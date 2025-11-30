@@ -172,6 +172,9 @@ def main():
         print(f"Marking {len(still_missing)} tags as skipped: {', '.join(still_missing)}")
         insert_skipped_comments(still_missing)
 
+    # Format with prettier
+    subprocess.run(["prettier", "--write", "CHANGELOG.md"], capture_output=True)
+
 
 if __name__ == "__main__":
     main()
