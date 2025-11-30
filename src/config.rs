@@ -47,6 +47,31 @@ pub struct FileConfig {
     pub symlink: Option<Vec<String>>,
 }
 
+/// Configuration for agent status icons displayed in tmux window bar
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct StatusIcons {
+    /// Icon shown when agent is working. Default: 🤖
+    pub working: Option<String>,
+    /// Icon shown when agent is waiting for input. Default: 💬
+    pub waiting: Option<String>,
+    /// Icon shown when agent is done. Default: ✅
+    pub done: Option<String>,
+}
+
+impl StatusIcons {
+    pub fn working(&self) -> &str {
+        self.working.as_deref().unwrap_or("🤖")
+    }
+
+    pub fn waiting(&self) -> &str {
+        self.waiting.as_deref().unwrap_or("💬")
+    }
+
+    pub fn done(&self) -> &str {
+        self.done.as_deref().unwrap_or("✅")
+    }
+}
+
 /// Configuration for the workmux tool, read from .workmux.yaml
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Config {
@@ -94,6 +119,15 @@ pub struct Config {
     /// File operations to perform after creating the worktree
     #[serde(default)]
     pub files: FileConfig,
+
+    /// Whether to auto-apply workmux status to tmux window format.
+    /// Default: true
+    #[serde(default)]
+    pub status_format: Option<bool>,
+
+    /// Custom icons for agent status display.
+    #[serde(default)]
+    pub status_icons: StatusIcons,
 }
 
 /// Configuration for a single tmux pane
@@ -375,6 +409,16 @@ impl Config {
             files: FileConfig {
                 copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
                 symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
+            },
+
+            // Status format: project overrides global, default true
+            status_format: project.status_format.or(self.status_format),
+
+            // Status icons: partial override (project icons override global per-field)
+            status_icons: StatusIcons {
+                working: project.status_icons.working.or(self.status_icons.working),
+                waiting: project.status_icons.waiting.or(self.status_icons.waiting),
+                done: project.status_icons.done.or(self.status_icons.done),
             },
         }
     }

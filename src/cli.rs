@@ -227,6 +227,13 @@ enum Commands {
         command: ClaudeCommands,
     },
 
+    /// Set agent status for the current tmux window (used by hooks)
+    #[command(hide = true)]
+    SetWindowStatus {
+        #[command(subcommand)]
+        command: command::set_window_status::SetWindowStatusCommand,
+    },
+
     /// Generate shell completions
     Completions {
         /// The shell to generate completions for
@@ -305,6 +312,7 @@ pub fn run() -> Result<()> {
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
         },
+        Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::Completions { shell } => {
             generate_completions(shell);
             Ok(())

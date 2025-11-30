@@ -1,0 +1,43 @@
+{
+  "name": "workmux-status",
+  "description": "Display Claude agent status in tmux window names via workmux",
+  "version": "1.0.0",
+  "author": {
+    "name": "raine"
+  },
+  "repository": "https://github.com/raine/workmux",
+  "license": "MIT",
+  "keywords": ["tmux", "workmux", "status", "agent"],
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "workmux set-window-status working"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "workmux set-window-status waiting"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "workmux set-window-status done"
+          }
+        ]
+      }
+    ]
+  }
+}

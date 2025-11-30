@@ -52,6 +52,8 @@ agents, is as simple as managing tmux windows.
 - Merge branches and clean up everything (worktree, tmux window, branches) in
   one command (`merge`)
 - List all worktrees with their tmux and merge status
+- Display Claude agent status (working/waiting) in tmux window names (not
+  visible in the demo above)
 - Bootstrap projects with an initial configuration file (`init`)
 - Dynamic shell completions for branch names
 
@@ -219,6 +221,13 @@ For a real-world example, see
 - `merge_strategy`: Default strategy for `workmux merge` (`merge`, `rebase`, or
   `squash`). CLI flags (`--rebase`, `--squash`) always override this setting.
   Default: `merge`.
+- `status_format`: Whether to automatically configure tmux to display agent
+  status icons in the window list. Default: `true`.
+- `status_icons`: Custom icons for agent status display.
+  - `working`: Icon shown when agent is processing (default: `🤖`)
+  - `waiting`: Icon shown when agent needs user input (default: `💬`)
+  - `done`: Icon shown when agent finished (default: `✅`) - auto-clears on
+    window focus
 
 #### Default behavior
 
@@ -840,6 +849,60 @@ workmux completions zsh
 
 See the [Shell Completions](#shell-completions) section for installation
 instructions.
+
+## Agent status tracking
+
+Workmux can display the status of Claude Code in your tmux window list, giving
+you at-a-glance visibility into what the agent in each window doing.
+
+```
+1:wm-feature 🤖*  2:wm-docs 💬-  3:wm-backend ✅
+             ▲             ▲               ▲
+          working       waiting          done
+```
+
+### Setup
+
+Install the workmux status plugin in Claude Code:
+
+```
+claude plugin marketplace add raine/workmux
+claude plugin install workmux-status
+```
+
+Alternatively, you can manually add the hooks to `~/.claude/settings.json`. See
+[.claude-plugin/plugin.json](.claude-plugin/plugin.json) for the hook
+configuration.
+
+Workmux automatically modifies your tmux `window-status-format` to display the
+status icons. This happens once per session and only affects the current tmux
+session (not your global config).
+
+### Customization
+
+You can customize the icons in your config:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_icons:
+  working: '🔄'
+  waiting: '⏸️'
+  done: '✔️'
+```
+
+If you prefer to manage the tmux format yourself, disable auto-modification and
+add the status variable to your `~/.tmux.conf`:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_format: false
+```
+
+```bash
+# ~/.tmux.conf
+set -g window-status-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+set -g window-status-current-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+```
 
 ## Workflow example
 

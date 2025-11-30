@@ -5,6 +5,7 @@ pub mod merge;
 pub mod open;
 pub mod path;
 pub mod remove;
+pub mod set_window_status;
 
 use crate::{config::Config, git, workflow::SetupOptions};
 use anyhow::{Context, Result};

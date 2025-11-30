@@ -1,0 +1,17 @@
+{
+  "name": "workmux",
+  "owner": {
+    "name": "raine",
+    "email": "raine.virta@gmail.com"
+  },
+  "metadata": {
+    "description": "Plugins for workmux - git worktrees and tmux workflow tool"
+  },
+  "plugins": [
+    {
+      "name": "workmux-status",
+      "source": "./",
+      "description": "Display Claude agent status (working/waiting) in tmux window names"
+    }
+  ]
+}
