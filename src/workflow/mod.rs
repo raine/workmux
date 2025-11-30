@@ -5,6 +5,8 @@ mod create;
 mod list;
 mod merge;
 mod open;
+pub mod pr;
+pub mod prompt_loader;
 mod remove;
 mod setup;
 pub mod types;
