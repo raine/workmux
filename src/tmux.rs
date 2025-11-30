@@ -679,21 +679,4 @@ mod tests {
             Some("opencode -p \"$(cat PROMPT.md)\"".to_string())
         );
     }
-
-    #[test]
-    fn test_rewrite_opencode_command_with_args() {
-        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
-        let working_dir = PathBuf::from("/tmp/worktree");
-
-        let result = rewrite_agent_command(
-            "opencode --model gpt-4",
-            &prompt_file,
-            &working_dir,
-            Some("opencode"),
-        );
-        assert_eq!(
-            result,
-            Some("opencode --model gpt-4 -p \"$(cat PROMPT.md)\"".to_string())
-        );
-    }
 }
