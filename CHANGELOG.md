@@ -4,6 +4,12 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.32 (2025-11-30)
+
+- Added OpenCode agent support: prompts are now automatically passed using the
+  `-p` flag when using `--prompt-file` or `--prompt-editor` with
+  `--agent opencode`
+
 ## v0.1.31 (2025-11-29)
 
 - Added `path` command to get the filesystem path of a worktree by branch name
