@@ -1,5 +1,9 @@
 # Changelog
 
+<!-- skipped: v0.1.27 -->
+<!-- skipped: v0.1.25 -->
+<!-- skipped: v0.1.8 -->
+
 ## v0.1.31 (2025-11-29)
 
 - Added `path` command to get the filesystem path of a worktree by branch name

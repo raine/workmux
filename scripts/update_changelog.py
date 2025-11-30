@@ -97,15 +97,43 @@ def get_all_tags() -> list[str]:
 
 
 def get_tags_in_changelog() -> set[str]:
-    """Get tags already present in CHANGELOG.md."""
+    """Get tags already present in CHANGELOG.md (entries or skipped markers)."""
     try:
         with open("CHANGELOG.md") as f:
             content = f.read()
+        tags = set()
         # Match ## v0.1.5 or # v0.1.5 style headings (with optional date)
-        pattern = r"^#+\s+(v[\d.]+)"
-        return set(re.findall(pattern, content, re.MULTILINE))
+        heading_pattern = r"^#+\s+(v[\d.]+)"
+        tags.update(re.findall(heading_pattern, content, re.MULTILINE))
+        # Match <!-- skipped: v0.1.5 --> comments
+        skipped_pattern = r"<!--\s*skipped:\s*(v[\d.]+)\s*-->"
+        tags.update(re.findall(skipped_pattern, content))
+        return tags
     except FileNotFoundError:
         return set()
+
+
+def insert_skipped_comments(tags: list[str]) -> None:
+    """Insert <!-- skipped: vX.X.X --> comments for tags that weren't added."""
+    if not tags:
+        return
+    try:
+        with open("CHANGELOG.md") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return
+
+    # Insert skipped comments at the top, after the # Changelog header
+    skipped_block = "\n".join(f"<!-- skipped: {tag} -->" for tag in tags)
+    # Find the end of the first line (the header)
+    header_end = content.find("\n")
+    if header_end == -1:
+        content = content + "\n\n" + skipped_block
+    else:
+        content = content[: header_end + 1] + "\n" + skipped_block + content[header_end + 1 :]
+
+    with open("CHANGELOG.md", "w") as f:
+        f.write(content)
 
 
 def main():
@@ -136,6 +164,13 @@ def main():
         )
     finally:
         Path(prompt_path).unlink(missing_ok=True)
+
+    # Check which tags are still missing and mark them as skipped
+    updated_tags = get_tags_in_changelog()
+    still_missing = [t for t in missing_tags if t not in updated_tags]
+    if still_missing:
+        print(f"Marking {len(still_missing)} tags as skipped: {', '.join(still_missing)}")
+        insert_skipped_comments(still_missing)
 
 
 if __name__ == "__main__":
