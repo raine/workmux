@@ -1,5 +1,18 @@
 use std::path::PathBuf;
 
+use crate::prompt::Prompt;
+
+/// Arguments for creating a worktree
+pub struct CreateArgs<'a> {
+    pub branch_name: &'a str,
+    pub handle: &'a str,
+    pub base_branch: Option<&'a str>,
+    pub remote_branch: Option<&'a str>,
+    pub prompt: Option<&'a Prompt>,
+    pub options: SetupOptions,
+    pub agent: Option<&'a str>,
+}
+
 /// Result of creating a worktree
 pub struct CreateResult {
     pub worktree_path: PathBuf,

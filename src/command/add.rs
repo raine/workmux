@@ -389,14 +389,16 @@ fn create_worktrees_from_specs(
         let context = workflow::WorkflowContext::new(config)?;
 
         let result = workflow::create(
-            &spec.branch_name,
-            &handle,
-            resolved_base,
-            remote_branch,
-            prompt_for_spec.as_ref(),
             &context,
-            options.clone(),
-            spec.agent.as_deref(),
+            workflow::CreateArgs {
+                branch_name: &spec.branch_name,
+                handle: &handle,
+                base_branch: resolved_base,
+                remote_branch,
+                prompt: prompt_for_spec.as_ref(),
+                options: options.clone(),
+                agent: spec.agent.as_deref(),
+            },
         )
         .with_context(|| {
             format!(

@@ -1,36 +1,26 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
-use crate::{git, prompt::Prompt, tmux};
+use crate::{git, tmux};
 use tracing::{debug, info, warn};
 
 use super::cleanup;
 use super::context::WorkflowContext;
 use super::setup;
-use super::types::{CreateResult, SetupOptions};
+use super::types::{CreateArgs, CreateResult, SetupOptions};
 
 /// Create a new worktree with tmux window and panes
-///
-/// # Arguments
-/// * `branch_name` - The git branch name (used for git operations)
-/// * `handle` - The display name for worktree directory and tmux window
-/// * `base_branch` - Optional base branch/commit/tag to branch from
-/// * `remote_branch` - Optional remote branch reference
-/// * `prompt` - Optional prompt for AI agents
-/// * `context` - Workflow context with config and repo info
-/// * `options` - Setup options (hooks, file ops, etc.)
-/// * `agent` - Optional agent override
-#[allow(clippy::too_many_arguments)]
-pub fn create(
-    branch_name: &str,
-    handle: &str,
-    base_branch: Option<&str>,
-    remote_branch: Option<&str>,
-    prompt: Option<&Prompt>,
-    context: &WorkflowContext,
-    options: SetupOptions,
-    agent: Option<&str>,
-) -> Result<CreateResult> {
+pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResult> {
+    let CreateArgs {
+        branch_name,
+        handle,
+        base_branch,
+        remote_branch,
+        prompt,
+        options,
+        agent,
+    } = args;
+
     info!(
         branch = branch_name,
         handle = handle,
@@ -270,14 +260,16 @@ pub fn create_with_changes(
 
     // 2. Create new worktree
     let create_result = match create(
-        branch_name,
-        handle,
-        None,
-        None,
-        None,
         context,
-        options,
-        None,
+        CreateArgs {
+            branch_name,
+            handle,
+            base_branch: None,
+            remote_branch: None,
+            prompt: None,
+            options,
+            agent: None,
+        },
     ) {
         Ok(result) => result,
         Err(e) => {

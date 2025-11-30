@@ -18,4 +18,4 @@ pub use remove::remove;
 
 // Re-export commonly used types for convenience
 pub use context::WorkflowContext;
-pub use types::SetupOptions;
+pub use types::{CreateArgs, SetupOptions};
