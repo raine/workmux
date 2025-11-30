@@ -52,8 +52,7 @@ agents, is as simple as managing tmux windows.
 - Merge branches and clean up everything (worktree, tmux window, branches) in
   one command (`merge`)
 - List all worktrees with their tmux and merge status
-- Display Claude agent status (working/done) in tmux window names (not visible
-  in the demo above)
+- Display Claude agent status in tmux window names → [setup](#agent-status-tracking)
 - Shell completions
 
 ## Hype
@@ -854,11 +853,17 @@ instructions.
 Workmux can display the status of Claude Code in your tmux window list, giving
 you at-a-glance visibility into what the agent in each window doing.
 
-```
-1:wm-feature 🤖*  2:wm-docs 💬-  3:wm-backend ✅
-             ▲             ▲               ▲
-          working       waiting          done
-```
+![tmux status showing agent icons](https://raw.githubusercontent.com/raine/workmux/refs/heads/main/meta/status.webp)
+
+#### Key
+
+- 🤖 = agent is working
+- 💬 = agent is waiting for user input
+- ✅ = agent finished (auto-clears on window focus)
+
+Currently only Claude Code seems to support hooks that enable this kind of
+functionality. Gemini's support is
+[on the way](https://github.com/google-gemini/gemini-cli/issues/9070).
 
 ### Setup
 
