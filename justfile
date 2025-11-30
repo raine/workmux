@@ -65,14 +65,6 @@ test *ARGS: build
 release-patch:
     @just _release patch
 
-# Release a new minor version
-release-minor:
-    @just _release minor
-
-# Release a new major version
-release-major:
-    @just _release major
-
 # Internal release helper
 _release bump:
     @python3 scripts/release.py {{bump}}
