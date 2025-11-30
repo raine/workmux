@@ -4,6 +4,7 @@ use git_url_parse::types::provider::GenericProvider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::{debug, info};
 
 use crate::cmd::Cmd;
 
@@ -65,15 +66,18 @@ pub fn get_default_branch() -> Result<String> {
         .run_and_capture_stdout()
         && let Some(branch) = ref_name.strip_prefix("refs/remotes/origin/")
     {
+        debug!(branch = branch, "git:default branch from remote HEAD");
         return Ok(branch.to_string());
     }
 
     // Fallback: check if main or master exists locally
     if branch_exists("main")? {
+        debug!("git:default branch 'main' (local fallback)");
         return Ok("main".to_string());
     }
 
     if branch_exists("master")? {
+        debug!("git:default branch 'master' (local fallback)");
         return Ok("master".to_string());
     }
 
@@ -232,12 +236,12 @@ pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
     if remote_exists(&remote_name)? {
         let current_url = get_remote_url(&remote_name)?;
         if current_url != fork_url {
-            println!("Updating remote '{}' URL...", remote_name);
+            info!(remote = %remote_name, url = %fork_url, "git:updating fork remote URL");
             set_remote_url(&remote_name, &fork_url)
                 .with_context(|| format!("Failed to update remote for fork '{}'", fork_owner))?;
         }
     } else {
-        println!("Adding remote '{}' for fork...", remote_name);
+        info!(remote = %remote_name, url = %fork_url, "git:adding fork remote");
         add_remote(&remote_name, &fork_url)
             .with_context(|| format!("Failed to add remote for fork '{}'", fork_owner))?;
     }

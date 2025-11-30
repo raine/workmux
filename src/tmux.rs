@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{debug, trace, warn};
 
 use crate::cmd::Cmd;
 use crate::config::{PaneConfig, SplitDirection};
@@ -189,6 +190,7 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
     // Handshake Part 3: Wait for shell to unlock (by attempting to lock again)
     // This blocks until the shell runs `tmux wait-for -U`
     // Use a polling loop with timeout to prevent indefinite hangs if pane fails to start
+    debug!(channel = channel, "tmux:handshake start");
 
     let mut child = std::process::Command::new("tmux")
         .args(["wait-for", "-L", channel])
@@ -209,10 +211,12 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
                         .args(&["wait-for", "-U", channel])
                         .run()
                         .context("Failed to cleanup wait channel")?;
+                    debug!(channel = channel, "tmux:handshake success");
                     return Ok(());
                 } else {
                     // Attempt cleanup even on failure
                     let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
+                    warn!(channel = channel, status = ?status.code(), "tmux:handshake failed (wait-for error)");
                     return Err(anyhow!(
                         "Pane handshake failed - tmux wait-for returned error"
                     ));
@@ -226,17 +230,28 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
                     // Attempt cleanup
                     let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
 
+                    warn!(
+                        channel = channel,
+                        timeout_secs = HANDSHAKE_TIMEOUT_SECS,
+                        "tmux:handshake timeout"
+                    );
                     return Err(anyhow!(
                         "Pane handshake timed out after {}s - shell may have failed to start",
                         HANDSHAKE_TIMEOUT_SECS
                     ));
                 }
+                trace!(
+                    channel = channel,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "tmux:handshake waiting"
+                );
                 thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
+                warn!(channel = channel, error = %e, "tmux:handshake error");
                 return Err(anyhow!("Error waiting for pane handshake: {}", e));
             }
         }

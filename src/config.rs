@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 use crate::{cmd, git};
 use which::{which, which_in};
@@ -261,6 +262,7 @@ pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
 impl Config {
     /// Load and merge global and project configurations.
     pub fn load(cli_agent: Option<&str>) -> anyhow::Result<Self> {
+        debug!("config:loading");
         let global_config = Self::load_global()?.unwrap_or_default();
         let project_config = Self::load_project()?.unwrap_or_default();
 
@@ -307,6 +309,11 @@ impl Config {
             }
         }
 
+        debug!(
+            agent = ?config.agent,
+            panes = config.panes.as_ref().map_or(0, |p| p.len()),
+            "config:loaded"
+        );
         Ok(config)
     }
 
@@ -315,6 +322,7 @@ impl Config {
         if !path.exists() {
             return Ok(None);
         }
+        debug!(path = %path.display(), "config:reading file");
         let contents = fs::read_to_string(path)?;
         let config: Config = serde_yaml::from_str(&contents)
             .map_err(|e| anyhow::anyhow!("Failed to parse config at {}: {}", path.display(), e))?;

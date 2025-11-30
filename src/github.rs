@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::process::Command;
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct PrDetails {
@@ -76,7 +77,7 @@ pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary
     let output = match output {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // gh not installed, silently return None (PR lookup is optional)
+            debug!("github:gh CLI not found, skipping PR lookup");
             return Ok(None);
         }
         Err(e) => {
@@ -85,7 +86,11 @@ pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary
     };
 
     if !output.status.success() {
-        // Non-zero exit could mean no PRs found or other error; treat as no PR
+        debug!(
+            owner = owner,
+            branch = branch,
+            "github:pr list failed, treating as no PR found"
+        );
         return Ok(None);
     }
 
@@ -125,6 +130,7 @@ pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
     let output = match output {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!("github:gh CLI not found");
             return Err(anyhow!(
                 "GitHub CLI (gh) is required for --pr. Install from https://cli.github.com"
             ));
@@ -136,6 +142,7 @@ pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!(pr = pr_number, stderr = %stderr, "github:pr view failed");
         return Err(anyhow!(
             "Failed to fetch PR #{}: {}",
             pr_number,
