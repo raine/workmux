@@ -4,7 +4,7 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.33 (2025-11-30)
 
 - Added support for GitHub fork branch format (`user:branch`) in `add` command,
   allowing direct checkout of fork branches copied from GitHub's UI
