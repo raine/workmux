@@ -96,6 +96,48 @@ def get_all_tags() -> list[str]:
     return [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
 
 
+def get_tag_date(tag: str) -> str:
+    """Get the date of a tag in YYYY-MM-DD format."""
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%as", tag],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def promote_unreleased_section(tag: str) -> bool:
+    """
+    Check for '## Unreleased' in CHANGELOG.md and rename it to the given tag.
+    Returns True if the section was found and updated.
+    """
+    changelog_path = Path("CHANGELOG.md")
+    if not changelog_path.exists():
+        return False
+
+    content = changelog_path.read_text()
+
+    # Look for "## Unreleased" (flexible spacing)
+    pattern = r"^(##\s+Unreleased)\s*$"
+    match = re.search(pattern, content, re.MULTILINE)
+
+    if match:
+        try:
+            date = get_tag_date(tag)
+        except subprocess.CalledProcessError:
+            print(f"Warning: Could not get date for tag {tag}")
+            return False
+
+        new_header = f"## {tag} ({date})"
+        new_content = content[: match.start(1)] + new_header + content[match.end(1) :]
+
+        changelog_path.write_text(new_content)
+        return True
+
+    return False
+
+
 def get_tags_in_changelog() -> set[str]:
     """Get tags already present in CHANGELOG.md (entries or skipped markers)."""
     try:
@@ -147,6 +189,16 @@ def main():
         return
 
     print(f"Found {len(missing_tags)} missing tags: {', '.join(missing_tags)}")
+
+    # Try to promote Unreleased section for the newest tag
+    if missing_tags and promote_unreleased_section(missing_tags[0]):
+        print(f"Promoted '## Unreleased' section to {missing_tags[0]}")
+        missing_tags.pop(0)
+
+    if not missing_tags:
+        # Format with prettier
+        subprocess.run(["prettier", "--write", "CHANGELOG.md"], capture_output=True)
+        return
 
     # Write prompt to temp file and run cc-batch
     with tempfile.NamedTemporaryFile(
