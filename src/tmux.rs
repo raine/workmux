@@ -549,10 +549,14 @@ fn rewrite_agent_command(
     }
 
     // Add the prompt argument (agent-specific handling)
-    let is_gemini = pane_stem.and_then(|s| s.to_str()) == Some("gemini");
-    if is_gemini {
+    let pane_stem_str = pane_stem.and_then(|s| s.to_str());
+    if pane_stem_str == Some("gemini") {
         // gemini uses -i flag with the prompt as its argument
         cmd.push_str(&format!(" -i \"$(cat {})\"", prompt_path));
+    } else if pane_stem_str == Some("opencode") {
+        // opencode uses -p flag for interactive TUI with initial prompt
+        // (opencode run is non-interactive, similar to claude -p)
+        cmd.push_str(&format!(" -p \"$(cat {})\"", prompt_path));
     } else {
         // Other agents use -- separator
         cmd.push_str(&format!(" -- \"$(cat {})\"", prompt_path));
@@ -661,5 +665,18 @@ mod tests {
 
         let result = rewrite_agent_command("", &prompt_file, &working_dir, Some("claude"));
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rewrite_opencode_command_basic() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result =
+            rewrite_agent_command("opencode", &prompt_file, &working_dir, Some("opencode"));
+        assert_eq!(
+            result,
+            Some("opencode -p \"$(cat PROMPT.md)\"".to_string())
+        );
     }
 }
