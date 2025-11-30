@@ -52,10 +52,9 @@ agents, is as simple as managing tmux windows.
 - Merge branches and clean up everything (worktree, tmux window, branches) in
   one command (`merge`)
 - List all worktrees with their tmux and merge status
-- Display Claude agent status (working/waiting) in tmux window names (not
-  visible in the demo above)
-- Bootstrap projects with an initial configuration file (`init`)
-- Dynamic shell completions for branch names
+- Display Claude agent status (working/done) in tmux window names (not visible
+  in the demo above)
+- Shell completions
 
 ## Hype
 
