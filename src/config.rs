@@ -337,17 +337,16 @@ impl Config {
     /// Merge a project config into a global config.
     /// Project config takes precedence. For lists, "<global>" placeholder expands to global items.
     fn merge(self, project: Self) -> Self {
-        // Helper to merge vectors with "<global>" placeholder expansion
+        /// Merge vectors with "<global>" placeholder expansion.
+        /// When project contains "<global>", it expands to global items at that position.
         fn merge_vec_with_placeholder(
             global: Option<Vec<String>>,
             project: Option<Vec<String>>,
         ) -> Option<Vec<String>> {
             match (global, project) {
                 (Some(global_items), Some(project_items)) => {
-                    // Check if project items contain the "<global>" placeholder
                     let has_placeholder = project_items.iter().any(|s| s == "<global>");
                     if has_placeholder {
-                        // Replace "<global>" with global items
                         let mut result = Vec::new();
                         for item in project_items {
                             if item == "<global>" {
@@ -358,7 +357,6 @@ impl Config {
                         }
                         Some(result)
                     } else {
-                        // No placeholder, project completely replaces global
                         Some(project_items)
                     }
                 }
@@ -366,45 +364,56 @@ impl Config {
             }
         }
 
-        Self {
-            // Scalar values: project wins
-            main_branch: project.main_branch.or(self.main_branch),
-            worktree_dir: project.worktree_dir.or(self.worktree_dir),
-            window_prefix: project.window_prefix.or(self.window_prefix),
-            agent: project.agent.or(self.agent),
-            merge_strategy: project.merge_strategy.or(self.merge_strategy),
-
-            // Worktree naming: project wins if not default
-            worktree_naming: if project.worktree_naming != WorktreeNaming::default() {
-                project.worktree_naming
-            } else {
-                self.worktree_naming
-            },
-            worktree_prefix: project.worktree_prefix.or(self.worktree_prefix),
-
-            // Panes: project replaces global (no placeholder support)
-            panes: project.panes.or(self.panes),
-
-            // List values with placeholder support
-            post_create: merge_vec_with_placeholder(self.post_create, project.post_create),
-            pre_delete: merge_vec_with_placeholder(self.pre_delete, project.pre_delete),
-
-            // File config with placeholder support
-            files: FileConfig {
-                copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
-                symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
-            },
-
-            // Status format: project overrides global, default true
-            status_format: project.status_format.or(self.status_format),
-
-            // Status icons: partial override (project icons override global per-field)
-            status_icons: StatusIcons {
-                working: project.status_icons.working.or(self.status_icons.working),
-                waiting: project.status_icons.waiting.or(self.status_icons.waiting),
-                done: project.status_icons.done.or(self.status_icons.done),
-            },
+        /// Macro to merge Option fields where project overrides global.
+        /// Reduces boilerplate for simple `project.field.or(self.field)` patterns.
+        macro_rules! merge_options {
+            ($global:expr, $project:expr, $($field:ident),+ $(,)?) => {
+                Self {
+                    $($field: $project.$field.or($global.$field),)+
+                    ..Default::default()
+                }
+            };
         }
+
+        // Merge simple Option<T> fields using the macro
+        let mut merged = merge_options!(
+            self,
+            project,
+            main_branch,
+            worktree_dir,
+            window_prefix,
+            agent,
+            merge_strategy,
+            worktree_prefix,
+            panes,
+            status_format,
+        );
+
+        // Special case: worktree_naming (project wins if not default)
+        merged.worktree_naming = if project.worktree_naming != WorktreeNaming::default() {
+            project.worktree_naming
+        } else {
+            self.worktree_naming
+        };
+
+        // List values with "<global>" placeholder support
+        merged.post_create = merge_vec_with_placeholder(self.post_create, project.post_create);
+        merged.pre_delete = merge_vec_with_placeholder(self.pre_delete, project.pre_delete);
+
+        // File config with placeholder support
+        merged.files = FileConfig {
+            copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
+            symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
+        };
+
+        // Status icons: per-field override
+        merged.status_icons = StatusIcons {
+            working: project.status_icons.working.or(self.status_icons.working),
+            waiting: project.status_icons.waiting.or(self.status_icons.waiting),
+            done: project.status_icons.done.or(self.status_icons.done),
+        };
+
+        merged
     }
 
     /// Get default panes.
