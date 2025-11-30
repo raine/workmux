@@ -4,7 +4,7 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.34 (2025-11-30)
 
 - Fixed worktree path calculation when running `add` from inside an existing
   worktree, which previously created nested paths instead of sibling worktrees
