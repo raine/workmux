@@ -49,10 +49,22 @@ pub fn merge(
         })?;
 
     // Handle changes in the source worktree
-    if git::has_unstaged_changes(&worktree_path)? && !ignore_uncommitted {
+    // Check for both unstaged changes and untracked files to prevent data loss during cleanup
+    let has_unstaged = git::has_unstaged_changes(&worktree_path)?;
+    let has_untracked = git::has_untracked_files(&worktree_path)?;
+
+    if (has_unstaged || has_untracked) && !ignore_uncommitted {
+        let mut issues = Vec::new();
+        if has_unstaged {
+            issues.push("unstaged changes");
+        }
+        if has_untracked {
+            issues.push("untracked files (will be lost)");
+        }
         return Err(anyhow!(
-            "Worktree for '{}' has unstaged changes. Please stage or stash them, or use --ignore-uncommitted.",
-            branch_to_merge
+            "Worktree for '{}' has {}. Please stage or stash them, or use --ignore-uncommitted.",
+            branch_to_merge,
+            issues.join(" and ")
         ));
     }
 
