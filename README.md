@@ -283,11 +283,10 @@ alias wm='workmux'
 Creates a new git worktree with a matching tmux window and switches you to it
 immediately. If the branch doesn't exist, it will be created automatically.
 
-- `<branch-name>`: Name of the branch to create or switch to, or a remote branch
-  reference (e.g., `origin/feature-branch`). When you provide a remote
-  reference, workmux automatically fetches it and creates a local branch with
-  the name derived from the remote branch (e.g., `origin/feature/foo` creates
-  local branch `feature/foo`). Optional when using `--pr`.
+- `<branch-name>`: Name of the branch to create or switch to, a remote branch
+  reference (e.g., `origin/feature-branch`), or a GitHub fork reference (e.g.,
+  `user:branch`). Remote and fork references are automatically fetched and
+  create a local branch with the derived name. Optional when using `--pr`.
 
 #### Options
 
@@ -377,7 +376,7 @@ workmux add feature/parallel-task --background
 workmux add feature/long-descriptive-branch-name --name short
 ```
 
-##### Checking out pull requests
+##### Checking out pull requests and fork branches
 
 ```bash
 # Checkout PR #123. The local branch will be named after the PR's branch.
@@ -385,6 +384,9 @@ workmux add --pr 123
 
 # Checkout PR #456 with a custom local branch name
 workmux add fix/api-bug --pr 456
+
+# Checkout a fork branch using GitHub's owner:branch format (copy from GitHub UI)
+workmux add someuser:feature-branch
 ```
 
 ##### Moving changes to a new worktree

@@ -9,8 +9,6 @@ use crate::workflow::SetupOptions;
 use crate::{config, git, workflow};
 use anyhow::{Context, Result, anyhow};
 use edit::Builder;
-use git_url_parse::GitUrl;
-use git_url_parse::types::provider::GenericProvider;
 use std::collections::BTreeMap;
 
 // Re-export the arg types that are used by the CLI
@@ -236,8 +234,24 @@ fn load_prompt(prompt_args: &PromptArgs) -> Result<Option<Prompt>> {
 }
 
 /// Detect if branch_name is a remote ref and extract the base name.
+/// Handles both "remote/branch" format and "owner:branch" (GitHub fork) format.
 /// Returns (remote_branch, template_base_name).
 fn detect_remote_branch(branch_name: &str, base: Option<&str>) -> Result<(Option<String>, String)> {
+    // 1. Check for owner:branch syntax (GitHub fork format, e.g., "someuser:feature-a")
+    if let Some(fork_spec) = git::parse_fork_branch_spec(branch_name) {
+        if base.is_some() {
+            return Err(anyhow!(
+                "Cannot use --base with 'owner:branch' syntax. \
+                The branch '{}' from '{}' will be used as the base.",
+                fork_spec.branch,
+                fork_spec.owner
+            ));
+        }
+
+        return handle_fork_branch_checkout(&fork_spec);
+    }
+
+    // 2. Existing remote/branch detection (e.g., "origin/feature")
     let remotes = git::list_remotes().context("Failed to list git remotes")?;
     let detected_remote = remotes
         .iter()
@@ -263,6 +277,50 @@ fn detect_remote_branch(branch_name: &str, base: Option<&str>) -> Result<(Option
     } else {
         Ok((None, branch_name.to_string()))
     }
+}
+
+/// Handle checkout of a fork branch specified as "owner:branch".
+/// Sets up the fork remote, fetches, and optionally displays PR info.
+fn handle_fork_branch_checkout(
+    fork_spec: &git::ForkBranchSpec,
+) -> Result<(Option<String>, String)> {
+    use crate::github;
+
+    // Try to find an associated PR and display info (optional, non-blocking)
+    if let Ok(Some(pr)) = github::find_pr_by_head_ref(&fork_spec.owner, &fork_spec.branch) {
+        let state_suffix = match pr.state.as_str() {
+            "OPEN" if pr.is_draft => " (draft)",
+            "OPEN" => "",
+            "MERGED" => " (merged)",
+            "CLOSED" => " (closed)",
+            _ => "",
+        };
+        println!("PR #{}: {}{}", pr.number, pr.title, state_suffix);
+    }
+
+    // Ensure the fork remote exists
+    let remote_name = git::ensure_fork_remote(&fork_spec.owner)?;
+
+    // Fetch to get the latest refs
+    println!(
+        "Fetching branch '{}' from '{}'...",
+        fork_spec.branch, remote_name
+    );
+    git::fetch_remote(&remote_name)
+        .with_context(|| format!("Failed to fetch from remote '{}'", remote_name))?;
+
+    // Verify the branch exists on the remote
+    let remote_ref = format!("{}/{}", remote_name, fork_spec.branch);
+    if !git::branch_exists(&remote_ref)? {
+        return Err(anyhow!(
+            "Branch '{}' not found on remote '{}' (fork of {})",
+            fork_spec.branch,
+            remote_name,
+            fork_spec.owner
+        ));
+    }
+
+    Ok((Some(remote_ref), fork_spec.branch.clone()))
 }
 
 /// Determine the effective foreach matrix from CLI or frontmatter.
@@ -401,59 +459,14 @@ fn handle_pr_checkout(
         pr_details.head_ref_name.clone()
     };
 
-    // Determine if this is a fork PR
+    // Determine if this is a fork PR and ensure remote exists
     let current_repo_owner =
         git::get_repo_owner().context("Failed to determine repository owner from origin remote")?;
 
     let remote_name = if pr_details.is_fork(&current_repo_owner) {
-        // Fork PR: need to add or update remote for the fork
         let fork_owner = &pr_details.head_repository_owner.login;
-        let remote_name = format!("fork-{}", fork_owner);
-
-        // Construct fork URL based on origin URL format, preserving host and protocol
-        let origin_url = git::get_remote_url("origin")?;
-        let parsed_url = GitUrl::parse(&origin_url).with_context(|| {
-            format!(
-                "Failed to parse origin URL for fork remote construction: {}",
-                origin_url
-            )
-        })?;
-
-        let host = parsed_url.host().unwrap_or("github.com");
-        let scheme = parsed_url.scheme().unwrap_or("ssh");
-
-        let provider: GenericProvider = parsed_url
-            .provider_info()
-            .with_context(|| "Failed to extract provider info from origin URL")?;
-        let repo_name = provider.repo();
-
-        let fork_url = match scheme {
-            "https" => format!("https://{}/{}/{}.git", host, fork_owner, repo_name),
-            "http" => format!("http://{}/{}/{}.git", host, fork_owner, repo_name),
-            _ => {
-                // SSH or other schemes
-                format!("git@{}:{}/{}.git", host, fork_owner, repo_name)
-            }
-        };
-
-        // Check if remote exists and update URL if needed
-        if git::remote_exists(&remote_name)? {
-            let current_url = git::get_remote_url(&remote_name)?;
-            if current_url != fork_url {
-                println!("Updating remote '{}' URL...", remote_name);
-                git::set_remote_url(&remote_name, &fork_url).with_context(|| {
-                    format!("Failed to update remote for fork '{}'", fork_owner)
-                })?;
-            }
-        } else {
-            println!("Adding remote '{}' for fork...", remote_name);
-            git::add_remote(&remote_name, &fork_url)
-                .with_context(|| format!("Failed to add remote for fork '{}'", fork_owner))?;
-        }
-
-        remote_name
+        git::ensure_fork_remote(fork_owner)?
     } else {
-        // Same-repo PR: use origin
         "origin".to_string()
     };
 

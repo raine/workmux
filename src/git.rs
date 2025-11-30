@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow};
+use git_url_parse::GitUrl;
+use git_url_parse::types::provider::GenericProvider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +10,12 @@ use crate::cmd::Cmd;
 #[derive(Debug, Clone)]
 pub struct RemoteBranchSpec {
     pub remote: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForkBranchSpec {
+    pub owner: String,
     pub branch: String,
 }
 
@@ -102,6 +110,28 @@ pub fn parse_remote_branch_spec(spec: &str) -> Result<RemoteBranchSpec> {
     })
 }
 
+/// Parse a fork branch specification in the form "owner:branch" (GitHub fork format).
+/// Returns None if the input doesn't match this format.
+pub fn parse_fork_branch_spec(input: &str) -> Option<ForkBranchSpec> {
+    // Skip URLs (contain "://" or start with "git@")
+    if input.contains("://") || input.starts_with("git@") {
+        return None;
+    }
+
+    // Split on first colon only
+    let (owner, branch) = input.split_once(':')?;
+
+    // Validate both parts are non-empty
+    if owner.is_empty() || branch.is_empty() {
+        return None;
+    }
+
+    Some(ForkBranchSpec {
+        owner: owner.to_string(),
+        branch: branch.to_string(),
+    })
+}
+
 /// Return a list of configured git remotes
 pub fn list_remotes() -> Result<Vec<String>> {
     let output = Cmd::new("git")
@@ -158,6 +188,61 @@ pub fn get_remote_url(remote: &str) -> Result<String> {
         .args(&["config", "--get", &format!("remote.{}.url", remote)])
         .run_and_capture_stdout()
         .with_context(|| format!("Failed to get URL for remote '{}'", remote))
+}
+
+/// Ensure a remote exists for a specific fork owner.
+/// Returns the name of the remote (e.g., "origin" or "fork-username").
+/// If the remote needs to be created, it constructs the URL based on the origin URL's scheme.
+pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
+    // If the fork owner is the same as the origin owner, just use origin
+    let current_owner = get_repo_owner().unwrap_or_default();
+    if !current_owner.is_empty() && fork_owner == current_owner {
+        return Ok("origin".to_string());
+    }
+
+    let remote_name = format!("fork-{}", fork_owner);
+
+    // Construct fork URL based on origin URL format, preserving host and protocol
+    let origin_url = get_remote_url("origin")?;
+    let parsed_url = GitUrl::parse(&origin_url).with_context(|| {
+        format!(
+            "Failed to parse origin URL for fork remote construction: {}",
+            origin_url
+        )
+    })?;
+
+    let host = parsed_url.host().unwrap_or("github.com");
+    let scheme = parsed_url.scheme().unwrap_or("ssh");
+
+    let provider: GenericProvider = parsed_url
+        .provider_info()
+        .with_context(|| "Failed to extract provider info from origin URL")?;
+    let repo_name = provider.repo();
+
+    let fork_url = match scheme {
+        "https" => format!("https://{}/{}/{}.git", host, fork_owner, repo_name),
+        "http" => format!("http://{}/{}/{}.git", host, fork_owner, repo_name),
+        _ => {
+            // SSH or other schemes
+            format!("git@{}:{}/{}.git", host, fork_owner, repo_name)
+        }
+    };
+
+    // Check if remote exists and update URL if needed
+    if remote_exists(&remote_name)? {
+        let current_url = get_remote_url(&remote_name)?;
+        if current_url != fork_url {
+            println!("Updating remote '{}' URL...", remote_name);
+            set_remote_url(&remote_name, &fork_url)
+                .with_context(|| format!("Failed to update remote for fork '{}'", fork_owner))?;
+        }
+    } else {
+        println!("Adding remote '{}' for fork...", remote_name);
+        add_remote(&remote_name, &fork_url)
+            .with_context(|| format!("Failed to add remote for fork '{}'", fork_owner))?;
+    }
+
+    Ok(remote_name)
 }
 
 /// Parse the repository owner from a git remote URL
@@ -757,5 +842,53 @@ mod tests {
     #[test]
     fn test_parse_repo_owner_file_protocol() {
         assert_eq!(parse_owner_from_git_url("file:///local/path/to/repo"), None);
+    }
+
+    use super::parse_fork_branch_spec;
+
+    #[test]
+    fn test_parse_fork_branch_spec_valid() {
+        let spec = parse_fork_branch_spec("someuser:feature-branch").unwrap();
+        assert_eq!(spec.owner, "someuser");
+        assert_eq!(spec.branch, "feature-branch");
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_with_slashes() {
+        let spec = parse_fork_branch_spec("user:feature/some-feature").unwrap();
+        assert_eq!(spec.owner, "user");
+        assert_eq!(spec.branch, "feature/some-feature");
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_empty_owner() {
+        assert!(parse_fork_branch_spec(":branch").is_none());
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_empty_branch() {
+        assert!(parse_fork_branch_spec("owner:").is_none());
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_no_colon() {
+        assert!(parse_fork_branch_spec("just-a-branch").is_none());
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_url_https() {
+        assert!(parse_fork_branch_spec("https://github.com/owner/repo").is_none());
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_url_ssh() {
+        // SSH URLs start with "git@" and should be rejected
+        assert!(parse_fork_branch_spec("git@github.com:owner/repo").is_none());
+    }
+
+    #[test]
+    fn test_parse_fork_branch_spec_remote_branch_format() {
+        // origin/feature should NOT match (no colon)
+        assert!(parse_fork_branch_spec("origin/feature").is_none());
     }
 }
