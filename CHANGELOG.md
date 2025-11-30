@@ -4,6 +4,12 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.35 (2025-12-01)
+
+- Added agent status tracking in tmux window names, showing icons for different
+  Claude Code states (🤖 working, 💬 waiting, ✅ done). The "done" status
+  auto-clears when you focus the window.
+
 ## v0.1.34 (2025-11-30)
 
 - Fixed worktree path calculation when running `add` from inside an existing
