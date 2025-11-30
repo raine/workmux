@@ -28,6 +28,8 @@ parallel without conflict.
 
 ## Philosophy
 
+- **Native tmux integration**: Workmux creates windows in your current tmux
+  session. Your existing shortcuts, themes, and workflow stay intact.
 - **One worktree, one tmux window**: Each git worktree gets its own dedicated,
   pre-configured tmux window.
 - **Frictionless**: Multi-step workflows are reduced to simple commands.
