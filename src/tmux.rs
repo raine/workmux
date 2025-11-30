@@ -674,9 +674,6 @@ mod tests {
 
         let result =
             rewrite_agent_command("opencode", &prompt_file, &working_dir, Some("opencode"));
-        assert_eq!(
-            result,
-            Some("opencode -p \"$(cat PROMPT.md)\"".to_string())
-        );
+        assert_eq!(result, Some("opencode -p \"$(cat PROMPT.md)\"".to_string()));
     }
 }
