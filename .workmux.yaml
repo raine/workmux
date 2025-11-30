@@ -9,3 +9,5 @@ files:
     - CLAUDE.md
     - target # Share Rust build cache for faster compilation
     - tests/venv # Share Python venv for faster worktree creation
+
+merge_strategy: rebase
