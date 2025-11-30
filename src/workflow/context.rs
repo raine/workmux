@@ -9,7 +9,6 @@ use tracing::debug;
 /// This struct centralizes pre-flight checks and holds essential data
 /// needed by workflow modules, reducing code duplication.
 pub struct WorkflowContext {
-    pub repo_root: PathBuf,
     pub main_worktree_root: PathBuf,
     pub main_branch: String,
     pub prefix: String,
@@ -27,7 +26,6 @@ impl WorkflowContext {
             return Err(anyhow!("Not in a git repository"));
         }
 
-        let repo_root = git::get_repo_root()?;
         let main_worktree_root =
             git::get_main_worktree_root().context("Could not find the main git worktree")?;
 
@@ -41,7 +39,6 @@ impl WorkflowContext {
         let prefix = config.window_prefix().to_string();
 
         debug!(
-            repo_root = %repo_root.display(),
             main_worktree_root = %main_worktree_root.display(),
             main_branch = %main_branch,
             prefix = %prefix,
@@ -49,7 +46,6 @@ impl WorkflowContext {
         );
 
         Ok(Self {
-            repo_root,
             main_worktree_root,
             main_branch,
             prefix,

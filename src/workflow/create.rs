@@ -125,24 +125,26 @@ pub fn create(
     };
 
     // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
+    // Always use main_worktree_root (not repo_root) to ensure consistent paths even when
+    // running from inside an existing worktree.
     let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
         let path = Path::new(worktree_dir);
         if path.is_absolute() {
             // Use absolute path as-is
             path.to_path_buf()
         } else {
-            // Relative path: resolve from repo root
-            context.repo_root.join(path)
+            // Relative path: resolve from main worktree root
+            context.main_worktree_root.join(path)
         }
     } else {
-        // Default behavior: <project_root>/../<project_name>__worktrees
+        // Default behavior: <main_worktree_root>/../<project_name>__worktrees
         let project_name = context
-            .repo_root
+            .main_worktree_root
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("Could not determine project name"))?;
         context
-            .repo_root
+            .main_worktree_root
             .parent()
             .ok_or_else(|| anyhow!("Could not determine parent directory"))?
             .join(format!("{}__worktrees", project_name))

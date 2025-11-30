@@ -4,6 +4,11 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fixed worktree path calculation when running `add` from inside an existing
+  worktree, which previously created nested paths instead of sibling worktrees
+
 ## v0.1.33 (2025-11-30)
 
 - Added support for GitHub fork branch format (`user:branch`) in `add` command,

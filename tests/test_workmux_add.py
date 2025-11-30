@@ -245,6 +245,59 @@ def test_add_creates_tmux_window(
     assert_window_exists(env, window_name)
 
 
+def test_add_from_inside_worktree_creates_sibling_worktree(
+    isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """
+    Verifies that running `workmux add` from inside an existing worktree
+    creates the new worktree as a sibling to the repo, not nested inside the current worktree.
+    """
+    env = isolated_tmux_server
+    first_branch = "feature-first"
+    second_branch = "feature-second"
+
+    write_workmux_config(repo_path)
+
+    # 1. Create the first worktree normally
+    first_worktree = add_branch_and_get_worktree(
+        env, workmux_exe_path, repo_path, first_branch
+    )
+
+    # Create a unique commit in the first worktree to verify ancestry
+    commit_msg = "Commit in first worktree"
+    create_commit(env, first_worktree, commit_msg)
+
+    # 2. Run `workmux add` for the second branch FROM INSIDE the first worktree
+    add_branch_and_get_worktree(
+        env,
+        workmux_exe_path,
+        repo_path,
+        second_branch,
+        working_dir=first_worktree,
+    )
+
+    # 3. Verify the second worktree exists at the correct sibling location
+    expected_path = get_worktree_path(repo_path, second_branch)
+    assert expected_path.exists(), f"Worktree should be created at {expected_path}"
+    assert expected_path.is_dir()
+
+    # 4. Verify it is NOT nested inside the first worktree
+    nested_path = (
+        first_worktree.parent / f"{first_worktree.name}__worktrees" / second_branch
+    )
+    assert not nested_path.exists(), f"Worktree should not be nested at {nested_path}"
+
+    # 5. Verify ancestry: The second branch should be based on the first branch
+    expected_file = file_for_commit(expected_path, commit_msg)
+    assert expected_file.exists(), (
+        "New branch should inherit commit from the current worktree context"
+    )
+
+    # 6. Verify git internal state is correct
+    worktree_list = env.run_command(["git", "worktree", "list"], cwd=repo_path).stdout
+    assert str(expected_path) in worktree_list
+
+
 def test_add_with_count_creates_numbered_worktrees(
     isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
