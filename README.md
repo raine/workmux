@@ -1080,7 +1080,7 @@ dependencies, so it's generally safer to run a fresh install in each worktree.
 
 Note: In large monorepos, cleaning up `node_modules` during worktree removal can
 take significant time. workmux has a
-[special cleanup mechanism](https://github.com/raine/workmux/blob/main/src/config.rs#L12)
+[special cleanup mechanism](https://github.com/raine/workmux/blob/main/src/scripts/cleanup_node_modules.sh)
 that moves `node_modules` to a temporary location and deletes it in the
 background, making the `remove` command return almost instantly.
 

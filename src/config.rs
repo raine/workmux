@@ -10,31 +10,7 @@ use which::{which, which_in};
 /// Default script for cleaning up node_modules directories before worktree deletion.
 /// This script moves node_modules to a temporary location and deletes them in the background,
 /// making the workmux remove command return almost instantly.
-const NODE_MODULES_CLEANUP_SCRIPT: &str = r#"#!/bin/bash
-set -euo pipefail
-
-# Create a temporary directory that will be cleaned up on script exit (success or error)
-TRASH_DIR=$(mktemp -d)
-trap 'rm -rf "$TRASH_DIR"' EXIT
-
-# Find and move all node_modules directories
-# -prune prevents descending into node_modules directories
-find . -name "node_modules" -type d -prune -print0 | while IFS= read -r -d '' dir; do
-  # Generate unique name from path: './frontend/node_modules' -> 'frontend_node_modules'
-  unique_name=$(printf '%s\n' "${dir#./}" | tr '/' '_')
-
-  if ! mv -- "$dir" "$TRASH_DIR/$unique_name"; then
-    echo "Warning: Failed to move '$dir'. Check permissions." >&2
-  fi
-done
-
-# Detach the final slow deletion from the script's execution
-if [ -n "$(ls -A "$TRASH_DIR")" ]; then
-  # Disown the trap and start a new background process for deletion
-  trap - EXIT
-  nohup rm -rf "$TRASH_DIR" >/dev/null 2>&1 &
-fi
-"#;
+const NODE_MODULES_CLEANUP_SCRIPT: &str = include_str!("scripts/cleanup_node_modules.sh");
 
 /// Configuration for file operations during worktree creation
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
