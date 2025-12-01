@@ -307,3 +307,64 @@ def test_merge_with_keep_flag_skips_cleanup(
     assert window_name in list_windows_result.stdout, "Tmux window should still exist"
     branch_list_result = env.run_command(["git", "branch", "--list", branch_name])
     assert branch_name in branch_list_result.stdout, "Local branch should still exist"
+
+
+def test_merge_into_different_branch(
+    isolated_tmux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies --into flag merges into a different branch instead of main."""
+    env = isolated_tmux_server
+    parent_branch = "feature/parent"
+    child_branch = "feature/child"
+    child_window_name = get_window_name(child_branch)
+    write_workmux_config(repo_path, env=env)
+
+    # Create parent feature branch with a worktree
+    run_workmux_add(env, workmux_exe_path, repo_path, parent_branch)
+    parent_worktree_path = get_worktree_path(repo_path, parent_branch)
+    create_commit(env, parent_worktree_path, "feat: parent feature base")
+
+    # Create child branch based on parent
+    run_workmux_add(env, workmux_exe_path, repo_path, child_branch, base=parent_branch)
+    child_worktree_path = get_worktree_path(repo_path, child_branch)
+
+    # Create a commit on the child branch
+    child_commit_msg = "feat: child subtask work"
+    create_commit(env, child_worktree_path, child_commit_msg)
+    child_commit_hash = env.run_command(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=child_worktree_path
+    ).stdout.strip()
+
+    # Merge child into parent (not main)
+    run_workmux_merge(
+        env, workmux_exe_path, repo_path, child_branch, into=parent_branch
+    )
+
+    # Verify child worktree was cleaned up
+    assert not child_worktree_path.exists(), "Child worktree should be removed"
+    list_windows_result = env.tmux(["list-windows", "-F", "#{window_name}"])
+    assert child_window_name not in list_windows_result.stdout, (
+        "Child tmux window should be closed"
+    )
+    branch_list_result = env.run_command(["git", "branch", "--list", child_branch])
+    assert child_branch not in branch_list_result.stdout, (
+        "Child branch should be deleted"
+    )
+
+    # Verify the commit is on parent branch, NOT on main
+    parent_log_result = env.run_command(
+        ["git", "log", "--oneline", parent_branch], cwd=repo_path
+    )
+    assert child_commit_hash in parent_log_result.stdout, (
+        "Child commit should be on parent branch"
+    )
+
+    main_log_result = env.run_command(
+        ["git", "log", "--oneline", "main"], cwd=repo_path
+    )
+    assert child_commit_hash not in main_log_result.stdout, (
+        "Child commit should NOT be on main branch"
+    )
+
+    # Verify parent worktree still exists
+    assert parent_worktree_path.exists(), "Parent worktree should still exist"

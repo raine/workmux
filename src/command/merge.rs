@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 pub fn run(
     branch_name: Option<&str>,
+    into_branch: Option<&str>,
     ignore_uncommitted: bool,
     mut rebase: bool,
     mut squash: bool,
@@ -37,6 +38,7 @@ pub fn run(
 
     let result = workflow::merge(
         &branch_to_merge,
+        into_branch,
         ignore_uncommitted,
         rebase,
         squash,

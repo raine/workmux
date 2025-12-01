@@ -157,13 +157,14 @@ pub fn cleanup(
     Ok(result)
 }
 
-/// Navigate to the main branch window and close the target window.
-/// Handles both cases: running inside the target window (async) and outside (sync).
-/// `target_handle` is the tmux window name (derived from worktree directory basename).
-pub fn navigate_to_main_and_close(
+/// Navigate to the target branch window and close the source window.
+/// Handles both cases: running inside the source window (async) and outside (sync).
+/// `target_window_name` is the tmux window name of the merge target.
+/// `source_handle` is the tmux window name of the branch being merged/removed.
+pub fn navigate_to_target_and_close(
     prefix: &str,
-    main_branch: &str,
-    target_handle: &str,
+    target_window_name: &str,
+    source_handle: &str,
     cleanup_result: &CleanupResult,
 ) -> Result<()> {
     /// Helper function to shell-escape strings for safe inclusion in shell commands
@@ -171,18 +172,18 @@ pub fn navigate_to_main_and_close(
         format!("'{}'", s.replace('\'', r#"'\''"#))
     }
 
-    // Check if main branch window exists
-    if !tmux::is_running()? || !tmux::window_exists(prefix, main_branch)? {
-        // If main window doesn't exist, still need to close target window if running inside it
+    // Check if target window exists
+    if !tmux::is_running()? || !tmux::window_exists(prefix, target_window_name)? {
+        // If target window doesn't exist, still need to close source window if running inside it
         if cleanup_result.ran_inside_target_window {
             let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
-            match tmux::schedule_window_close(prefix, target_handle, delay) {
+            match tmux::schedule_window_close(prefix, source_handle, delay) {
                 Ok(_) => info!(
-                    handle = target_handle,
+                    handle = source_handle,
                     "cleanup:tmux window close scheduled"
                 ),
                 Err(e) => warn!(
-                    handle = target_handle,
+                    handle = source_handle,
                     error = %e,
                     "cleanup:failed to schedule tmux window close",
                 ),
@@ -192,49 +193,49 @@ pub fn navigate_to_main_and_close(
     }
 
     if cleanup_result.ran_inside_target_window {
-        // Running inside target window: schedule both navigation and kill together
+        // Running inside source window: schedule both navigation and kill together
         let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
         let delay_secs = format!("{:.3}", delay.as_secs_f64());
-        let main_prefixed = shell_escape(&tmux::prefixed(prefix, main_branch));
-        let target_prefixed = shell_escape(&tmux::prefixed(prefix, target_handle));
+        let target_prefixed = shell_escape(&tmux::prefixed(prefix, target_window_name));
+        let source_prefixed = shell_escape(&tmux::prefixed(prefix, source_handle));
         let script = format!(
-            "sleep {delay}; tmux select-window -t ={main} >/dev/null 2>&1; tmux kill-window -t ={target} >/dev/null 2>&1",
+            "sleep {delay}; tmux select-window -t ={target} >/dev/null 2>&1; tmux kill-window -t ={source} >/dev/null 2>&1",
             delay = delay_secs,
-            main = main_prefixed,
             target = target_prefixed,
+            source = source_prefixed,
         );
 
         match tmux::run_shell(&script) {
             Ok(_) => info!(
-                handle = target_handle,
-                main = main_branch,
-                "cleanup:scheduled navigation to main and window close"
+                handle = source_handle,
+                target = target_window_name,
+                "cleanup:scheduled navigation to target and window close"
             ),
             Err(e) => warn!(
-                handle = target_handle,
+                handle = source_handle,
                 error = %e,
                 "cleanup:failed to schedule navigation and window close",
             ),
         }
     } else {
-        // Running outside target window: synchronously navigate to main and close target
-        tmux::select_window(prefix, main_branch)?;
+        // Running outside source window: synchronously navigate to target and close source
+        tmux::select_window(prefix, target_window_name)?;
         info!(
-            handle = target_handle,
-            main = main_branch,
-            "cleanup:navigated to main branch window"
+            handle = source_handle,
+            target = target_window_name,
+            "cleanup:navigated to target branch window"
         );
 
-        // Close the target window now that we've navigated away
-        match tmux::kill_window(prefix, target_handle) {
+        // Close the source window now that we've navigated away
+        match tmux::kill_window(prefix, source_handle) {
             Ok(_) => info!(
-                handle = target_handle,
-                "cleanup:closed target branch window"
+                handle = source_handle,
+                "cleanup:closed source branch window"
             ),
             Err(e) => warn!(
-                handle = target_handle,
+                handle = source_handle,
                 error = %e,
-                "cleanup:failed to close target branch window",
+                "cleanup:failed to close source branch window",
             ),
         }
     }

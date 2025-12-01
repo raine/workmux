@@ -92,8 +92,8 @@ pub fn remove(
         keep_branch,
     )?;
 
-    // Navigate to the main branch window and close the target window
-    cleanup::navigate_to_main_and_close(
+    // Navigate to the main branch window and close the source window
+    cleanup::navigate_to_target_and_close(
         &context.prefix,
         &context.main_branch,
         handle,

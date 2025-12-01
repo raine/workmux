@@ -166,6 +166,10 @@ enum Commands {
         #[arg(value_parser = WorktreeBranchParser::new())]
         branch_name: Option<String>,
 
+        /// The target branch to merge into (defaults to main_branch from config)
+        #[arg(long, value_parser = GitBranchParser::new())]
+        into: Option<String>,
+
         /// Ignore uncommitted and staged changes
         #[arg(long)]
         ignore_uncommitted: bool,
@@ -279,12 +283,14 @@ pub fn run() -> Result<()> {
         } => command::open::run(&branch_name, run_hooks, force_files),
         Commands::Merge {
             branch_name,
+            into,
             ignore_uncommitted,
             rebase,
             squash,
             keep,
         } => command::merge::run(
             branch_name.as_deref(),
+            into.as_deref(),
             ignore_uncommitted,
             rebase,
             squash,

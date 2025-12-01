@@ -580,14 +580,18 @@ workmux add testing --prompt-file task.md
 
 ### `workmux merge [branch-name]`
 
-Merges a branch into the main branch and automatically cleans up all associated
-resources (worktree, tmux window, and local branch).
+Merges a branch into a target branch (main by default) and automatically cleans
+up all associated resources (worktree, tmux window, and local branch).
 
 - `[branch-name]`: Optional name of the branch to merge. If omitted,
   automatically detects the current branch from the worktree you're in.
 
 #### Options
 
+- `--into <branch>`: Merge into the specified branch instead of the main branch.
+  Useful for stacked PRs, git-flow workflows, or merging subtasks into a parent
+  feature branch. If the target branch has its own worktree, the merge happens
+  there; otherwise, the main worktree is used.
 - `--ignore-uncommitted`: Commit any staged changes before merging without
   opening an editor
 - `--keep`, `-k`: Keep the worktree, window, and branch after merging (skip
@@ -599,25 +603,26 @@ By default, `workmux merge` performs a standard merge commit (configurable via
 `merge_strategy`). You can override the configured behavior with these mutually
 exclusive flags:
 
-- `--rebase`: Rebase the feature branch onto main before merging (creates a
-  linear history via fast-forward merge). If conflicts occur, you'll need to
+- `--rebase`: Rebase the feature branch onto the target before merging (creates
+  a linear history via fast-forward merge). If conflicts occur, you'll need to
   resolve them manually in the worktree and run `git rebase --continue`.
 - `--squash`: Squash all commits from the feature branch into a single commit on
-  main. You'll be prompted to provide a commit message in your editor.
+  the target. You'll be prompted to provide a commit message in your editor.
 
 #### What happens
 
 1. Determines which branch to merge (specified branch or current branch if
    omitted)
-2. Checks for uncommitted changes (errors if found, unless
+2. Determines the target branch (`--into` or main branch from config)
+3. Checks for uncommitted changes (errors if found, unless
    `--ignore-uncommitted` is used)
-3. Commits staged changes if present (unless `--ignore-uncommitted` is used)
-4. Merges your branch into main using the selected strategy (default: merge
-   commit)
-5. Deletes the tmux window (including the one you're currently in if you ran
+4. Commits staged changes if present (unless `--ignore-uncommitted` is used)
+5. Merges your branch into the target using the selected strategy (default:
+   merge commit)
+6. Deletes the tmux window (including the one you're currently in if you ran
    this from a worktree) — skipped if `--keep` is used
-6. Removes the worktree — skipped if `--keep` is used
-7. Deletes the local branch — skipped if `--keep` is used
+7. Removes the worktree — skipped if `--keep` is used
+8. Deletes the local branch — skipped if `--keep` is used
 
 #### Typical workflow
 
@@ -628,7 +633,7 @@ you're on, merge it into main, and close the current window as part of cleanup.
 #### Examples
 
 ```bash
-# Merge branch from main branch (default: merge commit)
+# Merge branch into main (default: merge commit)
 workmux merge user-auth
 
 # Merge the current worktree you're in
@@ -645,6 +650,9 @@ workmux merge user-auth --squash
 workmux merge user-auth --keep
 # ... verify the merge in main ...
 workmux remove user-auth  # clean up later when ready
+
+# Merge into a different branch (stacked PRs)
+workmux merge feature/subtask --into feature/parent
 ```
 
 ---

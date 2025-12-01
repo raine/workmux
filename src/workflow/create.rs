@@ -317,8 +317,8 @@ pub fn create_with_changes(
                 "Rollback failed: could not clean up the new worktree. Please do so manually.",
             )?;
 
-            // Handle tmux window navigation/closing based on whether we're inside the target window
-            cleanup::navigate_to_main_and_close(
+            // Handle tmux window navigation/closing based on whether we're inside the source window
+            cleanup::navigate_to_target_and_close(
                 &context.prefix,
                 &context.main_branch,
                 handle,
