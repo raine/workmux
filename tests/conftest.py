@@ -8,10 +8,281 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 import yaml
+
+
+# =============================================================================
+# Shared Assertion Helpers
+# =============================================================================
+
+
+def assert_window_exists(env: "TmuxEnvironment", window_name: str) -> None:
+    """Ensure a tmux window with the provided name exists."""
+    result = env.tmux(["list-windows", "-F", "#{window_name}"])
+    existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+    assert window_name in existing_windows, (
+        f"Window {window_name!r} not found. Existing: {existing_windows!r}"
+    )
+
+
+def assert_copied_file(
+    worktree_path: Path, relative_path: str, expected_text: str | None = None
+) -> Path:
+    """Assert that a copied file exists in the worktree and is not a symlink."""
+    file_path = worktree_path / relative_path
+    assert file_path.exists(), f"Expected copied file {relative_path} to exist"
+    assert not file_path.is_symlink(), (
+        f"Expected {relative_path} to be a regular file, but found a symlink"
+    )
+    if expected_text is not None:
+        assert file_path.read_text() == expected_text
+    return file_path
+
+
+def assert_symlink_to(worktree_path: Path, relative_path: str) -> Path:
+    """Assert that a symlink exists in the worktree and return the path."""
+    symlink_path = worktree_path / relative_path
+    assert symlink_path.exists(), f"Expected symlink {relative_path} to exist"
+    assert symlink_path.is_symlink(), f"Expected {relative_path} to be a symlink"
+    return symlink_path
+
+
+# =============================================================================
+# Polling & Wait Helpers
+# =============================================================================
+
+
+def wait_for_pane_output(
+    env: "TmuxEnvironment", window_name: str, text: str, timeout: float = 2.0
+) -> None:
+    """Poll until the specified text appears in the pane."""
+
+    final_content = f"Pane for window '{window_name}' was not captured."
+
+    def _has_output() -> bool:
+        nonlocal final_content
+        capture_result = env.tmux(
+            ["capture-pane", "-p", "-t", window_name], check=False
+        )
+        if capture_result.returncode == 0:
+            final_content = capture_result.stdout
+            return text in final_content
+        final_content = (
+            f"Error capturing pane for window '{window_name}':\n{capture_result.stderr}"
+        )
+        return False
+
+    if not poll_until(_has_output, timeout=timeout):
+        assert False, (
+            f"Expected output {text!r} not found in window {window_name!r} within {timeout}s.\n"
+            f"--- FINAL PANE CONTENT ---\n"
+            f"{final_content}\n"
+            f"--------------------------"
+        )
+
+
+def wait_for_file(
+    env: "TmuxEnvironment",
+    file_path: Path,
+    timeout: float = 2.0,
+    *,
+    window_name: str | None = None,
+    worktree_path: Path | None = None,
+    debug_log_path: Path | None = None,
+) -> None:
+    """
+    Poll for a file to exist. On timeout, fail with diagnostics about panes, worktrees, and logs.
+    """
+
+    def _file_exists() -> bool:
+        return file_path.exists()
+
+    if poll_until(_file_exists, timeout=timeout):
+        return
+
+    diagnostics: list[str] = [f"Target file: {file_path}"]
+
+    if worktree_path is not None:
+        diagnostics.append(f"Worktree path: {worktree_path}")
+        if worktree_path.exists():
+            try:
+                files = sorted(p.name for p in worktree_path.iterdir())
+                diagnostics.append(f"Worktree files: {files}")
+            except Exception as exc:  # pragma: no cover - best effort diagnostics
+                diagnostics.append(f"Error listing worktree files: {exc}")
+        else:
+            diagnostics.append("Worktree directory not found.")
+
+    if debug_log_path is not None:
+        if debug_log_path.exists():
+            diagnostics.append(
+                f"Debug log '{debug_log_path.name}':\n{debug_log_path.read_text()}"
+            )
+        else:
+            diagnostics.append(f"Debug log '{debug_log_path.name}' not found.")
+
+    if window_name is not None:
+        pane_target = f"={window_name}.0"
+        pane_content = f"Could not capture pane for window '{window_name}'."
+        capture_result = env.tmux(
+            ["capture-pane", "-p", "-t", pane_target], check=False
+        )
+        if capture_result.returncode == 0:
+            pane_content = capture_result.stdout
+        else:
+            pane_content = (
+                f"{pane_content}\nError capturing pane:\n{capture_result.stderr}"
+            )
+        diagnostics.append(f"Tmux pane '{pane_target}' content:\n{pane_content}")
+
+    diag_str = "\n".join(diagnostics)
+    assert False, (
+        f"File not found after {timeout}s: {file_path}\n\n"
+        f"-- Diagnostics --\n{diag_str}\n-----------------"
+    )
+
+
+# =============================================================================
+# Path & Naming Helpers
+# =============================================================================
+
+
+def prompt_file_for_branch(tmp_path: Path, branch_name: str) -> Path:
+    """Return the path to the prompt file for the given branch."""
+    return tmp_path / f"workmux-prompt-{branch_name}.md"
+
+
+def assert_prompt_file_contents(
+    env: "TmuxEnvironment", branch_name: str, expected_text: str
+) -> None:
+    """Assert that a prompt file exists for the branch and matches the expected text."""
+    prompt_file = prompt_file_for_branch(env.tmp_path, branch_name)
+    assert prompt_file.exists(), f"Prompt file not found at {prompt_file}"
+    actual_text = prompt_file.read_text()
+    assert actual_text == expected_text, (
+        f"Content mismatch for prompt file: {prompt_file}"
+    )
+
+
+def file_for_commit(worktree_path: Path, commit_message: str) -> Path:
+    """Return the expected file path generated by create_commit for a message."""
+    sanitized = commit_message.replace(" ", "_").replace(":", "")
+    return worktree_path / f"file_for_{sanitized}.txt"
+
+
+def configure_default_shell(shell: str | None = None) -> list[list[str]]:
+    """Return tmux commands that configure the default shell for panes."""
+    shell_path = shell or os.environ.get("SHELL", "/bin/zsh")
+    return [["set-option", "-g", "default-shell", shell_path]]
+
+
+# =============================================================================
+# RepoBuilder - Declarative Git Repository Setup
+# =============================================================================
+
+
+@dataclass
+class RepoBuilder:
+    """Builder pattern for setting up git repositories declaratively in tests."""
+
+    env: "TmuxEnvironment"
+    path: Path
+    _files_to_add: list[str] = field(default_factory=list)
+
+    def with_file(self, relative_path: str, content: str) -> "RepoBuilder":
+        """Create a file with the given content."""
+        file_path = self.path / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content)
+        self._files_to_add.append(relative_path)
+        return self
+
+    def with_files(self, files: dict[str, str]) -> "RepoBuilder":
+        """Create multiple files from a dict of path -> content."""
+        for rel_path, content in files.items():
+            self.with_file(rel_path, content)
+        return self
+
+    def with_dir(self, relative_path: str) -> "RepoBuilder":
+        """Create an empty directory."""
+        dir_path = self.path / relative_path
+        dir_path.mkdir(parents=True, exist_ok=True)
+        return self
+
+    def with_executable(self, relative_path: str, content: str) -> "RepoBuilder":
+        """Create an executable file."""
+        file_path = self.path / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content)
+        file_path.chmod(0o755)
+        self._files_to_add.append(relative_path)
+        return self
+
+    def commit(self, message: str = "Update files") -> "RepoBuilder":
+        """Stage all pending files and commit."""
+        if self._files_to_add:
+            self.env.run_command(["git", "add"] + self._files_to_add, cwd=self.path)
+            self._files_to_add.clear()
+        else:
+            self.env.run_command(["git", "add", "."], cwd=self.path)
+        self.env.run_command(["git", "commit", "-m", message], cwd=self.path)
+        return self
+
+    def add_to_gitignore(self, patterns: list[str]) -> "RepoBuilder":
+        """Append patterns to .gitignore."""
+        gitignore_path = self.path / ".gitignore"
+        with gitignore_path.open("a") as f:
+            for pattern in patterns:
+                f.write(f"{pattern}\n")
+        return self
+
+
+@pytest.fixture
+def repo_builder(
+    isolated_tmux_server: "TmuxEnvironment", repo_path: Path
+) -> RepoBuilder:
+    """Provides a RepoBuilder for declarative git setup in tests."""
+    return RepoBuilder(env=isolated_tmux_server, path=repo_path)
+
+
+# =============================================================================
+# Fake Agent Installation
+# =============================================================================
+
+
+@dataclass
+class FakeAgentInstaller:
+    """Factory for installing fake agent commands in tests."""
+
+    env: "TmuxEnvironment"
+    _bin_dir: Path | None = None
+
+    @property
+    def bin_dir(self) -> Path:
+        if self._bin_dir is None:
+            self._bin_dir = self.env.tmp_path / "agents-bin"
+            self._bin_dir.mkdir(exist_ok=True)
+        return self._bin_dir
+
+    def install(self, name: str, script_body: str) -> Path:
+        """Creates a fake agent command in PATH so tmux panes can invoke it."""
+        script_path = self.bin_dir / name
+        script_path.write_text(script_body)
+        script_path.chmod(0o755)
+
+        new_path = f"{self.bin_dir}:{self.env.env.get('PATH', '')}"
+        self.env.env["PATH"] = new_path
+        self.env.tmux(["set-environment", "-g", "PATH", new_path])
+        return script_path
+
+
+@pytest.fixture
+def fake_agent_installer(isolated_tmux_server: "TmuxEnvironment") -> FakeAgentInstaller:
+    """Provides a factory for installing fake agent commands."""
+    return FakeAgentInstaller(env=isolated_tmux_server)
 
 
 def slugify(text: str) -> str:
