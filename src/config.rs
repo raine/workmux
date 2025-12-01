@@ -321,16 +321,37 @@ impl Config {
         Ok(None)
     }
 
-    /// Load the project-specific configuration file from the current directory.
+    /// Load the project-specific configuration file.
+    ///
+    /// Searches for `.workmux.yaml` or `.workmux.yml` in the following order:
+    /// 1. Current worktree root (allows branch-specific config overrides)
+    /// 2. Main worktree root (shared config across all worktrees)
+    /// 3. Falls back gracefully when not in a git repository
     fn load_project() -> anyhow::Result<Option<Self>> {
-        let config_path_yaml = Path::new(".workmux.yaml");
-        if config_path_yaml.exists() {
-            return Self::load_from_path(config_path_yaml);
+        let config_names = [".workmux.yaml", ".workmux.yml"];
+
+        // Build list of directories to search
+        let mut search_dirs = Vec::new();
+        if let Ok(repo_root) = git::get_repo_root() {
+            search_dirs.push(repo_root.clone());
+            // Also check main worktree root if different from current worktree
+            if let Ok(main_root) = git::get_main_worktree_root()
+                && main_root != repo_root {
+                    search_dirs.push(main_root);
+                }
         }
-        let config_path_yml = Path::new(".workmux.yml");
-        if config_path_yml.exists() {
-            return Self::load_from_path(config_path_yml);
+
+        // Search for config in each directory
+        for dir in search_dirs {
+            for name in &config_names {
+                let config_path = dir.join(name);
+                if config_path.exists() {
+                    debug!(path = %config_path.display(), "config:found project config");
+                    return Self::load_from_path(&config_path);
+                }
+            }
         }
+
         Ok(None)
     }
 
