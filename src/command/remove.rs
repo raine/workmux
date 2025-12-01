@@ -10,35 +10,23 @@ enum UserChoice {
     NotNeeded, // No prompt needed (no unmerged commits)
 }
 
-pub fn run(
-    branch_name: Option<&str>,
-    force: bool,
-    delete_remote: bool,
-    keep_branch: bool,
-) -> Result<()> {
+pub fn run(branch_name: Option<&str>, force: bool, keep_branch: bool) -> Result<()> {
     // Resolve branch name from argument or current branch
     let branch_to_remove = super::resolve_branch(branch_name, "remove")?;
 
     // Validate removal safety and get effective force flag
-    let effective_force =
-        match validate_removal_safety(&branch_to_remove, force, delete_remote, keep_branch)? {
-            Some(force_flag) => force_flag,
-            None => return Ok(()), // User aborted
-        };
+    let effective_force = match validate_removal_safety(&branch_to_remove, force, keep_branch)? {
+        Some(force_flag) => force_flag,
+        None => return Ok(()), // User aborted
+    };
 
     let config = config::Config::load(None)?;
     let context = WorkflowContext::new(config)?;
 
     super::announce_hooks(&context.config, None, super::HookPhase::PreDelete);
 
-    let result = workflow::remove(
-        &branch_to_remove,
-        effective_force,
-        delete_remote,
-        keep_branch,
-        &context,
-    )
-    .context("Failed to remove worktree")?;
+    let result = workflow::remove(&branch_to_remove, effective_force, keep_branch, &context)
+        .context("Failed to remove worktree")?;
 
     if keep_branch {
         println!(
@@ -60,7 +48,6 @@ pub fn run(
 fn validate_removal_safety(
     branch_name: &str,
     force: bool,
-    delete_remote: bool,
     keep_branch: bool,
 ) -> Result<Option<bool>> {
     if force {
@@ -73,7 +60,7 @@ fn validate_removal_safety(
 
     // Check if we need to prompt for unmerged commits (only relevant when deleting the branch)
     if !keep_branch {
-        match check_unmerged_commits(branch_name, delete_remote)? {
+        match check_unmerged_commits(branch_name)? {
             UserChoice::Confirmed => return Ok(Some(true)), // User confirmed - use force
             UserChoice::Aborted => return Ok(None),         // User aborted
             UserChoice::NotNeeded => {}                     // No unmerged commits
@@ -107,7 +94,7 @@ fn check_uncommitted_changes(branch_name: &str) -> Result<()> {
 }
 
 /// Check for unmerged commits and prompt user for confirmation.
-fn check_unmerged_commits(branch_name: &str, delete_remote: bool) -> Result<UserChoice> {
+fn check_unmerged_commits(branch_name: &str) -> Result<UserChoice> {
     // Try to get the stored base branch, fall back to default branch
     let base = git::get_branch_base(branch_name)
         .ok()
@@ -133,7 +120,7 @@ fn check_unmerged_commits(branch_name: &str, delete_remote: bool) -> Result<User
     let has_unmerged = unmerged_branches.contains(branch_name);
 
     if has_unmerged {
-        prompt_unmerged_confirmation(branch_name, &base_branch, &base, delete_remote)
+        prompt_unmerged_confirmation(branch_name, &base_branch, &base)
     } else {
         Ok(UserChoice::NotNeeded)
     }
@@ -144,15 +131,11 @@ fn prompt_unmerged_confirmation(
     branch_name: &str,
     base_branch: &str,
     base: &str,
-    delete_remote: bool,
 ) -> Result<UserChoice> {
     println!(
         "This will delete the worktree, tmux window, and local branch for '{}'.",
         branch_name
     );
-    if delete_remote {
-        println!("The remote branch will also be deleted.");
-    }
     println!(
         "Warning: Branch '{}' has commits that are not merged into '{}' (base: '{}').",
         branch_name, base_branch, base

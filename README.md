@@ -590,8 +590,6 @@ resources (worktree, tmux window, and local branch).
 
 - `--ignore-uncommitted`: Commit any staged changes before merging without
   opening an editor
-- `--delete-remote`, `-r`: Also delete the remote branch after a successful
-  merge
 - `--keep`, `-k`: Keep the worktree, window, and branch after merging (skip
   cleanup). Useful when you want to verify the merge before cleaning up.
 
@@ -643,9 +641,6 @@ workmux merge user-auth --rebase
 # Squash all commits into a single commit
 workmux merge user-auth --squash
 
-# Merge and also delete the remote branch
-workmux merge user-auth --delete-remote
-
 # Merge but keep the worktree/window/branch to verify before cleanup
 workmux merge user-auth --keep
 # ... verify the merge in main ...
@@ -664,9 +659,8 @@ branch). Useful for abandoning work or cleaning up experimental branches.
 #### Options
 
 - `--force`, `-f`: Skip confirmation prompt and ignore uncommitted changes
-- `--delete-remote`, `-r`: Also delete the remote branch
 - `--keep-branch`, `-k`: Remove only the worktree and tmux window while keeping
-  the local branch (incompatible with `--delete-remote`)
+  the local branch
 
 #### Examples
 

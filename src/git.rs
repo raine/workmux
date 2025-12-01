@@ -650,15 +650,6 @@ pub fn delete_branch(branch_name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Delete a remote branch
-pub fn delete_remote_branch(branch_name: &str) -> Result<()> {
-    Cmd::new("git")
-        .args(&["push", "origin", "--delete", branch_name])
-        .run()
-        .with_context(|| format!("Failed to delete remote branch '{}'", branch_name))?;
-    Ok(())
-}
-
 /// Stash uncommitted changes, optionally including untracked files or using patch mode.
 pub fn stash_push(message: &str, include_untracked: bool, patch: bool) -> Result<()> {
     use std::process::Command;

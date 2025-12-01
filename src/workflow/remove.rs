@@ -11,14 +11,10 @@ use super::types::RemoveResult;
 pub fn remove(
     branch_name: &str,
     force: bool,
-    delete_remote: bool,
     keep_branch: bool,
     context: &WorkflowContext,
 ) -> Result<RemoveResult> {
-    info!(
-        branch = branch_name,
-        force, delete_remote, keep_branch, "remove:start"
-    );
+    info!(branch = branch_name, force, keep_branch, "remove:start");
 
     // Get worktree path - this also validates that the worktree exists
     let worktree_path = git::get_worktree_path(branch_name)
@@ -86,17 +82,13 @@ pub fn remove(
 
     // Note: Unmerged branch check removed - git branch -d/D handles this natively
     // The CLI provides a user-friendly confirmation prompt before calling this function
-    info!(
-        branch = branch_name,
-        delete_remote, keep_branch, "remove:cleanup start"
-    );
+    info!(branch = branch_name, keep_branch, "remove:cleanup start");
     let cleanup_result = cleanup::cleanup(
         context,
         branch_name,
         handle,
         &worktree_path,
         force,
-        delete_remote,
         keep_branch,
     )?;
 

@@ -170,10 +170,6 @@ enum Commands {
         #[arg(long)]
         ignore_uncommitted: bool,
 
-        /// Also delete the remote branch
-        #[arg(short = 'r', long)]
-        delete_remote: bool,
-
         /// Rebase the branch onto the main branch before merging (fast-forward)
         #[arg(long, group = "merge_strategy")]
         rebase: bool,
@@ -183,7 +179,7 @@ enum Commands {
         squash: bool,
 
         /// Keep the worktree, window, and branch after merging (skip cleanup)
-        #[arg(short = 'k', long, conflicts_with = "delete_remote")]
+        #[arg(short = 'k', long)]
         keep: bool,
     },
 
@@ -198,12 +194,8 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
 
-        /// Also delete the remote branch
-        #[arg(short = 'r', long)]
-        delete_remote: bool,
-
         /// Keep the local branch (only remove worktree and tmux window)
-        #[arg(short = 'k', long, conflicts_with = "delete_remote")]
+        #[arg(short = 'k', long)]
         keep_branch: bool,
     },
 
@@ -288,14 +280,12 @@ pub fn run() -> Result<()> {
         Commands::Merge {
             branch_name,
             ignore_uncommitted,
-            delete_remote,
             rebase,
             squash,
             keep,
         } => command::merge::run(
             branch_name.as_deref(),
             ignore_uncommitted,
-            delete_remote,
             rebase,
             squash,
             keep,
@@ -303,9 +293,8 @@ pub fn run() -> Result<()> {
         Commands::Remove {
             branch_name,
             force,
-            delete_remote,
             keep_branch,
-        } => command::remove::run(branch_name.as_deref(), force, delete_remote, keep_branch),
+        } => command::remove::run(branch_name.as_deref(), force, keep_branch),
         Commands::List => command::list::run(),
         Commands::Path { branch_name } => command::path::run(&branch_name),
         Commands::Init => crate::config::Config::init(),

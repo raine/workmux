@@ -38,8 +38,6 @@ pub struct CleanupResult {
     pub tmux_window_killed: bool,
     pub worktree_removed: bool,
     pub local_branch_deleted: bool,
-    pub remote_branch_deleted: bool,
-    pub remote_delete_error: Option<String>,
     pub ran_inside_target_window: bool,
 }
 

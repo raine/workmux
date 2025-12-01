@@ -19,7 +19,6 @@ pub fn cleanup(
     handle: &str,
     worktree_path: &Path,
     force: bool,
-    delete_remote: bool,
     keep_branch: bool,
 ) -> Result<CleanupResult> {
     info!(
@@ -27,7 +26,6 @@ pub fn cleanup(
         handle = handle,
         path = %worktree_path.display(),
         force,
-        delete_remote,
         keep_branch,
         "cleanup:start"
     );
@@ -50,8 +48,6 @@ pub fn cleanup(
         tmux_window_killed: false,
         worktree_removed: false,
         local_branch_deleted: false,
-        remote_branch_deleted: false,
-        remote_delete_error: None,
         ran_inside_target_window: running_inside_target_window,
     };
 
@@ -109,19 +105,6 @@ pub fn cleanup(
             info!(branch = branch_name, "cleanup:local branch deleted");
         }
 
-        // 4. Delete the remote branch if requested (redundant check due to CLI conflict, but safe).
-        if delete_remote && !keep_branch {
-            match git::delete_remote_branch(branch_name) {
-                Ok(_) => {
-                    result.remote_branch_deleted = true;
-                    info!(branch = branch_name, "cleanup:remote branch deleted");
-                }
-                Err(e) => {
-                    warn!(branch = branch_name, error = %e, "cleanup:failed to delete remote branch");
-                    result.remote_delete_error = Some(e.to_string());
-                }
-            }
-        }
         Ok(())
     };
 

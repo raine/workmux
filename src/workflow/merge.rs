@@ -11,7 +11,6 @@ use super::types::MergeResult;
 pub fn merge(
     branch_name: &str,
     ignore_uncommitted: bool,
-    delete_remote: bool,
     rebase: bool,
     squash: bool,
     keep: bool,
@@ -19,7 +18,7 @@ pub fn merge(
 ) -> Result<MergeResult> {
     info!(
         branch = branch_name,
-        ignore_uncommitted, delete_remote, rebase, squash, keep, "merge:start"
+        ignore_uncommitted, rebase, squash, keep, "merge:start"
     );
 
     // Change CWD to main worktree to prevent errors if the command is run from within
@@ -172,17 +171,13 @@ pub fn merge(
     }
 
     // Always force cleanup after a successful merge
-    info!(
-        branch = branch_to_merge,
-        delete_remote, "merge:cleanup start"
-    );
+    info!(branch = branch_to_merge, "merge:cleanup start");
     let cleanup_result = cleanup::cleanup(
         context,
         branch_to_merge,
         handle,
         &worktree_path,
         true,
-        delete_remote,
         false, // keep_branch: always delete when merging
     )?;
 

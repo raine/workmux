@@ -604,7 +604,6 @@ def run_workmux_merge(
     repo_path: Path,
     branch_name: Optional[str] = None,
     ignore_uncommitted: bool = False,
-    delete_remote: bool = False,
     rebase: bool = False,
     squash: bool = False,
     keep: bool = False,
@@ -623,7 +622,6 @@ def run_workmux_merge(
         repo_path: Path to the git repository
         branch_name: Optional name of the branch to merge (omit to auto-detect from current branch)
         ignore_uncommitted: Whether to use --ignore-uncommitted flag
-        delete_remote: Whether to use --delete-remote flag
         rebase: Whether to use --rebase flag
         squash: Whether to use --squash flag
         keep: Whether to use --keep flag
@@ -641,8 +639,6 @@ def run_workmux_merge(
     flags = []
     if ignore_uncommitted:
         flags.append("--ignore-uncommitted")
-    if delete_remote:
-        flags.append("--delete-remote")
     if rebase:
         flags.append("--rebase")
     if squash:

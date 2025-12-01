@@ -311,7 +311,6 @@ pub fn create_with_changes(
                 handle,
                 &create_result.worktree_path,
                 true,  // force
-                false, // delete_remote
                 false, // keep_branch
             )
             .context(
