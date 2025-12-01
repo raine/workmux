@@ -37,7 +37,8 @@ pub fn setup_environment(
         "setup_environment:start"
     );
     let prefix = config.window_prefix();
-    let repo_root = git::get_repo_root()?;
+    // Use main worktree root for file operations since source files live there
+    let repo_root = git::get_main_worktree_root()?;
 
     // Perform file operations (copy and symlink) if requested
     if options.run_file_ops {

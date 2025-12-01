@@ -336,9 +336,10 @@ impl Config {
             search_dirs.push(repo_root.clone());
             // Also check main worktree root if different from current worktree
             if let Ok(main_root) = git::get_main_worktree_root()
-                && main_root != repo_root {
-                    search_dirs.push(main_root);
-                }
+                && main_root != repo_root
+            {
+                search_dirs.push(main_root);
+            }
         }
 
         // Search for config in each directory
