@@ -4,6 +4,14 @@
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.36 (2025-12-01)
+
+- Added `--into` flag to `merge` command for merging into branches other than
+  main (e.g., `workmux merge feature --into develop`)
+- Fixed config loading and file operations when running commands from inside a
+  worktree
+- Removed `--delete-remote` flag from `merge` and `remove` commands
+
 ## v0.1.35 (2025-12-01)
 
 - Added agent status tracking in tmux window names, showing icons for different
