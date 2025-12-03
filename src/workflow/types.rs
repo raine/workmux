@@ -100,6 +100,5 @@ pub struct WorktreeInfo {
     pub path: PathBuf,
     pub has_tmux: bool,
     pub has_unmerged: bool,
-    /// True if the worktree directory no longer exists on disk
     pub is_orphaned: bool,
 }

@@ -54,9 +54,7 @@ pub fn cleanup(
     // Helper closure to perform the actual filesystem and git cleanup.
     // This avoids code duplication while enforcing the correct operational order.
     let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
-        // Run pre-delete hooks before removing the worktree directory.
-        // Only run hooks if the directory still exists - if it was already deleted,
-        // there's nothing to clean up and hooks would fail trying to cd into it.
+        // Run pre-delete hooks (skip if directory already deleted)
         if worktree_path.exists() {
             if let Some(pre_delete_hooks) = &context.config.pre_delete {
                 info!(
@@ -93,11 +91,7 @@ pub fn cleanup(
             info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
         }
 
-        // 2. Prune worktree metadata.
-        // This must run for BOTH cases:
-        // - After we removed the directory (to clean up git's reference to it)
-        // - For orphaned worktrees (directory already deleted, but git still thinks branch is checked out)
-        // Without this, `git branch -d` will fail with "Cannot delete branch checked out at..."
+        // 2. Prune worktree metadata (required for both existing and orphaned worktrees)
         git::prune_worktrees().context("Failed to prune worktrees")?;
         debug!("cleanup:git worktrees pruned");
 
