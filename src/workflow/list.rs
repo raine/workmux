@@ -38,6 +38,9 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
     let worktrees: Vec<WorktreeInfo> = worktrees_data
         .into_iter()
         .map(|(path, branch)| {
+            // Check if the worktree directory still exists on disk
+            let is_orphaned = !path.exists();
+
             // Extract handle from worktree path basename (the source of truth)
             let handle = path
                 .file_name()
@@ -49,8 +52,11 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
             let prefixed_window_name = tmux::prefixed(prefix, &handle);
             let has_tmux = tmux_windows.contains(&prefixed_window_name);
 
-            // Check for unmerged commits, but only if this isn't the main branch
-            let has_unmerged = if let Some(ref main) = main_branch {
+            // Check for unmerged commits, but only if this isn't the main branch.
+            // Skip unmerged check for orphaned worktrees since we can't check git status.
+            let has_unmerged = if is_orphaned {
+                false
+            } else if let Some(ref main) = main_branch {
                 if branch == *main || branch == "(detached)" {
                     false
                 } else {
@@ -65,6 +71,7 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
                 path,
                 has_tmux,
                 has_unmerged,
+                is_orphaned,
             }
         })
         .collect();
