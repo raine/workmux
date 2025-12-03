@@ -16,6 +16,8 @@ struct WorktreeRow {
     unmerged_status: String,
     #[tabled(rename = "PATH")]
     path_str: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
 }
 
 pub fn run() -> Result<()> {
@@ -28,6 +30,9 @@ pub fn run() -> Result<()> {
     }
 
     let current_dir = std::env::current_dir()?;
+
+    // Count orphaned worktrees before consuming the iterator
+    let orphan_count = worktrees.iter().filter(|wt| wt.is_orphaned).count();
 
     let display_data: Vec<WorktreeRow> = worktrees
         .into_iter()
@@ -56,6 +61,11 @@ pub fn run() -> Result<()> {
                 } else {
                     "-".to_string()
                 },
+                status: if wt.is_orphaned {
+                    "orphaned".to_string()
+                } else {
+                    "-".to_string()
+                },
             }
         })
         .collect();
@@ -66,6 +76,15 @@ pub fn run() -> Result<()> {
         .modify(Columns::new(0..3), Padding::new(0, 1, 0, 0));
 
     println!("{table}");
+
+    if orphan_count > 0 {
+        eprintln!();
+        eprintln!(
+            "Hint: {} orphaned worktree(s) found (directories no longer exist).",
+            orphan_count
+        );
+        eprintln!("Run 'workmux cleanup' to remove them.");
+    }
 
     Ok(())
 }
