@@ -207,6 +207,13 @@ enum Commands {
     #[command(visible_alias = "ls")]
     List,
 
+    /// Clean up orphaned worktrees (directories that no longer exist)
+    Cleanup {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Get the filesystem path of a worktree
     Path {
         /// Name of the branch
@@ -302,6 +309,7 @@ pub fn run() -> Result<()> {
             keep_branch,
         } => command::remove::run(branch_name.as_deref(), force, keep_branch),
         Commands::List => command::list::run(),
+        Commands::Cleanup { force } => command::cleanup::run(force),
         Commands::Path { branch_name } => command::path::run(&branch_name),
         Commands::Init => crate::config::Config::init(),
         Commands::Claude { command } => match command {
