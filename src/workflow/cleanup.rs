@@ -54,20 +54,30 @@ pub fn cleanup(
     // Helper closure to perform the actual filesystem and git cleanup.
     // This avoids code duplication while enforcing the correct operational order.
     let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
-        // Run pre-delete hooks before removing the worktree directory
-        if let Some(pre_delete_hooks) = &context.config.pre_delete {
-            info!(
-                branch = branch_name,
-                count = pre_delete_hooks.len(),
-                "cleanup:running pre-delete hooks"
-            );
-            let hook_env = [("WORKMUX_HANDLE", handle)];
-            for command in pre_delete_hooks {
-                // Run the hook with the worktree path as the working directory.
-                // This allows for relative paths like `node_modules` in the command.
-                cmd::shell_command_with_env(command, worktree_path, &hook_env)
-                    .with_context(|| format!("Failed to run pre-delete command: '{}'", command))?;
+        // Run pre-delete hooks before removing the worktree directory.
+        // Only run hooks if the directory still exists - if it was already deleted,
+        // there's nothing to clean up and hooks would fail trying to cd into it.
+        if worktree_path.exists() {
+            if let Some(pre_delete_hooks) = &context.config.pre_delete {
+                info!(
+                    branch = branch_name,
+                    count = pre_delete_hooks.len(),
+                    "cleanup:running pre-delete hooks"
+                );
+                let hook_env = [("WORKMUX_HANDLE", handle)];
+                for command in pre_delete_hooks {
+                    // Run the hook with the worktree path as the working directory.
+                    // This allows for relative paths like `node_modules` in the command.
+                    cmd::shell_command_with_env(command, worktree_path, &hook_env)
+                        .with_context(|| format!("Failed to run pre-delete command: '{}'", command))?;
+                }
             }
+        } else {
+            debug!(
+                branch = branch_name,
+                path = %worktree_path.display(),
+                "cleanup:skipping pre-delete hooks - directory does not exist"
+            );
         }
 
         // 1. Forcefully remove the worktree directory from the filesystem.
@@ -81,6 +91,12 @@ pub fn cleanup(
             })?;
             result.worktree_removed = true;
             info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
+
+            // 2. Prune this specific worktree's metadata.
+            // Only prune after we've removed the directory, so we don't accidentally
+            // prune other orphaned worktrees. Use `workmux cleanup` for bulk cleanup.
+            git::prune_worktrees().context("Failed to prune worktrees")?;
+            debug!("cleanup:git worktrees pruned");
         }
 
         // Clean up the prompt file if it exists
@@ -93,10 +109,6 @@ pub fn cleanup(
                 debug!(path = %prompt_file.display(), "cleanup:prompt file removed");
             }
         }
-
-        // 2. Prune worktrees to clean up git's metadata.
-        git::prune_worktrees().context("Failed to prune worktrees")?;
-        debug!("cleanup:git worktrees pruned");
 
         // 3. Delete the local branch (unless keeping it).
         if !keep_branch {
