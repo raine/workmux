@@ -91,13 +91,15 @@ pub fn cleanup(
             })?;
             result.worktree_removed = true;
             info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
-
-            // 2. Prune this specific worktree's metadata.
-            // Only prune after we've removed the directory, so we don't accidentally
-            // prune other orphaned worktrees. Use `workmux cleanup` for bulk cleanup.
-            git::prune_worktrees().context("Failed to prune worktrees")?;
-            debug!("cleanup:git worktrees pruned");
         }
+
+        // 2. Prune worktree metadata.
+        // This must run for BOTH cases:
+        // - After we removed the directory (to clean up git's reference to it)
+        // - For orphaned worktrees (directory already deleted, but git still thinks branch is checked out)
+        // Without this, `git branch -d` will fail with "Cannot delete branch checked out at..."
+        git::prune_worktrees().context("Failed to prune worktrees")?;
+        debug!("cleanup:git worktrees pruned");
 
         // Clean up the prompt file if it exists
         let prompt_filename = format!("workmux-prompt-{}.md", branch_name);
