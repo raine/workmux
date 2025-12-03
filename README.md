@@ -280,6 +280,7 @@ alias wm='workmux'
 - [`merge`](#workmux-merge-branch-name) - Merge a branch and clean up everything
 - [`remove`](#workmux-remove-branch-name) - Remove a worktree without merging
 - [`list`](#workmux-list) - List all worktrees with status
+- [`cleanup`](#workmux-cleanup) - Clean up orphaned worktrees
 - [`init`](#workmux-init) - Generate configuration file
 - [`open`](#workmux-open-branch-name) - Open a tmux window for an existing
   worktree
@@ -716,7 +717,53 @@ bug-fix     ✓       ●           ~/project__worktrees/bug-fix
 
 - `✓` in TMUX column = tmux window exists for this worktree
 - `●` in UNMERGED column = branch has commits not merged into main
+- `orphaned` in STATUS column = worktree directory no longer exists
 - `-` = not applicable
+
+---
+
+### `workmux cleanup`
+
+Cleans up orphaned worktrees — worktrees whose directories have been manually
+deleted but still have git metadata and local branches. This command prunes git
+worktree metadata and deletes the associated local branches.
+
+#### Options
+
+- `--force`, `-f`: Skip confirmation prompt
+
+#### What happens
+
+1. Scans for worktrees whose directories no longer exist on disk
+2. Prompts for confirmation (unless `--force` is used)
+3. Runs `git worktree prune` to clean up stale git metadata
+4. Deletes the local branches associated with orphaned worktrees
+
+#### Examples
+
+```bash
+# Clean up orphaned worktrees with confirmation
+workmux cleanup
+
+# Force cleanup without confirmation
+workmux cleanup --force
+```
+
+#### Example output
+
+```
+Found 2 orphaned worktree(s):
+  - feature-old (/path/to/worktrees/feature-old)
+  - experiment (/path/to/worktrees/experiment)
+
+Clean up all orphaned worktrees? [y/N] y
+Pruning git worktree metadata...
+Deleting branch 'feature-old'... done
+Deleting branch 'experiment'... done
+
+✓ Cleaned up 2 orphaned worktree(s)
+✓ Deleted 2 branch(es)
+```
 
 ---
 
