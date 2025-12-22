@@ -252,15 +252,14 @@ impl PaneHandshake {
 
     /// Build a shell wrapper command that signals readiness.
     ///
-    /// The wrapper disables echo, signals the channel, then exec's into the shell.
-    /// This ensures the shell appears "ready" (with proper TTY settings) before
-    /// we send any commands to it.
+    /// The wrapper briefly disables echo while signaling the channel, restores it,
+    /// then exec's into the shell so the TTY starts in a normal state.
     fn wrapper_command(&self, shell: &str) -> String {
         // Quote shell path in case it contains spaces
         // Silence stty errors in case it's not available in minimal environments
         // Use -l to start as login shell, ensuring ~/.zprofile etc. are sourced
         format!(
-            "stty -echo 2>/dev/null; tmux wait-for -U {}; exec '{}' -l",
+            "stty -echo 2>/dev/null; tmux wait-for -U {}; stty echo 2>/dev/null; exec '{}' -l",
             self.channel, shell
         )
     }
