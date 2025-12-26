@@ -78,6 +78,19 @@ agents, is as simple as managing tmux windows.
 brew install raine/workmux/workmux
 ```
 
+### Nix
+
+```bash
+# Quick install
+nix profile install github:raine/workmux
+
+# Or try without installing
+nix shell github:raine/workmux
+```
+
+For NixOS/home-manager integration, including a declarative home-manager module with
+full configuration options, see **[nix/README.md](nix/README.md)**.
+
 ### Cargo
 
 Requires Rust. Install via [rustup](https://rustup.rs/) if you don't have it.
