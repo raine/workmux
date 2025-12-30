@@ -274,7 +274,7 @@ in {
       fi
     '';
 
-    programs.zsh.initExtra = mkIf cfg.enableZshIntegration ''
+    programs.zsh.initContent = mkIf cfg.enableZshIntegration ''
       # workmux shell completion
       if command -v workmux &> /dev/null; then
         eval "$(workmux completions zsh)"
