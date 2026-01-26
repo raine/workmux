@@ -430,7 +430,7 @@ def isolated_tmux_server(tmp_path: Path) -> Generator[TmuxEnvironment, None, Non
 def setup_git_repo(path: Path, env_vars: Optional[dict] = None):
     """Initializes a git repository in the given path with an initial commit."""
     subprocess.run(
-        ["git", "init"], cwd=path, check=True, capture_output=True, env=env_vars
+        ["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, env=env_vars
     )
     # Configure git user for commits
     subprocess.run(
@@ -482,7 +482,7 @@ def remote_repo_path(isolated_tmux_server: "TmuxEnvironment") -> Path:
     parent = isolated_tmux_server.tmp_path.parent
     remote_path = Path(tempfile.mkdtemp(prefix="remote_repo_", dir=parent))
     subprocess.run(
-        ["git", "init", "--bare"],
+        ["git", "init", "--bare", "-b", "main"],
         cwd=remote_path,
         check=True,
         capture_output=True,
