@@ -159,4 +159,4 @@ If nothing is staged, stage all changes first.
 
 ## Task delegation
 
-For spawning parallel agents in worktrees, see [Delegating tasks](/guide/delegating-tasks) which covers the `/worktree` slash command.
+For spawning parallel agents in worktrees, see [Delegating tasks](./delegating-tasks.md) which covers the `/worktree` slash command.
