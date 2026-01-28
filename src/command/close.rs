@@ -1,13 +1,32 @@
+use crate::config::TmuxTarget;
 use crate::{config, git, tmux};
 use anyhow::{Context, Result, anyhow};
+
+/// Determine the tmux target mode for a worktree from git metadata.
+/// Falls back to Window mode if no metadata is found (backward compatibility).
+fn get_worktree_target(handle: &str) -> TmuxTarget {
+    match git::get_worktree_meta(handle, "target") {
+        Some(target) if target == "session" => TmuxTarget::Session,
+        _ => TmuxTarget::Window,
+    }
+}
 
 pub fn run(name: Option<&str>) -> Result<()> {
     let config = config::Config::load(None)?;
     let prefix = config.window_prefix();
 
-    // When no name is provided, prefer the current tmux window name
-    // This handles duplicate windows (e.g., wm:feature-2) correctly
-    let (full_window_name, is_current_window) = match name {
+    // Resolve the handle first to determine target mode
+    let resolved_handle = match name {
+        Some(h) => h.to_string(),
+        None => super::resolve_name(None)?,
+    };
+
+    // Determine if this worktree was created as a session or window
+    let is_session_mode = get_worktree_target(&resolved_handle) == TmuxTarget::Session;
+
+    // When no name is provided, prefer the current tmux window/session name
+    // This handles duplicate windows/sessions (e.g., wm:feature-2) correctly
+    let (full_target_name, is_current_target) = match name {
         Some(handle) => {
             // Explicit name provided - validate the worktree exists
             git::find_worktree(handle).with_context(|| {
@@ -17,47 +36,89 @@ pub fn run(name: Option<&str>) -> Result<()> {
                 )
             })?;
             let prefixed = tmux::prefixed(prefix, handle);
-            let current_window = tmux::current_window_name()?;
-            let is_current = current_window.as_deref() == Some(&prefixed);
+            let is_current = if is_session_mode {
+                let current_session = tmux::current_session_name()?;
+                current_session.as_deref() == Some(&prefixed)
+            } else {
+                let current_window = tmux::current_window_name()?;
+                current_window.as_deref() == Some(&prefixed)
+            };
             (prefixed, is_current)
         }
         None => {
-            // No name provided - check if we're in a workmux window
-            if let Some(current) = tmux::current_window_name()? {
+            // No name provided - check if we're in a workmux window/session
+            if is_session_mode {
+                if let Some(current) = tmux::current_session_name()? {
+                    if current.starts_with(prefix) {
+                        // We're in a workmux session, use it directly
+                        (current.clone(), true)
+                    } else {
+                        // Not in a workmux session, use resolved handle
+                        (tmux::prefixed(prefix, &resolved_handle), false)
+                    }
+                } else {
+                    // Not in tmux, use resolved handle
+                    (tmux::prefixed(prefix, &resolved_handle), false)
+                }
+            } else if let Some(current) = tmux::current_window_name()? {
                 if current.starts_with(prefix) {
                     // We're in a workmux window, use it directly
                     (current.clone(), true)
                 } else {
                     // Not in a workmux window, fall back to directory name
-                    let handle = super::resolve_name(None)?;
-                    (tmux::prefixed(prefix, &handle), false)
+                    (tmux::prefixed(prefix, &resolved_handle), false)
                 }
             } else {
                 // Not in tmux, use directory name
-                let handle = super::resolve_name(None)?;
-                (tmux::prefixed(prefix, &handle), false)
+                (tmux::prefixed(prefix, &resolved_handle), false)
             }
         }
     };
 
-    // Check if the tmux window exists
-    if !tmux::window_exists_by_full_name(&full_window_name)? {
+    let target_type = if is_session_mode { "session" } else { "window" };
+
+    // Check if the tmux window/session exists
+    let target_exists = if is_session_mode {
+        tmux::session_exists_by_full_name(&full_target_name)?
+    } else {
+        tmux::window_exists_by_full_name(&full_target_name)?
+    };
+
+    if !target_exists {
         return Err(anyhow!(
-            "No active tmux window found for '{}'. The worktree exists but has no open window.",
-            full_window_name
+            "No active tmux {} found for '{}'. The worktree exists but has no open {}.",
+            target_type,
+            full_target_name,
+            target_type
         ));
     }
 
-    if is_current_window {
-        // Schedule the window close with a small delay so the command can complete
-        tmux::schedule_window_close_by_full_name(
-            &full_window_name,
-            std::time::Duration::from_millis(100),
-        )?;
+    if is_current_target {
+        // Schedule the close with a small delay so the command can complete
+        if is_session_mode {
+            tmux::schedule_session_close_by_full_name(
+                &full_target_name,
+                std::time::Duration::from_millis(100),
+            )?;
+        } else {
+            tmux::schedule_window_close_by_full_name(
+                &full_target_name,
+                std::time::Duration::from_millis(100),
+            )?;
+        }
     } else {
-        // Kill the window directly
-        tmux::kill_window_by_full_name(&full_window_name).context("Failed to close tmux window")?;
-        println!("✓ Closed window '{}' (worktree kept)", full_window_name);
+        // Kill the target directly
+        if is_session_mode {
+            tmux::kill_session_by_full_name(&full_target_name)
+                .context("Failed to close tmux session")?;
+        } else {
+            tmux::kill_window_by_full_name(&full_target_name)
+                .context("Failed to close tmux window")?;
+        }
+        println!(
+            "✓ Closed {} '{}' (worktree kept)",
+            target_type, full_target_name
+        );
     }
 
     Ok(())

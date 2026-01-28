@@ -30,7 +30,6 @@ pub fn get_all_window_names() -> Result<HashSet<String>> {
 // =============================================================================
 
 /// Get all tmux session names across all servers
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn get_all_session_names() -> Result<HashSet<String>> {
     let sessions = Cmd::new("tmux")
         .args(&["list-sessions", "-F", "#{session_name}"])
@@ -41,14 +40,12 @@ pub fn get_all_session_names() -> Result<HashSet<String>> {
 }
 
 /// Check if a tmux session with the given name exists
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn session_exists(prefix: &str, session_name: &str) -> Result<bool> {
     let prefixed_name = prefixed(prefix, session_name);
     session_exists_by_full_name(&prefixed_name)
 }
 
 /// Check if a session exists by its full name (including prefix)
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn session_exists_by_full_name(full_name: &str) -> Result<bool> {
     Cmd::new("tmux")
         .args(&["has-session", "-t", &format!("={}", full_name)])
@@ -112,7 +109,6 @@ pub fn switch_to_session(prefix: &str, session_name: &str) -> Result<()> {
 }
 
 /// Kill a tmux session by its full name (including prefix)
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn kill_session_by_full_name(full_name: &str) -> Result<()> {
     let target = format!("={}", full_name);
 
@@ -126,7 +122,6 @@ pub fn kill_session_by_full_name(full_name: &str) -> Result<()> {
 
 /// Schedule a tmux session to be killed after a short delay.
 /// This is useful when the current command is running inside the session that needs to close.
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn schedule_session_close_by_full_name(full_name: &str, delay: Duration) -> Result<()> {
     let delay_secs = format!("{:.3}", delay.as_secs_f64());
     let target = format!("={}", full_name);
@@ -141,7 +136,6 @@ pub fn schedule_session_close_by_full_name(full_name: &str, delay: Duration) -> 
 }
 
 /// Get the current session name, if inside tmux
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn current_session_name() -> Result<Option<String>> {
     match Cmd::new("tmux")
         .args(&["display-message", "-p", "#{session_name}"])

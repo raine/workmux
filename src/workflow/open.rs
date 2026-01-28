@@ -1,12 +1,22 @@
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 
+use crate::config::TmuxTarget;
 use crate::{git, tmux};
 use tracing::info;
 
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
+
+/// Determine the tmux target mode for a worktree from git metadata.
+/// Falls back to Window mode if no metadata is found (backward compatibility).
+fn get_worktree_target(handle: &str) -> TmuxTarget {
+    match git::get_worktree_meta(handle, "target") {
+        Some(target) if target == "session" => TmuxTarget::Session,
+        _ => TmuxTarget::Window,
+    }
+}
 
 /// Open a tmux window for an existing worktree
 pub fn open(
@@ -47,17 +57,31 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    // Determine final handle (with or without suffix)
-    let window_exists = tmux::window_exists(&context.prefix, &base_handle)?;
+    // Determine the target mode from stored metadata (or default to Window)
+    let stored_target = get_worktree_target(&base_handle);
+    let is_session_mode = stored_target == TmuxTarget::Session;
 
-    // If window exists and we're not forcing new, switch to it
-    if window_exists && !new_window {
-        tmux::select_window(&context.prefix, &base_handle)?;
+    // Determine if target exists
+    let target_exists = if is_session_mode {
+        tmux::session_exists(&context.prefix, &base_handle)?
+    } else {
+        tmux::window_exists(&context.prefix, &base_handle)?
+    };
+
+    // If target exists and we're not forcing new, switch to it
+    if target_exists && !new_window {
+        if is_session_mode {
+            tmux::switch_to_session(&context.prefix, &base_handle)?;
+        } else {
+            tmux::select_window(&context.prefix, &base_handle)?;
+        }
+        let target_type = if is_session_mode { "session" } else { "window" };
         info!(
             handle = base_handle,
             branch = branch_name,
             path = %worktree_path.display(),
-            "open:switched to existing window"
+            target_type,
+            "open:switched to existing target"
         );
         return Ok(CreateResult {
             worktree_path,
@@ -68,12 +92,21 @@ pub fn open(
         });
     }
 
-    // Determine handle: use suffix if forcing new window and one exists
-    let (handle, after_window) = if new_window && window_exists {
-        let unique_handle = resolve_unique_handle(context, &base_handle)?;
+    // Determine handle: use suffix if forcing new target and one exists
+    // Note: For sessions, we use similar logic to windows for duplicate handling
+    let (handle, after_window) = if new_window && target_exists {
+        let unique_handle = if is_session_mode {
+            resolve_unique_session_handle(context, &base_handle)?
+        } else {
+            resolve_unique_handle(context, &base_handle)?
+        };
         // Insert after the last window in the base handle group (base or -N suffixes)
-        let after =
-            tmux::find_last_window_with_base_handle(&context.prefix, &base_handle).unwrap_or(None);
+        // For sessions, after_window is not used (sessions don't have ordering)
+        let after = if is_session_mode {
+            None
+        } else {
+            tmux::find_last_window_with_base_handle(&context.prefix, &base_handle).unwrap_or(None)
+        };
         (unique_handle, after)
     } else {
         (base_handle, None)
@@ -101,6 +134,7 @@ pub fn open(
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
+        target: stored_target,
         ..options
     };
 
@@ -164,6 +198,51 @@ fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result
         base_handle = base_handle,
         new_handle = new_handle,
         "open:generated unique handle for duplicate"
+    );
+
+    Ok(new_handle)
+}
+
+/// Find a unique session handle by appending a suffix if necessary.
+///
+/// If `base_handle` is "my-feature" and sessions exist for:
+/// - wm:my-feature
+/// - wm:my-feature-2
+///
+/// This returns "my-feature-3".
+fn resolve_unique_session_handle(context: &WorkflowContext, base_handle: &str) -> Result<String> {
+    let all_sessions = tmux::get_all_session_names()?;
+    let prefix = &context.prefix;
+    let full_base = tmux::prefixed(prefix, base_handle);
+
+    // If base name doesn't exist, use it directly
+    if !all_sessions.contains(&full_base) {
+        return Ok(base_handle.to_string());
+    }
+
+    // Find the highest existing suffix
+    // Pattern matches: {prefix}{handle}-{number}
+    let escaped_base = regex::escape(&full_base);
+    let pattern = format!(r"^{}-(\d+)$", escaped_base);
+    let re = Regex::new(&pattern).expect("Invalid regex pattern");
+
+    let mut max_suffix: u32 = 1; // Start at 1 so first duplicate is -2
+
+    for session_name in &all_sessions {
+        if let Some(caps) = re.captures(session_name)
+            && let Some(num_match) = caps.get(1)
+            && let Ok(num) = num_match.as_str().parse::<u32>()
+        {
+            max_suffix = max_suffix.max(num);
+        }
+    }
+
+    let new_handle = format!("{}-{}", base_handle, max_suffix + 1);
+
+    info!(
+        base_handle = base_handle,
+        new_handle = new_handle,
+        "open:generated unique session handle for duplicate"
     );
 
     Ok(new_handle)

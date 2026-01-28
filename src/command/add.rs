@@ -571,9 +571,13 @@ impl<'a> CreationPlan<'a> {
                 println!("✓ Setup complete");
             }
 
+            let tmux_type = match self.options.target {
+                TmuxTarget::Session => "session",
+                TmuxTarget::Window => "window",
+            };
             println!(
-                "✓ Successfully created worktree and tmux window for '{}'",
-                result.branch_name
+                "✓ Successfully created worktree and tmux {} for '{}'",
+                tmux_type, result.branch_name
             );
             if let Some(ref base) = result.base_branch {
                 println!("  Base: {}", base);

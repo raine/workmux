@@ -958,7 +958,6 @@ pub fn get_branch_base(branch: &str) -> Result<String> {
 
 /// Store per-worktree metadata using git config.
 /// Uses the worktree handle (directory name) as the key prefix.
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn set_worktree_meta(handle: &str, key: &str, value: &str) -> Result<()> {
     Cmd::new("git")
         .args(&[
@@ -974,7 +973,6 @@ pub fn set_worktree_meta(handle: &str, key: &str, value: &str) -> Result<()> {
 
 /// Retrieve per-worktree metadata from git config.
 /// Returns None if the key doesn't exist.
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn get_worktree_meta(handle: &str, key: &str) -> Option<String> {
     Cmd::new("git")
         .args(&[
@@ -1005,7 +1003,6 @@ pub fn unset_worktree_meta(handle: &str, key: &str) -> Result<()> {
 }
 
 /// Remove all metadata for a worktree handle.
-#[allow(dead_code)] // Will be used when cleanup/commands are updated
 pub fn remove_worktree_meta(handle: &str) -> Result<()> {
     // Use --remove-section to remove all keys under the handle's section
     let _ = Cmd::new("git")
