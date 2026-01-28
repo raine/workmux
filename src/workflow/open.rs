@@ -5,18 +5,10 @@ use crate::config::TmuxTarget;
 use crate::{git, tmux};
 use tracing::info;
 
+use super::cleanup::get_worktree_target;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
-
-/// Determine the tmux target mode for a worktree from git metadata.
-/// Falls back to Window mode if no metadata is found (backward compatibility).
-fn get_worktree_target(handle: &str) -> TmuxTarget {
-    match git::get_worktree_meta(handle, "target") {
-        Some(target) if target == "session" => TmuxTarget::Session,
-        _ => TmuxTarget::Window,
-    }
-}
 
 /// Open a tmux window for an existing worktree
 pub fn open(
@@ -95,11 +87,7 @@ pub fn open(
     // Determine handle: use suffix if forcing new target and one exists
     // Note: For sessions, we use similar logic to windows for duplicate handling
     let (handle, after_window) = if new_window && target_exists {
-        let unique_handle = if is_session_mode {
-            resolve_unique_session_handle(context, &base_handle)?
-        } else {
-            resolve_unique_handle(context, &base_handle)?
-        };
+        let unique_handle = resolve_unique_handle(context, &base_handle, is_session_mode)?;
         // Insert after the last window in the base handle group (base or -N suffixes)
         // For sessions, after_window is not used (sessions don't have ordering)
         let after = if is_session_mode {
@@ -160,18 +148,31 @@ pub fn open(
 
 /// Find a unique handle by appending a suffix if necessary.
 ///
-/// If `base_handle` is "my-feature" and windows exist for:
+/// If `base_handle` is "my-feature" and targets (windows or sessions) exist for:
 /// - wm:my-feature
 /// - wm:my-feature-2
 ///
 /// This returns "my-feature-3".
-fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result<String> {
-    let all_windows = tmux::get_all_window_names()?;
+///
+/// The `is_session_mode` parameter determines whether to check session names or window names.
+fn resolve_unique_handle(
+    context: &WorkflowContext,
+    base_handle: &str,
+    is_session_mode: bool,
+) -> Result<String> {
+    use std::collections::HashSet;
+
+    let existing_names: HashSet<String> = if is_session_mode {
+        tmux::get_all_session_names()?
+    } else {
+        tmux::get_all_window_names()?
+    };
+
     let prefix = &context.prefix;
     let full_base = tmux::prefixed(prefix, base_handle);
 
     // If base name doesn't exist, use it directly
-    if !all_windows.contains(&full_base) {
+    if !existing_names.contains(&full_base) {
         return Ok(base_handle.to_string());
     }
 
@@ -183,8 +184,8 @@ fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result
 
     let mut max_suffix: u32 = 1; // Start at 1 so first duplicate is -2
 
-    for window_name in &all_windows {
-        if let Some(caps) = re.captures(window_name)
+    for name in &existing_names {
+        if let Some(caps) = re.captures(name)
             && let Some(num_match) = caps.get(1)
             && let Ok(num) = num_match.as_str().parse::<u32>()
         {
@@ -194,55 +195,12 @@ fn resolve_unique_handle(context: &WorkflowContext, base_handle: &str) -> Result
 
     let new_handle = format!("{}-{}", base_handle, max_suffix + 1);
 
+    let target_type = if is_session_mode { "session" } else { "window" };
     info!(
         base_handle = base_handle,
         new_handle = new_handle,
+        target_type,
         "open:generated unique handle for duplicate"
-    );
-
-    Ok(new_handle)
-}
-
-/// Find a unique session handle by appending a suffix if necessary.
-///
-/// If `base_handle` is "my-feature" and sessions exist for:
-/// - wm:my-feature
-/// - wm:my-feature-2
-///
-/// This returns "my-feature-3".
-fn resolve_unique_session_handle(context: &WorkflowContext, base_handle: &str) -> Result<String> {
-    let all_sessions = tmux::get_all_session_names()?;
-    let prefix = &context.prefix;
-    let full_base = tmux::prefixed(prefix, base_handle);
-
-    // If base name doesn't exist, use it directly
-    if !all_sessions.contains(&full_base) {
-        return Ok(base_handle.to_string());
-    }
-
-    // Find the highest existing suffix
-    // Pattern matches: {prefix}{handle}-{number}
-    let escaped_base = regex::escape(&full_base);
-    let pattern = format!(r"^{}-(\d+)$", escaped_base);
-    let re = Regex::new(&pattern).expect("Invalid regex pattern");
-
-    let mut max_suffix: u32 = 1; // Start at 1 so first duplicate is -2
-
-    for session_name in &all_sessions {
-        if let Some(caps) = re.captures(session_name)
-            && let Some(num_match) = caps.get(1)
-            && let Ok(num) = num_match.as_str().parse::<u32>()
-        {
-            max_suffix = max_suffix.max(num);
-        }
-    }
-
-    let new_handle = format!("{}-{}", base_handle, max_suffix + 1);
-
-    info!(
-        base_handle = base_handle,
-        new_handle = new_handle,
-        "open:generated unique session handle for duplicate"
     );
 
     Ok(new_handle)

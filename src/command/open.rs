@@ -5,15 +5,6 @@ use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{config, git, workflow};
 use anyhow::{Context, Result, bail};
 
-/// Determine the tmux target mode for a worktree from git metadata.
-/// Falls back to Window mode if no metadata is found (backward compatibility).
-fn get_worktree_target(handle: &str) -> TmuxTarget {
-    match git::get_worktree_meta(handle, "target") {
-        Some(target) if target == "session" => TmuxTarget::Session,
-        _ => TmuxTarget::Window,
-    }
-}
-
 pub fn run(
     name: Option<&str>,
     run_hooks: bool,
@@ -34,7 +25,7 @@ pub fn run(
     let context = WorkflowContext::new(config, config_location)?;
 
     // Determine the target mode from stored metadata
-    let stored_target = get_worktree_target(&resolved_name);
+    let stored_target = git::get_worktree_target(&resolved_name);
     let target_type = match stored_target {
         TmuxTarget::Session => "session",
         TmuxTarget::Window => "window",

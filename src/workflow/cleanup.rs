@@ -8,6 +8,9 @@ use crate::config::TmuxTarget;
 use crate::{cmd, git, tmux};
 use tracing::{debug, info, warn};
 
+// Re-export for use by other modules in the workflow
+pub use git::get_worktree_target;
+
 use super::context::WorkflowContext;
 use super::types::{CleanupResult, DeferredCleanup};
 
@@ -102,15 +105,6 @@ fn is_inside_matching_session(prefix: &str, handle: &str) -> Result<Option<Strin
         Ok(Some(current_session))
     } else {
         Ok(None)
-    }
-}
-
-/// Determine the tmux target mode for a worktree from git metadata.
-/// Falls back to Window mode if no metadata is found (backward compatibility).
-fn get_worktree_target(handle: &str) -> TmuxTarget {
-    match git::get_worktree_meta(handle, "target") {
-        Some(target) if target == "session" => TmuxTarget::Session,
-        _ => TmuxTarget::Window,
     }
 }
 

@@ -4,18 +4,9 @@ use crate::config::TmuxTarget;
 use crate::{cmd, git};
 use tracing::{debug, info};
 
-use super::cleanup;
+use super::cleanup::{self, get_worktree_target};
 use super::context::WorkflowContext;
 use super::types::MergeResult;
-
-/// Determine the tmux target mode for a worktree from git metadata.
-/// Falls back to Window mode if no metadata is found (backward compatibility).
-fn get_worktree_target(handle: &str) -> TmuxTarget {
-    match git::get_worktree_meta(handle, "target") {
-        Some(target) if target == "session" => TmuxTarget::Session,
-        _ => TmuxTarget::Window,
-    }
-}
 
 /// Merge a branch into the target branch and clean up
 #[allow(clippy::too_many_arguments)]

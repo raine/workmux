@@ -4,18 +4,9 @@ use crate::config::TmuxTarget;
 use crate::git;
 use tracing::{debug, info};
 
-use super::cleanup;
+use super::cleanup::{self, get_worktree_target};
 use super::context::WorkflowContext;
 use super::types::RemoveResult;
-
-/// Determine the tmux target mode for a worktree from git metadata.
-/// Falls back to Window mode if no metadata is found (backward compatibility).
-fn get_worktree_target(handle: &str) -> TmuxTarget {
-    match git::get_worktree_meta(handle, "target") {
-        Some(target) if target == "session" => TmuxTarget::Session,
-        _ => TmuxTarget::Window,
-    }
-}
 
 /// Remove a worktree without merging
 pub fn remove(

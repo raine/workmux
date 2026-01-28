@@ -986,6 +986,15 @@ pub fn get_worktree_meta(handle: &str, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Determine the tmux target mode for a worktree from git metadata.
+/// Falls back to Window mode if no metadata is found (backward compatibility).
+pub fn get_worktree_target(handle: &str) -> crate::config::TmuxTarget {
+    match get_worktree_meta(handle, "target") {
+        Some(target) if target == "session" => crate::config::TmuxTarget::Session,
+        _ => crate::config::TmuxTarget::Window,
+    }
+}
+
 /// Remove per-worktree metadata from git config.
 /// Silently succeeds if the key doesn't exist.
 #[allow(dead_code)] // Will be used when cleanup/commands are updated
