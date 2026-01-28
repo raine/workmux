@@ -1,3 +1,4 @@
+use crate::config::TmuxTarget;
 use crate::prompt::{Prompt, PromptDocument, foreach_from_frontmatter};
 use crate::spinner;
 use crate::template::{
@@ -111,13 +112,23 @@ pub fn run(
     rescue: RescueArgs,
     multi: MultiArgs,
     wait: bool,
+    session: bool,
 ) -> Result<()> {
     // Ensure preconditions are met (git repo and tmux session)
     check_preconditions()?;
 
+    // Load config early to determine target (CLI flag overrides config)
+    let initial_config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
+    let target = if session {
+        TmuxTarget::Session
+    } else {
+        initial_config.target
+    };
+
     // Construct setup options from flags
     let mut options = SetupOptions::new(!setup.no_hooks, !setup.no_file_ops, !setup.no_pane_cmds);
     options.focus_window = !setup.background;
+    options.target = target;
 
     // Detect stdin input early
     let stdin_lines = read_stdin_lines()?;

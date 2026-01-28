@@ -167,6 +167,10 @@ pub struct Config {
     /// Whether to use nerdfont icons (None = prompt user on first run)
     #[serde(default)]
     pub nerdfont: Option<bool>,
+
+    /// Target for tmux operations: window (default) or session
+    #[serde(default)]
+    pub target: TmuxTarget,
 }
 
 /// Configuration for a single tmux pane
@@ -217,6 +221,17 @@ pub enum MergeStrategy {
     Merge,
     Rebase,
     Squash,
+}
+
+/// Target for tmux operations: create windows within the current session or create new sessions
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TmuxTarget {
+    /// Create windows within the current tmux session (default)
+    #[default]
+    Window,
+    /// Create new tmux sessions for each worktree
+    Session,
 }
 
 /// Strategy for deriving worktree/window names from branch names
@@ -601,6 +616,13 @@ impl Config {
             self.worktree_naming
         };
 
+        // Special case: target (project wins if not default)
+        merged.target = if project.target != TmuxTarget::default() {
+            project.target
+        } else {
+            self.target
+        };
+
         // List values with "<global>" placeholder support
         merged.post_create = merge_vec_with_placeholder(self.post_create, project.post_create);
         merged.pre_merge = merge_vec_with_placeholder(self.pre_merge, project.pre_merge);
@@ -740,6 +762,11 @@ impl Config {
 #-------------------------------------------------------------------------------
 # Tmux
 #-------------------------------------------------------------------------------
+
+# Target for tmux operations: window (default) or session.
+# - window: Create windows within the current tmux session
+# - session: Create new tmux sessions for each worktree (useful for session-per-project workflows)
+# target: session
 
 # Custom tmux pane layout.
 # Default: Two-pane layout with shell and clear command.

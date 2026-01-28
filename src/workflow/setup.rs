@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::TmuxTarget;
 use crate::{cmd, config, git, prompt::Prompt, tmux};
 use tracing::{debug, info};
 
@@ -100,29 +101,52 @@ pub fn setup_environment(
         );
     }
 
-    // Find the last workmux-managed window to insert the new one after.
-    // If after_window is provided (for duplicate windows), use that to group with base handle.
-    // Otherwise, use prefix-based lookup to group workmux windows together.
-    // If not found (or error), falls back to default append behavior.
-    let last_wm_window =
-        after_window.or_else(|| tmux::find_last_window_with_prefix(prefix).unwrap_or(None));
+    // Create tmux window or session based on target mode
+    let initial_pane_id = match options.target {
+        TmuxTarget::Window => {
+            // Find the last workmux-managed window to insert the new one after.
+            // If after_window is provided (for duplicate windows), use that to group with base handle.
+            // Otherwise, use prefix-based lookup to group workmux windows together.
+            // If not found (or error), falls back to default append behavior.
+            let last_wm_window =
+                after_window.or_else(|| tmux::find_last_window_with_prefix(prefix).unwrap_or(None));
 
-    // Create tmux window and get the initial pane's ID
-    // Use handle for the window name (not branch_name)
-    let initial_pane_id = tmux::create_window(
-        prefix,
-        handle,
-        effective_working_dir,
-        /* detached: */ !options.focus_window,
-        last_wm_window.as_deref(),
-    )
-    .context("Failed to create tmux window")?;
-    info!(
-        branch = branch_name,
-        handle = handle,
-        pane_id = %initial_pane_id,
-        "setup_environment:tmux window created"
-    );
+            // Create tmux window and get the initial pane's ID
+            // Use handle for the window name (not branch_name)
+            let pane_id = tmux::create_window(
+                prefix,
+                handle,
+                effective_working_dir,
+                /* detached: */ !options.focus_window,
+                last_wm_window.as_deref(),
+            )
+            .context("Failed to create tmux window")?;
+            info!(
+                branch = branch_name,
+                handle = handle,
+                pane_id = %pane_id,
+                "setup_environment:tmux window created"
+            );
+            pane_id
+        }
+        TmuxTarget::Session => {
+            // Create tmux session and get the initial pane's ID
+            let pane_id = tmux::create_session(
+                prefix,
+                handle,
+                effective_working_dir,
+                /* detached: */ !options.focus_window,
+            )
+            .context("Failed to create tmux session")?;
+            info!(
+                branch = branch_name,
+                handle = handle,
+                pane_id = %pane_id,
+                "setup_environment:tmux session created"
+            );
+            pane_id
+        }
+    };
 
     // Setup panes
     let panes = config.panes.as_deref().unwrap_or(&[]);
@@ -151,14 +175,22 @@ pub fn setup_environment(
         "setup_environment:panes configured"
     );
 
-    // Focus the configured pane and optionally switch to the window
+    // Focus the configured pane and optionally switch to the window/session
     if options.focus_window {
         tmux::select_pane(&pane_setup_result.focus_pane_id)?;
-        // Use handle for window selection (not branch_name)
-        tmux::select_window(prefix, handle)?;
+        match options.target {
+            TmuxTarget::Window => {
+                // Use handle for window selection (not branch_name)
+                tmux::select_window(prefix, handle)?;
+            }
+            TmuxTarget::Session => {
+                // Switch to the new session
+                tmux::switch_to_session(prefix, handle)?;
+            }
+        }
     } else {
-        // Background mode: do not steal focus from the current window.
-        // We intentionally skip select_window to keep the user's current window.
+        // Background mode: do not steal focus from the current window/session.
+        // We intentionally skip select_window/switch_to_session to keep the user's current context.
     }
 
     Ok(CreateResult {
@@ -507,6 +539,7 @@ mod tests {
             focus_window: true,
             working_dir: None,
             config_root: None,
+            target: crate::config::TmuxTarget::default(),
         }
     }
 

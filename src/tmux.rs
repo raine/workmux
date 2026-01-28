@@ -25,6 +25,133 @@ pub fn get_all_window_names() -> Result<HashSet<String>> {
     Ok(windows.lines().map(String::from).collect())
 }
 
+// =============================================================================
+// Session Management Functions
+// =============================================================================
+
+/// Get all tmux session names across all servers
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn get_all_session_names() -> Result<HashSet<String>> {
+    let sessions = Cmd::new("tmux")
+        .args(&["list-sessions", "-F", "#{session_name}"])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+
+    Ok(sessions.lines().map(String::from).collect())
+}
+
+/// Check if a tmux session with the given name exists
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn session_exists(prefix: &str, session_name: &str) -> Result<bool> {
+    let prefixed_name = prefixed(prefix, session_name);
+    session_exists_by_full_name(&prefixed_name)
+}
+
+/// Check if a session exists by its full name (including prefix)
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn session_exists_by_full_name(full_name: &str) -> Result<bool> {
+    Cmd::new("tmux")
+        .args(&["has-session", "-t", &format!("={}", full_name)])
+        .run_as_check()
+}
+
+/// Create a new tmux session with the given name and working directory.
+/// Returns the pane ID of the initial pane in the session.
+///
+/// If `detached` is true, the session is created but not attached to.
+/// If we're inside tmux and `detached` is false, we switch to the new session.
+pub fn create_session(
+    prefix: &str,
+    session_name: &str,
+    working_dir: &Path,
+    detached: bool,
+) -> Result<String> {
+    let prefixed_name = prefixed(prefix, session_name);
+    let working_dir_str = working_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
+
+    let mut cmd = Cmd::new("tmux").arg("new-session");
+
+    // Always create detached first, then switch if needed
+    cmd = cmd.arg("-d");
+
+    // Use -P to print pane info, -F to format output to just the pane ID
+    let pane_id = cmd
+        .args(&[
+            "-s",
+            &prefixed_name,
+            "-c",
+            working_dir_str,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .run_and_capture_stdout()
+        .context("Failed to create tmux session and get pane ID")?;
+
+    // If not detached and we're inside tmux, switch to the new session
+    if !detached && std::env::var("TMUX").is_ok() {
+        switch_to_session(prefix, session_name)?;
+    }
+
+    Ok(pane_id.trim().to_string())
+}
+
+/// Switch to a specific session
+pub fn switch_to_session(prefix: &str, session_name: &str) -> Result<()> {
+    let prefixed_name = prefixed(prefix, session_name);
+    let target = format!("={}", prefixed_name);
+
+    Cmd::new("tmux")
+        .args(&["switch-client", "-t", &target])
+        .run()
+        .context("Failed to switch to session")?;
+
+    Ok(())
+}
+
+/// Kill a tmux session by its full name (including prefix)
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn kill_session_by_full_name(full_name: &str) -> Result<()> {
+    let target = format!("={}", full_name);
+
+    Cmd::new("tmux")
+        .args(&["kill-session", "-t", &target])
+        .run()
+        .context("Failed to kill tmux session")?;
+
+    Ok(())
+}
+
+/// Schedule a tmux session to be killed after a short delay.
+/// This is useful when the current command is running inside the session that needs to close.
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn schedule_session_close_by_full_name(full_name: &str, delay: Duration) -> Result<()> {
+    let delay_secs = format!("{:.3}", delay.as_secs_f64());
+    let target = format!("={}", full_name);
+    let escaped_target = format!("'{}'", target.replace('\'', r#"'\''"#));
+    let script = format!(
+        "sleep {delay}; tmux kill-session -t {target} >/dev/null 2>&1",
+        delay = delay_secs,
+        target = escaped_target
+    );
+
+    run_shell(&script)
+}
+
+/// Get the current session name, if inside tmux
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn current_session_name() -> Result<Option<String>> {
+    match Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{session_name}"])
+        .run_and_capture_stdout()
+    {
+        Ok(name) => Ok(Some(name.trim().to_string())),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Filter a list of window names, returning only those that still exist.
 /// Used by the worker pool to track which windows are still active.
 pub fn filter_active_windows(windows: &[String]) -> Result<Vec<String>> {

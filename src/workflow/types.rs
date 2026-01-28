@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::TmuxTarget;
 use crate::github::PrSummary;
 use crate::prompt::Prompt;
 
@@ -74,6 +75,8 @@ pub struct SetupOptions {
     pub working_dir: Option<PathBuf>,
     /// Config root directory in source repo (for file ops). If None, uses main worktree root.
     pub config_root: Option<PathBuf>,
+    /// Target for tmux operations: window (default) or session
+    pub target: TmuxTarget,
 }
 
 impl SetupOptions {
@@ -88,6 +91,7 @@ impl SetupOptions {
             focus_window: true,
             working_dir: None,
             config_root: None,
+            target: TmuxTarget::default(),
         }
     }
 
@@ -101,6 +105,7 @@ impl SetupOptions {
             focus_window: true,
             working_dir: None,
             config_root: None,
+            target: TmuxTarget::default(),
         }
     }
 
@@ -120,6 +125,7 @@ impl SetupOptions {
             focus_window: true,
             working_dir: None,
             config_root: None,
+            target: TmuxTarget::default(),
         }
     }
 }

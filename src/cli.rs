@@ -213,6 +213,10 @@ enum Commands {
         /// Block until the created tmux window is closed
         #[arg(short = 'W', long)]
         wait: bool,
+
+        /// Create a new tmux session instead of a window (useful for session-per-project workflows)
+        #[arg(short = 'S', long)]
+        session: bool,
     },
 
     /// Open a tmux window for an existing worktree
@@ -429,6 +433,7 @@ pub fn run() -> Result<()> {
             rescue,
             multi,
             wait,
+            session,
         } => command::add::run(
             branch_name.as_deref(),
             pr,
@@ -440,6 +445,7 @@ pub fn run() -> Result<()> {
             rescue,
             multi,
             wait,
+            session,
         ),
         Commands::Open {
             name,

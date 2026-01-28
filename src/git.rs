@@ -956,6 +956,69 @@ pub fn get_branch_base(branch: &str) -> Result<String> {
     get_branch_base_in(branch, None)
 }
 
+/// Store per-worktree metadata using git config.
+/// Uses the worktree handle (directory name) as the key prefix.
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn set_worktree_meta(handle: &str, key: &str, value: &str) -> Result<()> {
+    Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            &format!("workmux.worktree.{}.{}", handle, key),
+            value,
+        ])
+        .run()
+        .with_context(|| format!("Failed to set worktree metadata {}.{}", handle, key))?;
+    Ok(())
+}
+
+/// Retrieve per-worktree metadata from git config.
+/// Returns None if the key doesn't exist.
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn get_worktree_meta(handle: &str, key: &str) -> Option<String> {
+    Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--get",
+            &format!("workmux.worktree.{}.{}", handle, key),
+        ])
+        .run_and_capture_stdout()
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Remove per-worktree metadata from git config.
+/// Silently succeeds if the key doesn't exist.
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn unset_worktree_meta(handle: &str, key: &str) -> Result<()> {
+    // --unset returns exit code 5 if key doesn't exist, which we ignore
+    let _ = Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--unset",
+            &format!("workmux.worktree.{}.{}", handle, key),
+        ])
+        .run();
+    Ok(())
+}
+
+/// Remove all metadata for a worktree handle.
+#[allow(dead_code)] // Will be used when cleanup/commands are updated
+pub fn remove_worktree_meta(handle: &str) -> Result<()> {
+    // Use --remove-section to remove all keys under the handle's section
+    let _ = Cmd::new("git")
+        .args(&[
+            "config",
+            "--local",
+            "--remove-section",
+            &format!("workmux.worktree.{}", handle),
+        ])
+        .run();
+    Ok(())
+}
+
 /// Get the base branch for a given branch in a specific workdir
 pub fn get_branch_base_in(branch: &str, workdir: Option<&Path>) -> Result<String> {
     let config_key = format!("branch.{}.workmux-base", branch);
