@@ -30,6 +30,39 @@ def assert_window_exists(env: "TmuxEnvironment", window_name: str) -> None:
     )
 
 
+def assert_session_exists(env: "TmuxEnvironment", session_name: str) -> None:
+    """Ensure a tmux session with the provided name exists."""
+    result = env.tmux(["list-sessions", "-F", "#{session_name}"])
+    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+    assert session_name in existing_sessions, (
+        f"Session {session_name!r} not found. Existing: {existing_sessions!r}"
+    )
+
+
+def assert_session_not_exists(env: "TmuxEnvironment", session_name: str) -> None:
+    """Ensure a tmux session with the provided name does NOT exist."""
+    result = env.tmux(["list-sessions", "-F", "#{session_name}"], check=False)
+    if result.returncode != 0:
+        # No sessions exist at all
+        return
+    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+    assert session_name not in existing_sessions, (
+        f"Session {session_name!r} should not exist but was found. Existing: {existing_sessions!r}"
+    )
+
+
+def assert_window_not_exists(env: "TmuxEnvironment", window_name: str) -> None:
+    """Ensure a tmux window with the provided name does NOT exist."""
+    result = env.tmux(["list-windows", "-F", "#{window_name}"], check=False)
+    if result.returncode != 0:
+        # No windows exist at all
+        return
+    existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+    assert window_name not in existing_windows, (
+        f"Window {window_name!r} should not exist but was found. Existing: {existing_windows!r}"
+    )
+
+
 def assert_copied_file(
     worktree_path: Path, relative_path: str, expected_text: str | None = None
 ) -> Path:
@@ -624,6 +657,16 @@ def get_window_name(branch_name: str) -> str:
     """Returns the expected tmux window name for a worktree.
 
     The window name uses the slugified version of the branch name,
+    matching the Rust workmux behavior.
+    """
+    handle = slugify(branch_name)
+    return f"{DEFAULT_WINDOW_PREFIX}{handle}"
+
+
+def get_session_name(branch_name: str) -> str:
+    """Returns the expected tmux session name for a worktree created with --session.
+
+    The session name uses the slugified version of the branch name,
     matching the Rust workmux behavior.
     """
     handle = slugify(branch_name)
