@@ -29,7 +29,7 @@ workmux open [name] [flags]
 
 1. Verifies that a worktree with `<name>` exists.
 2. If a tmux window exists and `--new` is not set, switches to it.
-3. Otherwise, creates a new tmux window (with suffix if duplicating).
+3. Otherwise, creates a new tmux window (with suffix if duplicating). If the worktree was originally created with `--session`, the window is recreated in its own session.
 4. (If specified) Runs file operations and `post_create` hooks.
 5. Sets up your configured tmux pane layout.
 6. Automatically switches your tmux client to the new window.

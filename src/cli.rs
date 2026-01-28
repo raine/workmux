@@ -214,7 +214,7 @@ enum Commands {
         #[arg(short = 'W', long)]
         wait: bool,
 
-        /// Create a new tmux session instead of a window (useful for session-per-project workflows)
+        /// Create the window in its own tmux session (useful for session-per-project workflows)
         #[arg(short = 'S', long)]
         session: bool,
     },

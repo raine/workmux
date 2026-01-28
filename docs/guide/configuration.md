@@ -62,9 +62,10 @@ Most options have sensible defaults. You only need to configure what you want to
 | `main_branch`    | Branch to merge into                                 | Auto-detected           |
 | `worktree_dir`   | Directory for worktrees (absolute or relative)       | `<project>__worktrees/` |
 | `nerdfont`       | Enable nerdfont icons (prompted on first run)        | Prompted                |
-| `window_prefix`  | Override tmux window prefix                          | Icon or `wm-`           |
+| `window_prefix`  | Override tmux window/session prefix                  | Icon or `wm-`           |
 | `agent`          | Default agent for `<agent>` placeholder              | `claude`                |
 | `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`) | `merge`                 |
+| `target`         | Tmux target type (`window` or `session`)             | `window`                |
 
 ### Naming options
 

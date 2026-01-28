@@ -27,5 +27,5 @@ workmux close
 To reopen the window later, use [`workmux open`](./open).
 
 ::: tip
-You can also use tmux's native kill-window command (default: `prefix + &`) to close a worktree's window with the same effect.
+You can also use tmux's native kill-window command (default: `prefix + &`) to close a worktree's window with the same effect. For worktrees created with `--session`, this closes the entire session.
 :::

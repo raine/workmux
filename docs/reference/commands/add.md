@@ -31,6 +31,7 @@ workmux add <branch-name> [flags]
 | `-e, --prompt-editor`          | Open your `$EDITOR` (or `$VISUAL`) to write the prompt interactively.                                                                                                                                                                                                   |
 | `-a, --agent <name>`           | The agent(s) to use for the worktree(s). Can be specified multiple times to generate a worktree for each agent. Overrides the `agent` from your config file.                                                                                                            |
 | `-W, --wait`                   | Block until the created tmux window is closed. Useful for scripting when you want to wait for an agent to complete its work. The agent can signal completion by running `workmux remove --keep-branch`.                                                                 |
+| `-S, --session`                | Create the worktree's window in its own tmux session instead of the current session. Useful for session-per-project workflows. Can also be set via `target: session` in config.                                                                                         |
 
 ## Skip options
 
@@ -47,8 +48,8 @@ These options allow you to skip expensive setup steps when they're not needed (e
 1. Determines the **handle** for the worktree by slugifying the branch name (e.g., `feature/auth` becomes `feature-auth`). This can be overridden with the `--name` flag.
 2. Creates a git worktree at `<worktree_dir>/<handle>` (the `worktree_dir` is configurable and defaults to a sibling directory of your project)
 3. Runs any configured file operations (copy/symlink)
-4. Executes `post_create` commands if defined (runs before the tmux window opens, so keep them fast)
-5. Creates a new tmux window named `<window_prefix><handle>` (e.g., `wm-feature-auth` with `window_prefix: wm-`)
+4. Executes `post_create` commands if defined (runs before the tmux window/session opens, so keep them fast)
+5. Creates a new tmux window named `<window_prefix><handle>` (e.g., `wm-feature-auth` with `window_prefix: wm-`). With `--session`, the window is created in its own dedicated session instead of the current session.
 6. Sets up your configured tmux pane layout
 7. Automatically switches your tmux client to the new window
 
@@ -131,6 +132,17 @@ workmux add feature/api --wait -p "Implement the REST API, then run: workmux rem
 for task in task1.md task2.md task3.md; do
   workmux add "task-$(basename $task .md)" --wait -P "$task"
 done
+```
+
+```bash [Session mode]
+# Create a worktree in its own tmux session (instead of the current session)
+workmux add feature/isolated --session
+
+# Create in a new session without switching to it
+workmux add feature/background-task --session --background
+
+# Session mode works with all other flags
+workmux add feature/ai-session --session -p "Implement the new API"
 ```
 
 :::

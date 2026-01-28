@@ -16,9 +16,10 @@ pub fn prefixed(prefix: &str, window_name: &str) -> String {
 
 /// Get all tmux window names in a single call
 pub fn get_all_window_names() -> Result<HashSet<String>> {
-    // tmux list-windows may exit with error if no windows exist
+    // Use -a to list windows across all sessions, so workmux list shows
+    // correct tmux status regardless of which session you're in
     let windows = Cmd::new("tmux")
-        .args(&["list-windows", "-F", "#{window_name}"])
+        .args(&["list-windows", "-a", "-F", "#{window_name}"])
         .run_and_capture_stdout()
         .unwrap_or_default(); // Return empty string if command fails
 
