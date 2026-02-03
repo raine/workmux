@@ -15,14 +15,20 @@ pub fn extract_worktree_name(window_name: &str, window_prefix: &str) -> (String,
 }
 
 /// Extract project name from a worktree path.
-/// Looks for __worktrees pattern or uses directory name as fallback.
+/// Finds the git root (where .git is a directory) or falls back to pattern matching.
 pub fn extract_project_name(path: &Path) -> String {
-    // Walk up the path to find __worktrees
+    // Walk up the path to find the git root or worktrees pattern
     for ancestor in path.ancestors() {
+        // Check if this is the git root (where .git is a directory, not a file)
+        let git_path = ancestor.join(".git");
+        if git_path.is_dir() && let Some(name) = ancestor.file_name() {
+            return name.to_string_lossy().to_string();
+        }
+
+        // Fallback: check for sibling pattern (project__worktrees/)
         if let Some(name) = ancestor.file_name() {
             let name_str = name.to_string_lossy();
             if name_str.ends_with("__worktrees") {
-                // Return the project name (part before __worktrees)
                 return name_str
                     .strip_suffix("__worktrees")
                     .unwrap_or(&name_str)
@@ -86,6 +92,33 @@ mod tests {
     fn test_extract_project_name_fallback() {
         let path = PathBuf::from("/home/user/myproject");
         assert_eq!(extract_project_name(&path), "myproject");
+    }
+
+    #[test]
+    fn test_extract_project_name_git_root() {
+        // Test custom worktree_dir inside repo (e.g., .worktrees)
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path().join("myproject");
+        std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+        std::fs::create_dir_all(project_dir.join(".worktrees").join("fix-bug")).unwrap();
+
+        let worktree_path = project_dir.join(".worktrees").join("fix-bug");
+        assert_eq!(extract_project_name(&worktree_path), "myproject");
+    }
+
+    #[test]
+    fn test_extract_project_name_git_file_skipped() {
+        // Worktrees have .git as a file, not directory - should be skipped
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path().join("myproject");
+        let worktree_dir = project_dir.join(".worktrees").join("fix-bug");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        // Create .git as a file (like real worktrees do)
+        std::fs::write(worktree_dir.join(".git"), "gitdir: /somewhere/else").unwrap();
+        // Create actual git root
+        std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+
+        assert_eq!(extract_project_name(&worktree_dir), "myproject");
     }
 
     #[test]
