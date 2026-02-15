@@ -115,7 +115,7 @@ pub fn shell_command_with_env(
     workdir: &Path,
     env_vars: &[(&str, &str)],
 ) -> Result<()> {
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command).current_dir(workdir);
 
     for (key, value) in env_vars {

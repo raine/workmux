@@ -54,7 +54,7 @@ fn try_run(run_dir: &Path) -> Result<()> {
         .context("Failed to open stderr file")?;
 
     // Spawn the command
-    let mut child = Command::new("sh")
+    let mut child = Command::new("bash")
         .arg("-c")
         .arg(&spec.command)
         .current_dir(&spec.worktree_path)
