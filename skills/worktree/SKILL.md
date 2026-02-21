@@ -28,7 +28,11 @@ ensure you have the latest version before writing prompts.
 
 For each task:
 
-1. Generate a short, descriptive worktree name (2-4 words, kebab-case)
+1. Generate a short, descriptive worktree name (2-4 words, kebab-case).
+   The name must describe the TASK, not be a sentence. NEVER include
+   preamble like "here-s-a-" or meta-descriptions like "kebab-case-git-branch".
+   Good: "fix-login-redirect", "add-s3-column-detection"
+   Bad: "here-s-a-suggested-branch-name", "here-s-a-kebab-case-git-branch"
 2. Write a detailed implementation prompt to a temp file
 3. Run `workmux add <worktree-name> -b -P <temp-file>` to create the worktree
 
