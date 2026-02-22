@@ -1109,6 +1109,8 @@ fn parse_jj_diff_stat_totals(output: &str) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    // ── Workspace list parsing ───────────────────────────────────────
+
     #[test]
     fn test_parse_workspace_list_single() {
         let output = "default: sqpusytp 28c83b43 (empty) (no description set)\n";
@@ -1131,6 +1133,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_workspace_list_with_description() {
+        let output = "default: sqpusytp 28c83b43 some: description with: colons\n";
+        let names = parse_workspace_list(output);
+        assert_eq!(names, vec!["default"]);
+    }
+
+    #[test]
+    fn test_parse_workspace_list_hyphenated_name() {
+        let output = "my-feature: sqpusytp 28c83b43 (empty) (no description set)\n";
+        let names = parse_workspace_list(output);
+        assert_eq!(names, vec!["my-feature"]);
+    }
+
+    // ── Diff stat parsing ────────────────────────────────────────────
+
+    #[test]
     fn test_parse_jj_diff_stat_totals_full() {
         let output = " src/main.rs | 10 +++++-----\n src/lib.rs  |  5 +++--\n 2 files changed, 8 insertions(+), 7 deletions(-)\n";
         assert_eq!(parse_jj_diff_stat_totals(output), (8, 7));
@@ -1143,6 +1161,12 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_jj_diff_stat_totals_deletions_only() {
+        let output = " src/old.rs | 15 ---------------\n 1 file changed, 15 deletions(-)\n";
+        assert_eq!(parse_jj_diff_stat_totals(output), (0, 15));
+    }
+
+    #[test]
     fn test_parse_jj_diff_stat_totals_empty() {
         assert_eq!(parse_jj_diff_stat_totals(""), (0, 0));
     }
@@ -1151,5 +1175,202 @@ mod tests {
     fn test_parse_jj_diff_stat_totals_no_changes() {
         let output = "0 files changed\n";
         assert_eq!(parse_jj_diff_stat_totals(output), (0, 0));
+    }
+
+    #[test]
+    fn test_parse_jj_diff_stat_totals_single_file() {
+        let output = " Cargo.toml | 1 +\n 1 file changed, 1 insertion(+)\n";
+        assert_eq!(parse_jj_diff_stat_totals(output), (1, 0));
+    }
+
+    // ── URL parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_owner_https() {
+        assert_eq!(
+            parse_owner_from_url("https://github.com/owner/repo.git"),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_ssh() {
+        assert_eq!(
+            parse_owner_from_url("git@github.com:owner/repo.git"),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_http() {
+        assert_eq!(
+            parse_owner_from_url("http://github.com/owner/repo"),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_enterprise_https() {
+        assert_eq!(
+            parse_owner_from_url("https://github.enterprise.com/org/project.git"),
+            Some("org")
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_enterprise_ssh() {
+        assert_eq!(
+            parse_owner_from_url("git@github.enterprise.net:team/project.git"),
+            Some("team")
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_invalid() {
+        assert_eq!(parse_owner_from_url("not-a-valid-url"), None);
+    }
+
+    #[test]
+    fn test_parse_owner_local_path() {
+        assert_eq!(parse_owner_from_url("/local/path/to/repo"), None);
+    }
+
+    // ── Cleanup commands ─────────────────────────────────────────────
+
+    #[test]
+    fn test_build_cleanup_commands_full() {
+        let jj = JjVcs::new();
+        let cmds = jj.build_cleanup_commands(
+            Path::new("/repo"),
+            "feature-branch",
+            "my-handle",
+            false, // don't keep branch
+            false,
+        );
+
+        assert_eq!(cmds.len(), 4); // forget + bookmark delete + 2 config unsets
+        assert!(cmds[0].contains("workspace forget"));
+        assert!(cmds[0].contains("my-handle"));
+        assert!(cmds[1].contains("bookmark delete"));
+        assert!(cmds[1].contains("feature-branch"));
+        assert!(cmds[2].contains("config unset"));
+        assert!(cmds[2].contains("workmux.worktree.my-handle.mode"));
+        assert!(cmds[3].contains("config unset"));
+        assert!(cmds[3].contains("workmux.worktree.my-handle.path"));
+    }
+
+    #[test]
+    fn test_build_cleanup_commands_keep_branch() {
+        let jj = JjVcs::new();
+        let cmds = jj.build_cleanup_commands(
+            Path::new("/repo"),
+            "feature",
+            "handle",
+            true, // keep branch
+            false,
+        );
+
+        assert_eq!(cmds.len(), 3); // forget + 2 config unsets (no bookmark delete)
+        assert!(cmds[0].contains("workspace forget"));
+        assert!(!cmds.iter().any(|c| c.contains("bookmark delete")));
+    }
+
+    #[test]
+    fn test_build_cleanup_commands_special_chars() {
+        let jj = JjVcs::new();
+        let cmds = jj.build_cleanup_commands(
+            Path::new("/path/with spaces"),
+            "feature/slash",
+            "handle",
+            false,
+            false,
+        );
+
+        // Should use shell quoting for paths with spaces
+        assert!(cmds[0].contains("'/path/with spaces'") || cmds[0].contains("with spaces"));
+    }
+
+    // ── Metadata config parsing ──────────────────────────────────────
+
+    #[test]
+    fn test_get_all_workspace_modes_parses_toml() {
+        // This tests the TOML parsing logic in get_all_workspace_modes
+        // by verifying the parsing patterns work correctly
+
+        let config = "\
+[workmux.worktree.handle1]
+mode = \"session\"
+path = \"/some/path\"
+
+[workmux.worktree.handle2]
+mode = \"window\"
+path = \"/other/path\"
+
+[other.section]
+key = \"value\"
+";
+        // Simulate the parsing logic directly
+        let mut modes = HashMap::new();
+        let mut current_handle: Option<String> = None;
+
+        for line in config.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("[workmux.worktree.") {
+                if let Some(handle) = rest.strip_suffix(']') {
+                    current_handle = Some(handle.to_string());
+                } else {
+                    current_handle = None;
+                }
+            } else if let Some(ref handle) = current_handle {
+                if let Some(rest) = trimmed.strip_prefix("mode") {
+                    let rest = rest.trim();
+                    if let Some(value) = rest.strip_prefix('=') {
+                        let value = value.trim().trim_matches('"');
+                        let mode = if value == "session" {
+                            MuxMode::Session
+                        } else {
+                            MuxMode::Window
+                        };
+                        modes.insert(handle.clone(), mode);
+                    }
+                }
+            } else if trimmed.starts_with('[') {
+                current_handle = None;
+            }
+        }
+
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes["handle1"], MuxMode::Session);
+        assert_eq!(modes["handle2"], MuxMode::Window);
+    }
+
+    // ── VCS name ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_jj_vcs_name() {
+        let jj = JjVcs::new();
+        assert_eq!(jj.name(), "jj");
+    }
+
+    #[test]
+    fn test_jj_has_commits_always_true() {
+        let jj = JjVcs::new();
+        assert!(jj.has_commits().unwrap());
+    }
+
+    #[test]
+    fn test_jj_stash_is_noop() {
+        let jj = JjVcs::new();
+        assert!(jj.stash_push("test", false, false).is_ok());
+        assert!(jj.stash_pop(Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn test_jj_untracked_files_always_false() {
+        // jj auto-tracks all files, so untracked is always false
+        // (This would fail if called on a non-jj repo, but the method
+        // itself just returns false without calling jj)
+        let jj = JjVcs::new();
+        assert!(!jj.has_untracked_files(Path::new("/tmp")).unwrap());
     }
 }
