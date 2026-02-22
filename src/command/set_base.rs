@@ -1,12 +1,14 @@
-use crate::git;
+use crate::vcs;
 use anyhow::{Context, Result, anyhow};
 
 pub fn run(base: &str) -> Result<()> {
-    if !git::branch_exists(base)? {
+    let vcs = vcs::detect_vcs()?;
+
+    if !vcs.branch_exists(base)? {
         return Err(anyhow!("Base reference '{}' does not exist", base));
     }
 
-    let branch = git::get_current_branch().context("Failed to get current branch")?;
+    let branch = vcs.get_current_branch().context("Failed to get current branch")?;
 
     if branch.is_empty() {
         return Err(anyhow!("Not on a branch (detached HEAD?)"));
@@ -16,7 +18,7 @@ pub fn run(base: &str) -> Result<()> {
         return Err(anyhow!("Cannot set base branch to the current branch"));
     }
 
-    git::set_branch_base(&branch, base)
+    vcs.set_branch_base(&branch, base)
         .with_context(|| format!("Failed to set base branch for '{}'", branch))?;
 
     println!("Set base branch for '{}' to '{}'", branch, base);

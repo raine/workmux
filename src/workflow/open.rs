@@ -1,12 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 
-use crate::git;
 use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
 use tracing::info;
-
-use super::cleanup::get_worktree_mode;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
@@ -48,9 +45,9 @@ pub fn open(
 
     // This command requires the worktree to already exist
     // Smart resolution: try handle first, then branch name
-    let (worktree_path, branch_name) = git::find_worktree(name).with_context(|| {
+    let (worktree_path, branch_name) = context.vcs.find_workspace(name).with_context(|| {
         format!(
-            "No worktree found with name '{}'. Use 'workmux list' to see available worktrees.",
+            "No workspace found with name '{}'. Use 'workmux list' to see available workspaces.",
             name
         )
     })?;
@@ -63,7 +60,7 @@ pub fn open(
         .to_string();
 
     // Determine the target mode from stored metadata (or default to Window)
-    let stored_mode = get_worktree_mode(&base_handle);
+    let stored_mode = context.vcs.get_workspace_mode(&base_handle);
     let target = MuxHandle::new(
         context.mux.as_ref(),
         stored_mode,

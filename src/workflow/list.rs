@@ -6,7 +6,8 @@ use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, util};
 use crate::state::StateStore;
 use crate::util::canon_or_self;
-use crate::{config, git, github, spinner};
+use crate::vcs::Vcs;
+use crate::{config, github, spinner};
 
 use super::types::{AgentStatusSummary, WorktreeInfo};
 
@@ -54,14 +55,15 @@ fn filter_worktrees(
 pub fn list(
     config: &config::Config,
     mux: &dyn Multiplexer,
+    vcs: &dyn Vcs,
     fetch_pr_status: bool,
     filter: &[String],
 ) -> Result<Vec<WorktreeInfo>> {
-    if !git::is_git_repo()? {
-        return Err(anyhow!("Not in a git repository"));
+    if !vcs.is_repo()? {
+        return Err(anyhow!("Not in a {} repository", vcs.name()));
     }
 
-    let worktrees_data = git::list_worktrees()?;
+    let worktrees_data = vcs.list_workspaces()?;
 
     if worktrees_data.is_empty() {
         return Ok(Vec::new());
@@ -88,14 +90,14 @@ pub fn list(
     };
 
     // Get the main branch for unmerged checks
-    let main_branch = git::get_default_branch().ok();
+    let main_branch = vcs.get_default_branch().ok();
 
     // Get all unmerged branches in one go for efficiency
     // Prefer checking against remote tracking branch for more accurate results
     let unmerged_branches = main_branch
         .as_deref()
-        .and_then(|main| git::get_merge_base(main).ok())
-        .and_then(|base| git::get_unmerged_branches(&base).ok())
+        .and_then(|main| vcs.get_merge_base(main).ok())
+        .and_then(|base| vcs.get_unmerged_branches(&base).ok())
         .unwrap_or_default(); // Use an empty set on failure
 
     // Batch fetch all PRs if requested (single API call)
@@ -123,8 +125,8 @@ pub fn list(
         .map(|a| (canon_or_self(&a.path), a.status))
         .collect();
 
-    // Batch-load all worktree modes in a single git config call
-    let worktree_modes = git::get_all_worktree_modes();
+    // Batch-load all workspace modes in a single VCS config call
+    let worktree_modes = vcs.get_all_workspace_modes();
 
     let prefix = config.window_prefix();
     let worktrees: Vec<WorktreeInfo> = worktrees_data

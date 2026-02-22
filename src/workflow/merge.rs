@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 
-use crate::{cmd, git};
+use crate::cmd;
 use tracing::{debug, info};
 
-use super::cleanup::{self, get_worktree_mode};
+use super::cleanup;
 use super::context::WorkflowContext;
 use super::types::MergeResult;
 
@@ -38,8 +38,8 @@ pub fn merge(
     context.chdir_to_main_worktree()?;
 
     // Smart resolution: try handle first, then branch name
-    let (worktree_path, branch_to_merge) = git::find_worktree(name)
-        .with_context(|| format!("No worktree found with name '{}'", name))?;
+    let (worktree_path, branch_to_merge) = context.vcs.find_workspace(name)
+        .with_context(|| format!("No workspace found with name '{}'", name))?;
 
     // The handle is the basename of the worktree directory (used for tmux operations)
     let handle = worktree_path
@@ -53,7 +53,7 @@ pub fn merge(
         })?;
 
     // Capture mode BEFORE cleanup (cleanup removes the metadata)
-    let mode = get_worktree_mode(handle);
+    let mode = context.vcs.get_workspace_mode(handle);
 
     debug!(
         name = name,
@@ -70,10 +70,10 @@ pub fn merge(
     let detected_base: Option<String> = if into_branch.is_some() {
         None // User explicitly specified target, no auto-detection needed
     } else {
-        match git::get_branch_base(&branch_to_merge) {
+        match context.vcs.get_branch_base(&branch_to_merge) {
             Ok(base) => {
                 // Verify the base branch still exists
-                if git::branch_exists(&base)? {
+                if context.vcs.branch_exists(&base)? {
                     info!(
                         branch = %branch_to_merge,
                         base = %base,
@@ -108,7 +108,7 @@ pub fn merge(
     // Resolve the worktree path and window handle for the TARGET branch.
     // We prioritize finding an existing worktree for the target branch to support
     // workflows where 'main' is checked out in a linked worktree (issue #29).
-    let (target_worktree_path, target_window_name) = match git::get_worktree_path(target_branch) {
+    let (target_worktree_path, target_window_name) = match context.vcs.get_workspace_path(target_branch) {
         Ok(path) => {
             // Target is checked out in a worktree (could be main root or a linked worktree)
             if path == context.main_worktree_root {
@@ -141,8 +141,8 @@ pub fn merge(
     // Handle changes in the source worktree
     // Only check for unstaged/untracked when worktree will be deleted (!keep)
     // With --keep, the worktree persists so no data loss risk
-    let has_unstaged = !keep && git::has_unstaged_changes(&worktree_path)?;
-    let has_untracked = !keep && git::has_untracked_files(&worktree_path)?;
+    let has_unstaged = !keep && context.vcs.has_unstaged_changes(&worktree_path)?;
+    let has_untracked = !keep && context.vcs.has_untracked_files(&worktree_path)?;
 
     if (has_unstaged || has_untracked) && !ignore_uncommitted {
         let mut issues = Vec::new();
@@ -159,11 +159,11 @@ pub fn merge(
         ));
     }
 
-    let had_staged_changes = git::has_staged_changes(&worktree_path)?;
+    let had_staged_changes = context.vcs.has_staged_changes(&worktree_path)?;
     if had_staged_changes && !ignore_uncommitted {
-        // Commit using git's editor (respects $EDITOR or git config)
+        // Commit using the user's editor
         info!(path = %worktree_path.display(), "merge:committing staged changes");
-        git::commit_with_editor(&worktree_path).context("Failed to commit staged changes")?;
+        context.vcs.commit_with_editor(&worktree_path).context("Failed to commit staged changes")?;
     }
 
     if branch_to_merge == target_branch {
@@ -180,7 +180,7 @@ pub fn merge(
 
     // Safety check: Abort if the target worktree has uncommitted tracked changes.
     // Untracked files are allowed; git will fail safely if they collide with merged files.
-    if git::has_tracked_changes(&target_worktree_path)? {
+    if context.vcs.has_tracked_changes(&target_worktree_path)? {
         return Err(anyhow!(
             "Target worktree ({}) has uncommitted changes. Please commit or stash them before merging.",
             target_worktree_path.display()
@@ -190,7 +190,7 @@ pub fn merge(
     // Explicitly switch the target worktree to the target branch.
     // This ensures that if we are reusing the main worktree for a feature branch merge,
     // it is checked out to the correct branch.
-    git::switch_branch_in_worktree(&target_worktree_path, target_branch)?;
+    context.vcs.switch_branch(&target_worktree_path, target_branch)?;
 
     // Run pre-merge hooks after all validations pass but before any merge operations begin.
     // Skip hooks if --no-verify or --no-hooks flag is passed.
@@ -259,7 +259,7 @@ pub fn merge(
             base = target_branch,
             "merge:rebase start"
         );
-        git::rebase_branch_onto_base(&worktree_path, target_branch).with_context(|| {
+        context.vcs.rebase_onto_base(&worktree_path, target_branch).with_context(|| {
             format!(
                 "Rebase failed, likely due to conflicts.\n\n\
                 Please resolve them manually inside the worktree at '{}'.\n\
@@ -269,29 +269,29 @@ pub fn merge(
         })?;
 
         // After a successful rebase, merge into target. This will be a fast-forward.
-        git::merge_in_worktree(&target_worktree_path, &branch_to_merge)
+        context.vcs.merge_in_workspace(&target_worktree_path, &branch_to_merge)
             .context("Failed to merge rebased branch. This should have been a fast-forward.")?;
         info!(branch = %branch_to_merge, "merge:fast-forward complete");
     } else if squash {
         // Perform the squash merge. This stages all changes from the feature branch but does not commit.
-        if let Err(e) = git::merge_squash_in_worktree(&target_worktree_path, &branch_to_merge) {
+        if let Err(e) = context.vcs.merge_squash(&target_worktree_path, &branch_to_merge) {
             info!(branch = %branch_to_merge, error = %e, "merge:squash merge failed, resetting target worktree");
             // Best effort to reset; ignore failure as the user message is the priority.
-            let _ = git::reset_hard(&target_worktree_path);
+            let _ = context.vcs.reset_hard(&target_worktree_path);
             return Err(conflict_err(&branch_to_merge));
         }
 
         // Prompt the user to provide a commit message for the squashed changes.
         println!("Staged squashed changes. Please provide a commit message in your editor.");
-        git::commit_with_editor(&target_worktree_path)
+        context.vcs.commit_with_editor(&target_worktree_path)
             .context("Failed to commit squashed changes. You may need to commit them manually.")?;
         info!(branch = %branch_to_merge, "merge:squash merge committed");
     } else {
         // Default merge commit workflow
-        if let Err(e) = git::merge_in_worktree(&target_worktree_path, &branch_to_merge) {
+        if let Err(e) = context.vcs.merge_in_workspace(&target_worktree_path, &branch_to_merge) {
             info!(branch = %branch_to_merge, error = %e, "merge:standard merge failed, aborting merge in target worktree");
             // Best effort to abort; ignore failure as the user message is the priority.
-            let _ = git::abort_merge_in_worktree(&target_worktree_path);
+            let _ = context.vcs.abort_merge(&target_worktree_path);
             return Err(conflict_err(&branch_to_merge));
         }
         info!(branch = %branch_to_merge, "merge:standard merge complete");

@@ -9,7 +9,8 @@ use crate::workflow;
 pub fn run(name: &str, text: Option<&str>, file: Option<&str>) -> Result<()> {
     let cfg = config::Config::load(None).unwrap_or_default();
     let mux = create_backend(detect_backend());
-    let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref())?;
+    let vcs = crate::vcs::detect_vcs()?;
+    let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref(), vcs.as_ref())?;
 
     // Determine content: positional arg > --file > stdin
     let content = if let Some(t) = text {

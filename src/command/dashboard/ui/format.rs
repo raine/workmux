@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::git::GitStatus;
+use crate::vcs::VcsStatus;
 use crate::github::{CheckState, PrSummary};
 use crate::nerdfont;
 
@@ -13,7 +13,7 @@ use super::theme::ThemePalette;
 /// Format: "→branch +N -M 󰏫 +X -Y 󰀪 ↑A ↓B"
 /// When there are uncommitted changes that differ from total, branch totals are dimmed
 pub fn format_git_status(
-    status: Option<&GitStatus>,
+    status: Option<&VcsStatus>,
     spinner_frame: u8,
     palette: &ThemePalette,
 ) -> Vec<(String, Style)> {

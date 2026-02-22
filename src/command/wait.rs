@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
-use crate::git;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
+use crate::vcs;
 use crate::state::StateStore;
 use crate::util;
 use crate::workflow;
@@ -30,13 +30,14 @@ pub fn run(
 ) -> Result<()> {
     let target = parse_status(target_status)?;
     let mux = create_backend(detect_backend());
+    let vcs = vcs::detect_vcs()?;
     let start = Instant::now();
 
     // Resolve worktree paths upfront
     let worktree_paths: Vec<_> = worktree_names
         .iter()
         .map(|name| {
-            let (path, _branch) = git::find_worktree(name)?;
+            let (path, _branch) = vcs.find_workspace(name)?;
             Ok((name.clone(), path))
         })
         .collect::<Result<Vec<_>>>()?;

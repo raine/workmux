@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 
-use crate::git;
 use crate::sandbox;
 use tracing::{debug, info};
 
-use super::cleanup::{self, get_worktree_mode};
+use super::cleanup;
 use super::context::WorkflowContext;
 use super::types::RemoveResult;
 
@@ -19,8 +18,8 @@ pub fn remove(
 
     // Get worktree path and branch - this also validates that the worktree exists
     // Smart resolution: try handle first, then branch name
-    let (worktree_path, branch_name) = git::find_worktree(handle)
-        .with_context(|| format!("No worktree found with name '{}'", handle))?;
+    let (worktree_path, branch_name) = context.vcs.find_workspace(handle)
+        .with_context(|| format!("No workspace found with name '{}'", handle))?;
 
     // Extract actual handle from worktree path (directory name)
     // User may have provided branch name (with slashes) but window names use handle (with dashes)
@@ -37,7 +36,7 @@ pub fn remove(
     debug!(handle = actual_handle, branch = branch_name, path = %worktree_path.display(), "remove:worktree resolved");
 
     // Capture mode BEFORE cleanup (cleanup removes the metadata)
-    let mode = get_worktree_mode(actual_handle);
+    let mode = context.vcs.get_workspace_mode(actual_handle);
 
     // Safety Check: Prevent deleting the main worktree itself, regardless of branch.
     let is_main_worktree = match (
@@ -74,7 +73,7 @@ pub fn remove(
         ));
     }
 
-    if worktree_path.exists() && git::has_uncommitted_changes(&worktree_path)? && !force {
+    if worktree_path.exists() && context.vcs.has_uncommitted_changes(&worktree_path)? && !force {
         return Err(anyhow!(
             "Worktree has uncommitted changes. Use --force to delete anyway."
         ));

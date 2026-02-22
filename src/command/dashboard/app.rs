@@ -10,7 +10,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
-use crate::git::{self, GitStatus};
+use crate::vcs::{self, VcsStatus};
 use crate::github::PrSummary;
 use crate::multiplexer::{AgentPane, AgentStatus, Multiplexer};
 use crate::state::StateStore;
@@ -69,11 +69,11 @@ pub struct App {
     /// Height of the preview area (updated during rendering)
     pub preview_height: u16,
     /// Git status for each worktree path
-    pub git_statuses: HashMap<PathBuf, GitStatus>,
+    pub git_statuses: HashMap<PathBuf, VcsStatus>,
     /// Channel receiver for git status updates from background thread
-    git_rx: mpsc::Receiver<(PathBuf, GitStatus)>,
+    git_rx: mpsc::Receiver<(PathBuf, VcsStatus)>,
     /// Channel sender for git status updates (cloned for background threads)
-    git_tx: mpsc::Sender<(PathBuf, GitStatus)>,
+    git_tx: mpsc::Sender<(PathBuf, VcsStatus)>,
     /// Last time git status was fetched (to throttle background fetches)
     last_git_fetch: std::time::Instant,
     /// Flag to track if a git fetch is in progress (prevents thread pile-up)
@@ -124,7 +124,9 @@ impl App {
 
         let palette = ThemePalette::from_theme(config.theme);
         let sort_mode = SortMode::load();
-        let git_statuses = git::load_status_cache();
+        let git_statuses = vcs::try_detect_vcs()
+            .map(|v| v.load_status_cache())
+            .unwrap_or_default();
         let pr_statuses = crate::github::load_pr_cache();
         let hide_stale = load_hide_stale();
         let last_pane_id = load_last_pane_id();
@@ -204,7 +206,7 @@ impl App {
                 .into_iter()
                 .map(|path| {
                     std::thread::spawn(move || {
-                        let root = git::get_repo_root_for(&path).ok();
+                        let root = vcs::try_detect_vcs().and_then(|v| v.get_repo_root_for(&path).ok());
                         (path, root)
                     })
                 })
@@ -322,7 +324,9 @@ impl App {
             let _reset = ResetFlag(is_fetching);
 
             for path in agent_paths {
-                let status = git::get_git_status(&path);
+                let status = vcs::try_detect_vcs()
+                    .map(|v| v.get_status(&path))
+                    .unwrap_or_default();
                 // Ignore send errors (receiver dropped means app is shutting down)
                 let _ = tx.send((path, status));
             }

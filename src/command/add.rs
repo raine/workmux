@@ -10,7 +10,7 @@ use crate::template::{
 use crate::workflow::SetupOptions;
 use crate::workflow::pr::detect_remote_branch;
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt, parse_prompt_with_frontmatter};
-use crate::{config, git, workflow};
+use crate::{config, vcs, workflow};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -90,11 +90,11 @@ fn read_stdin_lines() -> Result<Vec<String>> {
 /// Check preconditions for the add command (git repo and multiplexer session).
 /// Returns Ok(()) if all preconditions are met, or an error listing all failures.
 fn check_preconditions() -> Result<()> {
-    let is_git = git::is_git_repo()?;
+    let is_repo = vcs::try_detect_vcs().is_some();
     let mux = create_backend(detect_backend());
     let is_mux_running = mux.is_running()?;
 
-    if is_git && is_mux_running {
+    if is_repo && is_mux_running {
         return Ok(());
     }
 
@@ -103,8 +103,8 @@ fn check_preconditions() -> Result<()> {
     if !is_mux_running {
         errors.push(format!("{} is not running.", mux.name()));
     }
-    if !is_git {
-        errors.push("Current directory is not a git repository.".to_string());
+    if !is_repo {
+        errors.push("Current directory is not a git or jj repository.".to_string());
     }
 
     // Add blank line before suggestions
@@ -113,8 +113,8 @@ fn check_preconditions() -> Result<()> {
     if !is_mux_running {
         errors.push(format!("Please start a {} session first.", mux.name()));
     }
-    if !is_git {
-        errors.push("Please run this command from within a git repository.".to_string());
+    if !is_repo {
+        errors.push("Please run this command from within a git or jj repository.".to_string());
     }
 
     Err(anyhow!(errors.join("\n")))

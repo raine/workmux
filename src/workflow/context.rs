@@ -1,9 +1,10 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::multiplexer::Multiplexer;
-use crate::{config, git};
+use crate::vcs::{self, Vcs};
+use crate::config;
 use tracing::debug;
 
 /// Shared context for workflow operations
@@ -12,11 +13,12 @@ use tracing::debug;
 /// needed by workflow modules, reducing code duplication.
 pub struct WorkflowContext {
     pub main_worktree_root: PathBuf,
-    pub git_common_dir: PathBuf,
+    pub shared_dir: PathBuf,
     pub main_branch: String,
     pub prefix: String,
     pub config: config::Config,
     pub mux: Arc<dyn Multiplexer>,
+    pub vcs: Arc<dyn Vcs>,
     /// Relative path from repo root to config directory.
     /// Empty if config is at repo root or using defaults.
     pub config_rel_dir: PathBuf,
@@ -28,7 +30,7 @@ pub struct WorkflowContext {
 impl WorkflowContext {
     /// Create a new workflow context
     ///
-    /// Performs the git repository check and gathers all commonly needed data.
+    /// Performs the VCS repository check and gathers all commonly needed data.
     /// Does NOT check if multiplexer is running or change the current directory - those
     /// are optional operations that can be performed via helper methods.
     pub fn new(
@@ -36,20 +38,18 @@ impl WorkflowContext {
         mux: Arc<dyn Multiplexer>,
         config_location: Option<config::ConfigLocation>,
     ) -> Result<Self> {
-        if !git::is_git_repo()? {
-            return Err(anyhow!("Not in a git repository"));
-        }
+        let vcs = vcs::detect_vcs()?;
 
         let main_worktree_root =
-            git::get_main_worktree_root().context("Could not find the main git worktree")?;
+            vcs.get_main_workspace_root().context("Could not find the main worktree")?;
 
-        let git_common_dir =
-            git::get_git_common_dir().context("Could not find the git common directory")?;
+        let shared_dir =
+            vcs.get_shared_dir().context("Could not find the shared VCS directory")?;
 
         let main_branch = if let Some(ref branch) = config.main_branch {
             branch.clone()
         } else {
-            git::get_default_branch().context("Failed to determine the main branch")?
+            vcs.get_default_branch().context("Failed to determine the main branch")?
         };
 
         let prefix = config.window_prefix().to_string();
@@ -61,10 +61,11 @@ impl WorkflowContext {
 
         debug!(
             main_worktree_root = %main_worktree_root.display(),
-            git_common_dir = %git_common_dir.display(),
+            shared_dir = %shared_dir.display(),
             main_branch = %main_branch,
             prefix = %prefix,
-            backend = mux.name(),
+            vcs_backend = vcs.name(),
+            mux_backend = mux.name(),
             config_rel_dir = %config_rel_dir.display(),
             config_source_dir = %config_source_dir.display(),
             "workflow_context:created"
@@ -72,11 +73,12 @@ impl WorkflowContext {
 
         Ok(Self {
             main_worktree_root,
-            git_common_dir,
+            shared_dir,
             main_branch,
             prefix,
             config,
             mux,
+            vcs,
             config_rel_dir,
             config_source_dir,
         })
@@ -87,20 +89,13 @@ impl WorkflowContext {
     /// Call this at the start of workflows that require a multiplexer.
     pub fn ensure_mux_running(&self) -> Result<()> {
         if !self.mux.is_running()? {
-            return Err(anyhow!(
+            return Err(anyhow::anyhow!(
                 "{} is not running. Please start a {} session first.",
                 self.mux.name(),
                 self.mux.name()
             ));
         }
         Ok(())
-    }
-
-    /// Ensure tmux is running (backward-compat alias for ensure_mux_running)
-    #[deprecated(note = "Use ensure_mux_running() instead")]
-    #[allow(dead_code)]
-    pub fn ensure_tmux_running(&self) -> Result<()> {
-        self.ensure_mux_running()
     }
 
     /// Change working directory to main worktree root

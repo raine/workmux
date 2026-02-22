@@ -4,25 +4,26 @@ use std::path::Path;
 use crate::config::MuxMode;
 use crate::multiplexer::MuxHandle;
 use crate::{git, spinner};
+use crate::vcs::Vcs;
 use tracing::{debug, info, warn};
 
-/// Check if a path is registered as a git worktree.
+/// Check if a path is registered as a workspace with the VCS.
 /// Uses canonicalize() to handle symlinks, case sensitivity, and relative paths.
-fn is_registered_worktree(path: &Path) -> Result<bool> {
+fn is_registered_workspace(vcs: &dyn Vcs, path: &Path) -> Result<bool> {
     // Canonicalize the input path for reliable comparison
     let abs_path = match std::fs::canonicalize(path) {
         Ok(p) => p,
-        Err(_) => return Ok(false), // Can't canonicalize = not a valid worktree
+        Err(_) => return Ok(false), // Can't canonicalize = not a valid workspace
     };
 
-    let worktrees = git::list_worktrees()?;
-    for (wt_path, _) in worktrees {
-        // Canonicalize git's reported path as well
-        if let Ok(abs_wt) = std::fs::canonicalize(&wt_path) {
-            if abs_wt == abs_path {
+    let workspaces = vcs.list_workspaces()?;
+    for (ws_path, _) in workspaces {
+        // Canonicalize the VCS-reported path as well
+        if let Ok(abs_ws) = std::fs::canonicalize(&ws_path) {
+            if abs_ws == abs_path {
                 return Ok(true);
             }
-        } else if wt_path == path {
+        } else if ws_path == path {
             // Fallback to string comparison if canonicalization fails
             return Ok(true);
         }
@@ -88,7 +89,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     let target = MuxHandle::new(context.mux.as_ref(), options.mode, &context.prefix, handle);
     let full_target_name = target.full_name();
     let target_exists = target.exists()?;
-    let worktree_exists = git::worktree_exists(branch_name)?;
+    let worktree_exists = context.vcs.workspace_exists(branch_name)?;
 
     // If open_if_exists is set and either exists, delegate to open workflow
     if options.open_if_exists && (target_exists || worktree_exists) {
@@ -138,7 +139,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     }
 
     // Auto-detect: create branch if it doesn't exist
-    let branch_exists = git::branch_exists(branch_name)?;
+    let branch_exists = context.vcs.branch_exists(branch_name)?;
     if branch_exists && remote_branch.is_some() {
         return Err(anyhow!(
             "Branch '{}' already exists. Remove '--remote' or pick a different branch name.",
@@ -155,19 +156,21 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     // Determine the base for the new branch
     let base_branch_for_creation = if let Some(remote_spec) = remote_branch {
         let spec = git::parse_remote_branch_spec(remote_spec)?;
-        if !git::remote_exists(&spec.remote)? {
+        if !context.vcs.remote_exists(&spec.remote)? {
             return Err(anyhow!(
                 "Remote '{}' does not exist. Available remotes: {:?}",
                 spec.remote,
-                git::list_remotes()?
+                context.vcs.list_remotes()?
             ));
         }
-        spinner::with_spinner(&format!("Fetching from '{}'", spec.remote), || {
-            git::fetch_remote(&spec.remote)
+        let vcs = context.vcs.clone();
+        let remote_name = spec.remote.clone();
+        spinner::with_spinner(&format!("Fetching from '{}'", spec.remote), move || {
+            vcs.fetch_remote(&remote_name)
         })
         .with_context(|| format!("Failed to fetch from remote '{}'", spec.remote))?;
         let remote_ref = format!("{}/{}", spec.remote, spec.branch);
-        if !git::branch_exists(&remote_ref)? {
+        if !context.vcs.branch_exists(&remote_ref)? {
             return Err(anyhow!(
                 "Remote branch '{}' was not found. Double-check the name or fetch it manually.",
                 remote_ref
@@ -181,7 +184,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             Some(base.to_string())
         } else {
             // Default to the current branch when no explicit base was provided
-            let current_branch = git::get_current_branch()
+            let current_branch = context.vcs.get_current_branch()
                 .context("Failed to determine the current branch to use as the base")?;
             let current_branch = current_branch.trim().to_string();
 
@@ -231,7 +234,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         // Check if this is an orphan directory (exists on disk but not registered with git).
         // This can happen when cleanup renames a worktree but a background process (build tool,
         // file watcher, shell prompt) recreates the directory structure using stale $PWD.
-        if is_registered_worktree(&worktree_path)? {
+        if is_registered_workspace(context.vcs.as_ref(), &worktree_path)? {
             return Err(anyhow!(
                 "Worktree directory '{}' already exists and is registered with git.\n\
                  This may be from another branch with the same handle.\n\
@@ -276,18 +279,18 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         "create:creating worktree"
     );
 
-    git::create_worktree(
+    context.vcs.create_workspace(
         &worktree_path,
         branch_name,
         create_new,
         base_branch_for_creation.as_deref(),
         track_upstream,
     )
-    .context("Failed to create git worktree")?;
+    .context("Failed to create workspace")?;
 
     // Store the base branch in git config for future reference (used during removal checks)
     if let Some(ref base) = base_branch_for_creation {
-        git::set_branch_base(branch_name, base).with_context(|| {
+        context.vcs.set_branch_base(branch_name, base).with_context(|| {
             format!(
                 "Failed to store base branch '{}' for branch '{}'",
                 base, branch_name
@@ -303,12 +306,12 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     // Store the tmux mode in git config for cleanup operations
     // This allows remove/close/merge to know whether to kill a window or session
     if options.mode == MuxMode::Session {
-        git::set_worktree_meta(handle, "mode", "session")
-            .with_context(|| format!("Failed to store tmux mode for worktree '{}'", handle))?;
+        context.vcs.set_workspace_meta(handle, "mode", "session")
+            .with_context(|| format!("Failed to store mux mode for workspace '{}'", handle))?;
         debug!(
             handle = handle,
             mode = "session",
-            "create:stored tmux mode in git config"
+            "create:stored mux mode in config"
         );
     }
 
@@ -396,9 +399,9 @@ pub fn create_with_changes(
         .context("Failed to get current working directory to rescue changes from")?;
 
     // Check for changes based on the include_untracked flag
-    let has_tracked_changes = git::has_tracked_changes(&original_worktree_path)?;
+    let has_tracked_changes = context.vcs.has_tracked_changes(&original_worktree_path)?;
     let has_movable_untracked =
-        include_untracked && git::has_untracked_files(&original_worktree_path)?;
+        include_untracked && context.vcs.has_untracked_files(&original_worktree_path)?;
 
     if !has_tracked_changes && !has_movable_untracked {
         return Err(anyhow!(
@@ -407,13 +410,13 @@ pub fn create_with_changes(
         ));
     }
 
-    if git::branch_exists(branch_name)? {
+    if context.vcs.branch_exists(branch_name)? {
         return Err(anyhow!("Branch '{}' already exists.", branch_name));
     }
 
     // 1. Stash changes
     let stash_message = format!("workmux: moving changes to {}", branch_name);
-    git::stash_push(&stash_message, include_untracked, patch)
+    context.vcs.stash_push(&stash_message, include_untracked, patch)
         .context("Failed to stash current changes")?;
     info!(branch = branch_name, "create_with_changes: changes stashed");
 
@@ -437,7 +440,7 @@ pub fn create_with_changes(
         Err(e) => {
             warn!(error = %e, "create_with_changes: worktree creation failed, popping stash");
             // Best effort to restore the stash - if this fails, user still has stash@{0}
-            let _ = git::stash_pop(&original_worktree_path);
+            let _ = context.vcs.stash_pop(&original_worktree_path);
             return Err(e).context(
                 "Failed to create new worktree. Stashed changes have been restored if possible.",
             );
@@ -451,11 +454,11 @@ pub fn create_with_changes(
     );
 
     // 3. Apply stash in new worktree
-    match git::stash_pop(new_worktree_path) {
+    match context.vcs.stash_pop(new_worktree_path) {
         Ok(_) => {
             // 4. Success: Clean up original worktree
             info!("create_with_changes: stash applied successfully, cleaning original worktree");
-            git::reset_hard(&original_worktree_path)?;
+            context.vcs.reset_hard(&original_worktree_path)?;
 
             info!(
                 branch = branch_name,

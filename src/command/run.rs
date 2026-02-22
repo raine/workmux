@@ -39,7 +39,8 @@ pub fn run(
     let mux = create_backend(detect_backend());
 
     // Resolve worktree to agent pane (consistent with send/capture)
-    let (worktree_path, agent) = workflow::resolve_worktree_agent(worktree_name, mux.as_ref())?;
+    let vcs = crate::vcs::detect_vcs()?;
+    let (worktree_path, agent) = workflow::resolve_worktree_agent(worktree_name, mux.as_ref(), vcs.as_ref())?;
 
     // Build command string (preserve argument boundaries via shell escaping)
     let command = command_parts

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use crate::{cmd, git, nerdfont};
+use crate::{cmd, nerdfont, vcs};
 use which::{which, which_in};
 
 /// Default script for cleaning up node_modules directories before worktree deletion.
@@ -892,9 +892,12 @@ pub struct ConfigLocation {
 pub fn find_project_config(start_dir: &Path) -> anyhow::Result<Option<ConfigLocation>> {
     let config_names = [".workmux.yaml", ".workmux.yml"];
 
-    let repo_root = match git::get_repo_root_for(start_dir) {
-        Ok(root) => root,
-        Err(_) => return Ok(None),
+    let repo_root = match vcs::try_detect_vcs() {
+        Some(v) => match v.get_repo_root_for(start_dir) {
+            Ok(root) => root,
+            Err(_) => return Ok(None),
+        },
+        None => return Ok(None),
     };
 
     // Canonicalize both paths to handle symlinks and ensure consistent comparison
@@ -938,7 +941,9 @@ pub fn find_project_config(start_dir: &Path) -> anyhow::Result<Option<ConfigLoca
     }
 
     // Fallback: check main worktree root (preserves existing behavior for linked worktrees)
-    if let Ok(main_root) = git::get_main_worktree_root() {
+    if let Some(vcs_backend) = vcs::try_detect_vcs()
+        && let Ok(main_root) = vcs_backend.get_main_workspace_root()
+    {
         let main_root = main_root.canonicalize().unwrap_or(main_root);
         if main_root != repo_root {
             for name in &config_names {
@@ -1077,7 +1082,8 @@ impl Config {
         config.agent = Some(final_agent);
 
         // After merging, apply sensible defaults for any values that are not configured.
-        if let Ok(repo_root) = git::get_repo_root() {
+        let repo_root_opt = vcs::try_detect_vcs().and_then(|v| v.get_repo_root().ok());
+        if let Some(repo_root) = repo_root_opt {
             // Apply defaults that require inspecting the repository.
             let has_node_modules = repo_root.join("pnpm-lock.yaml").exists()
                 || repo_root.join("package-lock.json").exists()
@@ -1097,7 +1103,7 @@ impl Config {
                 config.pre_remove = Some(vec![NODE_MODULES_CLEANUP_SCRIPT.to_string()]);
             }
         } else {
-            // Apply fallback defaults for when not in a git repo (e.g., `workmux init`).
+            // Apply fallback defaults for when not in a VCS repo (e.g., `workmux init`).
             if config.panes.is_none() && config.windows.is_none() {
                 config.panes = Some(Self::default_panes());
             }
@@ -1137,7 +1143,7 @@ impl Config {
         let defaults_root = location
             .as_ref()
             .map(|loc| loc.config_dir.clone())
-            .or_else(|| git::get_repo_root().ok())
+            .or_else(|| vcs::try_detect_vcs().and_then(|v| v.get_repo_root().ok()))
             .unwrap_or_default();
 
         if !defaults_root.as_os_str().is_empty() {

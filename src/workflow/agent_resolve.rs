@@ -1,23 +1,24 @@
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
-use crate::git;
 use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::state::StateStore;
 use crate::util::canon_or_self;
+use crate::vcs::Vcs;
 
 /// Resolve a worktree name to its agent panes.
 ///
-/// 1. Finds the worktree path via git
+/// 1. Finds the workspace path via VCS
 /// 2. Loads reconciled agent state
 /// 3. Matches agents by comparing canonical workdir paths
 ///
-/// Returns the worktree path and matching agent panes (may be empty if no agent is running).
+/// Returns the workspace path and matching agent panes (may be empty if no agent is running).
 pub fn resolve_worktree_agents(
     name: &str,
     mux: &dyn Multiplexer,
+    vcs: &dyn Vcs,
 ) -> Result<(PathBuf, Vec<AgentPane>)> {
-    let (worktree_path, _branch) = git::find_worktree(name)?;
+    let (worktree_path, _branch) = vcs.find_workspace(name)?;
     let canon_wt_path = canon_or_self(&worktree_path);
 
     let agent_panes = StateStore::new().and_then(|store| store.load_reconciled_agents(mux))?;
@@ -36,8 +37,8 @@ pub fn resolve_worktree_agents(
 /// Resolve a worktree name to exactly one agent pane (the first/primary).
 ///
 /// Returns an error if no agent is running in the worktree.
-pub fn resolve_worktree_agent(name: &str, mux: &dyn Multiplexer) -> Result<(PathBuf, AgentPane)> {
-    let (path, agents) = resolve_worktree_agents(name, mux)?;
+pub fn resolve_worktree_agent(name: &str, mux: &dyn Multiplexer, vcs: &dyn Vcs) -> Result<(PathBuf, AgentPane)> {
+    let (path, agents) = resolve_worktree_agents(name, mux, vcs)?;
     let agent = agents
         .into_iter()
         .next()

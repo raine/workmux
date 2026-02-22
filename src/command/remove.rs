@@ -1,6 +1,6 @@
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::WorkflowContext;
-use crate::{config, git, spinner, workflow};
+use crate::{config, spinner, vcs, workflow};
 use anyhow::{Context, Result, anyhow};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -35,11 +35,13 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
             .collect::<Result<Vec<_>>>()?
     };
 
+    let vcs = vcs::detect_vcs()?;
+
     // 2. Resolve all targets and validate they exist
     let mut candidates: Vec<(String, PathBuf, String)> = Vec::new();
     for name in resolved_names {
-        let (worktree_path, branch_name) = git::find_worktree(&name)
-            .with_context(|| format!("No worktree found with name '{}'", name))?;
+        let (worktree_path, branch_name) = vcs.find_workspace(&name)
+            .with_context(|| format!("No workspace found with name '{}'", name))?;
 
         let handle = worktree_path
             .file_name()
@@ -83,13 +85,13 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 
     for (handle, path, branch) in candidates {
         // Check uncommitted (blocking)
-        if path.exists() && git::has_uncommitted_changes(&path).unwrap_or(false) {
+        if path.exists() && vcs.has_uncommitted_changes(&path).unwrap_or(false) {
             uncommitted.push(handle);
             continue;
         }
 
         // Check unmerged (promptable), only if we're deleting the branch
-        if !keep_branch && let Some(base) = is_unmerged(&branch)? {
+        if !keep_branch && let Some(base) = is_unmerged(vcs.as_ref(), &branch)? {
             unmerged.push((handle, branch, base));
             continue;
         }
@@ -144,25 +146,25 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 }
 
 /// Check if a branch has unmerged commits. Returns Some(base) if unmerged, None otherwise.
-fn is_unmerged(branch: &str) -> Result<Option<String>> {
-    let main_branch = git::get_default_branch().unwrap_or_else(|_| "main".to_string());
+fn is_unmerged(vcs: &dyn vcs::Vcs, branch: &str) -> Result<Option<String>> {
+    let main_branch = vcs.get_default_branch().unwrap_or_else(|_| "main".to_string());
 
-    let base = git::get_branch_base(branch)
+    let base = vcs.get_branch_base(branch)
         .ok()
         .unwrap_or_else(|| main_branch.clone());
 
-    let base_commit = match git::get_merge_base(&base) {
+    let base_commit = match vcs.get_merge_base(&base) {
         Ok(b) => b,
         Err(_) => {
             // If we can't determine base, try falling back to main
-            match git::get_merge_base(&main_branch) {
+            match vcs.get_merge_base(&main_branch) {
                 Ok(b) => b,
                 Err(_) => return Ok(None), // Can't determine, assume safe
             }
         }
     };
 
-    let unmerged_branches = git::get_unmerged_branches(&base_commit)?;
+    let unmerged_branches = vcs.get_unmerged_branches(&base_commit)?;
     if unmerged_branches.contains(branch) {
         Ok(Some(base))
     } else {
@@ -172,9 +174,10 @@ fn is_unmerged(branch: &str) -> Result<Option<String>> {
 
 /// Remove all managed worktrees (except main)
 fn run_all(force: bool, keep_branch: bool) -> Result<()> {
-    let worktrees = git::list_worktrees()?;
-    let main_branch = git::get_default_branch()?;
-    let main_worktree_root = git::get_main_worktree_root()?;
+    let vcs = vcs::detect_vcs()?;
+    let worktrees = vcs.list_workspaces()?;
+    let main_branch = vcs.get_default_branch()?;
+    let main_worktree_root = vcs.get_main_workspace_root()?;
 
     let mut to_remove: Vec<(PathBuf, String, String)> = Vec::new();
     let mut skipped_uncommitted: Vec<String> = Vec::new();
@@ -192,18 +195,18 @@ fn run_all(force: bool, keep_branch: bool) -> Result<()> {
         }
 
         // Check for uncommitted changes
-        if !force && path.exists() && git::has_uncommitted_changes(&path).unwrap_or(false) {
+        if !force && path.exists() && vcs.has_uncommitted_changes(&path).unwrap_or(false) {
             skipped_uncommitted.push(branch);
             continue;
         }
 
         // Check for unmerged commits (only when deleting the branch)
         if !force && !keep_branch {
-            let base = git::get_branch_base(&branch)
+            let base = vcs.get_branch_base(&branch)
                 .ok()
                 .unwrap_or_else(|| main_branch.clone());
-            if let Ok(merge_base) = git::get_merge_base(&base)
-                && let Ok(unmerged_branches) = git::get_unmerged_branches(&merge_base)
+            if let Ok(merge_base) = vcs.get_merge_base(&base)
+                && let Ok(unmerged_branches) = vcs.get_unmerged_branches(&merge_base)
                 && unmerged_branches.contains(&branch)
             {
                 skipped_unmerged.push(branch);
@@ -322,14 +325,17 @@ fn run_all(force: bool, keep_branch: bool) -> Result<()> {
 
 /// Remove worktrees whose upstream remote branch has been deleted
 fn run_gone(force: bool, keep_branch: bool) -> Result<()> {
+    let vcs = vcs::detect_vcs()?;
+
     // Fetch with prune to update remote-tracking refs
-    spinner::with_spinner("Fetching from remote", git::fetch_prune)?;
+    let vcs_clone = vcs.clone();
+    spinner::with_spinner("Fetching from remote", move || vcs_clone.fetch_prune())?;
 
-    let worktrees = git::list_worktrees()?;
-    let main_branch = git::get_default_branch()?;
-    let main_worktree_root = git::get_main_worktree_root()?;
+    let worktrees = vcs.list_workspaces()?;
+    let main_branch = vcs.get_default_branch()?;
+    let main_worktree_root = vcs.get_main_workspace_root()?;
 
-    let gone_branches = git::get_gone_branches().unwrap_or_default();
+    let gone_branches = vcs.get_gone_branches().unwrap_or_default();
 
     // Find worktrees whose upstream is gone
     let mut to_remove: Vec<(PathBuf, String, String)> = Vec::new();
@@ -352,7 +358,7 @@ fn run_gone(force: bool, keep_branch: bool) -> Result<()> {
         }
 
         // Check for uncommitted changes
-        if !force && path.exists() && git::has_uncommitted_changes(&path).unwrap_or(false) {
+        if !force && path.exists() && vcs.has_uncommitted_changes(&path).unwrap_or(false) {
             skipped_uncommitted.push(branch);
             continue;
         }

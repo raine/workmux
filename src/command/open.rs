@@ -3,7 +3,7 @@ use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
-use crate::{config, git, workflow};
+use crate::{config, workflow};
 use anyhow::{Context, Result, bail};
 
 pub fn run(
@@ -27,7 +27,7 @@ pub fn run(
     let context = WorkflowContext::new(config, mux, config_location)?;
 
     // Determine the target mode from stored metadata
-    let stored_mode = git::get_worktree_mode(&resolved_name);
+    let stored_mode = context.vcs.get_workspace_mode(&resolved_name);
     let target_type = match stored_mode {
         MuxMode::Session => "session",
         MuxMode::Window => "window",

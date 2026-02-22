@@ -112,7 +112,8 @@ fn format_agent_status(
 pub fn run(show_pr: bool, filter: &[String]) -> Result<()> {
     let config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
-    let worktrees = workflow::list(&config, mux.as_ref(), show_pr, filter)?;
+    let vcs = crate::vcs::detect_vcs()?;
+    let worktrees = workflow::list(&config, mux.as_ref(), vcs.as_ref(), show_pr, filter)?;
 
     if worktrees.is_empty() {
         println!("No worktrees found");
