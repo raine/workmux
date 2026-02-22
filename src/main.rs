@@ -19,6 +19,7 @@ mod spinner;
 mod state;
 mod template;
 mod util;
+mod vcs;
 mod workflow;
 
 use anyhow::Result;
