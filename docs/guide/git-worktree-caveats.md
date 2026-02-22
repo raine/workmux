@@ -1,14 +1,16 @@
 ---
-description: Common git worktree pitfalls and how workmux handles them
+description: Common worktree pitfalls and how workmux handles them
 ---
 
-# Git worktree caveats
+# Worktree caveats
 
-While powerful, git worktrees have nuances that are important to understand. workmux is designed to automate solutions to these, but awareness of the underlying mechanics helps.
+While powerful, worktrees (git worktrees and jj workspaces) have nuances that are important to understand. workmux is designed to automate solutions to these, but awareness of the underlying mechanics helps.
 
-## Gitignored files require configuration
+> **Note:** Most caveats below apply to both git worktrees and jj workspaces. Sections that are git-specific are marked as such.
 
-When `git worktree add` creates a new working directory, it's a clean checkout. Files listed in your `.gitignore` (e.g., `.env` files, `node_modules`, IDE configuration) will not exist in the new worktree by default. Your application will be broken in the new worktree until you manually create or link these necessary files.
+## Ignored files require configuration
+
+When a new worktree is created (via `git worktree add` or `jj workspace add`), it's a clean checkout. Ignored files (e.g., `.env` files, `node_modules`, IDE configuration) will not exist in the new worktree by default. Your application will be broken in the new worktree until you manually create or link these necessary files.
 
 This is a primary feature of workmux. Use the `files` section in your `.workmux.yaml` to automatically copy or symlink these files on creation:
 
@@ -36,9 +38,9 @@ panes:
 
 ## Conflicts
 
-Worktrees isolate your filesystem, but they do not prevent merge conflicts. If you modify the same area of code on two different branches (in two different worktrees), you will still have a conflict when you merge one into the other.
+Worktrees isolate your filesystem, but they do not prevent merge conflicts. If you modify the same area of code on two different branches (in two different worktrees), you will still have a conflict when you merge one into the other. This applies to both git and jj.
 
-The best practice is to work on logically separate features in parallel worktrees. When conflicts are unavoidable, use standard git tools to resolve them. You can also leverage an AI agent within the worktree to assist with the conflict resolution.
+The best practice is to work on logically separate features in parallel worktrees. When conflicts are unavoidable, use standard VCS tools to resolve them (`git` conflict resolution or `jj resolve`). You can also leverage an AI agent within the worktree to assist with the conflict resolution.
 
 ## Package manager considerations (pnpm, yarn)
 
@@ -69,7 +71,7 @@ rustc-wrapper = "sccache"
 
 This caches compiled dependencies globally, so new worktrees benefit from cached artifacts without any lock contention.
 
-## Symlinks and `.gitignore` trailing slashes
+## Symlinks and `.gitignore` trailing slashes (git-specific)
 
 If your `.gitignore` uses a trailing slash to ignore directories (e.g., `tests/venv/`), symlinks to that path in the created worktree will **not** be ignored and will show up in `git status`. This is because `venv/` only matches directories, not files (symlinks).
 
@@ -80,7 +82,7 @@ To ignore both directories and symlinks, remove the trailing slash:
 + tests/venv
 ```
 
-## Local git ignores are not shared
+## Local git ignores are not shared (git-specific)
 
 The local git ignore file, `.git/info/exclude`, is specific to the main worktree's git directory and is not respected in other worktrees. Personal ignore patterns for your editor or temporary files may not apply in new worktrees, causing them to appear in `git status`.
 

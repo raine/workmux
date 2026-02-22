@@ -140,7 +140,7 @@ windows:
 
 ### File operations
 
-New worktrees are clean checkouts with no gitignored files (`.env`, `node_modules`, etc.). Use `files` to automatically copy or symlink what each worktree needs:
+New worktrees are clean checkouts with no ignored files (`.env`, `node_modules`, etc.). Use `files` to automatically copy or symlink what each worktree needs:
 
 ```yaml
 files:

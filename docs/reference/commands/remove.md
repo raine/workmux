@@ -19,7 +19,7 @@ workmux remove [name]... [flags]
 | Flag                | Description                                                                                                                                                                      |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--all`             | Remove all worktrees at once (except the main worktree). Prompts for confirmation unless `--force` is used. Safely skips worktrees with uncommitted changes or unmerged commits. |
-| `--gone`            | Remove worktrees whose upstream remote branch has been deleted (e.g., after a PR is merged on GitHub). Automatically runs `git fetch --prune` first.                             |
+| `--gone`            | Remove worktrees whose upstream remote branch has been deleted (e.g., after a PR is merged on GitHub). Automatically runs `git fetch --prune` (or `jj git fetch` for jj repos) first. |
 | `--force, -f`       | Skip confirmation prompt and ignore uncommitted changes.                                                                                                                         |
 | `--keep-branch, -k` | Remove only the worktree and tmux window while keeping the local branch.                                                                                                         |
 

@@ -1,10 +1,10 @@
 ---
-description: Create git worktrees and tmux windows, with support for AI prompts and parallel generation
+description: Create worktrees and tmux windows, with support for AI prompts and parallel generation
 ---
 
 # add
 
-Creates a new git worktree with a matching tmux window and switches you to it immediately. If the branch doesn't exist, it will be created automatically.
+Creates a new worktree with a matching tmux window and switches you to it immediately. If the branch doesn't exist, it will be created automatically.
 
 ```bash
 workmux add <branch-name> [flags]
@@ -48,7 +48,7 @@ These options allow you to skip expensive setup steps when they're not needed (e
 ## What happens
 
 1. Determines the **handle** for the worktree by slugifying the branch name (e.g., `feature/auth` becomes `feature-auth`). This can be overridden with the `--name` flag.
-2. Creates a git worktree at `<worktree_dir>/<handle>` (the `worktree_dir` is configurable and defaults to a sibling directory of your project)
+2. Creates a worktree (via `git worktree add` or `jj workspace add`) at `<worktree_dir>/<handle>` (the `worktree_dir` is configurable and defaults to a sibling directory of your project)
 3. Runs any configured file operations (copy/symlink)
 4. Executes `post_create` commands if defined (runs before the tmux window/session opens, so keep them fast)
 5. Creates a new tmux window named `<window_prefix><handle>` (e.g., `wm-feature-auth` with `window_prefix: wm-`). With `--session`, the window is created in its own dedicated session instead of the current session.

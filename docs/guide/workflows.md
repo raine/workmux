@@ -117,6 +117,9 @@ git push -u origin feature-123
 gh pr create
 ```
 
+> For jj users, push with `jj git push` instead.
+
+
 Once your PR is merged on GitHub, use `workmux remove` to clean up:
 
 ```bash
@@ -127,4 +130,4 @@ workmux remove feature-123
 workmux rm --gone
 ```
 
-The `--gone` flag is particularly useful - it automatically finds worktrees whose upstream branches no longer exist (because the PR was merged and the branch was deleted on GitHub) and removes them.
+The `--gone` flag is particularly useful - it automatically finds worktrees whose upstream branches no longer exist (because the PR was merged and the branch was deleted on GitHub) and removes them. For jj repos, workmux detects gone branches via `jj git fetch` and bookmark tracking.

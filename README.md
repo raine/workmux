@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <strong>Parallel development in tmux* with git worktrees</strong>
+  <strong>Parallel development in tmux* with git worktrees & jj workspaces</strong>
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 ---
 
 Giga opinionated zero-friction workflow tool for managing
-[git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as
+[git worktrees](https://git-scm.com/docs/git-worktree) (or [jj workspaces](https://jj-vcs.github.io/jj/latest/working-copy/#workspaces)) and tmux windows as
 isolated development environments. Perfect for running multiple AI agents in
 parallel without conflict.
 
@@ -1920,11 +1920,15 @@ entire process and pairs each worktree with a dedicated tmux window, creating
 fully isolated development environments. See
 [Before and after](#before-and-after) for how workmux streamlines this workflow.
 
+**Using jj?** workmux also supports [jj (Jujutsu)](https://jj-vcs.github.io/jj/) natively. jj workspaces provide the same parallel development benefits. workmux auto-detects your VCS backend.
+
 ## Git worktree caveats
 
 While powerful, git worktrees have nuances that are important to understand.
 workmux is designed to automate solutions to these, but awareness of the
 underlying mechanics helps.
+
+> **Note:** These caveats are specific to git worktrees. If you're using jj, some (like ignored files and conflicts) still apply to jj workspaces, while git-specific ones (like `.git/info/exclude`) do not.
 
 - [Gitignored files require configuration](#gitignored-files-require-configuration)
 - [Conflicts](#conflicts)
@@ -2242,7 +2246,7 @@ workmux completions fish | source
 ## Requirements
 
 - Rust (for building)
-- Git 2.5+ (for worktree support)
+- Git 2.5+ (for worktree support) or [jj](https://jj-vcs.github.io/jj/) (Jujutsu)
 - tmux (or an alternative backend)
 
 ### Alternative backends

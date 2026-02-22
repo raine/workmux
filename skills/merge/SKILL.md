@@ -24,6 +24,17 @@ This command finishes work on the current branch by:
 2. Rebasing onto the base branch
 3. Running `workmux merge` to merge and clean up
 
+## Step 0: Detect VCS
+
+Determine the VCS backend:
+- If `.jj/` directory exists at or above the current directory → jj mode
+- Otherwise → git mode
+
+For jj mode, adapt the steps below:
+- Step 1: Use `jj describe` instead of `git commit`
+- Step 2: Use `jj rebase -d <base>` instead of `git rebase`
+- For conflicts: Use `jj resolve` and inspect with `jj diff`
+
 ## Step 1: Commit
 
 If there are staged changes, commit them. Use lowercase, imperative mood, no conventional commit prefixes. Skip if nothing is staged.

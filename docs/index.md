@@ -1,6 +1,6 @@
 ---
 layout: home
-description: The zero-friction workflow for git worktrees and tmux, kitty, WezTerm, or Zellij
+description: The zero-friction workflow for git worktrees, jj workspaces, and tmux, kitty, WezTerm, or Zellij
 ---
 
 <div class="mono-editorial">
@@ -61,7 +61,7 @@ description: The zero-friction workflow for git worktrees and tmux, kitty, WezTe
   <div class="ed-container">
     <div class="ed-accent-rule"></div>
     <span class="ed-section-label">Worktree pain points, solved</span>
-    <p class="ed-section-desc">Git worktrees are powerful, but managing them manually is painful. workmux automates the rough edges.</p>
+    <p class="ed-section-desc">Git worktrees (and jj workspaces) are powerful, but managing them manually is painful. workmux automates the rough edges.</p>
     <div class="ed-pain-points-list">
       <div class="ed-pain-point">
         <h3>"You need to reinstall everything"</h3>

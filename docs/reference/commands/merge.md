@@ -35,8 +35,8 @@ If your workflow uses pull requests, the merge happens on the remote after revie
 
 By default, `workmux merge` performs a standard merge commit (configurable via `merge_strategy`). You can override the configured behavior with these mutually exclusive flags:
 
-- `--rebase`: Rebase the feature branch onto the target before merging (creates a linear history via fast-forward merge). If conflicts occur, you'll need to resolve them manually in the worktree and run `git rebase --continue`.
-- `--squash`: Squash all commits from the feature branch into a single commit on the target. You'll be prompted to provide a commit message in your editor.
+- `--rebase`: Rebase the feature branch onto the target before merging (creates a linear history via fast-forward merge). If conflicts occur, you'll need to resolve them manually in the worktree and run `git rebase --continue`. For jj repos, this uses `jj rebase`.
+- `--squash`: Squash all commits from the feature branch into a single commit on the target. You'll be prompted to provide a commit message in your editor. For jj repos, this uses `jj squash`.
 
 If you don't want to have merge commits in your main branch, use the `rebase` merge strategy, which does `--rebase` by default.
 

@@ -117,7 +117,7 @@ export default defineConfig({
           { text: "Session mode", link: "/guide/session-mode" },
           { text: "direnv", link: "/guide/direnv" },
           { text: "Monorepos", link: "/guide/monorepos" },
-          { text: "Git worktree caveats", link: "/guide/git-worktree-caveats" },
+          { text: "Worktree caveats", link: "/guide/git-worktree-caveats" },
           { text: "Nix", link: "/guide/nix" },
         ],
       },

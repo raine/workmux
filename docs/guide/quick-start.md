@@ -32,7 +32,7 @@ workmux add new-feature
 
 This will:
 
-- Create a git worktree at `<project_root>/../<project_name>__worktrees/new-feature`
+- Create a worktree (git) or workspace (jj) at `<project_root>/../<project_name>__worktrees/new-feature`
 - Copy config files and symlink dependencies (if [configured](/guide/configuration#file-operations))
 - Run any [`post_create`](/guide/configuration#lifecycle-hooks) setup commands
 - Create a tmux window named `wm-new-feature` (the prefix is configurable)

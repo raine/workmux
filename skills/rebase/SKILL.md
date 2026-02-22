@@ -11,6 +11,13 @@ Rebase the current branch.
 
 Arguments: $ARGUMENTS
 
+## Step 0: Detect VCS
+
+If `.jj/` exists at or above the current directory → use jj commands:
+- `jj git fetch` instead of `git fetch`
+- `jj rebase -d <target>` instead of `git rebase`
+- For conflicts: `jj resolve` instead of manual conflict resolution + `git rebase --continue`
+
 Behavior:
 
 - No arguments: rebase on local main

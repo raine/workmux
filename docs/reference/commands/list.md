@@ -1,10 +1,10 @@
 ---
-description: List all git worktrees with their agent, window, and merge status
+description: List all worktrees with their agent, window, and merge status
 ---
 
 # list
 
-Lists all git worktrees with their agent status, multiplexer window status, and merge status. Alias: `ls`
+Lists all worktrees with their agent status, multiplexer window status, and merge status. Alias: `ls`
 
 ```bash
 workmux list [options] [worktree-or-branch...]
