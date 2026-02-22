@@ -794,24 +794,59 @@ impl Vcs for JjVcs {
 
     // ── Merge operations ─────────────────────────────────────────────
 
-    fn commit_with_editor(&self, _worktree: &Path) -> Result<()> {
-        Err(jj_todo("commit_with_editor"))
+    fn commit_with_editor(&self, worktree: &Path) -> Result<()> {
+        // `jj commit` creates a new change on top of the current one,
+        // prompting for a description via the editor.
+        let status = std::process::Command::new("jj")
+            .arg("commit")
+            .current_dir(worktree)
+            .status()
+            .context("Failed to run jj commit")?;
+
+        if !status.success() {
+            return Err(anyhow!("Commit was aborted or failed"));
+        }
+
+        Ok(())
     }
 
-    fn merge_in_workspace(&self, _worktree: &Path, _branch: &str) -> Result<()> {
-        Err(jj_todo("merge_in_workspace"))
+    fn merge_in_workspace(&self, worktree: &Path, branch: &str) -> Result<()> {
+        // In jj, merge creates a new change with multiple parents:
+        // `jj new @ <branch>` creates a merge commit
+        jj_cmd(Some(worktree))
+            .args(&["new", "@", branch])
+            .run()
+            .context("Failed to create merge commit")?;
+        Ok(())
     }
 
-    fn rebase_onto_base(&self, _worktree: &Path, _base: &str) -> Result<()> {
-        Err(jj_todo("rebase_onto_base"))
+    fn rebase_onto_base(&self, worktree: &Path, base: &str) -> Result<()> {
+        // `jj rebase -s @ -d <base>` rebases the current change onto base
+        jj_cmd(Some(worktree))
+            .args(&["rebase", "-s", "@", "-d", base])
+            .run()
+            .with_context(|| format!("Failed to rebase onto '{}'", base))?;
+        Ok(())
     }
 
-    fn merge_squash(&self, _worktree: &Path, _branch: &str) -> Result<()> {
-        Err(jj_todo("merge_squash"))
+    fn merge_squash(&self, worktree: &Path, branch: &str) -> Result<()> {
+        // In jj, squash merges the content from source into the current change.
+        // First rebase the branch onto @, then squash.
+        // Alternative: `jj squash --from <branch> --into @`
+        jj_cmd(Some(worktree))
+            .args(&["squash", "--from", branch, "--into", "@"])
+            .run()
+            .context("Failed to perform squash merge")?;
+        Ok(())
     }
 
-    fn switch_branch(&self, _worktree: &Path, _branch: &str) -> Result<()> {
-        Err(jj_todo("switch_branch"))
+    fn switch_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
+        // `jj edit <bookmark>` switches the working copy to the bookmark's change
+        jj_cmd(Some(worktree))
+            .args(&["edit", branch])
+            .run()
+            .with_context(|| format!("Failed to edit bookmark '{}'", branch))?;
+        Ok(())
     }
 
     fn stash_push(&self, _msg: &str, _untracked: bool, _patch: bool) -> Result<()> {
@@ -824,12 +859,22 @@ impl Vcs for JjVcs {
         Ok(())
     }
 
-    fn reset_hard(&self, _worktree: &Path) -> Result<()> {
-        Err(jj_todo("reset_hard"))
+    fn reset_hard(&self, worktree: &Path) -> Result<()> {
+        // `jj restore` restores the working copy to match the parent change
+        jj_cmd(Some(worktree))
+            .args(&["restore"])
+            .run()
+            .context("Failed to restore working copy")?;
+        Ok(())
     }
 
-    fn abort_merge(&self, _worktree: &Path) -> Result<()> {
-        Err(jj_todo("abort_merge"))
+    fn abort_merge(&self, worktree: &Path) -> Result<()> {
+        // `jj undo` undoes the last operation (e.g., a merge)
+        jj_cmd(Some(worktree))
+            .args(&["undo"])
+            .run()
+            .context("Failed to undo operation")?;
+        Ok(())
     }
 
     // ── Remotes ──────────────────────────────────────────────────────
