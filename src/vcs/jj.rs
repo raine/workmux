@@ -70,6 +70,49 @@ fn parse_workspace_list(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse repository owner from a git remote URL.
+/// Supports both HTTPS and SSH formats.
+fn parse_owner_from_url(url: &str) -> Option<&str> {
+    if let Some(https_part) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        https_part.split('/').nth(1)
+    } else if url.starts_with("git@") {
+        url.split(':')
+            .nth(1)
+            .and_then(|path| path.split('/').next())
+    } else {
+        None
+    }
+}
+
+/// Construct a fork URL by replacing the owner in an origin URL.
+fn construct_fork_url(origin_url: &str, fork_owner: &str) -> Result<String> {
+    use git_url_parse::GitUrl;
+    use git_url_parse::types::provider::GenericProvider;
+
+    let parsed_url = GitUrl::parse(origin_url).with_context(|| {
+        format!("Failed to parse origin URL for fork remote: {}", origin_url)
+    })?;
+
+    let host = parsed_url.host().unwrap_or("github.com");
+    let scheme = parsed_url.scheme().unwrap_or("ssh");
+
+    let provider: GenericProvider = parsed_url
+        .provider_info()
+        .context("Failed to extract provider info from origin URL")?;
+    let repo_name = provider.repo();
+
+    let fork_url = match scheme {
+        "https" => format!("https://{}/{}/{}.git", host, fork_owner, repo_name),
+        "http" => format!("http://{}/{}/{}.git", host, fork_owner, repo_name),
+        _ => format!("git@{}:{}/{}.git", host, fork_owner, repo_name),
+    };
+
+    Ok(fork_url)
+}
+
 /// Read metadata directly from .jj/repo/config.toml (for batch operations).
 /// Returns the raw content of the config file, or empty string if not found.
 fn read_jj_repo_config(repo_root: &Path) -> String {
@@ -880,39 +923,105 @@ impl Vcs for JjVcs {
     // ── Remotes ──────────────────────────────────────────────────────
 
     fn list_remotes(&self) -> Result<Vec<String>> {
-        Err(jj_todo("list_remotes"))
+        let output = jj_cmd(None)
+            .args(&["git", "remote", "list"])
+            .run_and_capture_stdout()
+            .context("Failed to list jj git remotes")?;
+
+        Ok(output
+            .lines()
+            .filter_map(|line| {
+                // Format: "<name> <url>"
+                line.split_whitespace().next().map(String::from)
+            })
+            .collect())
     }
 
-    fn remote_exists(&self, _name: &str) -> Result<bool> {
-        Err(jj_todo("remote_exists"))
+    fn remote_exists(&self, name: &str) -> Result<bool> {
+        Ok(self.list_remotes()?.iter().any(|n| n == name))
     }
 
-    fn fetch_remote(&self, _remote: &str) -> Result<()> {
-        Err(jj_todo("fetch_remote"))
+    fn fetch_remote(&self, remote: &str) -> Result<()> {
+        jj_cmd(None)
+            .args(&["git", "fetch", "--remote", remote])
+            .run()
+            .with_context(|| format!("Failed to fetch from remote '{}'", remote))?;
+        Ok(())
     }
 
     fn fetch_prune(&self) -> Result<()> {
-        Err(jj_todo("fetch_prune"))
+        // jj git fetch auto-prunes deleted remote branches
+        jj_cmd(None)
+            .args(&["git", "fetch"])
+            .run()
+            .context("Failed to fetch")?;
+        Ok(())
     }
 
-    fn add_remote(&self, _name: &str, _url: &str) -> Result<()> {
-        Err(jj_todo("add_remote"))
+    fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        jj_cmd(None)
+            .args(&["git", "remote", "add", name, url])
+            .run()
+            .with_context(|| format!("Failed to add remote '{}' with URL '{}'", name, url))?;
+        Ok(())
     }
 
-    fn set_remote_url(&self, _name: &str, _url: &str) -> Result<()> {
-        Err(jj_todo("set_remote_url"))
+    fn set_remote_url(&self, name: &str, url: &str) -> Result<()> {
+        // jj doesn't have a direct "set-url" - remove and re-add
+        let _ = jj_cmd(None)
+            .args(&["git", "remote", "remove", name])
+            .run();
+        self.add_remote(name, url)
     }
 
-    fn get_remote_url(&self, _remote: &str) -> Result<String> {
-        Err(jj_todo("get_remote_url"))
+    fn get_remote_url(&self, remote: &str) -> Result<String> {
+        let output = jj_cmd(None)
+            .args(&["git", "remote", "list"])
+            .run_and_capture_stdout()
+            .context("Failed to list remotes")?;
+
+        for line in output.lines() {
+            let mut parts = line.splitn(2, char::is_whitespace);
+            if let (Some(name), Some(url)) = (parts.next(), parts.next()) {
+                if name == remote {
+                    return Ok(url.trim().to_string());
+                }
+            }
+        }
+
+        Err(anyhow!("Remote '{}' not found", remote))
     }
 
-    fn ensure_fork_remote(&self, _owner: &str) -> Result<String> {
-        Err(jj_todo("ensure_fork_remote"))
+    fn ensure_fork_remote(&self, fork_owner: &str) -> Result<String> {
+        // Reuse same logic as git: check if fork owner matches origin owner
+        let current_owner = self.get_repo_owner().unwrap_or_default();
+        if !current_owner.is_empty() && fork_owner == current_owner {
+            return Ok("origin".to_string());
+        }
+
+        let remote_name = format!("fork-{}", fork_owner);
+        let origin_url = self.get_remote_url("origin")?;
+
+        // Construct fork URL based on origin URL format
+        let fork_url = construct_fork_url(&origin_url, fork_owner)?;
+
+        if self.remote_exists(&remote_name)? {
+            let current_url = self.get_remote_url(&remote_name)?;
+            if current_url != fork_url {
+                self.set_remote_url(&remote_name, &fork_url)?;
+            }
+        } else {
+            self.add_remote(&remote_name, &fork_url)?;
+        }
+
+        Ok(remote_name)
     }
 
     fn get_repo_owner(&self) -> Result<String> {
-        Err(jj_todo("get_repo_owner"))
+        let url = self.get_remote_url("origin")?;
+        parse_owner_from_url(&url)
+            .ok_or_else(|| anyhow!("Could not parse repository owner from origin URL: {}", url))
+            .map(|s| s.to_string())
     }
 
     // ── Deferred cleanup ─────────────────────────────────────────────
