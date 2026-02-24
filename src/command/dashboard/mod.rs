@@ -43,11 +43,13 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::git;
 use crate::github;
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::state::StatusPoller;
 
 use self::actions::apply_action;
 use self::app::{App, ViewMode};
@@ -115,6 +117,10 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Start status poller for agents without hooks (e.g., Copilot CLI)
+    // The poller runs in a background thread and updates status via pattern matching
+    let poller = StatusPoller::start(Arc::clone(&mux), Duration::from_secs(3));
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -123,7 +129,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     // Create app state
-    let mut app = App::new(mux)?;
+    let mut app = App::new(Arc::clone(&mux))?;
 
     // CLI preview size overrides config/tmux if provided
     if let Some(size) = cli_preview_size {
@@ -230,6 +236,9 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
             break;
         }
     }
+
+    // Stop the status poller
+    poller.stop();
 
     // Save git status cache before exiting
     git::save_status_cache(&app.git_statuses);

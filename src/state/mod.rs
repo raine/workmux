@@ -3,6 +3,7 @@
 //! This module provides persistent state storage that works across all
 //! terminal multiplexer backends (tmux, WezTerm, Zellij).
 
+pub mod poller;
 pub mod run;
 pub(crate) mod store;
 mod types;
@@ -13,6 +14,7 @@ use tracing::warn;
 
 use crate::multiplexer::{AgentStatus, Multiplexer};
 
+pub use poller::StatusPoller;
 pub use store::StateStore;
 pub use types::{AgentState, PaneKey};
 

@@ -471,6 +471,14 @@ enum Commands {
         run_dir: std::path::PathBuf,
     },
 
+    /// Run status poller for agents without hooks support (e.g., Copilot CLI)
+    #[command(hide = true)]
+    Poll {
+        /// Polling interval in seconds
+        #[arg(long, short = 'i', default_value = "3")]
+        interval: Option<u64>,
+    },
+
     /// Switch to the agent that most recently completed its task
     #[command(hide = true, name = "last-done")]
     LastDone,
@@ -652,6 +660,7 @@ pub fn run() -> Result<()> {
             timeout,
         } => command::run::run(&name, command, background, keep, timeout),
         Commands::Exec { run_dir } => command::exec::run(&run_dir),
+        Commands::Poll { interval } => command::poll::run(interval),
         Commands::Init => crate::config::Config::init(),
         Commands::Setup => command::setup::run(),
         Commands::Docs => command::docs::run(),
