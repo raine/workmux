@@ -290,6 +290,12 @@ pub struct Config {
     #[serde(default)]
     pub status_format: Option<bool>,
 
+    /// Apply subtle background color tinting per window (tmux only).
+    /// Colors are derived from the branch name for consistent identification.
+    /// Default: false
+    #[serde(default)]
+    pub window_colors: Option<bool>,
+
     /// Custom icons for agent status display.
     #[serde(default)]
     pub status_icons: StatusIcons,
@@ -1853,6 +1859,7 @@ impl Config {
             panes,
             windows,
             status_format,
+            window_colors,
             nerdfont,
             auto_update_check,
             prompt_file_only,
@@ -2274,6 +2281,11 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Auto-apply agent status icons to tmux window format.
 # Default: true
 # status_format: true
+
+# Apply subtle background color tinting per window (tmux only).
+# Colors are derived from the branch name for consistent identification.
+# Default: false
+# window_colors: true
 
 # Custom icons for agent status display.
 # status_icons:

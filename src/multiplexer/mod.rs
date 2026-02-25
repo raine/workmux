@@ -159,6 +159,13 @@ pub trait Multiplexer: Send + Sync {
     /// Wait until the specified session is closed
     fn wait_until_session_closed(&self, full_session_name: &str) -> Result<()>;
 
+    /// Apply a background color tint to a window based on a name hash.
+    /// Colors are derived from the name for consistent identification.
+    /// Only supported by tmux backend. Other backends silently ignore this.
+    fn apply_window_color(&self, _pane_id: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
     // === Pane Management ===
 
     /// Select (focus) a pane by ID

@@ -372,6 +372,10 @@ enum Commands {
         #[arg(long, short = 'n', conflicts_with = "session")]
         new: bool,
 
+        /// Apply per-window color tinting (tmux only)
+        #[arg(long)]
+        colors: bool,
+
         /// Open in session mode (overrides stored mode for this worktree)
         #[arg(short = 's', long)]
         session: bool,
@@ -887,6 +891,7 @@ pub fn run() -> Result<()> {
             run_hooks,
             force_files,
             new,
+            colors,
             session,
             continue_session,
             prompt,
@@ -895,6 +900,7 @@ pub fn run() -> Result<()> {
             run_hooks,
             force_files,
             new,
+            colors,
             session,
             continue_session,
             prompt,

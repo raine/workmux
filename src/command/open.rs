@@ -11,6 +11,7 @@ pub fn run(
     run_hooks: bool,
     force_files: bool,
     new_window: bool,
+    colors: bool,
     session: bool,
     continue_session: bool,
     prompt_args: PromptArgs,
@@ -34,7 +35,10 @@ pub fn run(
         bail!("Prompt arguments (-p, -P, -e) cannot be used when opening multiple worktrees");
     }
 
-    let (config, config_location) = config::Config::load_with_location(None)?;
+    let (mut config, config_location) = config::Config::load_with_location(None)?;
+    if colors {
+        config.window_colors = Some(true);
+    }
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
 

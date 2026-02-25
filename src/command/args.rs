@@ -58,6 +58,10 @@ pub struct SetupFlags {
     /// Enable sandbox mode even when disabled in config
     #[arg(short = 'S', long)]
     pub sandbox: bool,
+
+    /// Apply per-window color tinting (tmux only)
+    #[arg(long)]
+    pub colors: bool,
 }
 
 #[derive(clap::Args, Debug)]
