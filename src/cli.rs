@@ -712,16 +712,55 @@ fn generate_completions(shell: Shell) {
     let mut buf = Vec::new();
     generate(shell, &mut cmd, &name, &mut buf);
     let base_script = String::from_utf8_lossy(&buf);
-    print!("{base_script}");
 
     // Append dynamic branch completion for each shell
     // Note: PowerShell and Elvish are not supported because clap_complete generates
     // anonymous completers that can't be wrapped without breaking standard completions.
     match shell {
-        Shell::Zsh => print_zsh_dynamic_completion(),
-        Shell::Bash => print_bash_dynamic_completion(),
-        Shell::Fish => print_fish_dynamic_completion(),
-        _ => {}
+        Shell::Zsh => {
+            let base = prepare_zsh_base(&base_script, &name);
+            print!("{base}\n");
+            print_zsh_dynamic_completion();
+        }
+        _ => {
+            print!("{base_script}");
+            match shell {
+                Shell::Bash => print_bash_dynamic_completion(),
+                Shell::Fish => print_fish_dynamic_completion(),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Rename the clap-generated zsh completion function so the dynamic wrapper
+/// (in `zsh_dynamic.zsh`) can take the primary `_workmux` name.
+///
+/// The dynamic wrapper needs to BE `_workmux` — the function zsh autoloads
+/// from fpath. It delegates flag completion to `_workmux_base` (the renamed
+/// clap output) and handles positional args with dynamic helpers.
+///
+/// The `replace("_{name}", "_{name}_base")` is precise: `_{name}` (with the
+/// leading underscore) only appears as zsh function identifiers in clap's
+/// output. Bare `{name}` in `#compdef`, `_describe` strings, `curcontext`,
+/// and state names is unaffected.
+fn prepare_zsh_base(script: &str, name: &str) -> String {
+    let fn_prefix = format!("_{name}");
+    let base_fn_prefix = format!("_{name}_base");
+
+    let script = script.replace(&fn_prefix, &base_fn_prefix);
+
+    // Strip the autoload/eval detection block clap appends at the end.
+    // After renaming it registers _workmux_base, which conflicts with our
+    // dynamic wrapper's own registration.
+    let funcstack_block = format!(
+        "\nif [ \"$funcstack[1]\" = \"{base_fn_prefix}\" ]; then\n    \
+         {base_fn_prefix} \"$@\"\nelse\n    \
+         compdef {base_fn_prefix} {name}\nfi\n"
+    );
+    match script.strip_suffix(&funcstack_block) {
+        Some(stripped) => stripped.to_string(),
+        None => script,
     }
 }
 
@@ -735,4 +774,230 @@ fn print_bash_dynamic_completion() {
 
 fn print_fish_dynamic_completion() {
     print!("{}", include_str!("scripts/completions/fish_dynamic.fish"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_zsh_base_renames_function_identifiers() {
+        let input = concat!(
+            "#compdef workmux\n",
+            "_workmux() {\n",
+            "  \":: :_workmux_commands\"\n",
+            "}\n",
+            "(( $+functions[_workmux_commands] )) ||\n",
+            "_workmux_commands() {\n",
+            "  _describe -t commands 'workmux commands' commands\n",
+            "}\n",
+            "\nif [ \"$funcstack[1]\" = \"_workmux\" ]; then\n",
+            "    _workmux \"$@\"\n",
+            "else\n",
+            "    compdef _workmux workmux\n",
+            "fi\n",
+        );
+        let result = prepare_zsh_base(input, "workmux");
+
+        // Function identifiers are renamed
+        assert!(result.contains("_workmux_base()"));
+        assert!(result.contains("_workmux_base_commands"));
+        assert!(!result.contains("_workmux()"));
+
+        // Bare "workmux" in #compdef and _describe strings is preserved
+        assert!(result.contains("#compdef workmux"));
+        assert!(result.contains("'workmux commands'"));
+
+        // funcstack block is stripped
+        assert!(!result.contains("funcstack"));
+        assert!(!result.contains("compdef _workmux_base"));
+    }
+
+    #[test]
+    fn prepare_zsh_base_preserves_state_and_curcontext() {
+        let input = concat!(
+            "#compdef workmux\n",
+            "_workmux() {\n",
+            "  \"*::: :->workmux\"\n",
+            "  curcontext=\"workmux-command-$line[1]:\"\n",
+            "}\n",
+            "\nif [ \"$funcstack[1]\" = \"_workmux\" ]; then\n",
+            "    _workmux \"$@\"\n",
+            "else\n",
+            "    compdef _workmux workmux\n",
+            "fi\n",
+        );
+        let result = prepare_zsh_base(input, "workmux");
+
+        // State names and curcontext use bare "workmux" (no underscore), unchanged
+        assert!(result.contains("->workmux"));
+        assert!(result.contains("workmux-command-"));
+    }
+
+    #[test]
+    fn prepare_zsh_base_tolerates_missing_funcstack_block() {
+        let input = "_workmux() {\n  echo hello\n}\n";
+        let result = prepare_zsh_base(input, "workmux");
+
+        assert!(result.contains("_workmux_base()"));
+        assert!(!result.contains("_workmux()"));
+    }
+
+    #[test]
+    fn prepare_zsh_base_works_with_real_clap_output() {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        let mut buf = Vec::new();
+        generate(Shell::Zsh, &mut cmd, &name, &mut buf);
+        let base_script = String::from_utf8_lossy(&buf);
+
+        let result = prepare_zsh_base(&base_script, &name);
+
+        // Main function is renamed
+        assert!(result.contains("_workmux_base()"));
+        assert!(!result.contains("\n_workmux()"));
+
+        // Helpers are renamed
+        assert!(result.contains("_workmux_base_commands"));
+
+        // #compdef header preserved
+        assert!(result.starts_with("#compdef workmux\n"));
+
+        // _describe strings preserved
+        assert!(result.contains("'workmux commands'"));
+
+        // funcstack block stripped
+        assert!(!result.contains("funcstack"));
+    }
+
+    /// Helper: produce the full `workmux completions zsh` output
+    /// (base post-processed by prepare_zsh_base + dynamic wrapper).
+    fn generate_full_zsh_completions() -> String {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        let mut buf = Vec::new();
+        generate(Shell::Zsh, &mut cmd, &name, &mut buf);
+        let base_script = String::from_utf8_lossy(&buf);
+        let base = prepare_zsh_base(&base_script, &name);
+        let dynamic = include_str!("scripts/completions/zsh_dynamic.zsh");
+        format!("{base}\n{dynamic}")
+    }
+
+    #[test]
+    fn zsh_full_output_has_no_stale_workmux_functions() {
+        let output = generate_full_zsh_completions();
+
+        // The only _workmux() definition should be the dynamic wrapper.
+        // There must be no clap-generated _workmux() left (it was renamed).
+        let workmux_fn_count = output.matches("\n_workmux()").count();
+        assert_eq!(
+            workmux_fn_count, 1,
+            "Expected exactly one _workmux() definition (the dynamic wrapper)"
+        );
+
+        // The wrapper must call _workmux_base, not itself
+        let wrapper_section: &str = output
+            .split("\n_workmux()")
+            .nth(1)
+            .expect("_workmux() not found");
+        assert!(
+            wrapper_section.contains("_workmux_base"),
+            "Dynamic wrapper must delegate to _workmux_base"
+        );
+    }
+
+    #[test]
+    fn zsh_full_output_no_file_fallback_for_handle_commands() {
+        let output = generate_full_zsh_completions();
+
+        // The dynamic wrapper's case branches for handle commands should
+        // call _workmux_handles, not _workmux_base (which has _default).
+        // Extract the case block from the wrapper.
+        let wrapper_start = output
+            .find("\n_workmux()")
+            .expect("_workmux() not found");
+        let wrapper = &output[wrapper_start..];
+
+        // The handle commands should appear in the case pattern
+        for cmd in ["open", "remove", "close", "merge"] {
+            assert!(
+                wrapper.contains(cmd),
+                "Wrapper should handle {cmd}"
+            );
+        }
+        assert!(
+            wrapper.contains("_workmux_handles"),
+            "Wrapper should call _workmux_handles for handle commands"
+        );
+        assert!(
+            wrapper.contains("_workmux_git_branches"),
+            "Wrapper should call _workmux_git_branches for add"
+        );
+    }
+
+    #[test]
+    fn zsh_full_output_autoload_and_eval_compatible() {
+        let output = generate_full_zsh_completions();
+
+        // Must start with #compdef for fpath autoloading
+        assert!(
+            output.starts_with("#compdef workmux\n"),
+            "Must start with #compdef for fpath autoloading"
+        );
+
+        // Must have funcstack detection for autoload/eval compatibility
+        assert!(
+            output.contains(r#""$funcstack[1]" = "_workmux""#),
+            "Must have funcstack check for autoload detection"
+        );
+
+        // Must have compdef registration for eval case
+        assert!(
+            output.contains("compdef _workmux workmux"),
+            "Must register _workmux via compdef for eval case"
+        );
+
+        // Must NOT have compdef for _workmux_base (that was stripped)
+        assert!(
+            !output.contains("compdef _workmux_base"),
+            "Must not register _workmux_base directly"
+        );
+    }
+
+    #[test]
+    fn bash_output_unaffected_by_zsh_postprocessing() {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        let mut buf = Vec::new();
+        generate(Shell::Bash, &mut cmd, &name, &mut buf);
+        let base_script = String::from_utf8_lossy(&buf);
+        let dynamic = include_str!("scripts/completions/bash_dynamic.bash");
+        let output = format!("{base_script}{dynamic}");
+
+        // Bash uses _workmux directly (no _base rename)
+        assert!(output.contains("_workmux()"));
+        assert!(!output.contains("_workmux_base"));
+
+        // Dynamic wrapper registered
+        assert!(output.contains("complete -F _workmux_dynamic"));
+    }
+
+    #[test]
+    fn fish_output_unaffected_by_zsh_postprocessing() {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        let mut buf = Vec::new();
+        generate(Shell::Fish, &mut cmd, &name, &mut buf);
+        let base_script = String::from_utf8_lossy(&buf);
+        let dynamic = include_str!("scripts/completions/fish_dynamic.fish");
+        let output = format!("{base_script}{dynamic}");
+
+        // Fish uses workmux directly (no _base rename)
+        assert!(output.contains("__fish_workmux"));
+        assert!(!output.contains("workmux_base"));
+
+        // Dynamic completions registered
+        assert!(output.contains("__workmux_handles"));
+        assert!(output.contains("__workmux_git_branches"));
+    }
 }
