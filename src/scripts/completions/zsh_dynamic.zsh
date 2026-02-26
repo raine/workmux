@@ -1,16 +1,19 @@
 # Dynamic worktree handle completion (directory names)
 # Used for open/remove/merge/path/close - these accept handles or branch names
 _workmux_handles() {
-    local handles
+    local -a handles
     handles=("${(@f)$(workmux _complete-handles 2>/dev/null)}")
-    compadd -a handles
+    # "${(@f)...}" on empty output produces a single empty string; filter it out
+    handles=(${handles:#})
+    (( ${#handles} )) && compadd -a handles
 }
 
 # Dynamic git branch completion for add command
 _workmux_git_branches() {
-    local branches
+    local -a branches
     branches=("${(@f)$(workmux _complete-git-branches 2>/dev/null)}")
-    compadd -a branches
+    branches=(${branches:#})
+    (( ${#branches} )) && compadd -a branches
 }
 
 # Main completion function.
