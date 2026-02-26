@@ -76,20 +76,17 @@ _workmux() {
         return
     fi
 
-    # Only handle commands that need dynamic completion
+    # For commands that take handles or branches, offer only those
+    # (no file fallback from _default). Flag completion is handled above.
     case "$cmd" in
         open|remove|rm|path|merge|close|send|capture|status|wait|run)
-            # Offer handles mixed with any remaining flags
-            _workmux_base "$@"
             _workmux_handles
             ;;
         add)
-            # Offer git branches mixed with any remaining flags
-            _workmux_base "$@"
             _workmux_git_branches
             ;;
         *)
-            # For all other commands, use base completions
+            # For all other commands (config, sandbox, etc.), use base completions
             _workmux_base "$@"
             ;;
     esac
