@@ -2,15 +2,15 @@
 
 use ansi_to_tui::IntoText;
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Cell, Paragraph, Row, Table},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table},
+    Frame,
 };
 use std::collections::{BTreeMap, HashSet};
 
-use super::super::app::App;
+use super::super::app::{AddSessionField, App};
 use super::super::spinner::SPINNER_FRAMES;
 use super::format::{format_git_status, format_pr_status};
 
@@ -52,7 +52,23 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
     };
 
     // Footer - show different help based on mode
-    let footer_text = if app.input_mode {
+    let footer_text = if app.add_form.is_some() {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "  CREATE AGENT",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - branch + prompt  "),
+            Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+            Span::raw(" switch  "),
+            Span::styled("[Enter]", Style::default().fg(Color::Green)),
+            Span::raw(" create  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
+            Span::raw(" cancel"),
+        ]))
+    } else if app.input_mode {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "  INPUT MODE",
@@ -68,6 +84,8 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
         let mut spans = vec![
             Span::styled("  [i]", Style::default().fg(Color::Green)),
             Span::raw(" input  "),
+            Span::styled("[a]", Style::default().fg(Color::Green)),
+            Span::raw(" add  "),
             Span::styled("[d]", Style::default().fg(Color::Yellow)),
             Span::raw(" diff  "),
             Span::styled("[1-9]", Style::default().fg(Color::Yellow)),
@@ -115,6 +133,121 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
         Paragraph::new(Line::from(spans))
     };
     f.render_widget(footer_text, chunks[footer_index]);
+
+    if app.add_form.is_some() {
+        render_add_form(f, app);
+    }
+}
+
+fn render_add_form(f: &mut Frame, app: &App) {
+    let Some(form) = app.add_form.as_ref() else {
+        return;
+    };
+
+    let area = f.area();
+    let width = area.width.min(90).saturating_sub(4).max(40);
+    let height = 11;
+    let popup = Rect {
+        x: area.width.saturating_sub(width) / 2,
+        y: area.height.saturating_sub(height) / 2,
+        width,
+        height: height.min(area.height),
+    };
+
+    let palette = &app.palette;
+
+    let branch_style = if form.active_field == AddSessionField::Branch {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(palette.text)
+    };
+
+    let prompt_style = if form.active_field == AddSessionField::Prompt {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(palette.text)
+    };
+
+    let branch_text = if form.branch.is_empty() {
+        Span::styled("feature/name", Style::default().fg(palette.dimmed))
+    } else {
+        Span::styled(form.branch.as_str(), branch_style)
+    };
+
+    let prompt_text = if form.prompt.is_empty() {
+        Span::styled(
+            "What should this agent do?",
+            Style::default().fg(palette.dimmed),
+        )
+    } else {
+        Span::styled(form.prompt.as_str(), prompt_style)
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                " Branch ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            branch_text,
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " Prompt ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            prompt_text,
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Tip: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Prompt is optional; leave blank to start without one.",
+                Style::default().fg(palette.dimmed),
+            ),
+        ]),
+    ];
+
+    if let Some(err) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            err,
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(palette.help_border))
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                "Create Agent",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .title_bottom(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::styled(" switch field · ", Style::default().fg(palette.help_muted)),
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::styled(" create · ", Style::default().fg(palette.help_muted)),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled(" cancel ", Style::default().fg(palette.help_muted)),
+        ]));
+
+    let panel = Paragraph::new(lines).block(block);
+
+    f.render_widget(Clear, popup);
+    f.render_widget(panel, popup);
 }
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {

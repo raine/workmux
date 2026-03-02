@@ -1,21 +1,23 @@
 //! Help overlay rendering.
 
 use ratatui::{
-    Frame,
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Cell, Clear, Row, Table},
+    Frame,
 };
 
 use super::super::app::{App, ViewMode};
-use super::super::keymap::{Context, help_rows};
+use super::super::keymap::{help_rows, Context};
 
 /// Determine the current keymap context for help display.
 fn get_help_context(app: &App) -> Context {
     match &app.view_mode {
         ViewMode::Dashboard => {
-            if app.input_mode {
+            if app.add_form.is_some() {
+                Context::DashboardAdd
+            } else if app.input_mode {
                 Context::DashboardInput
             } else {
                 Context::DashboardNormal
@@ -40,6 +42,7 @@ fn context_title(ctx: Context) -> &'static str {
     match ctx {
         Context::DashboardNormal => "Dashboard",
         Context::DashboardInput => "Input Mode",
+        Context::DashboardAdd => "Create Agent",
         Context::DiffNormal => "Diff View",
         Context::Patch => "Patch Mode",
         Context::Comment => "Comment",

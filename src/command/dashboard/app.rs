@@ -13,7 +13,9 @@ use crate::config::Config;
 use crate::git::{self, GitStatus};
 use crate::github::PrSummary;
 use crate::multiplexer::{AgentPane, AgentStatus, Multiplexer};
+use crate::prompt::Prompt;
 use crate::state::StateStore;
+use crate::workflow;
 
 use super::ui::theme::ThemePalette;
 
@@ -39,6 +41,52 @@ pub enum ViewMode {
     Diff(Box<DiffView>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddSessionField {
+    #[default]
+    Branch,
+    Prompt,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AddSessionForm {
+    pub branch: String,
+    pub prompt: String,
+    pub active_field: AddSessionField,
+    pub error: Option<String>,
+}
+
+impl AddSessionForm {
+    fn active_value_mut(&mut self) -> &mut String {
+        match self.active_field {
+            AddSessionField::Branch => &mut self.branch,
+            AddSessionField::Prompt => &mut self.prompt,
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        self.active_field = match self.active_field {
+            AddSessionField::Branch => AddSessionField::Prompt,
+            AddSessionField::Prompt => AddSessionField::Branch,
+        };
+        self.error = None;
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.active_value_mut().push(c);
+        self.error = None;
+    }
+
+    pub fn pop_char(&mut self) {
+        self.active_value_mut().pop();
+        self.error = None;
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.branch.trim().is_empty()
+    }
+}
+
 /// App state for the TUI
 pub struct App {
     /// The multiplexer backend
@@ -62,6 +110,8 @@ pub struct App {
     preview_pane_id: Option<String>,
     /// Input mode: keystrokes are sent directly to the selected agent's pane
     pub input_mode: bool,
+    /// Add mode: popup form for creating a new workmux agent
+    pub add_form: Option<AddSessionForm>,
     /// Manual scroll offset for the preview (None = auto-scroll to bottom)
     pub preview_scroll: Option<u16>,
     /// Number of lines in the current preview content
@@ -144,6 +194,7 @@ impl App {
             preview: None,
             preview_pane_id: None,
             input_mode: false,
+            add_form: None,
             preview_scroll: None,
             preview_line_count: 0,
             preview_height: 0,
@@ -651,6 +702,98 @@ impl App {
         }
     }
 
+    /// Enter add mode to create a new agent from the dashboard.
+    pub fn enter_add_mode(&mut self) {
+        self.input_mode = false;
+        self.add_form = Some(AddSessionForm::default());
+    }
+
+    /// Exit add mode and discard the form.
+    pub fn cancel_add_mode(&mut self) {
+        self.add_form = None;
+    }
+
+    /// Toggle active field in the add-session form.
+    pub fn toggle_add_form_field(&mut self) {
+        if let Some(form) = self.add_form.as_mut() {
+            form.toggle_field();
+        }
+    }
+
+    /// Append a character to the active add-session form field.
+    pub fn append_add_form_char(&mut self, c: char) {
+        if let Some(form) = self.add_form.as_mut() {
+            form.push_char(c);
+        }
+    }
+
+    /// Delete the last character from the active add-session form field.
+    pub fn delete_add_form_char(&mut self) {
+        if let Some(form) = self.add_form.as_mut() {
+            form.pop_char();
+        }
+    }
+
+    /// Submit the add-session form and create a new worktree agent.
+    pub fn submit_add_session(&mut self) {
+        let Some(form) = self.add_form.as_ref() else {
+            return;
+        };
+
+        if !form.is_valid() {
+            if let Some(active) = self.add_form.as_mut() {
+                active.error = Some("Branch name is required".to_string());
+            }
+            return;
+        }
+
+        let branch = form.branch.trim().to_string();
+        let prompt_text = form.prompt.trim().to_string();
+
+        let prompt = if prompt_text.is_empty() {
+            None
+        } else {
+            Some(Prompt::Inline(prompt_text))
+        };
+
+        match self.create_agent_from_form(&branch, prompt.as_ref()) {
+            Ok(()) => {
+                self.add_form = None;
+                self.refresh();
+            }
+            Err(err) => {
+                if let Some(active) = self.add_form.as_mut() {
+                    active.error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    fn create_agent_from_form(&self, branch: &str, prompt: Option<&Prompt>) -> Result<()> {
+        let (config, config_location) = Config::load_with_location(None)?;
+        let mut options = workflow::SetupOptions::new(true, true, true);
+        options.focus_window = false;
+        options.mode = config.mode();
+
+        let handle = crate::naming::derive_handle(branch, None, &config)?;
+        let context = workflow::WorkflowContext::new(config, self.mux.clone(), config_location)?;
+
+        workflow::create(
+            &context,
+            workflow::CreateArgs {
+                branch_name: branch,
+                handle: &handle,
+                base_branch: None,
+                remote_branch: None,
+                prompt,
+                options,
+                agent: None,
+            },
+        )?;
+
+        Ok(())
+    }
+
     /// Scroll preview up (toward older content). Returns the amount to scroll by.
     pub fn scroll_preview_up(&mut self, visible_height: u16, total_lines: u16) {
         let max_scroll = total_lines.saturating_sub(visible_height);
@@ -766,5 +909,48 @@ impl App {
     /// Get PR statuses for caching
     pub fn pr_statuses(&self) -> &HashMap<PathBuf, HashMap<String, PrSummary>> {
         &self.pr_statuses
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AddSessionField, AddSessionForm};
+
+    #[test]
+    fn add_form_switches_fields() {
+        let mut form = AddSessionForm::default();
+        assert_eq!(form.active_field, AddSessionField::Branch);
+
+        form.toggle_field();
+        assert_eq!(form.active_field, AddSessionField::Prompt);
+
+        form.toggle_field();
+        assert_eq!(form.active_field, AddSessionField::Branch);
+    }
+
+    #[test]
+    fn add_form_edits_active_field() {
+        let mut form = AddSessionForm::default();
+
+        form.push_char('f');
+        form.push_char('e');
+        form.push_char('a');
+        form.push_char('t');
+
+        form.toggle_field();
+        form.push_char('h');
+        form.push_char('i');
+
+        assert_eq!(form.branch, "feat");
+        assert_eq!(form.prompt, "hi");
+    }
+
+    #[test]
+    fn add_form_requires_non_empty_branch() {
+        let mut form = AddSessionForm::default();
+        assert!(!form.is_valid());
+
+        form.branch = "new-thing".to_string();
+        assert!(form.is_valid());
     }
 }

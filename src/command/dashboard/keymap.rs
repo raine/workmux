@@ -9,6 +9,7 @@ use super::actions::Action;
 pub enum Context {
     DashboardNormal,
     DashboardInput,
+    DashboardAdd,
     DiffNormal,
     Patch,
     Comment,
@@ -19,6 +20,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     match ctx {
         Context::DashboardNormal => dashboard_normal_key(key),
         Context::DashboardInput => dashboard_input_key(key),
+        Context::DashboardAdd => dashboard_add_key(key),
         Context::DiffNormal => diff_normal_key(key),
         Context::Patch => patch_key(key),
         Context::Comment => comment_key(key),
@@ -42,6 +44,7 @@ fn dashboard_normal_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('s') => Some(Action::CycleSortMode),
         KeyCode::Char('f') => Some(Action::ToggleStaleFilter),
         KeyCode::Char('i') => Some(Action::EnterInputMode),
+        KeyCode::Char('a') => Some(Action::EnterAddMode),
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Action::ScrollPreviewUp)
         }
@@ -54,6 +57,18 @@ fn dashboard_normal_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c') => Some(Action::SendCommitDashboard),
         KeyCode::Char('m') => Some(Action::TriggerMergeDashboard),
         KeyCode::Char(c @ '1'..='9') => Some(Action::JumpToIndex((c as u8 - b'1') as usize)),
+        _ => None,
+    }
+}
+
+fn dashboard_add_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        KeyCode::Esc => Some(Action::CancelAddMode),
+        KeyCode::Enter => Some(Action::SubmitAddSession),
+        KeyCode::Tab | KeyCode::Up | KeyCode::Down => Some(Action::ToggleAddFormField),
+        KeyCode::Backspace => Some(Action::DeleteAddChar),
+        KeyCode::Char(c) => Some(Action::AppendAddChar(c)),
         _ => None,
     }
 }
@@ -143,6 +158,7 @@ pub fn help_rows(ctx: Context) -> Vec<(&'static str, &'static str)> {
             ("s", "Cycle sort mode"),
             ("f", "Toggle stale filter"),
             ("i", "Enter input mode"),
+            ("a", "Create agent"),
             ("Ctrl+u/d", "Scroll preview"),
             ("+/-", "Resize preview"),
             ("d", "View diff"),
@@ -151,6 +167,13 @@ pub fn help_rows(ctx: Context) -> Vec<(&'static str, &'static str)> {
             ("1-9", "Quick jump"),
         ],
         Context::DashboardInput => vec![("Esc", "Exit input mode"), ("<keys>", "Send to agent")],
+        Context::DashboardAdd => vec![
+            ("Tab", "Switch field"),
+            ("<type>", "Edit field"),
+            ("Enter", "Create agent"),
+            ("Esc", "Cancel"),
+            ("Ctrl+c", "Quit"),
+        ],
         Context::DiffNormal => vec![
             ("?", "Show help"),
             ("q/Esc", "Close diff"),
@@ -200,6 +223,7 @@ mod tests {
         for ctx in [
             Context::DashboardNormal,
             Context::DashboardInput,
+            Context::DashboardAdd,
             Context::DiffNormal,
             Context::Patch,
             Context::Comment,
@@ -257,6 +281,50 @@ mod tests {
         assert_eq!(
             action_for_key(Context::Patch, y),
             Some(Action::StageAndNext)
+        );
+    }
+
+    #[test]
+    fn test_dashboard_add_mode_keys() {
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, esc),
+            Some(Action::CancelAddMode)
+        );
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, enter),
+            Some(Action::SubmitAddSession)
+        );
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, tab),
+            Some(Action::ToggleAddFormField)
+        );
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, backspace),
+            Some(Action::DeleteAddChar)
+        );
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, a),
+            Some(Action::AppendAddChar('a'))
+        );
+        assert_eq!(
+            action_for_key(Context::DashboardAdd, ctrl_c),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn test_dashboard_normal_add_key() {
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(
+            action_for_key(Context::DashboardNormal, a),
+            Some(Action::EnterAddMode)
         );
     }
 }

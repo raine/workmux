@@ -23,6 +23,12 @@ pub enum Action {
     ToggleStaleFilter,
     EnterInputMode,
     ExitInputMode,
+    EnterAddMode,
+    CancelAddMode,
+    ToggleAddFormField,
+    SubmitAddSession,
+    DeleteAddChar,
+    AppendAddChar(char),
     ScrollPreviewUp,
     ScrollPreviewDown,
     IncreasePreviewSize,
@@ -119,6 +125,30 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
         }
         Action::ExitInputMode => {
             app.input_mode = false;
+            false
+        }
+        Action::EnterAddMode => {
+            app.enter_add_mode();
+            false
+        }
+        Action::CancelAddMode => {
+            app.cancel_add_mode();
+            false
+        }
+        Action::ToggleAddFormField => {
+            app.toggle_add_form_field();
+            false
+        }
+        Action::SubmitAddSession => {
+            app.submit_add_session();
+            false
+        }
+        Action::DeleteAddChar => {
+            app.delete_add_form_char();
+            false
+        }
+        Action::AppendAddChar(c) => {
+            app.append_add_form_char(c);
             false
         }
         Action::ScrollPreviewUp => {

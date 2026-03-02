@@ -60,7 +60,9 @@ use self::ui::ui;
 fn get_context(app: &App) -> Context {
     match &app.view_mode {
         ViewMode::Dashboard => {
-            if app.input_mode {
+            if app.add_form.is_some() {
+                Context::DashboardAdd
+            } else if app.input_mode {
                 Context::DashboardInput
             } else {
                 Context::DashboardNormal
