@@ -92,8 +92,12 @@ run *ARGS:
     cargo run -- "$@"
 
 # Start dashboard with subsecond hot-reload dev server
-dev-tui *ARGS:
+dev *ARGS:
     scripts/devmux "$@"
+
+# Backward-compatible alias for dev hot-reload workflow
+dev-tui *ARGS:
+    @just dev "$@"
 
 # Start a dashboard sidecar connected to local dev hotpatch server
 dev-dashboard *ARGS:

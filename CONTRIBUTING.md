@@ -38,7 +38,7 @@ workmux dev tui
 workmux dev dashboard
 
 # Or use the wrapper recipe for `workmux dev tui`
-just dev-tui
+just dev
 ```
 
 ## Running tests

@@ -14,8 +14,10 @@ pub fn run_tui(dashboard_args: &[String]) -> Result<()> {
     build_dev_binary(project_root)?;
     install_live_binary_symlink(project_root)?;
 
+    let (devserver_ip, devserver_port) = devserver_endpoint();
+
     let mut cmd = std::process::Command::new("dx");
-    cmd.args(dx_tui_args());
+    cmd.args(dx_tui_args(&devserver_ip, &devserver_port));
     cmd.arg(format!("--args={}", app_args_for_dashboard(dashboard_args)));
     cmd.current_dir(project_root);
 
@@ -70,15 +72,19 @@ fn ensure_dx_installed() -> Result<()> {
     }
 }
 
-fn dx_tui_args() -> Vec<&'static str> {
+fn dx_tui_args(devserver_ip: &str, devserver_port: &str) -> Vec<String> {
     vec![
-        "serve",
-        "--hot-patch",
-        "--desktop",
-        "--bin",
-        "workmux",
-        "--features",
-        "dev-hotpatch",
+        "serve".to_string(),
+        "--hot-patch".to_string(),
+        "--desktop".to_string(),
+        "--addr".to_string(),
+        devserver_ip.to_string(),
+        "--port".to_string(),
+        devserver_port.to_string(),
+        "--bin".to_string(),
+        "workmux".to_string(),
+        "--features".to_string(),
+        "dev-hotpatch".to_string(),
     ]
 }
 
@@ -251,9 +257,18 @@ mod tests {
 
     #[test]
     fn dx_tui_args_enable_hot_patch() {
-        let args = dx_tui_args();
-        assert!(args.contains(&"--hot-patch"));
-        assert!(args.contains(&"--features"));
+        let args = dx_tui_args("127.0.0.1", "8080");
+        assert!(args.iter().any(|a| a == "--hot-patch"));
+        assert!(args.iter().any(|a| a == "--features"));
+    }
+
+    #[test]
+    fn dx_tui_args_sets_devserver_endpoint() {
+        let args = dx_tui_args("127.0.0.1", "8080");
+        assert!(args.iter().any(|a| a == "--addr"));
+        assert!(args.iter().any(|a| a == "127.0.0.1"));
+        assert!(args.iter().any(|a| a == "--port"));
+        assert!(args.iter().any(|a| a == "8080"));
     }
 
     #[test]
