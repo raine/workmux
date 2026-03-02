@@ -179,8 +179,12 @@ enum Commands {
     Add {
         /// Name of the branch (creates if it doesn't exist) or remote ref (e.g., origin/feature).
         /// When used with --pr, this becomes the custom local branch name.
-        #[arg(required_unless_present_any = ["pr", "auto_name"], value_parser = GitBranchParser::new())]
-        branch_name: Option<String>,
+        #[arg(
+            required_unless_present_any = ["pr", "auto_name"],
+            value_parser = GitBranchParser::new(),
+            num_args = 1..
+        )]
+        branch_name: Vec<String>,
 
         /// Pull request number to checkout
         #[arg(long, conflicts_with_all = ["base", "auto_name"])]
@@ -604,19 +608,22 @@ pub fn run() -> Result<()> {
             multi,
             wait,
             session,
-        } => command::add::run(
-            branch_name.as_deref(),
-            pr,
-            auto_name,
-            base.as_deref(),
-            name,
-            prompt,
-            setup,
-            rescue,
-            multi,
-            wait,
-            session,
-        ),
+        } => {
+            let branch_name = normalize_branch_name_input(&branch_name);
+            command::add::run(
+                branch_name.as_deref(),
+                pr,
+                auto_name,
+                base.as_deref(),
+                name,
+                prompt,
+                setup,
+                rescue,
+                multi,
+                wait,
+                session,
+            )
+        }
         Commands::Open {
             name,
             run_hooks,
@@ -766,4 +773,52 @@ fn print_bash_dynamic_completion() {
 
 fn print_fish_dynamic_completion() {
     print!("{}", include_str!("scripts/completions/fish_dynamic.fish"));
+}
+
+fn normalize_branch_name_input(parts: &[String]) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+
+    let raw = if parts.len() == 1 {
+        parts[0].clone()
+    } else {
+        parts.join(" ")
+    };
+
+    if raw.chars().any(char::is_whitespace) {
+        return Some(slug::slugify(&raw));
+    }
+
+    Some(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_accepts_unquoted_multi_word_branch_name() {
+        let parsed = Cli::try_parse_from([
+            "workmux", "add", "this", "branch", "name", "--background",
+        ]);
+
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn normalize_branch_name_slugifies_multi_word_input() {
+        let normalized = normalize_branch_name_input(&[
+            "this".to_string(),
+            "branch".to_string(),
+            "name".to_string(),
+        ]);
+        assert_eq!(normalized.as_deref(), Some("this-branch-name"));
+    }
+
+    #[test]
+    fn normalize_branch_name_preserves_single_token_refs() {
+        let normalized = normalize_branch_name_input(&["origin/feature".to_string()]);
+        assert_eq!(normalized.as_deref(), Some("origin/feature"));
+    }
 }

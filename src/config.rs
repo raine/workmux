@@ -56,6 +56,16 @@ pub struct AutoNameConfig {
     /// If not set, uses llm's default model.
     pub model: Option<String>,
 
+    /// Optional command used instead of `llm` for branch name generation.
+    ///
+    /// The configured command is executed with the composed prompt appended as
+    /// the final argument. Examples:
+    /// - "opencode run"
+    /// - "claude -p"
+    /// - "gemini -p"
+    /// - "codex -p"
+    pub command: Option<String>,
+
     /// Custom system prompt for branch name generation.
     /// If not set, uses the default prompt that asks for a kebab-case branch name.
     pub system_prompt: Option<String>,
@@ -1629,6 +1639,7 @@ impl Config {
 # LLM-based branch name generation (`workmux add -A`).
 # auto_name:
 #   model: "gpt-4o-mini"
+#   command: "opencode run"
 #   system_prompt: "Generate a kebab-case git branch name."
 #   background: true  # Always run in background when using --auto-name
 
@@ -3013,6 +3024,17 @@ windows:
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].name.as_deref(), Some("editor"));
         assert!(windows[1].name.is_none());
+    }
+
+    #[test]
+    fn parse_auto_name_command() {
+        let yaml = r#"
+auto_name:
+  command: "opencode run"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let auto_name = config.auto_name.unwrap();
+        assert_eq!(auto_name.command.as_deref(), Some("opencode run"));
     }
 
     #[test]
