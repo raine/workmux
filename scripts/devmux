@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST_PATH="$ROOT_DIR/Cargo.toml"
+
+cargo run --manifest-path "$MANIFEST_PATH" -- dev tui "$@"

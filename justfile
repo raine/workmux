@@ -51,9 +51,9 @@ clippy-fix:
 build:
     cargo build --all
 
-# Install debug binary globally via symlink
+# Install debug binary and dev hot-reload launcher via symlink
 install-dev:
-    cargo build && ln -sf $(pwd)/target/debug/workmux ~/.cargo/bin/workmux
+    cargo build && ln -sf $(pwd)/target/debug/workmux ~/.cargo/bin/workmux && chmod +x $(pwd)/scripts/devmux && ln -sf $(pwd)/scripts/devmux ~/.cargo/bin/devmux
 
 # Run unit tests
 unit-tests:
@@ -90,6 +90,14 @@ docs-check:
 # Run the application
 run *ARGS:
     cargo run -- "$@"
+
+# Start dashboard with subsecond hot-reload dev server
+dev-tui *ARGS:
+    scripts/devmux "$@"
+
+# Start a dashboard sidecar connected to local dev hotpatch server
+dev-dashboard *ARGS:
+    cargo run -- dev dashboard "$@"
 
 # Run Python tests in parallel (depends on build)
 test *ARGS: build

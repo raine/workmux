@@ -56,6 +56,77 @@ use self::keymap::{Context, action_for_key};
 use self::spinner::SPINNER_FRAME_COUNT;
 use self::ui::ui;
 
+#[inline]
+fn hot_call<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(debug_assertions)]
+    {
+        let mut f = Some(f);
+        subsecond::call(|| {
+            let f = f
+                .take()
+                .expect("hot_call closure should be called exactly once");
+            f()
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        f()
+    }
+}
+
+#[inline]
+fn hot_ui(frame: &mut ratatui::Frame, app: &mut App) {
+    #[cfg(debug_assertions)]
+    {
+        let mut hot = subsecond::HotFn::current(ui as fn(&mut ratatui::Frame, &mut App));
+        hot.call((frame, app));
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        ui(frame, app);
+    }
+}
+
+#[inline]
+fn hot_apply_action(app: &mut App, action: actions::Action) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        let mut hot =
+            subsecond::HotFn::current(apply_action as fn(&mut App, actions::Action) -> bool);
+        hot.call((app, action))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        apply_action(app, action)
+    }
+}
+
+#[inline]
+fn hot_refresh(app: &mut App) {
+    #[cfg(debug_assertions)]
+    {
+        let mut hot = subsecond::HotFn::current(App::refresh as fn(&mut App));
+        hot.call((app,));
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        app.refresh();
+    }
+}
+
+#[inline]
+fn hot_refresh_preview(app: &mut App) {
+    #[cfg(debug_assertions)]
+    {
+        let mut hot = subsecond::HotFn::current(App::refresh_preview as fn(&mut App));
+        hot.call((app,));
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        app.refresh_preview();
+    }
+}
+
 /// Determine the current keymap context based on app state.
 fn get_context(app: &App) -> Context {
     match &app.view_mode {
@@ -151,7 +222,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
     let mut last_preview_refresh = std::time::Instant::now();
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
+        hot_call(|| terminal.draw(|f| hot_ui(f, &mut app)).map(|_| ()))?;
 
         // Calculate timeout to respect the next scheduled preview refresh
         let current_preview_interval = if app.input_mode {
@@ -200,7 +271,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
             }
 
             if let Some(action) = action_for_key(ctx, key) {
-                let refreshed_preview = apply_action(&mut app, action);
+                let refreshed_preview = hot_apply_action(&mut app, action);
                 if refreshed_preview {
                     last_preview_refresh = std::time::Instant::now();
                 }
@@ -215,7 +286,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
 
         // Auto-refresh agent list every 2 seconds
         if last_refresh.elapsed() >= refresh_interval {
-            app.refresh();
+            hot_refresh(&mut app);
             last_refresh = std::time::Instant::now();
         }
 
@@ -223,7 +294,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
         // Uses faster refresh rate in input mode (set at top of loop)
         if app.mux.supports_preview() && last_preview_refresh.elapsed() >= current_preview_interval
         {
-            app.refresh_preview();
+            hot_refresh_preview(&mut app);
             last_preview_refresh = std::time::Instant::now();
         }
 
@@ -248,4 +319,14 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool) -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hot_call;
+
+    #[test]
+    fn hot_call_returns_closure_value() {
+        assert_eq!(hot_call(|| 42), 42);
+    }
 }

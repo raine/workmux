@@ -439,6 +439,12 @@ enum Commands {
         diff: bool,
     },
 
+    /// Developer workflows
+    Dev {
+        #[command(subcommand)]
+        command: DevCommands,
+    },
+
     /// Manage global configuration
     Config(command::config::ConfigArgs),
 
@@ -525,6 +531,23 @@ enum Commands {
 enum ClaudeCommands {
     /// Remove stale entries from ~/.claude.json for deleted worktrees
     Prune,
+}
+
+#[derive(Subcommand)]
+enum DevCommands {
+    /// Start a subsecond hot-reload server for the dashboard TUI
+    Tui {
+        /// Additional args forwarded to `workmux dashboard`
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Run a dashboard sidecar that connects to an existing dev hotpatch server
+    Dashboard {
+        /// Additional args forwarded to `workmux dashboard`
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Check if the command should show the nerdfont setup prompt.
@@ -684,6 +707,10 @@ pub fn run() -> Result<()> {
         Commands::Changelog => command::changelog::run(),
         Commands::Update => command::update::run(),
         Commands::Dashboard { preview_size, diff } => command::dashboard::run(preview_size, diff),
+        Commands::Dev { command } => match command {
+            DevCommands::Tui { args } => command::dev::run_tui(&args),
+            DevCommands::Dashboard { args } => command::dev::run_dashboard(&args),
+        },
         Commands::Config(args) => command::config::run(args),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),

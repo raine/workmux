@@ -6,6 +6,7 @@ pub mod clipboard_read;
 pub mod close;
 pub mod config;
 pub mod dashboard;
+pub mod dev;
 pub mod docs;
 pub mod exec;
 pub mod host_exec;

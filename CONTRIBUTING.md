@@ -25,8 +25,20 @@ python -m venv tests/venv
 source tests/venv/bin/activate
 pip install -r tests/requirements.txt
 
-# Install dev binary (symlinks to ~/.cargo/bin)
+# Install dev binaries (workmux + devmux symlinks to ~/.cargo/bin)
 just install-dev
+
+# Optional: install Dioxus CLI used by subsecond hotpatch dev mode
+cargo install dioxus-cli
+
+# Start dashboard in hot-reload mode
+workmux dev tui
+
+# Optional: run a second dashboard process that connects to the same dev hotpatch server
+workmux dev dashboard
+
+# Or use the wrapper recipe for `workmux dev tui`
+just dev-tui
 ```
 
 ## Running tests
