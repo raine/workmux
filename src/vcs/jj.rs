@@ -405,6 +405,10 @@ impl Vcs for JjVcs {
         Ok(())
     }
 
+    fn remove_workspace_lock(&self, _worktree_path: &Path, _shared_dir: &Path) {
+        // jj has no equivalent worktree lock mechanism
+    }
+
     // ── Workspace metadata ───────────────────────────────────────────
 
     fn set_workspace_meta(&self, handle: &str, key: &str, value: &str) -> Result<()> {
@@ -1033,6 +1037,7 @@ impl Vcs for JjVcs {
         handle: &str,
         keep_branch: bool,
         _force: bool,
+        _worktree_path: &Path,
     ) -> Vec<String> {
         let repo_dir = shell_quote(&shared_dir.to_string_lossy());
         let mut cmds = Vec::new();
@@ -1246,6 +1251,7 @@ mod tests {
             "my-handle",
             false, // don't keep branch
             false,
+            Path::new("/repo/worktrees/my-handle"),
         );
 
         assert_eq!(cmds.len(), 4); // forget + bookmark delete + 2 config unsets
@@ -1268,6 +1274,7 @@ mod tests {
             "handle",
             true, // keep branch
             false,
+            Path::new("/repo/worktrees/handle"),
         );
 
         assert_eq!(cmds.len(), 3); // forget + 2 config unsets (no bookmark delete)
@@ -1284,6 +1291,7 @@ mod tests {
             "handle",
             false,
             false,
+            Path::new("/path/worktrees/handle"),
         );
 
         // Should use shell quoting for paths with spaces

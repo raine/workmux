@@ -137,6 +137,11 @@ pub fn cleanup(
     // This avoids code duplication while enforcing the correct operational order.
     let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
 
+        // Remove any stale workspace locks before the worktree is renamed.
+        // Must happen while the worktree directory still exists so the VCS can
+        // read metadata files inside it to resolve the lock path.
+        context.vcs.remove_workspace_lock(worktree_path, &context.shared_dir);
+
         // Run pre-remove hooks before removing the worktree directory.
         // Skip if the worktree directory doesn't exist (e.g., user manually deleted it).
         // Skip if --no-hooks is set (e.g., RPC-triggered merge).
@@ -406,6 +411,7 @@ pub fn cleanup(
                     handle,
                     keep_branch,
                     force,
+                    worktree_path,
                 ),
             });
             debug!(
@@ -720,10 +726,15 @@ mod tests {
         handle: &str,
         keep_branch: bool,
         force: bool,
+        admin_dir: Option<&str>,
     ) -> Vec<String> {
         use crate::shell::shell_quote;
         let git_dir_q = shell_quote(git_dir);
         let mut cmds = Vec::new();
+        if let Some(dir) = admin_dir {
+            let locked = shell_quote(&format!("{}/locked", dir));
+            cmds.push(format!("rm -f {} >/dev/null 2>&1", locked));
+        }
         cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir_q));
         if !keep_branch {
             let branch_q = shell_quote(branch);
@@ -746,6 +757,7 @@ mod tests {
         git_dir: &str,
         keep_branch: bool,
         force: bool,
+        admin_dir: Option<&str>,
     ) -> DeferredCleanup {
         DeferredCleanup {
             worktree_path: PathBuf::from(worktree),
@@ -754,7 +766,7 @@ mod tests {
             handle: handle.to_string(),
             keep_branch,
             force,
-            vcs_cleanup_commands: git_cleanup_commands(git_dir, branch, handle, keep_branch, force),
+            vcs_cleanup_commands: git_cleanup_commands(git_dir, branch, handle, keep_branch, force, admin_dir),
         }
     }
 
@@ -768,6 +780,7 @@ mod tests {
             "/repo/.git",
             false,
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -793,6 +806,7 @@ mod tests {
             "/repo/.git",
             true, // keep_branch
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -822,6 +836,7 @@ mod tests {
             "/repo/.git",
             false,
             true, // force
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -846,6 +861,7 @@ mod tests {
             "/my repo/.git",
             false,
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -874,6 +890,7 @@ mod tests {
             "/repo/.git",
             false,
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -908,6 +925,7 @@ mod tests {
             "/repo/.git",
             false,
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -928,6 +946,7 @@ mod tests {
             "/repo/.git",
             false,
             false,
+            None,
         );
 
         let script = build_deferred_cleanup_script(&dc);
@@ -939,4 +958,55 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn deferred_cleanup_script_removes_lock_when_admin_dir_set() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            false,
+            false,
+            Some("/repo/.git/worktrees/feature"),
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            script.contains("rm -f /repo/.git/worktrees/feature/locked"),
+            "Should remove lock file when admin dir is set: {script}"
+        );
+
+        // Lock removal should happen after mv but before prune
+        let mv_pos = script.find("mv ").unwrap();
+        let lock_pos = script
+            .find("rm -f /repo/.git/worktrees/feature/locked")
+            .unwrap();
+        let prune_pos = script.find("worktree prune").unwrap();
+        assert!(mv_pos < lock_pos, "lock removal should follow mv");
+        assert!(lock_pos < prune_pos, "lock removal should precede prune");
+    }
+
+    #[test]
+    fn deferred_cleanup_script_no_lock_step_without_admin_dir() {
+        let dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            false,
+            false,
+            None,
+        );
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            !script.contains("/locked"),
+            "Should not have lock removal without admin dir: {script}"
+        );
+    }
 }

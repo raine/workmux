@@ -78,6 +78,15 @@ pub trait Vcs: Send + Sync {
     /// Prune stale workspace metadata
     fn prune_workspaces(&self, shared_dir: &Path) -> Result<()>;
 
+    /// Remove stale workspace locks that would prevent pruning.
+    ///
+    /// Must be called while the workspace directory still exists (before rename/move),
+    /// since the implementation may need to read files inside it to resolve metadata paths.
+    ///
+    /// For git: resolves the worktree admin directory and removes any stale `locked` file.
+    /// For jj: no-op.
+    fn remove_workspace_lock(&self, worktree_path: &Path, shared_dir: &Path);
+
     // ── Workspace metadata ───────────────────────────────────────────
 
     /// Store per-workspace metadata
@@ -228,6 +237,7 @@ pub trait Vcs: Send + Sync {
         handle: &str,
         keep_branch: bool,
         force: bool,
+        worktree_path: &Path,
     ) -> Vec<String>;
 
     // ── Status cache ─────────────────────────────────────────────────

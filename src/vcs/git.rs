@@ -7,6 +7,7 @@ use crate::git;
 use crate::shell::shell_quote;
 
 use super::{Vcs, VcsStatus};
+use tracing::{debug, warn};
 
 /// Git implementation of the Vcs trait.
 ///
@@ -17,6 +18,51 @@ impl GitVcs {
     pub fn new() -> Self {
         GitVcs
     }
+}
+
+/// Read the worktree's `.git` file to find the admin directory path.
+///
+/// Linked worktrees have a `.git` file (not directory) containing `gitdir: <path>`.
+/// The path may be absolute or relative to the worktree directory.
+/// Falls back to `$GIT_COMMON_DIR/worktrees/<dir_name>` if the `.git` file is missing
+/// (e.g., the worktree directory was already deleted).
+fn resolve_worktree_admin_dir(
+    worktree_path: &Path,
+    git_common_dir: &Path,
+) -> Option<PathBuf> {
+    let git_file = worktree_path.join(".git");
+    if git_file.is_file() {
+        match std::fs::read_to_string(&git_file) {
+            Ok(content) => {
+                if let Some(raw) = content.trim().strip_prefix("gitdir: ") {
+                    let p = Path::new(raw.trim());
+                    let abs = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        worktree_path.join(p)
+                    };
+                    return Some(abs);
+                }
+                warn!(
+                    path = %git_file.display(),
+                    "cleanup:worktree .git file missing 'gitdir:' prefix"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    path = %git_file.display(),
+                    error = %e,
+                    "cleanup:failed to read worktree .git file"
+                );
+            }
+        }
+    }
+
+    // Fallback: construct expected admin dir from the worktree directory name.
+    // Git uses the basename of the worktree path as the admin directory name.
+    worktree_path
+        .file_name()
+        .map(|name| git_common_dir.join("worktrees").join(name))
 }
 
 impl Vcs for GitVcs {
@@ -85,6 +131,19 @@ impl Vcs for GitVcs {
 
     fn prune_workspaces(&self, shared_dir: &Path) -> Result<()> {
         git::prune_worktrees_in(shared_dir)
+    }
+
+    fn remove_workspace_lock(&self, worktree_path: &Path, shared_dir: &Path) {
+        if let Some(admin_dir) = resolve_worktree_admin_dir(worktree_path, shared_dir) {
+            let locked_file = admin_dir.join("locked");
+            match std::fs::remove_file(&locked_file) {
+                Ok(()) => debug!(path = %locked_file.display(), "cleanup:removed worktree lock"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    warn!(path = %locked_file.display(), error = %e, "cleanup:failed to remove worktree lock")
+                }
+            }
+        }
     }
 
     // ── Workspace metadata ───────────────────────────────────────────
@@ -276,10 +335,19 @@ impl Vcs for GitVcs {
         handle: &str,
         keep_branch: bool,
         force: bool,
+        worktree_path: &Path,
     ) -> Vec<String> {
         let git_dir = shell_quote(&shared_dir.to_string_lossy());
 
         let mut cmds = Vec::new();
+
+        // Remove worktree lock if present (git worktree prune skips locked entries)
+        if let Some(ref admin_dir) = resolve_worktree_admin_dir(worktree_path, shared_dir) {
+            if admin_dir.is_absolute() {
+                let locked = shell_quote(&admin_dir.join("locked").to_string_lossy());
+                cmds.push(format!("rm -f {} >/dev/null 2>&1", locked));
+            }
+        }
 
         // Prune git worktrees
         cmds.push(format!(
