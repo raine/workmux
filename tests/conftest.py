@@ -1568,6 +1568,7 @@ def run_workmux_open(
     run_hooks: bool = False,
     force_files: bool = False,
     new_window: bool = False,
+    session: bool = False,
     prompt: Optional[str] = None,
     prompt_file: Optional[Path] = None,
     pre_run_mux_cmds: Optional[List[List[str]]] = None,
@@ -1582,6 +1583,7 @@ def run_workmux_open(
     Args:
         branch_name: Worktree name to open (optional with --new, uses current directory)
         new_window: If True, pass --new to force opening a new window (creates suffix like -2, -3)
+        session: If True, pass -s to force opening as a tmux session
         prompt: Inline prompt text to pass via -p
         prompt_file: Path to a prompt file to pass via -P
         working_dir: Optional directory to run the command from (defaults to repo_path)
@@ -1593,6 +1595,8 @@ def run_workmux_open(
         flags.append("--force-files")
     if new_window:
         flags.append("--new")
+    if session:
+        flags.append("-s")
     if prompt:
         flags.append(f"-p {shlex.quote(prompt)}")
     if prompt_file:

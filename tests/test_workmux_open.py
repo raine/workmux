@@ -5,10 +5,15 @@ import pytest
 from .conftest import (
     DEFAULT_WINDOW_PREFIX,
     MuxEnvironment,
+    assert_session_exists,
+    assert_session_not_exists,
+    assert_window_not_exists,
+    get_session_name,
     get_window_name,
     get_worktree_path,
     poll_until,
     run_workmux_add,
+    run_workmux_command,
     run_workmux_open,
     run_workmux_remove,
     write_workmux_config,
@@ -561,3 +566,152 @@ def test_open_with_prompt_file(
     assert found_content, (
         "Prompt file content was not processed into a temp prompt file"
     )
+
+
+# =============================================================================
+# Session flag tests (open --session)
+# =============================================================================
+
+
+def test_open_session_flag_creates_session_for_window_mode_worktree(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies `workmux open --session` creates a tmux session for a window-mode worktree."""
+    env = mux_server
+    branch_name = "feature-open-session"
+    window_name = get_window_name(branch_name)
+    session_name = get_session_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+
+    # Kill the window created by add (window mode default)
+    env.kill_window(window_name)
+
+    # Open with --session flag (switch-client may fail in test env)
+    run_workmux_open(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+        session=True,
+        expect_fail=True,
+    )
+
+    # Session should exist
+    assert_session_exists(env, session_name)
+    # No new window should have been created in the test session
+    assert_window_not_exists(env, window_name)
+
+
+@pytest.mark.tmux_only
+def test_open_session_flag_switches_to_existing_session(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies second `workmux open --session` switches to existing session, no duplicate."""
+    env = mux_server
+    branch_name = "feature-open-session-switch"
+    window_name = get_window_name(branch_name)
+    session_name = get_session_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+
+    # Kill the window created by add
+    env.kill_window(window_name)
+
+    # First open --session: creates the session
+    run_workmux_open(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+        session=True,
+        expect_fail=True,
+    )
+    assert_session_exists(env, session_name)
+
+    # Second open --session: should switch to existing session (may fail due to no client)
+    run_workmux_open(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+        session=True,
+        expect_fail=True,
+    )
+
+    # Verify only ONE session with that name exists (no -2 suffix created)
+    sessions_result = env.tmux(["list-sessions", "-F", "#{session_name}"], check=False)
+    matching = [
+        s for s in sessions_result.stdout.strip().split("\n") if s == session_name
+    ]
+    assert len(matching) == 1, (
+        f"Expected exactly 1 session named {session_name!r}, "
+        f"found {len(matching)}. All sessions: {sessions_result.stdout.strip()}"
+    )
+
+
+def test_open_without_session_flag_uses_stored_window_mode(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies `workmux open` without --session uses stored window mode (regression)."""
+    env = mux_server
+    branch_name = "feature-open-window-mode"
+    window_name = get_window_name(branch_name)
+    session_name = get_session_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+
+    # Kill the window created by add
+    env.kill_window(window_name)
+
+    # Open without --session flag: should recreate as window
+    run_workmux_open(env, workmux_exe_path, repo_path, branch_name)
+
+    # Window should exist
+    assert window_name in _get_all_windows(env)
+    # No session should have been created
+    assert_session_not_exists(env, session_name)
+
+
+def test_open_session_flag_with_new_flag_fails(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies `workmux open --session --new` fails (session mode rejects --new)."""
+    env = mux_server
+    branch_name = "feature-open-session-new"
+    window_name = get_window_name(branch_name)
+    session_name = get_session_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+
+    # Kill the window created by add
+    env.kill_window(window_name)
+
+    # First, create the session so we can test --new rejection
+    run_workmux_open(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+        session=True,
+        expect_fail=True,
+    )
+    assert_session_exists(env, session_name)
+
+    # Now try --session --new, which should fail
+    result = run_workmux_open(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+        session=True,
+        new_window=True,
+        expect_fail=True,
+    )
+
+    # Command should have exited non-zero (expect_fail=True already asserts this)
+    assert result.exit_code != 0
