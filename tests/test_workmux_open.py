@@ -653,6 +653,7 @@ def test_open_session_flag_switches_to_existing_session(
     )
 
 
+@pytest.mark.tmux_only
 def test_open_without_session_flag_uses_stored_window_mode(
     mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
@@ -677,6 +678,7 @@ def test_open_without_session_flag_uses_stored_window_mode(
     assert_session_not_exists(env, session_name)
 
 
+@pytest.mark.tmux_only
 def test_open_session_flag_with_new_flag_fails(
     mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
