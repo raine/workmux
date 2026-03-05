@@ -6,7 +6,6 @@ use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
 use tracing::info;
 
-use super::cleanup::get_worktree_mode;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
@@ -62,11 +61,9 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    // Determine the target mode from stored metadata (or default to Window)
-    let stored_mode = get_worktree_mode(&base_handle);
     let target = MuxHandle::new(
         context.mux.as_ref(),
-        stored_mode,
+        options.mode,
         &context.prefix,
         &base_handle,
     );
@@ -134,7 +131,7 @@ pub fn open(
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
-        mode: stored_mode,
+        mode: options.mode,
         ..options
     };
 
