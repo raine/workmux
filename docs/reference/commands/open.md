@@ -16,14 +16,15 @@ workmux open [name] [flags]
 
 ## Options
 
-| Flag                       | Description                                                                                                                                                                              |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-n, --new`                | Force opening in a new window even if one already exists. Creates a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having multiple terminal views into the same worktree. |
-| `--run-hooks`              | Re-runs the `post_create` commands (these block window creation).                                                                                                                        |
-| `--force-files`            | Re-applies file copy/symlink operations. Useful for restoring a deleted `.env` file.                                                                                                     |
-| `-p, --prompt <text>`      | Provide an inline prompt for AI agent panes.                                                                                                                                             |
-| `-P, --prompt-file <path>` | Provide a path to a file containing the prompt.                                                                                                                                          |
-| `-e, --prompt-editor`      | Open your editor to write the prompt interactively.                                                                                                                                      |
+| Flag                       | Description                                                                                                                                                                                                                   |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-n, --new`                | Force opening in a new window even if one already exists. Creates a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having multiple terminal views into the same worktree. Cannot be combined with `--session`. |
+| `-s, --session`            | Open in session mode, overriding the stored mode. Persists the mode change for subsequent opens. Cannot be combined with `--new`. Only supported with tmux.                                                                   |
+| `--run-hooks`              | Re-runs the `post_create` commands (these block window creation).                                                                                                                                                             |
+| `--force-files`            | Re-applies file copy/symlink operations. Useful for restoring a deleted `.env` file.                                                                                                                                          |
+| `-p, --prompt <text>`      | Provide an inline prompt for AI agent panes.                                                                                                                                                                                  |
+| `-P, --prompt-file <path>` | Provide a path to a file containing the prompt.                                                                                                                                                                               |
+| `-e, --prompt-editor`      | Open your editor to write the prompt interactively.                                                                                                                                                                           |
 
 ## What happens
 
@@ -45,6 +46,9 @@ workmux open user-auth --new
 
 # Open a new window for the current worktree (run from within the worktree)
 workmux open --new
+
+# Open in session mode (converts from window mode if needed)
+workmux open user-auth --session
 
 # Open with a prompt for AI agents
 workmux open user-auth -p "Continue implementing the login flow"
