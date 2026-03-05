@@ -5,6 +5,7 @@ import pytest
 from .conftest import (
     DEFAULT_WINDOW_PREFIX,
     MuxEnvironment,
+    TmuxEnvironment,
     assert_session_exists,
     assert_session_not_exists,
     assert_window_not_exists,
@@ -13,7 +14,6 @@ from .conftest import (
     get_worktree_path,
     poll_until,
     run_workmux_add,
-    run_workmux_command,
     run_workmux_open,
     run_workmux_remove,
     write_workmux_config,
@@ -575,7 +575,7 @@ def test_open_with_prompt_file(
 
 @pytest.mark.tmux_only
 def test_open_session_flag_creates_session_for_window_mode_worktree(
-    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
     """Verifies `workmux open --session` creates a tmux session for a window-mode worktree."""
     env = mux_server
@@ -607,7 +607,7 @@ def test_open_session_flag_creates_session_for_window_mode_worktree(
 
 @pytest.mark.tmux_only
 def test_open_session_flag_switches_to_existing_session(
-    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
     """Verifies second `workmux open --session` switches to existing session, no duplicate."""
     env = mux_server
@@ -655,7 +655,7 @@ def test_open_session_flag_switches_to_existing_session(
 
 @pytest.mark.tmux_only
 def test_open_without_session_flag_uses_stored_window_mode(
-    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
     """Verifies `workmux open` without --session uses stored window mode (regression)."""
     env = mux_server
@@ -680,7 +680,7 @@ def test_open_without_session_flag_uses_stored_window_mode(
 
 @pytest.mark.tmux_only
 def test_open_session_flag_with_new_flag_fails(
-    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
     """Verifies `workmux open --session --new` fails (session mode rejects --new)."""
     env = mux_server
