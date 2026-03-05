@@ -1,10 +1,10 @@
 use crate::command::args::PromptArgs;
 use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
-use crate::workflow::prompt_loader::{load_prompt, PromptLoadArgs};
+use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{config, git, workflow};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub fn run(
     name: Option<&str>,
