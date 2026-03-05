@@ -276,6 +276,151 @@ class TestSessionOpen:
         )
 
 
+class TestOpenSessionFlag:
+    """Tests for `workmux open --session` flag to override stored mode."""
+
+    def test_open_session_flag_converts_window_to_session(
+        self, mux_server, workmux_exe_path, repo_path
+    ):
+        """Verifies `workmux open --session` converts a window-mode worktree to session mode."""
+        env = mux_server
+        branch_name = "feature-window-to-session"
+        session_name = get_session_name(branch_name)
+
+        write_workmux_config(repo_path)
+
+        # Create as window-mode worktree
+        add_branch_and_get_worktree(
+            env, workmux_exe_path, repo_path, branch_name, extra_args="--background"
+        )
+
+        # Close the window
+        run_workmux_command(env, workmux_exe_path, repo_path, f"close {branch_name}")
+
+        # Re-open with --session flag
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open {branch_name} --session",
+            expect_fail=True,  # May fail due to switch-client in test env
+        )
+
+        # The session should be created
+        sessions_result = env.tmux(
+            ["list-sessions", "-F", "#{session_name}"], check=False
+        )
+        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+
+        assert session_name in existing_sessions, (
+            f"Session {session_name!r} should exist after open --session. "
+            f"Existing sessions: {existing_sessions!r}. "
+            f"Open command stderr: {result.stderr}"
+        )
+
+    def test_open_session_flag_persists_mode(
+        self, mux_server, workmux_exe_path, repo_path
+    ):
+        """Verifies that --session persists the mode change for subsequent opens."""
+        env = mux_server
+        branch_name = "feature-persist-session"
+        session_name = get_session_name(branch_name)
+
+        write_workmux_config(repo_path)
+
+        # Create as window-mode worktree
+        add_branch_and_get_worktree(
+            env, workmux_exe_path, repo_path, branch_name, extra_args="--background"
+        )
+
+        # Close the window
+        run_workmux_command(env, workmux_exe_path, repo_path, f"close {branch_name}")
+
+        # Open with --session to convert
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open {branch_name} --session",
+            expect_fail=True,
+        )
+
+        # Close again
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"close {branch_name}",
+        )
+        assert_session_not_exists(env, session_name)
+
+        # Open again WITHOUT --session; should still use session mode (persisted)
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open {branch_name}",
+            expect_fail=True,
+        )
+
+        sessions_result = env.tmux(
+            ["list-sessions", "-F", "#{session_name}"], check=False
+        )
+        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+
+        assert session_name in existing_sessions, (
+            f"Session {session_name!r} should exist after subsequent open (mode persisted). "
+            f"Existing sessions: {existing_sessions!r}"
+        )
+
+    def test_open_session_flag_closes_existing_window(
+        self, mux_server, workmux_exe_path, repo_path
+    ):
+        """Verifies that --session closes the existing window when converting modes."""
+        env = mux_server
+        branch_name = "feature-close-on-convert"
+        window_name = get_window_name(branch_name)
+        session_name = get_session_name(branch_name)
+
+        write_workmux_config(repo_path)
+
+        # Create as window-mode worktree
+        add_branch_and_get_worktree(
+            env, workmux_exe_path, repo_path, branch_name, extra_args="--background"
+        )
+
+        # Verify window exists
+        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
+        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        assert window_name in existing_windows
+
+        # Open with --session (should close old window and create session)
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open {branch_name} --session",
+            expect_fail=True,
+        )
+
+        # Old window should be gone
+        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
+        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        assert window_name not in existing_windows, (
+            f"Window {window_name!r} should have been closed during mode conversion"
+        )
+
+        # New session should exist
+        sessions_result = env.tmux(
+            ["list-sessions", "-F", "#{session_name}"], check=False
+        )
+        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+        assert session_name in existing_sessions, (
+            f"Session {session_name!r} should exist after conversion. "
+            f"Existing sessions: {existing_sessions!r}"
+        )
+
+
 class TestMixedMode:
     """Tests for mixed-mode scenarios (some worktrees as windows, some as sessions)."""
 
