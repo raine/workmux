@@ -237,6 +237,10 @@ enum Commands {
         #[arg(long, short = 'n')]
         new: bool,
 
+        /// Open as a tmux session regardless of stored mode
+        #[arg(short = 's', long)]
+        session: bool,
+
         #[command(flatten)]
         prompt: PromptArgs,
     },
@@ -622,8 +626,9 @@ pub fn run() -> Result<()> {
             run_hooks,
             force_files,
             new,
+            session,
             prompt,
-        } => command::open::run(name.as_deref(), run_hooks, force_files, new, prompt),
+        } => command::open::run(name.as_deref(), run_hooks, force_files, new, session, prompt),
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Merge {
             name,

@@ -1,16 +1,17 @@
 use crate::command::args::PromptArgs;
 use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
-use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
+use crate::workflow::prompt_loader::{load_prompt, PromptLoadArgs};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{config, git, workflow};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 pub fn run(
     name: Option<&str>,
     run_hooks: bool,
     force_files: bool,
     new_window: bool,
+    session: bool,
     prompt_args: PromptArgs,
 ) -> Result<()> {
     // Resolve the worktree name
@@ -26,9 +27,14 @@ pub fn run(
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
 
-    // Determine the target mode from stored metadata
+    // Determine the effective mode: --session flag overrides stored metadata
     let stored_mode = git::get_worktree_mode(&resolved_name);
-    let target_type = match stored_mode {
+    let effective_mode = if session {
+        MuxMode::Session
+    } else {
+        stored_mode
+    };
+    let target_type = match effective_mode {
         MuxMode::Session => "session",
         MuxMode::Window => "window",
     };
@@ -61,7 +67,7 @@ pub fn run(
 
     // Construct setup options (pane commands always run on open)
     let mut options = SetupOptions::new(run_hooks, force_files, true);
-    options.mode = stored_mode;
+    options.mode = effective_mode;
     options.prompt_file_path = prompt_file_path;
 
     // Only announce hooks if we're forcing a new target (otherwise we might just switch)
