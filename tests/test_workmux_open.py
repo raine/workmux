@@ -573,6 +573,7 @@ def test_open_with_prompt_file(
 # =============================================================================
 
 
+@pytest.mark.tmux_only
 def test_open_session_flag_creates_session_for_window_mode_worktree(
     mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
