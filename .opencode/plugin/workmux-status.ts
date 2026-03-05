@@ -9,10 +9,12 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
             await $`workmux set-window-status working`.quiet();
           }
           break;
-        case 'permission.updated':
+        case 'permission.asked':
+        case 'question.asked':
           await $`workmux set-window-status waiting`.quiet();
           break;
         case 'permission.replied':
+        case 'question.replied':
           await $`workmux set-window-status working`.quiet();
           break;
         case 'session.idle':
