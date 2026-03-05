@@ -28,6 +28,8 @@ pub struct CreateResult {
     pub did_switch: bool,
     /// The actual handle used (may differ from requested if auto-suffixed for cross-repo collision)
     pub resolved_handle: String,
+    /// The mux mode that was actually used (window or session)
+    pub mode: MuxMode,
 }
 
 /// Result of merging a worktree

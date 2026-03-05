@@ -6,6 +6,7 @@ use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
 use tracing::info;
 
+use super::cleanup::get_worktree_mode;
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
@@ -16,27 +17,20 @@ pub fn open(
     context: &WorkflowContext,
     options: SetupOptions,
     new_window: bool,
+    session_override: bool,
 ) -> Result<CreateResult> {
     info!(
         name = name,
         run_hooks = options.run_hooks,
         run_file_ops = options.run_file_ops,
         new_window = new_window,
+        session_override = session_override,
         "open:start"
     );
 
-    // Validate layout config before any other operations
+    // Validate mutual exclusion of panes/windows config (mode-independent)
     if context.config.panes.is_some() && context.config.windows.is_some() {
         anyhow::bail!("Cannot specify both 'panes' and 'windows' in configuration.");
-    }
-    if let Some(windows) = &context.config.windows {
-        if options.mode != crate::config::MuxMode::Session {
-            anyhow::bail!(
-                "'windows' configuration requires 'mode: session'. \
-                 Add 'mode: session' to your config."
-            );
-        }
-        crate::config::validate_windows_config(windows)?;
     }
     if let Some(panes) = &context.config.panes {
         crate::config::validate_panes_config(panes)?;
@@ -61,12 +55,54 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    let target = MuxHandle::new(
-        context.mux.as_ref(),
-        options.mode,
-        &context.prefix,
-        &base_handle,
-    );
+    // Resolve mode using canonical base_handle (not the CLI-provided name which may be a branch)
+    let stored_mode = get_worktree_mode(&base_handle);
+    let mode = if session_override {
+        crate::config::MuxMode::Session
+    } else {
+        stored_mode
+    };
+
+    // Validate windows config requires session mode (after canonical mode resolution)
+    if let Some(windows) = &context.config.windows {
+        if mode != crate::config::MuxMode::Session {
+            anyhow::bail!(
+                "'windows' configuration requires 'mode: session'. \
+                 Add 'mode: session' to your config."
+            );
+        }
+        crate::config::validate_windows_config(windows)?;
+    }
+
+    // If --session was explicitly passed and mode is changing, close existing targets and persist
+    if session_override && stored_mode != mode {
+        // Kill all matching window targets (base + any -N numeric duplicates only)
+        let all_names = context.mux.get_all_window_names()?;
+        let full_base = crate::multiplexer::util::prefixed(&context.prefix, &base_handle);
+        let full_base_dash = format!("{}-", full_base);
+        for name in &all_names {
+            let is_exact = *name == full_base;
+            let is_numeric_suffix = name
+                .strip_prefix(&full_base_dash)
+                .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+
+            if is_exact || is_numeric_suffix {
+                info!(
+                    handle = base_handle,
+                    window = name,
+                    "open:closing window before mode conversion"
+                );
+                MuxHandle::kill_full(context.mux.as_ref(), stored_mode, name)?;
+            }
+        }
+        git::set_worktree_meta(&base_handle, "mode", "session")
+            .context("Failed to persist session mode")?;
+    }
+
+    // Update options with the resolved mode
+    let options = SetupOptions { mode, ..options };
+
+    let target = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, &base_handle);
     let target_exists = target.exists()?;
 
     // If target exists and we're not forcing new, switch to it
@@ -86,6 +122,7 @@ pub fn open(
             base_branch: None,
             did_switch: true,
             resolved_handle: base_handle,
+            mode,
         });
     }
 
@@ -131,7 +168,6 @@ pub fn open(
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
-        mode: options.mode,
         ..options
     };
 

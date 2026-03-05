@@ -290,6 +290,7 @@ pub fn setup_environment(
         base_branch: None,
         did_switch: false,
         resolved_handle: handle.to_string(),
+        mode: options.mode,
     })
 }
 

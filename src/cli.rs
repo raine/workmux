@@ -234,10 +234,10 @@ enum Commands {
         force_files: bool,
 
         /// Force opening in a new window (creates suffix like -2, -3) instead of switching to existing
-        #[arg(long, short = 'n')]
+        #[arg(long, short = 'n', conflicts_with = "session")]
         new: bool,
 
-        /// Open as a tmux session regardless of stored mode
+        /// Open in session mode (overrides stored mode for this worktree)
         #[arg(short = 's', long)]
         session: bool,
 
@@ -628,7 +628,14 @@ pub fn run() -> Result<()> {
             new,
             session,
             prompt,
-        } => command::open::run(name.as_deref(), run_hooks, force_files, new, session, prompt),
+        } => command::open::run(
+            name.as_deref(),
+            run_hooks,
+            force_files,
+            new,
+            session,
+            prompt,
+        ),
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Merge {
             name,

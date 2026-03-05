@@ -161,7 +161,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             mode: options.mode,
         };
 
-        return super::open::open(branch_name, context, open_options, false);
+        return super::open::open(branch_name, context, open_options, false, false);
     }
 
     // Check target using handle (the display name)

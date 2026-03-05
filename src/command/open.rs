@@ -27,16 +27,22 @@ pub fn run(
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
 
-    // Determine the effective mode: --session flag overrides stored metadata
-    let stored_mode = git::get_worktree_mode(&resolved_name);
-    let effective_mode = if session {
+    // Validate backend supports session mode
+    if session && context.mux.name() != "tmux" {
+        bail!(
+            "Session mode (--session) is only supported with tmux.\n\
+             Current backend: {}. Use window mode instead.",
+            context.mux.name()
+        );
+    }
+
+    // Note: final mode resolution happens in workflow::open using the canonical
+    // base_handle (which may differ from resolved_name when opening by branch name).
+    // We pass a preliminary mode here for SetupOptions; workflow::open will override it.
+    let preliminary_mode = if session {
         MuxMode::Session
     } else {
-        stored_mode
-    };
-    let target_type = match effective_mode {
-        MuxMode::Session => "session",
-        MuxMode::Window => "window",
+        git::get_worktree_mode(&resolved_name)
     };
 
     // Load prompt if any prompt argument is provided
@@ -67,7 +73,7 @@ pub fn run(
 
     // Construct setup options (pane commands always run on open)
     let mut options = SetupOptions::new(run_hooks, force_files, true);
-    options.mode = effective_mode;
+    options.mode = preliminary_mode;
     options.prompt_file_path = prompt_file_path;
 
     // Only announce hooks if we're forcing a new target (otherwise we might just switch)
@@ -79,8 +85,13 @@ pub fn run(
         );
     }
 
-    let result = workflow::open(&resolved_name, &context, options, new_window)
+    let result = workflow::open(&resolved_name, &context, options, new_window, session)
         .context("Failed to open worktree environment")?;
+
+    let target_type = match result.mode {
+        MuxMode::Session => "session",
+        MuxMode::Window => "window",
+    };
 
     if result.did_switch {
         println!(
