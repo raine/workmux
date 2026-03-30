@@ -376,6 +376,12 @@ pub fn build_docker_run_args(
         }
     }
 
+    // Explicit env vars from config
+    for (key, value) in config.env_vars() {
+        args.push("--env".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
     // Extra env vars (RPC connection details)
     for (key, value) in extra_envs {
         args.push("--env".to_string());

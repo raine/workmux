@@ -220,6 +220,11 @@ fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32>
         }
     }
 
+    // Explicit env vars from config
+    for (key, val) in config.sandbox.env_vars() {
+        env_exports.push(format!("{}='{}'", key, crate::shell::shell_escape(val)));
+    }
+
     // Inject host git user config (user.name, user.email) for commits
     for (key, val) in git_user_config_envs(worktree) {
         env_exports.push(format!("{}='{}'", key, crate::shell::shell_escape(&val)));

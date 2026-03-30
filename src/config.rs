@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1100,6 +1100,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub env_passthrough: Option<Vec<String>>,
 
+    /// Environment variables to set in the sandbox with explicit values.
+    /// Unlike env_passthrough (which reads from host), these are set directly.
+    /// Global-only: project config cannot set this to prevent a sandboxed agent
+    /// from injecting env vars into its next session via .workmux.yaml.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+
     /// Override the hostname used by containers to reach the host RPC server.
     /// Defaults to `host.docker.internal` (Docker) or `host.containers.internal` (Podman).
     /// Useful for non-standard Podman or custom networking setups.
@@ -1182,6 +1189,14 @@ impl SandboxConfig {
         self.env_passthrough
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get explicit environment variables to set in the sandbox.
+    pub fn env_vars(&self) -> Vec<(&str, &str)> {
+        self.env
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
             .unwrap_or_default()
     }
 
@@ -1870,6 +1885,17 @@ impl Config {
                 }
                 self.sandbox.env_passthrough.clone()
             },
+            // Security: env is global-only. A sandboxed agent could modify
+            // .workmux.yaml to inject env vars into its next session.
+            env: {
+                if project.sandbox.env.is_some() {
+                    tracing::warn!(
+                        "env in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                self.sandbox.env
+            },
             // Security: rpc_host is global-only. Project config cannot
             // set it -- this prevents a malicious repo from redirecting
             // RPC traffic to attacker infrastructure via .workmux.yaml.
@@ -2370,6 +2396,8 @@ pub fn is_agent_command(command_line: &str, agent_command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         Config, ContainerConfig, ExtraMount, LimaConfig, NetworkConfig, NetworkPolicy,
         SandboxConfig, SandboxRuntime, SandboxTarget, ToolchainMode, is_agent_command,
@@ -3101,6 +3129,89 @@ agents:
             merged.sandbox.env_passthrough,
             Some(vec!["GITHUB_TOKEN".to_string()])
         );
+    }
+
+    #[test]
+    fn sandbox_env_global_only() {
+        // Project config is ignored -- only global matters
+        let global = Config {
+            sandbox: SandboxConfig {
+                env: Some(HashMap::from([(
+                    "GH_TOKEN".to_string(),
+                    "global_token".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            sandbox: SandboxConfig {
+                env: Some(HashMap::from([(
+                    "GH_TOKEN".to_string(),
+                    "project_token".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        let env = merged.sandbox.env.unwrap();
+        assert_eq!(env.get("GH_TOKEN").unwrap(), "global_token");
+    }
+
+    #[test]
+    fn sandbox_env_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = Config {
+            sandbox: SandboxConfig {
+                env: Some(HashMap::from([(
+                    "GH_TOKEN".to_string(),
+                    "project_token".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert!(merged.sandbox.env.is_none());
+    }
+
+    #[test]
+    fn sandbox_env_uses_global() {
+        let global = Config {
+            sandbox: SandboxConfig {
+                env: Some(HashMap::from([(
+                    "GH_TOKEN".to_string(),
+                    "global_token".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = Config::default();
+
+        let merged = global.merge(project);
+        let env = merged.sandbox.env.unwrap();
+        assert_eq!(env.get("GH_TOKEN").unwrap(), "global_token");
+    }
+
+    #[test]
+    fn sandbox_env_vars_accessor() {
+        let config = SandboxConfig {
+            env: Some(HashMap::from([("KEY".to_string(), "VALUE".to_string())])),
+            ..Default::default()
+        };
+        let vars = config.env_vars();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0], ("KEY", "VALUE"));
+    }
+
+    #[test]
+    fn sandbox_env_vars_accessor_empty() {
+        let config = SandboxConfig::default();
+        assert!(config.env_vars().is_empty());
     }
 
     #[test]
