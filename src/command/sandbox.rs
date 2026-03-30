@@ -1050,7 +1050,7 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
         let runtime_bin = config.sandbox.runtime().binary_name();
         let redacted_args: Vec<_> = docker_args
             .iter()
-            .map(|a| super::sandbox_run::redact_env_arg(a))
+            .map(|a| super::sandbox_run::redact_env_arg(a, &[]))
             .collect();
         debug!(runtime = runtime_bin, args = ?redacted_args, "starting shell container");
 

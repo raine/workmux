@@ -412,7 +412,11 @@ fn run_container(
     docker_args.insert(1, "--name".to_string());
     docker_args.insert(2, container_name.clone());
 
-    let redacted_args: Vec<_> = docker_args.iter().map(|a| redact_env_arg(a)).collect();
+    let env_keys: Vec<&str> = config.sandbox.env_vars().iter().map(|(k, _)| *k).collect();
+    let redacted_args: Vec<_> = docker_args
+        .iter()
+        .map(|a| redact_env_arg(a, &env_keys))
+        .collect();
     debug!(runtime = runtime_bin, container = %container_name, args = ?redacted_args, "spawning container");
 
     // Background freshness check (non-blocking)
@@ -437,10 +441,13 @@ fn run_container(
 }
 
 /// Redact sensitive values in docker run args for debug logging.
-/// Covers RPC token and proxy URLs (which embed the proxy auth token).
-pub(super) fn redact_env_arg(arg: &str) -> String {
-    if (arg.starts_with("WM_RPC_TOKEN=") || arg.to_uppercase().contains("PROXY="))
-        && let Some((key, _)) = arg.split_once('=')
+/// Covers RPC token, proxy URLs (which embed the proxy auth token),
+/// and explicit sandbox.env values (which may contain secrets).
+pub(super) fn redact_env_arg(arg: &str, extra_redact_keys: &[&str]) -> String {
+    if let Some((key, _)) = arg.split_once('=')
+        && (key == "WM_RPC_TOKEN"
+            || key.to_uppercase().contains("PROXY")
+            || extra_redact_keys.contains(&key))
     {
         return format!("{}=<redacted>", key);
     }
@@ -454,7 +461,7 @@ mod tests {
     #[test]
     fn redact_rpc_token() {
         assert_eq!(
-            redact_env_arg("WM_RPC_TOKEN=abc123"),
+            redact_env_arg("WM_RPC_TOKEN=abc123", &[]),
             "WM_RPC_TOKEN=<redacted>"
         );
     }
@@ -468,7 +475,7 @@ mod tests {
             "http_proxy=http://workmux:secret@host:1234",
         ];
         for arg in &cases {
-            let redacted = redact_env_arg(arg);
+            let redacted = redact_env_arg(arg, &[]);
             assert!(
                 redacted.ends_with("=<redacted>"),
                 "expected redacted for {}, got {}",
@@ -482,15 +489,33 @@ mod tests {
     #[test]
     fn redact_no_proxy_env_var() {
         // NO_PROXY contains "PROXY" so it gets redacted too (safe default)
-        let redacted = redact_env_arg("NO_PROXY=localhost,127.0.0.1");
+        let redacted = redact_env_arg("NO_PROXY=localhost,127.0.0.1", &[]);
         assert_eq!(redacted, "NO_PROXY=<redacted>");
     }
 
     #[test]
     fn no_redact_normal_args() {
-        assert_eq!(redact_env_arg("HOME=/tmp"), "HOME=/tmp");
-        assert_eq!(redact_env_arg("--rm"), "--rm");
-        assert_eq!(redact_env_arg("WM_SANDBOX_GUEST=1"), "WM_SANDBOX_GUEST=1");
+        assert_eq!(redact_env_arg("HOME=/tmp", &[]), "HOME=/tmp");
+        assert_eq!(redact_env_arg("--rm", &[]), "--rm");
+        assert_eq!(
+            redact_env_arg("WM_SANDBOX_GUEST=1", &[]),
+            "WM_SANDBOX_GUEST=1"
+        );
+    }
+
+    #[test]
+    fn redact_sandbox_env_keys() {
+        let extra = ["GH_TOKEN", "OPENAI_API_KEY"];
+        assert_eq!(
+            redact_env_arg("GH_TOKEN=ghp_secret123", &extra),
+            "GH_TOKEN=<redacted>"
+        );
+        assert_eq!(
+            redact_env_arg("OPENAI_API_KEY=sk-abc", &extra),
+            "OPENAI_API_KEY=<redacted>"
+        );
+        // Non-extra keys still pass through
+        assert_eq!(redact_env_arg("HOME=/tmp", &extra), "HOME=/tmp");
     }
 
     // ── git_user_config_envs tests ──────────────────────────────────────
