@@ -298,14 +298,32 @@ panes:
 
 Each pane supports:
 
-| Option       | Description                                                    | Default |
-| ------------ | -------------------------------------------------------------- | ------- |
-| `command`    | Command to run (see [agent placeholders](#agent-placeholders)) | Shell   |
-| `focus`      | Whether this pane receives focus                               | `false` |
-| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                | `false` |
-| `split`      | Split direction (`horizontal` or `vertical`)                   | —       |
-| `size`       | Absolute size in lines/cells                                   | 50%     |
-| `percentage` | Size as percentage (1-100)                                     | 50%     |
+| Option       | Description                                                                          | Default |
+| ------------ | ------------------------------------------------------------------------------------ | ------- |
+| `command`    | Command to run (see [agent placeholders](#agent-placeholders))                       | Shell   |
+| `focus`      | Whether this pane receives focus                                                     | `false` |
+| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                                      | `false` |
+| `split`      | Split direction (`horizontal` or `vertical`) for the new pane                        | —       |
+| `size`       | Absolute size in lines/cells                                                         | 50%     |
+| `percentage` | Size as percentage (1-100)                                                           | 50%     |
+| `target`     | 0-based pane index to split from; defaults to the most recently created pane         | previous pane |
+
+Use `target` when you want to split something other than the pane that was just
+created. The target must reference an earlier pane in the same layout.
+
+```yaml
+panes:
+  - command: nvim
+    focus: true
+  - command: pnpm install & pnpm run dev
+    split: vertical
+    size: 15
+  - command: <agent>
+    split: horizontal
+    target: 0
+```
+
+That produces a three-pane layout with nvim in the top-left, the agent to the right of nvim, and the dev server full-width at the bottom.
 
 ##### Agent placeholders
 

@@ -124,6 +124,27 @@ Each pane supports:
 | `split`      | Split direction (`horizontal` or `vertical`)                         | ---     |
 | `size`       | Absolute size in lines/cells                                         | 50%     |
 | `percentage` | Size as percentage (1-100)                                           | 50%     |
+| `target`     | 0-based pane index to split from; defaults to the most recent pane   | previous pane |
+
+Use `target` when a new pane should split from an earlier pane instead of the
+one that was just created. This is useful for layouts like “two panes across
+the top, one full-width pane on the bottom,” where the bottom pane needs to
+split the original full window.
+
+```yaml
+panes:
+  - command: nvim
+    focus: true
+  - command: pnpm install & pnpm run dev
+    split: vertical
+    size: 15
+  - command: <agent>
+    split: horizontal
+    target: 0
+```
+
+`target` must refer to a pane that already exists in the same layout. For
+example, pane `2` can target `0` or `1`, but not `2` or any later pane.
 
 #### Agent placeholders
 
