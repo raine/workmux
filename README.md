@@ -127,6 +127,12 @@ Requires Rust. Install via [rustup](https://rustup.rs/) if you don't have it.
 cargo install workmux
 ```
 
+### [mise](https://mise.jdx.dev/)
+
+```bash
+mise use -g cargo:raine/workmux
+```
+
 ### Nix
 
 ```bash
