@@ -81,3 +81,24 @@ crossterm = { git = "https://github.com/raine/crossterm" }
 strip = true       # Strip debug symbols
 lto = true         # Link Time Optimization for smaller binaries
 codegen-units = 1  # Maximize optimization
+
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-linux-amd64.{ archive-format }"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-linux-amd64.{ archive-format }"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-linux-arm64.{ archive-format }"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-linux-arm64.{ archive-format }"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-amd64.{ archive-format }"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-arm64.{ archive-format }"
