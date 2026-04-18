@@ -568,6 +568,85 @@ impl Multiplexer for TmuxBackend {
         }
     }
 
+    fn apply_window_color(&self, pane_id: &str, name: &str) -> Result<()> {
+        let scheme = window_color_for_name(name);
+        // Pane content: background and text color
+        let pane_style = format!("bg={},fg={}", scheme.bg, scheme.fg);
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "window-style",
+            &pane_style,
+        ])?;
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "window-active-style",
+            &pane_style,
+        ])?;
+        // Pane borders
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "pane-border-style",
+            &format!("fg={}", scheme.border),
+        ])?;
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "pane-active-border-style",
+            &format!("fg={}", scheme.active_border),
+        ])?;
+        // Status bar: this window's tab in the bottom bar
+        let tab_style = format!("bg={},fg={}", scheme.status_bg, scheme.status_fg);
+        let active_tab_style = format!("bg={},fg={},bold", scheme.active_border, scheme.status_fg);
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "window-status-style",
+            &tab_style,
+        ])?;
+        self.tmux_cmd(&[
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "window-status-current-style",
+            &active_tab_style,
+        ])?;
+        // Status bar background: update the session-level status-style when this window is focused.
+        // Uses hook index [99] to avoid conflicting with other pane-focus-in hooks.
+        let status_bar_style = format!("bg={},fg={}", scheme.status_bg, scheme.status_fg);
+        let hook_cmd = format!("set-option status-style '{}'", status_bar_style);
+        let _ = self.tmux_cmd(&[
+            "set-hook",
+            "-w",
+            "-t",
+            pane_id,
+            "pane-focus-in[99]",
+            &hook_cmd,
+        ]);
+        // Apply immediately for the current window
+        self.tmux_cmd(&[
+            "set-option",
+            "-t",
+            pane_id,
+            "status-style",
+            &status_bar_style,
+        ])?;
+        Ok(())
+    }
+
     // === Pane Management ===
 
     fn select_pane(&self, pane_id: &str) -> Result<()> {
@@ -844,6 +923,135 @@ impl Multiplexer for TmuxBackend {
         Ok(panes)
     }
 }
+
+/// A complete color scheme for a tmux window: background, text, borders, and status bar.
+struct WindowColorScheme {
+    /// Subtle background tint
+    bg: &'static str,
+    /// Text color (light, complementary to background hue)
+    fg: &'static str,
+    /// Pane border color (muted accent)
+    border: &'static str,
+    /// Active pane border color (brighter accent)
+    active_border: &'static str,
+    /// Status bar tab background for this window
+    status_bg: &'static str,
+    /// Status bar tab text color for this window
+    status_fg: &'static str,
+}
+
+/// Palette of 12 color schemes for per-window tinting.
+/// Each scheme uses a tinted dark background with coordinated text, border, and status bar colors.
+const WINDOW_COLOR_PALETTE: &[WindowColorScheme] = &[
+    WindowColorScheme {
+        bg: "#141430",
+        fg: "#b8b8d0",
+        border: "#3a3a5e",
+        active_border: "#6868b0",
+        status_bg: "#1e1e48",
+        status_fg: "#c8c8e0",
+    }, // blue
+    WindowColorScheme {
+        bg: "#143014",
+        fg: "#b8d0b8",
+        border: "#3a5e3a",
+        active_border: "#68b068",
+        status_bg: "#1e481e",
+        status_fg: "#c8e0c8",
+    }, // green
+    WindowColorScheme {
+        bg: "#301414",
+        fg: "#d0b8b8",
+        border: "#5e3a3a",
+        active_border: "#b06868",
+        status_bg: "#481e1e",
+        status_fg: "#e0c8c8",
+    }, // red
+    WindowColorScheme {
+        bg: "#143030",
+        fg: "#b8d0d0",
+        border: "#3a5e5e",
+        active_border: "#68b0b0",
+        status_bg: "#1e4848",
+        status_fg: "#c8e0e0",
+    }, // cyan
+    WindowColorScheme {
+        bg: "#303014",
+        fg: "#d0d0b8",
+        border: "#5e5e3a",
+        active_border: "#b0b068",
+        status_bg: "#48481e",
+        status_fg: "#e0e0c8",
+    }, // yellow
+    WindowColorScheme {
+        bg: "#301430",
+        fg: "#d0b8d0",
+        border: "#5e3a5e",
+        active_border: "#b068b0",
+        status_bg: "#481e48",
+        status_fg: "#e0c8e0",
+    }, // magenta
+    WindowColorScheme {
+        bg: "#141a28",
+        fg: "#b8c0c8",
+        border: "#3a4858",
+        active_border: "#6878a0",
+        status_bg: "#1e2840",
+        status_fg: "#c8d0d8",
+    }, // slate
+    WindowColorScheme {
+        bg: "#281a14",
+        fg: "#c8c0b8",
+        border: "#58483a",
+        active_border: "#a07868",
+        status_bg: "#40281e",
+        status_fg: "#d8d0c8",
+    }, // warm
+    WindowColorScheme {
+        bg: "#142818",
+        fg: "#b8c8c0",
+        border: "#3a5848",
+        active_border: "#68a078",
+        status_bg: "#1e4028",
+        status_fg: "#c8d8d0",
+    }, // forest
+    WindowColorScheme {
+        bg: "#1a1428",
+        fg: "#c0b8c8",
+        border: "#483a58",
+        active_border: "#7868a0",
+        status_bg: "#281e40",
+        status_fg: "#d0c8d8",
+    }, // purple
+    WindowColorScheme {
+        bg: "#282814",
+        fg: "#c8c8b8",
+        border: "#58583a",
+        active_border: "#a0a068",
+        status_bg: "#40401e",
+        status_fg: "#d8d8c8",
+    }, // olive
+    WindowColorScheme {
+        bg: "#141c24",
+        fg: "#b8c0c5",
+        border: "#3a4850",
+        active_border: "#688090",
+        status_bg: "#1e2c38",
+        status_fg: "#c8d0d5",
+    }, // steel
+];
+
+/// Derive a deterministic palette color scheme from a name string.
+/// Uses FNV-1a hash for fast, well-distributed mapping.
+fn window_color_for_name(name: &str) -> &'static WindowColorScheme {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for byte in name.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    &WINDOW_COLOR_PALETTE[(hash as usize) % WINDOW_COLOR_PALETTE.len()]
+}
+
 /// Format string to inject into tmux window-status-format.
 const WORKMUX_STATUS_FORMAT: &str = "#{?@workmux_status, #{@workmux_status},}";
 
@@ -922,5 +1130,46 @@ mod tests {
             result,
             " #I:#W#{?@workmux_status, #{@workmux_status},}#{window_flags} "
         );
+    }
+
+    #[test]
+    fn test_window_color_deterministic() {
+        // Same name always produces the same color scheme
+        let scheme1 = window_color_for_name("feature-auth");
+        let scheme2 = window_color_for_name("feature-auth");
+        assert_eq!(scheme1.bg, scheme2.bg);
+        assert_eq!(scheme1.fg, scheme2.fg);
+        assert_eq!(scheme1.border, scheme2.border);
+        assert_eq!(scheme1.active_border, scheme2.active_border);
+    }
+
+    #[test]
+    fn test_window_color_different_names() {
+        // Different names should (very likely) produce different schemes
+        let scheme1 = window_color_for_name("feature-auth");
+        let scheme2 = window_color_for_name("fix-bug-123");
+        let scheme3 = window_color_for_name("refactor-db");
+        // At least 2 of 3 should differ
+        assert!(scheme1.bg != scheme2.bg || scheme2.bg != scheme3.bg);
+    }
+
+    #[test]
+    fn test_window_color_scheme_has_all_fields() {
+        // Every name produces a scheme with non-empty hex color values
+        for name in &["main", "develop", "feature-x", "hotfix-y", "a", ""] {
+            let scheme = window_color_for_name(name);
+            let fields = [
+                ("bg", scheme.bg),
+                ("fg", scheme.fg),
+                ("border", scheme.border),
+                ("active_border", scheme.active_border),
+                ("status_bg", scheme.status_bg),
+                ("status_fg", scheme.status_fg),
+            ];
+            for (field, value) in &fields {
+                assert!(!value.is_empty(), "{} empty for '{}'", field, name);
+                assert!(value.starts_with('#'), "{} not hex for '{}'", field, name);
+            }
+        }
     }
 }

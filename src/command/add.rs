@@ -196,8 +196,9 @@ pub fn run(
     // Ensure preconditions are met (git repo and multiplexer session)
     check_preconditions()?;
 
-    // Extract sandbox override before consuming setup flags
+    // Extract overrides before consuming setup flags
     let sandbox_override = setup.sandbox;
+    let colors_override = setup.colors;
 
     // Load config early to determine mode (CLI flag overrides config)
     let mut initial_config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
@@ -370,6 +371,9 @@ pub fn run(
         if let Some(layout_name) = &layout {
             resolve_layout(&mut rescue_config, layout_name)?;
         }
+        if colors_override {
+            rescue_config.window_colors = Some(true);
+        }
         let mux = create_backend(detect_backend());
         let rescue_context = workflow::WorkflowContext::new(rescue_config, mux, rescue_location)?;
         // Derive handle for rescue flow (uses config for naming strategy/prefix)
@@ -496,6 +500,7 @@ pub fn run(
         deferred_auto_name,
         max_concurrent: multi.max_concurrent,
         sandbox_override,
+        colors_override,
         prompt_file_only,
         layout: layout.as_deref(),
         fork_source,
@@ -627,6 +632,7 @@ struct CreationPlan<'a> {
     deferred_auto_name: bool,
     max_concurrent: Option<u32>,
     sandbox_override: bool,
+    colors_override: bool,
     prompt_file_only: bool,
     layout: Option<&'a str>,
     fork_source: Option<crate::workflow::types::ForkSource>,
@@ -678,6 +684,9 @@ impl<'a> CreationPlan<'a> {
                 config::Config::load_with_location(spec.agent.as_deref())?;
             if self.sandbox_override {
                 config.sandbox.enabled = Some(true);
+            }
+            if self.colors_override {
+                config.window_colors = Some(true);
             }
 
             // Resolve layout: replace top-level panes with layout's panes

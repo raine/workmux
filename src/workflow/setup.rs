@@ -195,6 +195,10 @@ pub fn setup_environment(
                 "setup_environment:window created"
             );
 
+            if config.window_colors.unwrap_or(false) {
+                let _ = mux.apply_window_color(&initial_pane_id, handle);
+            }
+
             let result = mux
                 .setup_panes(
                     &initial_pane_id,
@@ -253,6 +257,10 @@ pub fn setup_environment(
                     );
                     pane_id
                 };
+
+                if config.window_colors.unwrap_or(false) {
+                    let _ = mux.apply_window_color(&initial_pane_id, handle);
+                }
 
                 let result = mux
                     .setup_panes(
