@@ -14,18 +14,46 @@ from .conftest import (
 )
 
 
+GITHUB_URL = "https://github.com/testowner/testrepo.git"
+PR_URL_BASE = "https://github.com/testowner/testrepo/pull"
+
+
+def same_repo_pr_data(
+    pr_number: int,
+    head_ref: str,
+    *,
+    title: str = "Add new feature",
+    state: str = "OPEN",
+    is_draft: bool = False,
+) -> dict:
+    """PR JSON for a same-repo (non-fork) PR against testowner/testrepo."""
+    return {
+        "headRefName": head_ref,
+        "headRepositoryOwner": {"login": "testowner"},
+        "headRepository": {"name": "testrepo"},
+        "isCrossRepository": False,
+        "url": f"{PR_URL_BASE}/{pr_number}",
+        "state": state,
+        "isDraft": is_draft,
+        "title": title,
+        "author": {"login": "contributor"},
+    }
+
+
 def setup_pr_remote_and_branch(
     env: MuxEnvironment,
     repo_path: Path,
     remote_repo_path: Path,
     branch_name: str,
+    pr_number: int,
 ):
-    """Helper to set up a fetchable remote with a PR branch"""
-    # Use a fake GitHub URL for the remote so get_repo_owner() can parse it
-    github_url = "https://github.com/testowner/testrepo.git"
+    """Set up a fetchable origin and publish a PR head as refs/pull/<n>/head.
 
+    workmux fetches PRs via the GitHub-style pull ref rather than the head
+    branch, so the bare remote must expose that ref.
+    """
     env.run_command(
-        ["git", "remote", "add", "origin", github_url],
+        ["git", "remote", "add", "origin", GITHUB_URL],
         cwd=repo_path,
     )
     # Set pushurl to the local path so git operations actually work
@@ -35,18 +63,23 @@ def setup_pr_remote_and_branch(
     )
     # Also need to configure insteadOf for fetch operations
     env.run_command(
-        ["git", "config", f"url.{remote_repo_path}.insteadOf", github_url],
+        ["git", "config", f"url.{remote_repo_path}.insteadOf", GITHUB_URL],
         cwd=repo_path,
     )
     env.run_command(["git", "push", "-u", "origin", "main"], cwd=repo_path)
 
-    # Create and push the PR branch
+    # Create the PR head commit and publish it as refs/pull/<n>/head on the
+    # remote. We do not push the branch itself, mirroring the case where the
+    # head branch was deleted after merge.
     env.run_command(["git", "checkout", "-b", branch_name], cwd=repo_path)
     env.run_command(
         ["git", "commit", "--allow-empty", "-m", "PR changes"],
         cwd=repo_path,
     )
-    env.run_command(["git", "push", "-u", "origin", branch_name], cwd=repo_path)
+    env.run_command(
+        ["git", "push", "origin", f"HEAD:refs/pull/{pr_number}/head"],
+        cwd=repo_path,
+    )
     env.run_command(["git", "checkout", "main"], cwd=repo_path)
     # Delete the local branch so workmux can create it fresh (matching gh pr checkout behavior)
     env.run_command(["git", "branch", "-D", branch_name], cwd=repo_path)
@@ -58,16 +91,9 @@ def test_add_pr_from_same_repo(mux_server, workmux_exe_path, remote_repo_path):
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch")
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch", 123)
 
-    pr_data = {
-        "headRefName": "feature-branch",
-        "headRepositoryOwner": {"login": "testowner"},
-        "state": "OPEN",
-        "isDraft": False,
-        "title": "Add new feature",
-        "author": {"login": "contributor"},
-    }
+    pr_data = same_repo_pr_data(123, "feature-branch")
     install_fake_gh_cli(env, pr_number=123, json_response=pr_data)
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
@@ -90,16 +116,9 @@ def test_add_pr_with_custom_branch_name(mux_server, workmux_exe_path, remote_rep
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch")
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch", 123)
 
-    pr_data = {
-        "headRefName": "feature-branch",
-        "headRepositoryOwner": {"login": "testowner"},
-        "state": "OPEN",
-        "isDraft": False,
-        "title": "Add new feature",
-        "author": {"login": "contributor"},
-    }
+    pr_data = same_repo_pr_data(123, "feature-branch")
     install_fake_gh_cli(env, pr_number=123, json_response=pr_data)
 
     result = run_workmux_command(
@@ -122,16 +141,11 @@ def test_add_pr_merged_state_warning(mux_server, workmux_exe_path, remote_repo_p
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "merged-branch")
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "merged-branch", 456)
 
-    pr_data = {
-        "headRefName": "merged-branch",
-        "headRepositoryOwner": {"login": "testowner"},
-        "state": "MERGED",
-        "isDraft": False,
-        "title": "Already merged PR",
-        "author": {"login": "contributor"},
-    }
+    pr_data = same_repo_pr_data(
+        456, "merged-branch", title="Already merged PR", state="MERGED"
+    )
     install_fake_gh_cli(env, pr_number=456, json_response=pr_data)
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 456")
@@ -149,16 +163,11 @@ def test_add_pr_draft_warning(mux_server, workmux_exe_path, remote_repo_path):
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "draft-branch")
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "draft-branch", 789)
 
-    pr_data = {
-        "headRefName": "draft-branch",
-        "headRepositoryOwner": {"login": "testowner"},
-        "state": "OPEN",
-        "isDraft": True,
-        "title": "WIP: Work in progress",
-        "author": {"login": "contributor"},
-    }
+    pr_data = same_repo_pr_data(
+        789, "draft-branch", title="WIP: Work in progress", is_draft=True
+    )
     install_fake_gh_cli(env, pr_number=789, json_response=pr_data)
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 789")
@@ -246,57 +255,22 @@ def test_add_pr_conflicts_with_base_flag(
 
 
 def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_path):
-    """Test that fork PRs with branch 'main' get prefixed with owner to avoid conflict"""
+    """Cross-repo PR with head branch 'main' is fetched via pull ref and
+    checked out under an owner-prefixed name to avoid clobbering local main."""
     env = mux_server
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    # Set up origin with a GitHub-style URL
-    github_url = "https://github.com/testowner/testrepo.git"
-    env.run_command(
-        ["git", "remote", "add", "origin", github_url],
-        cwd=repo_path,
-    )
-    env.run_command(
-        ["git", "remote", "set-url", "--push", "origin", str(remote_repo_path)],
-        cwd=repo_path,
-    )
-    env.run_command(
-        ["git", "config", f"url.{remote_repo_path}.insteadOf", github_url],
-        cwd=repo_path,
-    )
-    env.run_command(["git", "push", "-u", "origin", "main"], cwd=repo_path)
+    # Origin = base repo. Publish the fork's commit as refs/pull/16/head there;
+    # workmux never needs to talk to the fork directly.
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "fork-work", 16)
 
-    # Create a separate "fork" bare repo that has a "main" branch with a commit
-    fork_repo_path = repo_path.parent / "fork_repo.git"
-    env.run_command(
-        ["git", "clone", "--bare", str(remote_repo_path), str(fork_repo_path)]
-    )
-
-    # Create a commit on main in the fork (via a temp checkout)
-    fork_work = repo_path.parent / "fork_work"
-    env.run_command(
-        ["git", "clone", str(fork_repo_path), str(fork_work)], cwd=repo_path
-    )
-    env.run_command(["git", "config", "user.name", "Fork User"], cwd=fork_work)
-    env.run_command(["git", "config", "user.email", "fork@example.com"], cwd=fork_work)
-    env.run_command(
-        ["git", "commit", "--allow-empty", "-m", "Fork PR changes"],
-        cwd=fork_work,
-    )
-    env.run_command(["git", "push", "origin", "main"], cwd=fork_work)
-
-    # Map the fork URL that ensure_fork_remote will construct
-    fork_github_url = "https://github.com/forkowner/testrepo.git"
-    env.run_command(
-        ["git", "config", f"url.{fork_repo_path}.insteadOf", fork_github_url],
-        cwd=repo_path,
-    )
-
-    # PR data: fork PR where head branch is "main" from a different owner
     pr_data = {
         "headRefName": "main",
         "headRepositoryOwner": {"login": "forkowner"},
+        "headRepository": {"name": "testrepo"},
+        "isCrossRepository": True,
+        "url": f"{PR_URL_BASE}/16",
         "state": "OPEN",
         "isDraft": False,
         "title": "Use ANSI palette colors",
@@ -320,6 +294,12 @@ def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_
     windows = env.list_windows()
     assert window_name in windows
 
+    # Upstream tracking should point at the fork's URL so push/pull target it.
+    remote = env.run_command(
+        ["git", "config", "branch.forkowner-main.remote"], cwd=repo_path
+    ).stdout.strip()
+    assert remote == "git@github.com:forkowner/testrepo.git"
+
 
 def test_add_pr_fails_when_worktree_exists(
     mux_server, workmux_exe_path, remote_repo_path
@@ -329,16 +309,9 @@ def test_add_pr_fails_when_worktree_exists(
     repo_path = env.tmp_path
     setup_git_repo(repo_path, env.env)
 
-    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch")
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch", 123)
 
-    pr_data = {
-        "headRefName": "feature-branch",
-        "headRepositoryOwner": {"login": "testowner"},
-        "state": "OPEN",
-        "isDraft": False,
-        "title": "Add new feature",
-        "author": {"login": "contributor"},
-    }
+    pr_data = same_repo_pr_data(123, "feature-branch")
     install_fake_gh_cli(env, pr_number=123, json_response=pr_data)
 
     # First checkout should succeed

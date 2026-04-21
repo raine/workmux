@@ -45,70 +45,105 @@ fn fork_local_branch_name(owner: &str, branch: &str) -> String {
 /// Result of resolving a PR checkout.
 pub struct PrCheckoutResult {
     pub local_branch: String,
-    pub remote_branch: String,
 }
 
-/// Resolve a PR reference and prepare for checkout.
+/// Parse `owner` and `repo` out of a GitHub PR URL like
+/// `https://github.com/owner/repo/pull/123`.
+fn parse_base_repo_from_pr_url(url: &str) -> Option<(String, String, String)> {
+    let stripped = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let mut parts = stripped.splitn(4, '/');
+    let host = parts.next()?.to_string();
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    Some((host, owner, repo))
+}
+
+/// Resolve a PR reference and prepare a local branch for checkout.
 ///
-/// Fetches PR details, sets up the remote if it's a fork, and returns
-/// the branch information needed to create a worktree.
+/// Mirrors `gh pr checkout`: fetches `refs/pull/<N>/head` from the base repo
+/// into a local branch and points the branch's upstream at the head repo URL.
+/// This avoids creating named remotes and works even when the head branch has
+/// been deleted (merged/closed PRs).
 pub fn resolve_pr_ref(
     pr_number: u32,
     custom_branch_name: Option<&str>,
+    quiet: bool,
 ) -> Result<PrCheckoutResult> {
-    let pr_details = spinner::with_spinner(&format!("Fetching PR #{}", pr_number), || {
-        github::get_pr_details(pr_number)
-    })
+    let fetch_details = || github::get_pr_details(pr_number);
+    let pr_details = if quiet {
+        fetch_details()
+    } else {
+        spinner::with_spinner(&format!("Fetching PR #{}", pr_number), fetch_details)
+    }
     .with_context(|| format!("Failed to fetch details for PR #{}", pr_number))?;
 
-    // Display PR information
-    println!("PR #{}: {}", pr_number, pr_details.title);
-    println!("Author: {}", pr_details.author.login);
-    println!("Branch: {}", pr_details.head_ref_name);
-
-    // Warn about PR state
-    if pr_details.state != "OPEN" {
-        eprintln!(
-            "⚠️  Warning: PR #{} is {}. Proceeding with checkout...",
-            pr_number, pr_details.state
-        );
+    if !quiet {
+        println!("PR #{}: {}", pr_number, pr_details.title);
+        println!("Author: {}", pr_details.author.login);
+        println!("Branch: {}", pr_details.head_ref_name);
+        if pr_details.state != "OPEN" {
+            eprintln!(
+                "⚠️  Warning: PR #{} is {}. Proceeding with checkout...",
+                pr_number, pr_details.state
+            );
+        }
+        if pr_details.is_draft {
+            eprintln!("⚠️  Warning: PR #{} is a DRAFT.", pr_number);
+        }
     }
-    if pr_details.is_draft {
-        eprintln!("⚠️  Warning: PR #{} is a DRAFT.", pr_number);
-    }
 
-    // Determine if this is a fork PR and ensure remote exists
-    let current_repo_owner =
-        git::get_repo_owner().context("Failed to determine repository owner from origin remote")?;
+    let head_owner = &pr_details.head_repository_owner.login;
+    let is_fork = pr_details.is_cross_repository;
 
-    let is_fork = pr_details.is_fork(&current_repo_owner);
-    let fork_owner = &pr_details.head_repository_owner.login;
-
-    let remote_name = if is_fork {
-        git::ensure_fork_remote(fork_owner)?
-    } else {
-        "origin".to_string()
-    };
-
-    // Determine local branch name.
-    // For fork PRs, prefix with the fork owner to avoid conflicts with common
-    // branch names like "main", matching resolve_fork_branch behavior.
+    // Prefix cross-repo PRs with head owner to avoid colliding with e.g. "main".
     let local_branch = custom_branch_name.map(String::from).unwrap_or_else(|| {
         if is_fork {
-            fork_local_branch_name(fork_owner, &pr_details.head_ref_name)
+            fork_local_branch_name(head_owner, &pr_details.head_ref_name)
         } else {
             pr_details.head_ref_name.clone()
         }
     });
 
-    // Note: We do not fetch here. The `create` workflow handles fetching
-    // the remote branch to ensure the worktree base is up to date.
-    let remote_branch = format!("{}/{}", remote_name, pr_details.head_ref_name);
+    // Don't clobber an existing local branch; create() will attach a worktree.
+    if git::branch_exists(&local_branch)? {
+        return Ok(PrCheckoutResult { local_branch });
+    }
 
-    Ok(PrCheckoutResult {
-        local_branch,
-        remote_branch,
-    })
+    // Pull refs live on the base repo, not the fork.
+    let (host, base_owner, base_repo) = parse_base_repo_from_pr_url(&pr_details.url)
+        .with_context(|| format!("Could not parse base repo from PR URL '{}'", pr_details.url))?;
+
+    let fetch_source = git::find_remote_for(&base_owner, Some(&base_repo))?
+        .unwrap_or_else(|| format!("https://{}/{}/{}.git", host, base_owner, base_repo));
+
+    let refspec = format!("refs/pull/{}/head:refs/heads/{}", pr_number, local_branch);
+    let do_fetch = || git::fetch_refspec(&fetch_source, &refspec);
+    if quiet {
+        do_fetch()
+    } else {
+        spinner::with_spinner(&format!("Fetching pull/{}/head", pr_number), do_fetch)
+    }
+    .with_context(|| format!("Failed to fetch PR #{} from '{}'", pr_number, fetch_source))?;
+
+    // Record the fetched commit as workmux-base so removal's unmerged check
+    // only flags commits the user adds on top, not the PR's own commits.
+    if let Ok(sha) = git::rev_parse(&format!("refs/heads/{}", local_branch)) {
+        let _ = git::set_branch_base(&local_branch, &sha);
+    }
+
+    // Track the head repo URL so `git pull`/`git push` work without a named remote.
+    if let Some(head_repo) = &pr_details.head_repository {
+        let head_url = format!("git@{}:{}/{}.git", host, head_owner, head_repo.name);
+        git::set_branch_tracking_url(
+            &local_branch,
+            &head_url,
+            &format!("refs/heads/{}", pr_details.head_ref_name),
+        )?;
+    }
+
+    Ok(PrCheckoutResult { local_branch })
 }
 
 /// Result of resolving a fork branch.
@@ -134,7 +169,7 @@ pub fn resolve_fork_branch(fork_spec: &git::ForkBranchSpec) -> Result<ForkBranch
     }
 
     // Ensure the fork remote exists
-    let remote_name = git::ensure_fork_remote(&fork_spec.owner)?;
+    let remote_name = git::ensure_fork_remote(&fork_spec.owner, None)?;
 
     // Note: We do not fetch or verify the branch exists here.
     // The `create` workflow will perform the fetch and fail if the branch is missing.

@@ -303,6 +303,32 @@ pub fn get_gone_branches() -> Result<HashSet<String>> {
     Ok(gone)
 }
 
+/// Resolve a ref to its commit SHA.
+pub fn rev_parse(rev: &str) -> Result<String> {
+    Cmd::new("git")
+        .args(&["rev-parse", "--verify", rev])
+        .run_and_capture_stdout()
+        .with_context(|| format!("Failed to resolve ref '{}'", rev))
+}
+
+/// Configure a branch to track a ref on a remote given by URL (no named remote).
+///
+/// Mirrors what `gh pr checkout` does so that `git pull`/`git push` on the
+/// branch talk directly to the PR's head repository.
+pub fn set_branch_tracking_url(branch: &str, remote_url: &str, merge_ref: &str) -> Result<()> {
+    for (key, val) in [
+        (format!("branch.{}.remote", branch), remote_url),
+        (format!("branch.{}.pushRemote", branch), remote_url),
+        (format!("branch.{}.merge", branch), merge_ref),
+    ] {
+        Cmd::new("git")
+            .args(&["config", "--local", &key, val])
+            .run()
+            .with_context(|| format!("Failed to set {}", key))?;
+    }
+    Ok(())
+}
+
 /// Unset the upstream tracking for a branch
 pub fn unset_branch_upstream(branch_name: &str) -> Result<()> {
     if !branch_has_upstream(branch_name)? {

@@ -281,64 +281,58 @@ pub fn run(
 
     // Handle auto-name: load prompt first, generate branch name
     // In multi-worktree mode with auto-name, we defer LLM generation to the loop
-    let (final_branch_name, preloaded_prompt, remote_branch_for_pr, deferred_auto_name) =
-        if auto_name {
-            // Use editor if no prompt source specified, otherwise use provided source
-            let use_editor = prompt_args.prompt.is_none() && prompt_args.prompt_file.is_none();
+    let (final_branch_name, preloaded_prompt, deferred_auto_name) = if auto_name {
+        // Use editor if no prompt source specified, otherwise use provided source
+        let use_editor = prompt_args.prompt.is_none() && prompt_args.prompt_file.is_none();
 
-            // Cannot use interactive editor when stdin is piped (editor can't read terminal)
-            if has_stdin && (prompt_args.prompt_editor || use_editor) {
-                return Err(anyhow!(
-                    "Cannot use interactive prompt editor when piping input from stdin.\n\
+        // Cannot use interactive editor when stdin is piped (editor can't read terminal)
+        if has_stdin && (prompt_args.prompt_editor || use_editor) {
+            return Err(anyhow!(
+                "Cannot use interactive prompt editor when piping input from stdin.\n\
                     Please provide a prompt via --prompt or --prompt-file."
-                ));
-            }
+            ));
+        }
 
-            let prompt = load_prompt(&PromptLoadArgs {
-                prompt_editor: use_editor || prompt_args.prompt_editor,
-                prompt_inline: prompt_args.prompt.as_deref(),
-                prompt_file: prompt_args.prompt_file.as_ref(),
-            })?
-            .ok_or_else(|| anyhow!("Prompt is required for --auto-name"))?;
+        let prompt = load_prompt(&PromptLoadArgs {
+            prompt_editor: use_editor || prompt_args.prompt_editor,
+            prompt_inline: prompt_args.prompt.as_deref(),
+            prompt_file: prompt_args.prompt_file.as_ref(),
+        })?
+        .ok_or_else(|| anyhow!("Prompt is required for --auto-name"))?;
 
-            // Check if we need to defer auto-name generation to the loop
-            // This happens when we have multi-worktree mode OR frontmatter foreach
-            let prompt_doc_preview = parse_prompt_with_frontmatter(&prompt, true)?;
-            let has_frontmatter_foreach = prompt_doc_preview.meta.foreach.is_some();
+        // Check if we need to defer auto-name generation to the loop
+        // This happens when we have multi-worktree mode OR frontmatter foreach
+        let prompt_doc_preview = parse_prompt_with_frontmatter(&prompt, true)?;
+        let has_frontmatter_foreach = prompt_doc_preview.meta.foreach.is_some();
 
-            if is_explicit_multi || has_frontmatter_foreach {
-                // Defer LLM generation - use placeholder branch name
-                ("deferred".to_string(), Some(prompt), None, true)
-            } else {
-                // Single worktree mode - generate branch name now
-                let prompt_text = prompt.read_content()?;
-                let config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
-                let generated = generate_branch_name_with_spinner(Some(&prompt_text), &config)?;
-                (generated, Some(prompt), None, false)
-            }
-        } else if let Some(pr_number) = pr {
-            // Handle PR checkout if --pr flag is provided
-            let result = workflow::pr::resolve_pr_ref(pr_number, branch_name)?;
-            (result.local_branch, None, Some(result.remote_branch), false)
+        if is_explicit_multi || has_frontmatter_foreach {
+            // Defer LLM generation - use placeholder branch name
+            ("deferred".to_string(), Some(prompt), true)
         } else {
-            // Normal flow: use provided branch name
-            (
-                branch_name
-                    .expect("branch_name required when --pr and --auto-name not provided")
-                    .to_string(),
-                None,
-                None,
-                false,
-            )
-        };
+            // Single worktree mode - generate branch name now
+            let prompt_text = prompt.read_content()?;
+            let config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
+            let generated = generate_branch_name_with_spinner(Some(&prompt_text), &config)?;
+            (generated, Some(prompt), false)
+        }
+    } else if let Some(pr_number) = pr {
+        // resolve_pr_ref fetches the pull ref into a local branch directly.
+        let result = workflow::pr::resolve_pr_ref(pr_number, branch_name, false)?;
+        (result.local_branch, None, false)
+    } else {
+        // Normal flow: use provided branch name
+        (
+            branch_name
+                .expect("branch_name required when --pr and --auto-name not provided")
+                .to_string(),
+            None,
+            false,
+        )
+    };
 
     // Use the determined branch name and override base if from PR
     let branch_name = &final_branch_name;
-    let cli_base = if remote_branch_for_pr.is_some() {
-        None
-    } else {
-        base
-    };
+    let cli_base = if pr.is_some() { None } else { base };
     let config_base = initial_config.base_branch.as_deref();
 
     // Validate --with-changes compatibility
@@ -441,8 +435,8 @@ pub fn run(
     // If we have a PR remote branch, use that; otherwise detect from branch_name
     // Only pass CLI --base to detect_remote_branch; config base_branch should not
     // interfere with remote/fork branch detection.
-    let (remote_branch, template_base_name) = if let Some(ref pr_remote) = remote_branch_for_pr {
-        (Some(pr_remote.clone()), branch_name.to_string())
+    let (remote_branch, template_base_name) = if pr.is_some() {
+        (None, branch_name.to_string())
     } else {
         detect_remote_branch(branch_name, cli_base)?
     };

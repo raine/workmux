@@ -12,6 +12,11 @@ pub struct PrDetails {
     pub head_ref_name: String,
     #[serde(rename = "headRepositoryOwner")]
     pub head_repository_owner: RepositoryOwner,
+    #[serde(rename = "headRepository")]
+    pub head_repository: Option<Repository>,
+    #[serde(rename = "isCrossRepository")]
+    pub is_cross_repository: bool,
+    pub url: String,
     pub state: String,
     #[serde(rename = "isDraft")]
     pub is_draft: bool,
@@ -25,14 +30,13 @@ pub struct RepositoryOwner {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Author {
-    pub login: String,
+pub struct Repository {
+    pub name: String,
 }
 
-impl PrDetails {
-    pub fn is_fork(&self, current_repo_owner: &str) -> bool {
-        self.head_repository_owner.login != current_repo_owner
-    }
+#[derive(Debug, Deserialize)]
+pub struct Author {
+    pub login: String,
 }
 
 /// Aggregated status of PR checks
@@ -398,7 +402,7 @@ pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
             "view",
             &pr_number.to_string(),
             "--json",
-            "headRefName,headRepositoryOwner,state,isDraft,title,author",
+            "headRefName,headRepository,headRepositoryOwner,isCrossRepository,url,state,isDraft,title,author",
         ])
         .output();
 

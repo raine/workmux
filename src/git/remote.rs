@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use git_url_parse::GitUrl;
 use git_url_parse::types::provider::GenericProvider;
 use tracing::info;
@@ -31,6 +31,15 @@ pub fn fetch_remote(remote: &str) -> Result<()> {
         .args(&["fetch", remote])
         .run()
         .with_context(|| format!("Failed to fetch from remote '{}'", remote))?;
+    Ok(())
+}
+
+/// Fetch a specific refspec from a remote name or URL.
+pub fn fetch_refspec(source: &str, refspec: &str) -> Result<()> {
+    Cmd::new("git")
+        .args(&["fetch", source, refspec])
+        .run()
+        .with_context(|| format!("Failed to fetch '{}' from '{}'", refspec, source))?;
     Ok(())
 }
 
@@ -72,14 +81,43 @@ pub fn get_remote_url(remote: &str) -> Result<String> {
         .with_context(|| format!("Failed to get URL for remote '{}'", remote))
 }
 
+/// Find an existing remote whose URL points at `owner` (and `repo_name` if given).
+///
+/// This lets us reuse remotes the user already configured (e.g. `upstream`
+/// pointing at the parent repo) instead of synthesizing a `fork-<owner>` remote
+/// with a guessed URL.
+pub fn find_remote_for(owner: &str, repo_name: Option<&str>) -> Result<Option<String>> {
+    for remote in list_remotes()? {
+        let Ok(url) = get_remote_url(&remote) else {
+            continue;
+        };
+        let Ok(parsed) = GitUrl::parse(&url) else {
+            continue;
+        };
+        let Ok(provider): std::result::Result<GenericProvider, _> = parsed.provider_info() else {
+            continue;
+        };
+        if !provider.owner().eq_ignore_ascii_case(owner) {
+            continue;
+        }
+        if let Some(repo) = repo_name
+            && !provider.repo().eq_ignore_ascii_case(repo)
+        {
+            continue;
+        }
+        return Ok(Some(remote));
+    }
+    Ok(None)
+}
+
 /// Ensure a remote exists for a specific fork owner.
-/// Returns the name of the remote (e.g., "origin" or "fork-username").
-/// If the remote needs to be created, it constructs the URL based on the origin URL's scheme.
-pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
-    // If the fork owner is the same as the origin owner, just use origin
-    let current_owner = get_repo_owner().unwrap_or_default();
-    if !current_owner.is_empty() && fork_owner == current_owner {
-        return Ok("origin".to_string());
+/// Returns the name of the remote (e.g., "origin", "upstream", or "fork-username").
+///
+/// `repo_name` overrides the repo name guessed from `origin`, which may differ
+/// from the fork's actual name.
+pub fn ensure_fork_remote(fork_owner: &str, repo_name: Option<&str>) -> Result<String> {
+    if let Some(existing) = find_remote_for(fork_owner, repo_name)? {
+        return Ok(existing);
     }
 
     let remote_name = format!("fork-{}", fork_owner);
@@ -99,7 +137,7 @@ pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
     let provider: GenericProvider = parsed_url
         .provider_info()
         .with_context(|| "Failed to extract provider info from origin URL")?;
-    let repo_name = provider.repo();
+    let repo_name = repo_name.unwrap_or_else(|| provider.repo());
 
     let fork_url = match scheme {
         "https" => format!("https://{}/{}/{}.git", host, fork_owner, repo_name),
@@ -125,132 +163,4 @@ pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
     }
 
     Ok(remote_name)
-}
-
-/// Parse the repository owner from a git remote URL
-/// Supports both HTTPS and SSH formats for github.com and GitHub Enterprise domains
-fn parse_owner_from_git_url(url: &str) -> Option<&str> {
-    if let Some(https_part) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        // HTTPS format: https://github.com/owner/repo.git or https://github.enterprise.com/owner/repo.git
-        https_part.split('/').nth(1)
-    } else if url.starts_with("git@") {
-        // SSH format: git@github.com:owner/repo.git or git@github.enterprise.com:owner/repo.git
-        url.split(':')
-            .nth(1)
-            .and_then(|path| path.split('/').next())
-    } else {
-        None
-    }
-}
-
-/// Get the repository owner from the origin remote URL
-pub fn get_repo_owner() -> Result<String> {
-    let url = get_remote_url("origin")?;
-
-    parse_owner_from_git_url(&url)
-        .ok_or_else(|| anyhow!("Could not parse repository owner from origin URL: {}", url))
-        .map(|s| s.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_owner_from_git_url;
-
-    #[test]
-    fn test_parse_repo_owner_https_github_com() {
-        assert_eq!(
-            parse_owner_from_git_url("https://github.com/owner/repo.git"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_https_github_com_no_git_suffix() {
-        assert_eq!(
-            parse_owner_from_git_url("https://github.com/owner/repo"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_http_github_com() {
-        assert_eq!(
-            parse_owner_from_git_url("http://github.com/owner/repo.git"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_ssh_github_com() {
-        assert_eq!(
-            parse_owner_from_git_url("git@github.com:owner/repo.git"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_ssh_github_com_no_git_suffix() {
-        assert_eq!(
-            parse_owner_from_git_url("git@github.com:owner/repo"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_https_github_enterprise() {
-        assert_eq!(
-            parse_owner_from_git_url("https://github.enterprise.com/owner/repo.git"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_ssh_github_enterprise() {
-        assert_eq!(
-            parse_owner_from_git_url("git@github.enterprise.net:org/project.git"),
-            Some("org")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_https_github_enterprise_subdomain() {
-        assert_eq!(
-            parse_owner_from_git_url("https://github.company.internal/team/project.git"),
-            Some("team")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_with_nested_path() {
-        assert_eq!(
-            parse_owner_from_git_url("https://github.com/owner/repo/subpath"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_ssh_with_nested_path() {
-        assert_eq!(
-            parse_owner_from_git_url("git@github.com:owner/repo/subpath"),
-            Some("owner")
-        );
-    }
-
-    #[test]
-    fn test_parse_repo_owner_invalid_format() {
-        assert_eq!(parse_owner_from_git_url("not-a-valid-url"), None);
-    }
-
-    #[test]
-    fn test_parse_repo_owner_local_path() {
-        assert_eq!(parse_owner_from_git_url("/local/path/to/repo"), None);
-    }
-
-    #[test]
-    fn test_parse_repo_owner_file_protocol() {
-        assert_eq!(parse_owner_from_git_url("file:///local/path/to/repo"), None);
-    }
 }

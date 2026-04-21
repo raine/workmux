@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Context as _;
-
 use crate::git;
 use crate::workflow;
 
@@ -1103,27 +1101,8 @@ impl App {
             let result = (|| -> anyhow::Result<String> {
                 std::env::set_current_dir(&repo_path)?;
 
-                // Quiet PR resolution (no println/spinner like resolve_pr_ref)
-                let pr_details = crate::github::get_pr_details(pr_number)
-                    .with_context(|| format!("Failed to fetch PR #{}", pr_number))?;
-
-                let current_repo_owner =
-                    git::get_repo_owner().context("Failed to determine repository owner")?;
-                let is_fork = pr_details.is_fork(&current_repo_owner);
-                let fork_owner = &pr_details.head_repository_owner.login;
-
-                let remote_name = if is_fork {
-                    git::ensure_fork_remote(fork_owner)?
-                } else {
-                    "origin".to_string()
-                };
-
-                let local_branch = if is_fork {
-                    format!("{}-{}", fork_owner, pr_details.head_ref_name)
-                } else {
-                    pr_details.head_ref_name.clone()
-                };
-                let remote_branch = format!("{}/{}", remote_name, pr_details.head_ref_name);
+                let result = workflow::pr::resolve_pr_ref(pr_number, None, true)?;
+                let local_branch = result.local_branch;
 
                 let ctx = workflow::WorkflowContext::new(config.clone(), mux, None)?;
                 let handle = crate::naming::derive_handle(&local_branch, None, &config)?;
@@ -1137,7 +1116,7 @@ impl App {
                         branch_name: &local_branch,
                         handle: &handle,
                         base_branch: None,
-                        remote_branch: Some(&remote_branch),
+                        remote_branch: None,
                         prompt: None,
                         options,
                         agent: None,
