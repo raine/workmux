@@ -145,6 +145,7 @@ jobs:
           - codex
           - gemini
           - opencode
+          - pi
         platform:
           - linux/amd64
           - linux/arm64
@@ -213,6 +214,7 @@ jobs:
           - codex
           - gemini
           - opencode
+          - pi
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4

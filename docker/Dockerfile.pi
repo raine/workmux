@@ -1,0 +1,14 @@
+ARG BASE=ghcr.io/raine/workmux-sandbox:base
+FROM ${BASE}
+
+# Install Node.js (required for pi coding agent CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG CACHE_BUST=1
+
+# Install pi coding agent CLI globally.
+# npm global bin is /usr/local/bin so the `pi` binary is reachable when
+# running as an arbitrary non-root UID (--user uid:gid).
+RUN npm install -g @mariozechner/pi-coding-agent
