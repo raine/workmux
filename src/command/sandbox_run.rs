@@ -349,13 +349,15 @@ fn run_container(
 
     // Generate container name from worktree directory name so cleanup can find it.
     // Include PID to allow multiple agents in the same worktree (e.g., open -n).
-    let handle = slug::slugify(
-        worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown"),
-    );
-    let container_name = format!("wm-{}-{}", handle, std::process::id());
+    let handle = worktree_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    // Slugify only the container name; the raw handle is used as the state store key
+    // so cleanup (which derives the handle from the directory name without slugifying)
+    // can find it.
+    let container_name = format!("wm-{}-{}", slug::slugify(&handle), std::process::id());
 
     // Register container in state store so cleanup can find it without docker ps
     if let Ok(store) = StateStore::new()
