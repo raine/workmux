@@ -17,9 +17,10 @@ pub const DOCKERFILE_CLAUDE: &str = include_str!("../../docker/Dockerfile.claude
 pub const DOCKERFILE_CODEX: &str = include_str!("../../docker/Dockerfile.codex");
 pub const DOCKERFILE_GEMINI: &str = include_str!("../../docker/Dockerfile.gemini");
 pub const DOCKERFILE_OPENCODE: &str = include_str!("../../docker/Dockerfile.opencode");
+pub const DOCKERFILE_PI: &str = include_str!("../../docker/Dockerfile.pi");
 
 /// Known agents that have pre-built images.
-pub const KNOWN_AGENTS: &[&str] = &["claude", "codex", "gemini", "opencode"];
+pub const KNOWN_AGENTS: &[&str] = &["claude", "codex", "gemini", "opencode", "pi"];
 
 /// Get the agent-specific Dockerfile content, or None for unknown agents.
 pub fn dockerfile_for_agent(agent: &str) -> Option<&'static str> {
@@ -28,6 +29,7 @@ pub fn dockerfile_for_agent(agent: &str) -> Option<&'static str> {
         "codex" => Some(DOCKERFILE_CODEX),
         "gemini" => Some(DOCKERFILE_GEMINI),
         "opencode" => Some(DOCKERFILE_OPENCODE),
+        "pi" => Some(DOCKERFILE_PI),
         _ => None,
     }
 }
@@ -535,6 +537,7 @@ pub fn build_docker_run_args(
             "gemini" => "/tmp/.gemini",
             "codex" => "/home/user/.codex",
             "opencode" => "/tmp/.local/share/opencode",
+            "pi" => "/tmp/.pi/agent",
             _ => unreachable!(), // resolved_agent_config_dir returns None for unknown agents
         };
         let _ = std::fs::create_dir_all(&config_dir);
@@ -1355,6 +1358,7 @@ mod tests {
         assert!(dockerfile_for_agent("codex").is_some());
         assert!(dockerfile_for_agent("gemini").is_some());
         assert!(dockerfile_for_agent("opencode").is_some());
+        assert!(dockerfile_for_agent("pi").is_some());
     }
 
     #[test]
@@ -2137,5 +2141,36 @@ mod tests {
         assert!(devs.contains(&"/dev/kvm"));
         let groups = find_flag_value(&args, "--group-add");
         assert!(groups.contains(&"dialout"));
+    }
+
+    #[test]
+    fn test_build_args_pi_agent_apple_container_mounts_config_dir() {
+        use crate::config::{ContainerConfig, SandboxConfig, SandboxRuntime};
+        let config = SandboxConfig {
+            enabled: Some(true),
+            container: ContainerConfig {
+                runtime: Some(SandboxRuntime::AppleContainer),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let args = build_docker_run_args(
+            "pi",
+            &config,
+            "pi",
+            Path::new("/tmp/project"),
+            Path::new("/tmp/project"),
+            &[],
+            None,
+            false,
+        )
+        .unwrap();
+
+        let args_str = args.join(" ");
+        // Pi agent should mount ~/.pi/agent to /tmp/.pi/agent
+        assert!(args_str.contains("/tmp/.pi/agent"), "pi agent config mount missing: {}", args_str);
+        // Should NOT have Claude-specific mounts
+        assert!(!args_str.contains("/tmp/.claude.json"), "no claude mount expected for pi");
+        assert!(!args_str.contains("/tmp/.claude,"));
     }
 }

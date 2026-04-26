@@ -107,6 +107,7 @@ Both sandbox backends mount agent-specific credential directories from the host.
 | `gemini`   | `~/.gemini/`               | `/tmp/.gemini/`               | `$HOME/.gemini/`               |
 | `codex`    | `~/.codex/`                | `/home/user/.codex/`          | `$HOME/.codex/`                |
 | `opencode` | `~/.local/share/opencode/` | `/tmp/.local/share/opencode/` | `$HOME/.local/share/opencode/` |
+| `pi`       | `~/.pi/agent/`             | `/tmp/.pi/agent/`             | `$HOME/.pi/agent/`             |
 
 OpenCode's global config directory (`~/.config/opencode/`) is also mounted read-only, providing access to `opencode.json`, plugins, and global MCP definitions.
 

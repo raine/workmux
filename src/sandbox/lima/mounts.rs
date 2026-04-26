@@ -262,6 +262,7 @@ pub fn generate_mounts(
             "gemini" => ".gemini",
             "codex" => ".codex",
             "opencode" => ".local/share/opencode",
+            "pi" => ".pi/agent",
             _ => unreachable!(),
         };
         let guest_path = lima_guest_home()

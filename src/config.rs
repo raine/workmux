@@ -1633,6 +1633,7 @@ impl SandboxConfig {
                 "gemini" => Some(home.join(".gemini")),
                 "codex" => Some(home.join(".codex")),
                 "opencode" => Some(home.join(".local/share/opencode")),
+                "pi" => Some(home.join(".pi/agent")),
                 _ => None,
             }
         }

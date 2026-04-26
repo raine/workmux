@@ -47,6 +47,17 @@ mkdir -p "$HOME/.local/bin"
 "#
         .to_string(),
 
+        "pi" => r#"# Install Node.js (required for pi coding agent CLI)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y --no-install-recommends nodejs
+
+# Install pi coding agent CLI to /usr/local (avoids sudo permission issues)
+sudo mkdir -p /usr/local/bin /usr/local/lib/node_modules
+npm config set prefix /usr/local
+npm install -g @mariozechner/pi-coding-agent
+"#
+        .to_string(),
+
         other => format!("# No built-in install script for agent: {other}\n\
                           # Use sandbox.lima.provision to install it manually.\n"),
     }
@@ -512,6 +523,19 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_lima_config_pi_agent() {
+        let mounts = vec![Mount::rw(PathBuf::from("/tmp/test"))];
+        let sandbox_config = SandboxConfig::default();
+        let yaml =
+            generate_lima_config("test-vm", &mounts, &sandbox_config, "pi", true).unwrap();
+
+        assert!(yaml.contains("@mariozechner/pi-coding-agent"));
+        assert!(yaml.contains("npm install -g"));
+        assert!(!yaml.contains("claude.ai/install.sh"));
+        assert!(!yaml.contains(".claude.json"));
+    }
+
+    #[test]
     fn test_generate_lima_config_unknown_agent() {
         let mounts = vec![Mount::rw(PathBuf::from("/tmp/test"))];
         let sandbox_config = SandboxConfig::default();
@@ -580,6 +604,13 @@ mod tests {
     fn test_lima_install_script_for_agent_opencode() {
         let script = lima_install_script_for_agent("opencode");
         assert!(script.contains("opencode.ai/install"));
+    }
+
+    #[test]
+    fn test_lima_install_script_for_agent_pi() {
+        let script = lima_install_script_for_agent("pi");
+        assert!(script.contains("@mariozechner/pi-coding-agent"));
+        assert!(script.contains("npm install -g"));
     }
 
     #[test]

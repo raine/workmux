@@ -109,6 +109,7 @@ The agent CLI installed depends on your `agent` configuration:
 | `codex`            | Codex CLI binary from GitHub releases      |
 | `gemini`           | Node.js + Gemini CLI via npm               |
 | `opencode`         | OpenCode binary via `opencode.ai/install`  |
+| `pi`               | Pi CLI via npm                             |
 
 Changing the `agent` setting after VM creation has no effect on existing VMs. Recreate the VM with `workmux sandbox prune` to provision with a different agent.
 
