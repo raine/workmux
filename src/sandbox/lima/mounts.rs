@@ -269,10 +269,23 @@ pub fn generate_mounts(
             .map(|h| h.join(guest_subpath))
             .unwrap_or_else(|| auth_dir.clone());
         mounts.push(Mount {
-            host_path: auth_dir,
-            guest_path,
+            host_path: auth_dir.clone(),
+            guest_path: guest_path.clone(),
             read_only: false,
         });
+
+        // Pi stores managed fd/rg binaries under bin/. Overlay a per-VM,
+        // arch-keyed directory there so the guest's Linux downloads never
+        // clobber the host's Mach-O binaries via the parent bind mount.
+        if agent == "pi" {
+            let state_dir = lima_state_dir(vm_name)?;
+            let overlay = crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)?;
+            mounts.push(Mount {
+                host_path: overlay,
+                guest_path: guest_path.join("bin"),
+                read_only: false,
+            });
+        }
     }
 
     // Mount opencode global config directory (~/.config/opencode/) read-only.
@@ -392,6 +405,96 @@ mod tests {
             suffix == "linux" || suffix == "guest",
             "unexpected suffix: {}",
             suffix
+        );
+    }
+
+    fn init_git_project(parent: &Path) -> PathBuf {
+        let project_root = parent.join("proj");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        project_root
+    }
+
+    #[test]
+    fn test_pi_agent_appends_bin_overlay_after_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = init_git_project(tmp.path());
+
+        let mut config = Config::default();
+        // Use a custom agent_config_dir so the test doesn't depend on $HOME.
+        config.sandbox.agent_config_dir =
+            Some(format!("{}/agent-cfg/{{agent}}", tmp.path().display()));
+
+        let mounts = generate_mounts(
+            &project_root,
+            IsolationLevel::Project,
+            &config,
+            "test-vm",
+            "pi",
+        )
+        .unwrap();
+
+        // Find the parent and bin mounts by guest_path suffix.
+        let parent_idx = mounts
+            .iter()
+            .position(|m| m.guest_path.ends_with(".pi/agent"))
+            .expect("parent .pi/agent mount missing");
+        let bin_idx = mounts
+            .iter()
+            .position(|m| m.guest_path.ends_with(".pi/agent/bin"))
+            .expect("bin overlay mount missing");
+        assert!(
+            bin_idx > parent_idx,
+            "bin overlay must come after parent mount"
+        );
+
+        let bin_mount = &mounts[bin_idx];
+        assert!(!bin_mount.read_only, "bin overlay must be writable");
+        let src = bin_mount.host_path.to_string_lossy();
+        assert!(
+            src.contains("pi-agent-bin"),
+            "host path should contain pi-agent-bin: {}",
+            src
+        );
+        assert!(
+            src.contains(super::super::super::pi::linux_arch_key()),
+            "host path should contain arch key: {}",
+            src
+        );
+        assert!(
+            src.contains("test-vm"),
+            "host path should be per-VM: {}",
+            src
+        );
+    }
+
+    #[test]
+    fn test_non_pi_agent_has_no_bin_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = init_git_project(tmp.path());
+
+        let mut config = Config::default();
+        config.sandbox.agent_config_dir =
+            Some(format!("{}/agent-cfg/{{agent}}", tmp.path().display()));
+
+        let mounts = generate_mounts(
+            &project_root,
+            IsolationLevel::Project,
+            &config,
+            "test-vm",
+            "claude",
+        )
+        .unwrap();
+
+        assert!(
+            !mounts
+                .iter()
+                .any(|m| m.host_path.to_string_lossy().contains("pi-agent-bin")),
+            "claude agent should not get pi bin overlay"
         );
     }
 }

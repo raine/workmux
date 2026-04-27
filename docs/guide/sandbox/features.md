@@ -117,6 +117,7 @@ Key behaviors:
 - Claude stores auth in macOS Keychain, which isn't accessible from containers or Linux VMs. You need to authenticate Claude separately inside the sandbox.
 - Authentication done inside the sandbox writes back to the host directory. Credentials persist across sandbox recreations.
 - The credential mount is determined by the `agent` setting. Switching agents requires recreating the sandbox (Lima) or starting a new container.
+- For `pi`, the entire `~/.pi/agent/` is shared except `bin/`. Pi auto-downloads platform-specific `fd` and `rg` binaries into `bin/`, so a Linux sandbox would otherwise overwrite a macOS host's Mach-O binaries through the bind mount. Workmux overlays a per-sandbox, arch-keyed directory on `bin/` to keep host and guest binaries separate.
 
 The container backend also uses a separate config file for Claude, mounted to `/tmp/.claude.json` inside the container. Docker/Podman use `~/.claude-sandbox.json` (file mount); Apple Container uses `~/.claude-sandbox-config/claude.json` (directory mount, since Apple Container only supports directory mounts).
 

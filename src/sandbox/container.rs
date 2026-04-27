@@ -547,6 +547,34 @@ pub fn build_docker_run_args(
             config_dir.display(),
             target
         ));
+
+        // Pi stores managed fd/rg binaries under bin/. Overlay a per-worktree,
+        // arch-keyed directory there so the guest's Linux downloads never
+        // clobber the host's Mach-O binaries via the parent bind mount. The
+        // cache key includes a hash of the canonical worktree path so two
+        // different projects with the same basename don't share a cache.
+        if agent == "pi" {
+            let canonical = worktree_root
+                .canonicalize()
+                .unwrap_or_else(|_| worktree_root.to_path_buf());
+            let basename = worktree_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let cache_key = format!(
+                "{}-{}",
+                slug::slugify(basename),
+                crate::sandbox::pi::path_hash(&canonical)
+            );
+            let state_dir = crate::xdg::state_dir()?.join("container").join(cache_key);
+            std::fs::create_dir_all(&state_dir)?;
+            let overlay = crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)?;
+            args.push("--mount".to_string());
+            args.push(format!(
+                "type=bind,source={},target=/tmp/.pi/agent/bin",
+                overlay.display()
+            ));
+        }
     }
 
     // Mount opencode global config directory (~/.config/opencode/) read-only.
@@ -2168,9 +2196,96 @@ mod tests {
 
         let args_str = args.join(" ");
         // Pi agent should mount ~/.pi/agent to /tmp/.pi/agent
-        assert!(args_str.contains("/tmp/.pi/agent"), "pi agent config mount missing: {}", args_str);
+        assert!(
+            args_str.contains("/tmp/.pi/agent"),
+            "pi agent config mount missing: {}",
+            args_str
+        );
         // Should NOT have Claude-specific mounts
-        assert!(!args_str.contains("/tmp/.claude.json"), "no claude mount expected for pi");
+        assert!(
+            !args_str.contains("/tmp/.claude.json"),
+            "no claude mount expected for pi"
+        );
         assert!(!args_str.contains("/tmp/.claude,"));
+    }
+
+    #[test]
+    fn test_build_args_pi_agent_overlays_bin_after_parent() {
+        use crate::config::SandboxConfig;
+        let config = SandboxConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let args = build_docker_run_args(
+            "pi",
+            &config,
+            "pi",
+            Path::new("/tmp/myproject"),
+            Path::new("/tmp/myproject"),
+            &[],
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Find indices of the parent and bin mount entries.
+        let parent_idx = args
+            .iter()
+            .position(|a| a.contains("target=/tmp/.pi/agent") && !a.contains("/tmp/.pi/agent/bin"))
+            .expect("parent /tmp/.pi/agent mount missing");
+        let bin_idx = args
+            .iter()
+            .position(|a| a.contains("target=/tmp/.pi/agent/bin"))
+            .expect("bin overlay /tmp/.pi/agent/bin mount missing");
+        assert!(bin_idx > parent_idx, "bin overlay must come after parent");
+
+        let bin_arg = &args[bin_idx];
+        assert!(
+            bin_arg.contains("pi-agent-bin"),
+            "bin overlay source should contain pi-agent-bin: {}",
+            bin_arg
+        );
+        assert!(
+            bin_arg.contains(crate::sandbox::pi::linux_arch_key()),
+            "bin overlay source should contain arch key: {}",
+            bin_arg
+        );
+        // Per-worktree-handle, NOT container_name (which contains the PID).
+        assert!(
+            !bin_arg.contains(&format!("-{}", std::process::id())),
+            "bin overlay path must not contain PID: {}",
+            bin_arg
+        );
+        assert!(
+            bin_arg.contains("myproject"),
+            "bin overlay path should contain worktree handle: {}",
+            bin_arg
+        );
+    }
+
+    #[test]
+    fn test_build_args_non_pi_agent_has_no_bin_overlay() {
+        use crate::config::SandboxConfig;
+        let config = SandboxConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let args = build_docker_run_args(
+            "claude",
+            &config,
+            "claude",
+            Path::new("/tmp/myproject"),
+            Path::new("/tmp/myproject"),
+            &[],
+            None,
+            false,
+        )
+        .unwrap();
+
+        let args_str = args.join(" ");
+        assert!(
+            !args_str.contains("pi-agent-bin"),
+            "claude agent should not have pi bin overlay"
+        );
     }
 }

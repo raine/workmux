@@ -526,8 +526,7 @@ mod tests {
     fn test_generate_lima_config_pi_agent() {
         let mounts = vec![Mount::rw(PathBuf::from("/tmp/test"))];
         let sandbox_config = SandboxConfig::default();
-        let yaml =
-            generate_lima_config("test-vm", &mounts, &sandbox_config, "pi", true).unwrap();
+        let yaml = generate_lima_config("test-vm", &mounts, &sandbox_config, "pi", true).unwrap();
 
         assert!(yaml.contains("@mariozechner/pi-coding-agent"));
         assert!(yaml.contains("npm install -g"));
