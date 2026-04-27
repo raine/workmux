@@ -19,8 +19,4 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async () => {
     setStatus("done");
   });
-
-  pi.on("session_shutdown", async () => {
-    setStatus("done");
-  });
 }
