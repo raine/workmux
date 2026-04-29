@@ -48,6 +48,9 @@ pub struct AgentPane {
     pub path: PathBuf,
     /// Pane title (set by Claude Code to show session summary)
     pub pane_title: Option<String>,
+    /// Command that identified the agent when status was last recorded.
+    #[serde(default)]
+    pub agent_command: Option<String>,
     /// Current agent status
     pub status: Option<AgentStatus>,
     /// Unix timestamp when status was last set

@@ -1315,6 +1315,7 @@ mod tests {
             window_id: String::new(),
             path: PathBuf::new(),
             pane_title: None,
+            agent_command: Some("claude".to_string()),
             status: Some(AgentStatus::Working),
             status_ts: Some(100),
             updated_ts: Some(updated_ts),

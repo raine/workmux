@@ -130,6 +130,11 @@ impl AgentState {
             window_id: String::new(),
             path: self.workdir.clone(),
             pane_title: self.pane_title.clone(),
+            agent_command: if self.command.is_empty() {
+                None
+            } else {
+                Some(self.command.clone())
+            },
             status: self.status,
             status_ts: self.status_ts,
             updated_ts: Some(self.updated_ts),

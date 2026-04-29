@@ -1,4 +1,5 @@
 mod agent_display;
+mod agent_identity;
 mod agent_setup;
 mod claude;
 mod cli;
