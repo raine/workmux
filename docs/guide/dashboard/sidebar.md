@@ -41,6 +41,7 @@ bind C-t run-shell "workmux sidebar"
 Each agent is displayed as a tile showing:
 
 - Status icon with spinner animation (working/waiting/done)
+- Optional agent identity badge (Claude, Codex, OpenCode, Gemini, etc.)
 - Worktree name and elapsed time since last status change
 - Project name and git diff stats (committed + uncommitted lines)
 - Agent task description
@@ -58,10 +59,24 @@ sidebar:
 
   # Layout mode: "compact" or "tiles" (default)
   layout: tiles
+
+  # Agent identity badge: "off" (default), "icon", "label", or "both"
+  agent_identity: both
+
+  # Optional custom identity icons
+  agent_icons:
+    claude: "✳"
+    codex: "CX"
+    opencode: "OC"
 ```
 
 Width defaults to 10% of terminal width, clamped between 25 and 50 columns.
 When set explicitly, the clamp is removed (minimum 10 columns).
+
+Agent identity badges are detected from the command recorded by status tracking.
+The sidebar currently recognizes Claude, Codex, OpenCode, Gemini, Copilot, Pi,
+Kiro, and Vibe agents. When space is tight, the sidebar preserves the worktree
+name first and hides or shortens the identity badge.
 
 ## Layout modes
 

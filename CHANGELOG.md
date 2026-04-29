@@ -22,6 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Add optional agent identity badges to the tmux sidebar, configurable with
+  `sidebar.agent_identity` and `sidebar.agent_icons`
+
 ## v0.1.189 (2026-04-27)
 
 - Fix pi agents lingering in the dashboard after exit ([#143](https://github.com/raine/workmux/issues/143))

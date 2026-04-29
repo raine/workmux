@@ -1686,6 +1686,7 @@ workmux sidebar --session  # Toggle sidebar for current session only
 The sidebar displays:
 
 - Status icon (working/waiting/done with spinner animation)
+- Optional agent identity badge (Claude, Codex, OpenCode, Gemini, etc.)
 - Project and worktree name (e.g. `myproject/fix-bug`)
 - Elapsed time since last status change
 
@@ -1703,6 +1704,11 @@ Configure width and layout in `.workmux.yaml`:
 sidebar:
   width: 40 # absolute columns, or "15%" for percentage
   layout: tiles # "compact" or "tiles" (default)
+  agent_identity: both # "off" (default), "icon", "label", or "both"
+  agent_icons:
+    claude: "✳"
+    codex: "CX"
+    opencode: "OC"
 ```
 
 #### Example tmux binding

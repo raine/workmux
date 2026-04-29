@@ -18,6 +18,7 @@ workmux sidebar --session  # Toggle sidebar for current session only
 Each agent row displays:
 
 - Status icon (working/waiting/done with spinner animation)
+- Optional agent identity badge (Claude, Codex, OpenCode, Gemini, etc.)
 - Project and worktree name (e.g. `myproject/fix-bug`)
 - Elapsed time since last status change
 
@@ -68,11 +69,20 @@ sidebar:
   width: 40 # absolute columns (default: "10%", clamped 25-50)
   # width: "15%"  # or percentage of terminal width
   layout: tiles # "compact" or "tiles" (default)
+  agent_identity: both # "off" (default), "icon", "label", or "both"
+  agent_icons:
+    claude: "✳"
+    codex: "CX"
+    opencode: "OC"
 ```
 
 Explicit width values bypass the default 25-50 column clamp (minimum 10
 columns). Layout preference can also be toggled at runtime with `v` and is
 persisted across restarts.
+
+Agent identity badges are detected from the command recorded by status tracking.
+If the sidebar is too narrow, worktree names take priority and the identity badge
+is hidden or shortened.
 
 ## How it works
 
