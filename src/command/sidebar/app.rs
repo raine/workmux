@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::agent_display::{extract_project_name, extract_worktree_name};
 use crate::cmd::Cmd;
-use crate::config::{Config, StatusIcons};
+use crate::config::{AgentIcons, AgentIdentityDisplay, Config, StatusIcons};
 use crate::git::GitStatus;
 
 use crate::multiplexer::{AgentPane, Multiplexer};
@@ -53,6 +53,8 @@ pub struct SidebarApp {
     pub quit_reason: Option<String>,
     pub palette: ThemePalette,
     pub status_icons: StatusIcons,
+    pub agent_identity: AgentIdentityDisplay,
+    pub agent_icons: AgentIcons,
     pub spinner_frame: u8,
     pub stale_threshold_secs: u64,
     pub layout_mode: SidebarLayoutMode,
@@ -92,6 +94,8 @@ impl SidebarApp {
         let palette = ThemePalette::from_config(&config.theme, theme_mode);
         let window_prefix = config.window_prefix().to_string();
         let status_icons = config.status_icons.clone();
+        let agent_identity = config.sidebar.agent_identity.unwrap_or_default();
+        let agent_icons = config.sidebar.agent_icons.clone();
 
         let (host_session, host_window_id) = detect_host_window();
 
@@ -103,6 +107,8 @@ impl SidebarApp {
             quit_reason: None,
             palette,
             status_icons,
+            agent_identity,
+            agent_icons,
             spinner_frame: 0,
             stale_threshold_secs: 60 * 60, // 60 minutes
             layout_mode: SidebarLayoutMode::default(),

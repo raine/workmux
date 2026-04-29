@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::agent_identity::AgentKind;
 use crate::{cmd, git, nerdfont};
 use which::{which, which_in};
 
@@ -127,6 +128,60 @@ pub struct SidebarConfig {
 
     /// Layout mode: "compact" or "tiles". Default: "tiles"
     pub layout: Option<String>,
+
+    /// Agent identity display mode. Default: off.
+    #[serde(default)]
+    pub agent_identity: Option<AgentIdentityDisplay>,
+
+    /// Custom icons for agent identity badges.
+    #[serde(default)]
+    pub agent_icons: AgentIcons,
+}
+
+/// How much agent identity to show in the sidebar.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentIdentityDisplay {
+    /// Hide agent identity badges.
+    #[default]
+    Off,
+    /// Show only the agent icon.
+    Icon,
+    /// Show only the agent label.
+    Label,
+    /// Show icon and label.
+    Both,
+}
+
+/// Custom icons for agent identity display.
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct AgentIcons {
+    pub claude: Option<String>,
+    pub codex: Option<String>,
+    pub opencode: Option<String>,
+    pub gemini: Option<String>,
+    pub copilot: Option<String>,
+    pub pi: Option<String>,
+    pub kiro_cli: Option<String>,
+    pub vibe: Option<String>,
+    pub unknown: Option<String>,
+}
+
+impl AgentIcons {
+    pub fn icon_for(&self, kind: AgentKind) -> &str {
+        match kind {
+            AgentKind::Claude => self.claude.as_deref(),
+            AgentKind::Codex => self.codex.as_deref(),
+            AgentKind::OpenCode => self.opencode.as_deref(),
+            AgentKind::Gemini => self.gemini.as_deref(),
+            AgentKind::Copilot => self.copilot.as_deref(),
+            AgentKind::Pi => self.pi.as_deref(),
+            AgentKind::KiroCli => self.kiro_cli.as_deref(),
+            AgentKind::Vibe => self.vibe.as_deref(),
+            AgentKind::Unknown => self.unknown.as_deref(),
+        }
+        .unwrap_or_else(|| kind.default_icon())
+    }
 }
 
 /// Sidebar width: either absolute columns or a percentage of terminal width.
@@ -2104,6 +2159,57 @@ impl Config {
         merged.sidebar = SidebarConfig {
             width: project.sidebar.width.or(self.sidebar.width),
             layout: project.sidebar.layout.or(self.sidebar.layout),
+            agent_identity: project
+                .sidebar
+                .agent_identity
+                .or(self.sidebar.agent_identity),
+            agent_icons: AgentIcons {
+                claude: project
+                    .sidebar
+                    .agent_icons
+                    .claude
+                    .or(self.sidebar.agent_icons.claude),
+                codex: project
+                    .sidebar
+                    .agent_icons
+                    .codex
+                    .or(self.sidebar.agent_icons.codex),
+                opencode: project
+                    .sidebar
+                    .agent_icons
+                    .opencode
+                    .or(self.sidebar.agent_icons.opencode),
+                gemini: project
+                    .sidebar
+                    .agent_icons
+                    .gemini
+                    .or(self.sidebar.agent_icons.gemini),
+                copilot: project
+                    .sidebar
+                    .agent_icons
+                    .copilot
+                    .or(self.sidebar.agent_icons.copilot),
+                pi: project
+                    .sidebar
+                    .agent_icons
+                    .pi
+                    .or(self.sidebar.agent_icons.pi),
+                kiro_cli: project
+                    .sidebar
+                    .agent_icons
+                    .kiro_cli
+                    .or(self.sidebar.agent_icons.kiro_cli),
+                vibe: project
+                    .sidebar
+                    .agent_icons
+                    .vibe
+                    .or(self.sidebar.agent_icons.vibe),
+                unknown: project
+                    .sidebar
+                    .agent_icons
+                    .unknown
+                    .or(self.sidebar.agent_icons.unknown),
+            },
         };
 
         // Sandbox config: per-field override with nested struct merging
@@ -2530,6 +2636,16 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Layout mode: "compact" (single line per agent) or "tiles" (cards).
 #   # Default: "tiles". Can be toggled at runtime with 'v' key.
 #   layout: tiles
+#
+#   # Agent identity display in the sidebar: off, icon, label, or both.
+#   # Default: off.
+#   agent_identity: both
+#
+#   # Optional custom identity icons.
+#   agent_icons:
+#     claude: "✳"
+#     codex: "CX"
+#     opencode: "OC"
 
 #-------------------------------------------------------------------------------
 # Sandbox
@@ -2666,10 +2782,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        Config, ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig, LimaConfig,
-        NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
-        SplitDirection, ToolchainMode, is_agent_command, split_first_token, validate_domain,
-        validate_group_add_entry, validate_layouts_config,
+        AgentIdentityDisplay, Config, ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig,
+        LimaConfig, NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime,
+        SandboxTarget, SplitDirection, ToolchainMode, is_agent_command, split_first_token,
+        validate_domain, validate_group_add_entry, validate_layouts_config,
     };
 
     #[test]
@@ -2757,6 +2873,82 @@ mod tests {
     fn is_agent_command_env_wrapped_mismatch() {
         assert!(!is_agent_command("env -u FOO claude", "gemini"));
         assert!(!is_agent_command("env -u FOO vim", "claude"));
+    }
+
+    #[test]
+    fn parses_sidebar_agent_identity_config() {
+        let yaml = r#"
+sidebar:
+  width: 38
+  layout: tiles
+  agent_identity: both
+  agent_icons:
+    claude: "C"
+    codex: "X"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.sidebar.agent_identity,
+            Some(AgentIdentityDisplay::Both)
+        );
+        assert_eq!(
+            config
+                .sidebar
+                .agent_icons
+                .icon_for(crate::agent_identity::AgentKind::Claude),
+            "C"
+        );
+        assert_eq!(
+            config
+                .sidebar
+                .agent_icons
+                .icon_for(crate::agent_identity::AgentKind::Codex),
+            "X"
+        );
+    }
+
+    #[test]
+    fn merges_sidebar_agent_identity_config_per_field() {
+        let global: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  agent_identity: icon
+  agent_icons:
+    claude: "C"
+    codex: "X"
+"#,
+        )
+        .unwrap();
+        let project: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  agent_identity: label
+  agent_icons:
+    codex: "CDX"
+"#,
+        )
+        .unwrap();
+
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.sidebar.agent_identity,
+            Some(AgentIdentityDisplay::Label)
+        );
+        assert_eq!(
+            merged
+                .sidebar
+                .agent_icons
+                .icon_for(crate::agent_identity::AgentKind::Claude),
+            "C"
+        );
+        assert_eq!(
+            merged
+                .sidebar
+                .agent_icons
+                .icon_for(crate::agent_identity::AgentKind::Codex),
+            "CDX"
+        );
     }
 
     #[test]

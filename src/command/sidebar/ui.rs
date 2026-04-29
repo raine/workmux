@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
 use crate::agent_display::{extract_project_name, extract_worktree_name, strip_oc_title_prefix};
+use crate::agent_identity::classify_agent_command;
+use crate::config::AgentIdentityDisplay;
 use crate::git::GitStatus;
 use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::tmux_style;
@@ -251,11 +253,24 @@ fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 String::new()
             };
 
-            // Calculate available width for the name
-            // Layout: "{icon}{pad} {name} {elapsed}"
+            // Calculate available width for the name.
+            // Layout: "{icon}{pad} {identity} {name} {elapsed}"
             let elapsed_width = elapsed.len();
-            // Reserve: 2 (icon slot) + 1 (space) + 1 (space) + elapsed
-            let reserved = 2 + 1 + 1 + elapsed_width;
+            let base_reserved = 2 + 1 + 1 + elapsed_width;
+            let min_name_width = 8.min(display_width(&worktree_name));
+            let identity_max_width = (area.width as usize)
+                .saturating_sub(base_reserved)
+                .saturating_sub(min_name_width)
+                .saturating_sub(1);
+            let identity = agent_identity_text(app, agent, identity_max_width);
+            let identity_width = display_width(&identity);
+            let identity_reserved = if identity.is_empty() {
+                0
+            } else {
+                identity_width + 1
+            };
+            // Reserve: base + optional identity + separating space
+            let reserved = base_reserved + identity_reserved;
             let name_width = (area.width as usize).saturating_sub(reserved);
 
             let display_name = truncate_to_width(&worktree_name, name_width);
@@ -285,9 +300,12 @@ fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 .into_iter()
                 .map(|(text, style)| Span::styled(text, style))
                 .collect();
+            line_spans.extend([Span::raw(icon_pad), Span::raw(" ")]);
+            if !identity.is_empty() {
+                line_spans.push(Span::styled(identity, identity_style(app, is_stale)));
+                line_spans.push(Span::raw(" "));
+            }
             line_spans.extend([
-                Span::raw(icon_pad),
-                Span::raw(" "),
                 Span::styled(display_name, name_style),
                 Span::raw(" ".repeat(padding)),
                 Span::raw(" "),
@@ -389,9 +407,23 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 String::new()
             };
 
-            // Line 1 content width: area - stripe(2) - icon(2+pad) - space(1) - space(1) - elapsed - space(1)
+            // Line 1 content width:
+            // area - stripe(2) - icon slot(2) - spaces - optional identity - elapsed.
+            let base_line1_reserved = 2 + 2 + 1 + 1 + 1 + elapsed.len();
+            let min_name_width = 8.min(display_width(&display_worktree));
+            let identity_max_width = (area.width as usize)
+                .saturating_sub(base_line1_reserved)
+                .saturating_sub(min_name_width)
+                .saturating_sub(1);
+            let identity = agent_identity_text(app, agent, identity_max_width);
+            let identity_width = display_width(&identity);
+            let identity_reserved = if identity.is_empty() {
+                0
+            } else {
+                identity_width + 1
+            };
             let line1_name_width =
-                (area.width as usize).saturating_sub(2 + 2 + 1 + 1 + 1 + elapsed.len());
+                (area.width as usize).saturating_sub(base_line1_reserved + identity_reserved);
             // Body lines indent to align with worktree name: icon(2) + gap(1) = 3
             let body_indent = "   ";
             let body_width = (area.width as usize).saturating_sub(2 + body_indent.len());
@@ -476,6 +508,7 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 + icon_cols
                 + (2usize.saturating_sub(icon_cols))
                 + 1
+                + identity_reserved
                 + full_width
                 + name_padding
                 + 1
@@ -499,6 +532,16 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
             line1_spans.extend([
                 Span::styled(icon_pad, pad_style),
                 Span::styled(" ", pad_style),
+            ]);
+            if !identity.is_empty() {
+                let mut identity_style = identity_style(app, is_stale);
+                if let Some(bg_color) = bg {
+                    identity_style = identity_style.bg(bg_color);
+                }
+                line1_spans.push(Span::styled(identity, identity_style));
+                line1_spans.push(Span::styled(" ", pad_style));
+            }
+            line1_spans.extend([
                 Span::styled(display_name_part, name_style),
                 Span::styled(display_suffix_part, suffix_style),
                 Span::styled(" ".repeat(name_padding), pad_style),
@@ -609,6 +652,60 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     let list = List::new(items);
 
     f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+/// Build the agent identity badge text for the configured display mode.
+fn agent_identity_text(app: &SidebarApp, agent: &AgentPane, max_width: usize) -> String {
+    if max_width == 0 || app.agent_identity == AgentIdentityDisplay::Off {
+        return String::new();
+    }
+
+    let Some(kind) = classify_agent_command(agent.agent_command.as_deref()) else {
+        return String::new();
+    };
+
+    let icon = app.agent_icons.icon_for(kind);
+    let label = kind.label();
+
+    choose_identity_text(app.agent_identity, icon, label, max_width)
+}
+
+fn choose_identity_text(
+    mode: AgentIdentityDisplay,
+    icon: &str,
+    label: &str,
+    max_width: usize,
+) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let candidates: Vec<String> = match mode {
+        AgentIdentityDisplay::Off => return String::new(),
+        AgentIdentityDisplay::Icon => vec![icon.to_string()],
+        AgentIdentityDisplay::Label => vec![label.to_string()],
+        AgentIdentityDisplay::Both => vec![
+            format!("{} {}", icon, label),
+            icon.to_string(),
+            label.to_string(),
+        ],
+    };
+
+    candidates
+        .iter()
+        .find(|candidate| display_width(candidate) <= max_width)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn identity_style(app: &SidebarApp, is_stale: bool) -> Style {
+    if is_stale {
+        Style::default()
+            .fg(app.palette.dimmed)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(app.palette.accent)
+    }
 }
 
 /// Get the status icon as parsed styled spans and the base style for an agent.
@@ -780,8 +877,9 @@ fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_pane_title;
+    use super::{choose_identity_text, sanitize_pane_title};
     use crate::agent_display::strip_oc_title_prefix;
+    use crate::config::AgentIdentityDisplay;
 
     #[test]
     fn strips_oc_prefixes() {
@@ -820,6 +918,30 @@ mod tests {
         assert_eq!(
             sanitize_pane_title(Some("⠋⠙ OC | Investigating..."), "worktree", "project"),
             Some("Investigating...")
+        );
+    }
+
+    #[test]
+    fn identity_text_degrades_to_fit_available_width() {
+        assert_eq!(
+            choose_identity_text(AgentIdentityDisplay::Both, "CX", "Codex", 8),
+            "CX Codex"
+        );
+        assert_eq!(
+            choose_identity_text(AgentIdentityDisplay::Both, "CX", "Codex", 2),
+            "CX"
+        );
+        assert_eq!(
+            choose_identity_text(AgentIdentityDisplay::Both, "CX", "Codex", 1),
+            ""
+        );
+        assert_eq!(
+            choose_identity_text(AgentIdentityDisplay::Label, "CX", "Codex", 4),
+            ""
+        );
+        assert_eq!(
+            choose_identity_text(AgentIdentityDisplay::Off, "CX", "Codex", 8),
+            ""
         );
     }
 }
