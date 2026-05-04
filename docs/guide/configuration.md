@@ -23,6 +23,8 @@ workmux respects the [XDG Base Directory Specification](https://specifications.f
 
 All workmux files live under a `workmux/` subdirectory within these base directories. If you have an existing config at the default location and later set a custom `XDG_CONFIG_HOME`, workmux will fall back to reading from `~/.config/workmux/` if no config exists at the new location.
 
+The host-side log lives at `$XDG_STATE_HOME/workmux/workmux.log` and includes sandbox network-proxy rejections — see [Debugging blocked requests](./sandbox/features.md#debugging-blocked-requests).
+
 ## Global configuration example
 
 `~/.config/workmux/config.yaml`:

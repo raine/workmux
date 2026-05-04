@@ -46,7 +46,7 @@ Any allowed command can execute code from project files. For example, an agent c
 ```yaml
 # ~/.config/workmux/config.yaml
 sandbox:
-  host_commands: ["just", "cargo", "npm"]
+  host_commands: ['just', 'cargo', 'npm']
 ```
 
 `host_commands` is only read from your global config. If set in a project's `.workmux.yaml`, it is ignored and a warning is logged. This ensures that only you control which commands get host access, not the projects you clone.
@@ -166,6 +166,18 @@ Requests are authenticated with a per-session token passed via the `WM_RPC_TOKEN
 Claude stores auth in macOS Keychain, so it must authenticate separately inside containers and VMs. Other agents (Gemini, Codex, OpenCode) use file-based credentials that are shared with the host automatically.
 
 If credentials are missing, start a shell in the sandbox with `workmux sandbox shell` and run the agent to trigger authentication. Credentials written inside the sandbox persist to the host.
+
+### Debugging blocked requests
+
+Network proxy rejections are logged on the host at `$XDG_STATE_HOME/workmux/workmux.log`, or `~/.local/state/workmux/workmux.log` by default.
+
+To watch rejections while reproducing an issue:
+
+```bash
+tail -f ~/.local/state/workmux/workmux.log | grep rejected
+```
+
+Rejected entries include the denied hostname. Add any expected hosts to your sandbox's `network.domains` list and retry.
 
 ## Installing local builds
 
