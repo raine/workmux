@@ -11,4 +11,4 @@ ARG CACHE_BUST=1
 # Install pi coding agent CLI globally.
 # npm global bin is /usr/local/bin so the `pi` binary is reachable when
 # running as an arbitrary non-root UID (--user uid:gid).
-RUN npm install -g @mariozechner/pi-coding-agent
+RUN npm install -g @earendil-works/pi-coding-agent
