@@ -254,6 +254,7 @@ mod tests {
         assert!(hooks.contains_key("UserPromptSubmit"));
         assert!(hooks.contains_key("PostToolUse"));
         assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("SubagentStop"));
     }
 
     #[test]
@@ -304,6 +305,7 @@ mod tests {
         assert!(obj.contains_key("UserPromptSubmit"));
         assert!(obj.contains_key("PostToolUse"));
         assert!(obj.contains_key("Stop"));
+        assert!(obj.contains_key("SubagentStop"));
     }
 
     #[test]
@@ -319,7 +321,7 @@ mod tests {
         }
 
         let hooks = config.get("hooks").unwrap().as_object().unwrap();
-        assert_eq!(hooks.len(), 3);
+        assert_eq!(hooks.len(), 4);
     }
 
     #[test]
@@ -407,9 +409,9 @@ mod tests {
             .unwrap();
         assert_eq!(stop.len(), 2);
 
-        // All 3 events should be present
+        // All 4 events should be present
         let hooks = config.get("hooks").unwrap().as_object().unwrap();
-        assert_eq!(hooks.len(), 3);
+        assert_eq!(hooks.len(), 4);
     }
 
     #[test]

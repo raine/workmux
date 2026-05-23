@@ -23,7 +23,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     // Codex compatibility: hook stdin may identify a specific parent/subagent
-    // turn. Use it to avoid a child Stop hook marking the pane done early.
+    // turn. Use it to avoid child cleanup marking the pane done early.
     let codex_run_id = crate::state::codex_status::detect_run_id_from_stdin();
 
     // Inside a sandbox guest, route through RPC to the host supervisor

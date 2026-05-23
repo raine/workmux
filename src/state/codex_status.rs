@@ -1,14 +1,14 @@
 //! Codex-specific workaround for nested hook status updates.
 //!
 //! Codex currently runs Workmux status hooks for both a parent agent and its
-//! spawned subagents in the same tmux pane. A subagent `Stop` hook can therefore
+//! spawned subagents in the same tmux pane. A subagent cleanup hook can therefore
 //! run before the parent `Stop` hook and incorrectly mark the pane/window as
 //! done while the parent is still active.
 //!
-//! Codex hook payloads do not currently expose an explicit root/subagent marker
-//! such as `agent_path`, `parent_thread_id`, or `is_subagent`. Until they do,
 //! Workmux tracks active Codex turns by `session_id` + `turn_id` and renders the
-//! pane as working while any tracked Codex turn is active.
+//! pane as working while any tracked Codex turn is active. Subagent cleanup is
+//! handled through Codex's `SubagentStop` event, which includes `agent_id` and
+//! `agent_type` metadata but still carries the turn id to remove.
 //!
 //! Keep this module isolated so it can be removed or replaced if Codex adds
 //! official hook metadata for subagent/root detection.
@@ -105,15 +105,20 @@ pub(crate) fn clear_pane_with_store(store: &StateStore, pane_key: &PaneKey) -> R
 fn detect_run_id(input: &str) -> Option<String> {
     let payload: CodexHookProbe = serde_json::from_str(input).ok()?;
 
-    if payload.agent_id.is_some() || payload.agent_type.is_some() {
-        return None;
-    }
-
     let event = payload.hook_event_name.as_deref()?;
     if !matches!(
         event,
-        "UserPromptSubmit" | "PreToolUse" | "PermissionRequest" | "PostToolUse" | "Stop"
+        "UserPromptSubmit"
+            | "PreToolUse"
+            | "PermissionRequest"
+            | "PostToolUse"
+            | "Stop"
+            | "SubagentStop"
     ) {
+        return None;
+    }
+
+    if event != "SubagentStop" && (payload.agent_id.is_some() || payload.agent_type.is_some()) {
         return None;
     }
 
@@ -350,6 +355,20 @@ mod tests {
         }"#;
 
         assert!(detect_run_id(input).is_none());
+    }
+
+    #[test]
+    fn detects_subagent_stop_with_agent_metadata() {
+        let input = r#"{
+            "hook_event_name":"SubagentStop",
+            "session_id":"session",
+            "turn_id":"turn",
+            "model":"gpt-5.5",
+            "agent_id":"agent",
+            "agent_type":"worker"
+        }"#;
+
+        assert_eq!(detect_run_id(input).as_deref(), Some("session:turn"));
     }
 
     #[test]
