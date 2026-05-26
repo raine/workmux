@@ -243,18 +243,18 @@ fn set_sidebar_position(position: SidebarPosition) {
 
 /// Resolve sidebar width for a given terminal/window width.
 ///
-/// If `synced_width` is provided, it takes precedence over config/default.
+/// Priority: explicit config > synced (persisted resize) > default (10%).
 /// The result is clamped to ensure the sidebar is at least 10 columns
 /// and leaves at least 20 columns for content panes.
 fn resolve_width_for(config: &crate::config::Config, tw: u16, synced_width: Option<u16>) -> u16 {
+    if let Some(ref w) = config.sidebar.width {
+        let max_w = tw.saturating_sub(10).max(10);
+        return w.resolve(tw).clamp(10, max_w);
+    }
+
     if let Some(w) = synced_width {
         let max_w = tw.saturating_sub(10).max(10);
         return w.clamp(10, max_w);
-    }
-
-    if let Some(ref w) = config.sidebar.width {
-        // Explicit config: respect it, only enforce a minimum of 10
-        return w.resolve(tw).max(10);
     }
 
     // Default: 10% of terminal, clamped to [MIN_WIDTH, MAX_WIDTH]
@@ -930,5 +930,13 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.sidebar.height = Some(crate::config::SidebarHeight::Absolute(2));
         assert_eq!(resolve_height_for(&config, 40, Some(1)), 2);
+    }
+
+    #[test]
+    fn resolve_width_uses_explicit_config_before_synced_width() {
+        let mut config = crate::config::Config::default();
+        config.sidebar.width = Some(crate::config::SidebarWidth::Percent(10));
+        // Synced width of 150 should be ignored; 10% of 200 = 20
+        assert_eq!(resolve_width_for(&config, 200, Some(150)), 20);
     }
 }

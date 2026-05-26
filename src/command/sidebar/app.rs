@@ -772,7 +772,9 @@ impl SidebarApp {
                 let expected = super::effective_width_for(&config, window_w);
                 let delta = (actual_width as i16 - expected as i16).abs();
                 if delta > 0 {
-                    super::set_sidebar_width(actual_width);
+                    if config.sidebar.width.is_none() {
+                        super::set_sidebar_width(actual_width);
+                    }
                     if let Some(wid) = self.host_window_id() {
                         super::reflow_all_sidebars_except(wid);
                     }
@@ -797,7 +799,9 @@ impl SidebarApp {
                 let expected = super::effective_height_for(&config, window_h);
                 let delta = (actual_height as i16 - expected as i16).abs();
                 if delta > 0 {
-                    super::set_sidebar_height(actual_height);
+                    if config.sidebar.height.is_none() {
+                        super::set_sidebar_height(actual_height);
+                    }
                     if let Some(wid) = self.host_window_id() {
                         super::reflow_all_sidebars_except(wid);
                     }
