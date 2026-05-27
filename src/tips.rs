@@ -45,7 +45,11 @@ fn save_tips(state: &TipsState) {
 /// - sidebar has not been used before
 /// - tip has been shown fewer than 5 times
 pub fn should_show_sidebar_tip() -> bool {
-    if std::env::var("TMUX").is_err() {
+    should_show_sidebar_tip_for_tmux(std::env::var("TMUX").is_ok())
+}
+
+fn should_show_sidebar_tip_for_tmux(in_tmux: bool) -> bool {
+    if !in_tmux {
         return false;
     }
     let mut state = load_tips();
@@ -96,9 +100,6 @@ mod tests {
 
     #[test]
     fn should_show_requires_tmux() {
-        let mut process = crate::test_support::process_state().unwrap();
-        process.remove_env("TMUX");
-
-        assert!(!should_show_sidebar_tip());
+        assert!(!should_show_sidebar_tip_for_tmux(false));
     }
 }

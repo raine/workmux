@@ -974,18 +974,31 @@ mod tests {
 
     #[test]
     fn workflow_create_uses_explicit_repo_not_process_cwd() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_a = temp.path().join("repo-a");
-        let repo_b = temp.path().join("repo-b");
-        let non_repo = temp.path().join("not-a-repo");
-        std::fs::create_dir_all(&repo_a).unwrap();
-        std::fs::create_dir_all(&repo_b).unwrap();
-        std::fs::create_dir_all(&non_repo).unwrap();
-        init_repo(&repo_a);
-        init_repo(&repo_b);
+        const TEST_NAME: &str =
+            "workflow::create::tests::workflow_create_uses_explicit_repo_not_process_cwd";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo_a = temp.path().join("repo-a");
+            let repo_b = temp.path().join("repo-b");
+            let non_repo = temp.path().join("not-a-repo");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::create_dir_all(&repo_b).unwrap();
+            std::fs::create_dir_all(&non_repo).unwrap();
+            init_repo(&repo_a);
+            init_repo(&repo_b);
 
-        let mut process = test_support::process_state().unwrap();
-        process.set_current_dir(&non_repo).unwrap();
+            test_support::run_isolated_test(TEST_NAME, &non_repo, &[("WM_TEST_TEMP", temp.path())]);
+            return;
+        }
+
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        let repo_a = temp.join("repo-a");
+        let repo_b = temp.join("repo-b");
+        let non_repo = temp.join("not-a-repo");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            non_repo.canonicalize().unwrap()
+        );
 
         let config = Config::default();
         let ctx =
@@ -1017,9 +1030,5 @@ mod tests {
             Some("window")
         );
         assert!(!git::branch_exists_in("feature", Some(&repo_a)).unwrap());
-        assert_eq!(
-            std::env::current_dir().unwrap(),
-            non_repo.canonicalize().unwrap()
-        );
     }
 }

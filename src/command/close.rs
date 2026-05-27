@@ -125,10 +125,27 @@ pub fn run(name: Option<&str>) -> Result<()> {
 }
 
 fn run_via_rpc(name: &str) -> Result<()> {
-    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+    let mut client = crate::sandbox::rpc::RpcClient::from_env()?;
+    run_via_rpc_impl(name, &mut client)
+}
+
+#[cfg(test)]
+fn run_sandbox_guest_with_client(
+    name: Option<&str>,
+    cwd: &std::path::Path,
+    client: &mut crate::sandbox::rpc::RpcClient,
+) -> Result<()> {
+    let name_to_close = match name {
+        Some(name) => name.to_string(),
+        None => super::resolve_name_from_path(cwd)?,
+    };
+    run_via_rpc_impl(&name_to_close, client)
+}
+
+fn run_via_rpc_impl(name: &str, client: &mut crate::sandbox::rpc::RpcClient) -> Result<()> {
+    use crate::sandbox::rpc::{RpcRequest, RpcResponse};
     use std::io::Write;
 
-    let mut client = RpcClient::from_env()?;
     client.send(&RpcRequest::Close {
         name: name.to_string(),
     })?;
@@ -150,8 +167,7 @@ fn run_via_rpc(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::rpc::{RpcRequest, RpcResponse};
-    use crate::test_support;
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -189,14 +205,8 @@ mod tests {
         let worktree_dir = tmp.path().join("repo__worktrees").join("feature-x");
         std::fs::create_dir_all(&worktree_dir)?;
 
-        let mut process = test_support::process_state()?;
-        process.set_current_dir(&worktree_dir)?;
-        process.set_env("WM_SANDBOX_GUEST", "1");
-        process.set_env("WM_RPC_HOST", "127.0.0.1");
-        process.set_env("WM_RPC_PORT", port.to_string());
-        process.set_env("WM_RPC_TOKEN", token);
-
-        run(None)?;
+        let mut client = RpcClient::connect("127.0.0.1", port, token)?;
+        run_sandbox_guest_with_client(None, &worktree_dir, &mut client)?;
         let name = server.join().unwrap()?;
         assert_eq!(name, "feature-x");
         Ok(())

@@ -473,6 +473,7 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::test_support;
+    use std::path::PathBuf;
     use std::process::Command;
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -509,18 +510,30 @@ mod tests {
 
     #[test]
     fn create_worktree_in_uses_explicit_repo_not_process_cwd() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_a = temp.path().join("repo-a");
-        let repo_b = temp.path().join("repo-b");
-        std::fs::create_dir_all(&repo_a).unwrap();
-        std::fs::create_dir_all(&repo_b).unwrap();
-        init_repo(&repo_a);
-        init_repo(&repo_b);
+        const TEST_NAME: &str =
+            "git::worktree::tests::create_worktree_in_uses_explicit_repo_not_process_cwd";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo_a = temp.path().join("repo-a");
+            let repo_b = temp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::create_dir_all(&repo_b).unwrap();
+            init_repo(&repo_a);
+            init_repo(&repo_b);
 
-        let mut process = test_support::process_state().unwrap();
-        process.set_current_dir(&repo_a).unwrap();
+            test_support::run_isolated_test(TEST_NAME, &repo_a, &[("WM_TEST_TEMP", temp.path())]);
+            return;
+        }
 
-        let worktree_path = temp.path().join("repo-b__worktrees").join("feature");
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        let repo_a = temp.join("repo-a");
+        let repo_b = temp.join("repo-b");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            repo_a.canonicalize().unwrap()
+        );
+
+        let worktree_path = temp.join("repo-b__worktrees").join("feature");
         create_worktree_in(
             &worktree_path,
             "feature",
@@ -552,9 +565,5 @@ mod tests {
             .unwrap()
             .success();
         assert!(!repo_a_has_branch);
-        assert_eq!(
-            std::env::current_dir().unwrap(),
-            repo_a.canonicalize().unwrap()
-        );
     }
 }

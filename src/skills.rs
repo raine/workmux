@@ -6,9 +6,10 @@
 use anyhow::{Context, Result};
 use console::style;
 use similar::{ChangeTag, TextDiff};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent_setup::Agent;
 
@@ -48,20 +49,26 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// Returns None if the agent doesn't support skills.
 pub fn skills_dir(agent: Agent) -> Option<PathBuf> {
     let home = home::home_dir()?;
+    skills_dir_with_env(agent, &home, |key| std::env::var_os(key))
+}
+
+fn skills_dir_with_env(
+    agent: Agent,
+    home: &Path,
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
     match agent {
         Agent::Claude => {
-            let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+            let base = get_env("CLAUDE_CONFIG_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".claude"));
             Some(base.join("skills"))
         }
         Agent::OpenCode => Some(home.join(".config/opencode/skills")),
         Agent::Pi => {
-            let pi_dir = if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
-                PathBuf::from(dir)
-            } else {
-                home.join(".pi/agent")
-            };
+            let pi_dir = get_env("PI_CODING_AGENT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".pi/agent"));
             Some(pi_dir.join("skills"))
         }
         Agent::Codex | Agent::Copilot | Agent::Gemini => None,
@@ -252,10 +259,11 @@ mod tests {
 
     #[test]
     fn test_skills_dir_claude_respects_env() {
-        let mut process = crate::test_support::process_state().unwrap();
-        process.set_env("CLAUDE_CONFIG_DIR", "/tmp/workmux-test-claude-cfg");
+        let dir = skills_dir_with_env(Agent::Claude, Path::new("/home/test"), |key| {
+            (key == "CLAUDE_CONFIG_DIR").then(|| OsString::from("/tmp/workmux-test-claude-cfg"))
+        })
+        .unwrap();
 
-        let dir = skills_dir(Agent::Claude).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/workmux-test-claude-cfg/skills"));
     }
 
