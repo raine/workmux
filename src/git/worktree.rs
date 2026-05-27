@@ -472,10 +472,8 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::CWD_LOCK;
     use std::process::Command;
-    use std::sync::Mutex;
-
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn run_git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")

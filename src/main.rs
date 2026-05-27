@@ -21,6 +21,8 @@ mod skills;
 mod spinner;
 mod state;
 mod template;
+#[cfg(test)]
+mod test_support;
 mod tips;
 mod tmux_style;
 mod ui;

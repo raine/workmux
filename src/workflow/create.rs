@@ -702,11 +702,10 @@ mod tests {
     use crate::multiplexer::{Multiplexer, PaneHandshake};
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
+    use crate::test_support::CWD_LOCK;
     use std::process::Command;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
-
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     struct TestMux;
 
