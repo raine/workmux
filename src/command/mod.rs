@@ -96,7 +96,7 @@ pub fn resolve_name(arg: Option<&str>) -> Result<String> {
 ///
 /// Iterates in reverse to find the *closest* `__worktrees` parent, handling nested
 /// structures correctly (e.g., `/backup__worktrees/project__worktrees/feature/src/`).
-pub(crate) fn resolve_name_from_path(path: &std::path::Path) -> Result<String> {
+fn resolve_name_from_path(path: &std::path::Path) -> Result<String> {
     let mut iter = path.components().rev();
     let mut child_name: Option<String> = iter
         .next()
