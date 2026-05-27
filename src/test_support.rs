@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub const ISOLATED_TEST_ENV: &str = "WM_ISOLATED_TEST";
+pub const ISOLATED_TEST_CANARY: &str = "WM_ISOLATED_TEST_EXECUTED";
 
 pub fn is_isolated_child(test_name: &str) -> bool {
     std::env::var_os(ISOLATED_TEST_ENV).as_deref() == Some(std::ffi::OsStr::new(test_name))
@@ -33,8 +34,8 @@ pub fn run_isolated_test(test_name: &str, cwd: &Path, envs: &[(&str, &Path)]) {
         stderr
     );
     assert!(
-        stdout.contains("test result: ok. 1 passed; 0 failed;"),
-        "isolated test {test_name} did not run exactly once\nstdout:\n{}\nstderr:\n{}",
+        stdout.contains(ISOLATED_TEST_CANARY),
+        "isolated test {test_name} did not execute\nstdout:\n{}\nstderr:\n{}",
         stdout,
         stderr
     );

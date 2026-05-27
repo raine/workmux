@@ -525,6 +525,7 @@ mod tests {
             return;
         }
 
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
         let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
         let repo_a = temp.join("repo-a");
         let repo_b = temp.join("repo-b");
