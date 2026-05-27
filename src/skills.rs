@@ -275,10 +275,9 @@ mod tests {
 
     #[test]
     fn test_skills_dir_pi() {
-        let dir = skills_dir(Agent::Pi);
-        assert!(dir.is_some());
-        let path = dir.unwrap();
-        assert!(path.ends_with(".pi/agent/skills"));
+        let dir = skills_dir_with_env(Agent::Pi, Path::new("/home/test"), |_| None).unwrap();
+
+        assert_eq!(dir, PathBuf::from("/home/test/.pi/agent/skills"));
     }
 
     #[test]
