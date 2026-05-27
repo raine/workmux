@@ -252,22 +252,11 @@ mod tests {
 
     #[test]
     fn test_skills_dir_claude_respects_env() {
-        // Safety: serial within this test; we restore the original value.
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
-        // SAFETY: tests in this module that read CLAUDE_CONFIG_DIR are
-        // intentionally isolated; cargo test runs may interleave, but no
-        // other test in this crate mutates this var.
-        unsafe {
-            std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/workmux-test-claude-cfg");
-        }
+        let mut process = crate::test_support::process_state().unwrap();
+        process.set_env("CLAUDE_CONFIG_DIR", "/tmp/workmux-test-claude-cfg");
+
         let dir = skills_dir(Agent::Claude).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/workmux-test-claude-cfg/skills"));
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-            }
-        }
     }
 
     #[test]

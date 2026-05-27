@@ -472,7 +472,7 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::CWD_LOCK;
+    use crate::test_support;
     use std::process::Command;
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -509,8 +509,6 @@ mod tests {
 
     #[test]
     fn create_worktree_in_uses_explicit_repo_not_process_cwd() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_a = temp.path().join("repo-a");
         let repo_b = temp.path().join("repo-b");
@@ -519,46 +517,44 @@ mod tests {
         init_repo(&repo_a);
         init_repo(&repo_b);
 
-        std::env::set_current_dir(&repo_a).unwrap();
-        let result = (|| {
-            let worktree_path = temp.path().join("repo-b__worktrees").join("feature");
-            create_worktree_in(
-                &worktree_path,
-                "feature",
-                true,
-                Some("main"),
-                false,
-                Some(&repo_b),
-            )
+        let mut process = test_support::process_state().unwrap();
+        process.set_current_dir(&repo_a).unwrap();
+
+        let worktree_path = temp.path().join("repo-b__worktrees").join("feature");
+        create_worktree_in(
+            &worktree_path,
+            "feature",
+            true,
+            Some("main"),
+            false,
+            Some(&repo_b),
+        )
+        .unwrap();
+        set_worktree_meta_in("feature", "mode", "window", Some(&repo_b)).unwrap();
+
+        let repo_b_worktrees = Command::new("git")
+            .current_dir(&repo_b)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
             .unwrap();
-            set_worktree_meta_in("feature", "mode", "window", Some(&repo_b)).unwrap();
+        assert!(repo_b_worktrees.status.success());
+        let repo_b_list = String::from_utf8(repo_b_worktrees.stdout).unwrap();
+        assert!(repo_b_list.contains("branch refs/heads/feature"));
+        assert_eq!(
+            get_worktree_meta_in("feature", "mode", Some(&repo_b)).as_deref(),
+            Some("window")
+        );
 
-            let repo_b_worktrees = Command::new("git")
-                .current_dir(&repo_b)
-                .args(["worktree", "list", "--porcelain"])
-                .output()
-                .unwrap();
-            assert!(repo_b_worktrees.status.success());
-            let repo_b_list = String::from_utf8(repo_b_worktrees.stdout).unwrap();
-            assert!(repo_b_list.contains("branch refs/heads/feature"));
-            assert_eq!(
-                get_worktree_meta_in("feature", "mode", Some(&repo_b)).as_deref(),
-                Some("window")
-            );
-
-            let repo_a_has_branch = Command::new("git")
-                .current_dir(&repo_a)
-                .args(["rev-parse", "--verify", "--quiet", "feature"])
-                .status()
-                .unwrap()
-                .success();
-            assert!(!repo_a_has_branch);
-            assert_eq!(
-                std::env::current_dir().unwrap(),
-                repo_a.canonicalize().unwrap()
-            );
-        })();
-        std::env::set_current_dir(original_cwd).unwrap();
-        result
+        let repo_a_has_branch = Command::new("git")
+            .current_dir(&repo_a)
+            .args(["rev-parse", "--verify", "--quiet", "feature"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!repo_a_has_branch);
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            repo_a.canonicalize().unwrap()
+        );
     }
 }

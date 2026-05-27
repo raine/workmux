@@ -67,7 +67,6 @@ pub fn mark_sidebar_used() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn tips_state_defaults() {
@@ -97,8 +96,9 @@ mod tests {
 
     #[test]
     fn should_show_requires_tmux() {
-        // SAFETY: test runs single-threaded; no other thread reads TMUX concurrently
-        unsafe { env::remove_var("TMUX") };
+        let mut process = crate::test_support::process_state().unwrap();
+        process.remove_env("TMUX");
+
         assert!(!should_show_sidebar_tip());
     }
 }

@@ -700,9 +700,9 @@ mod tests {
         PaneSetupOptions, PaneSetupResult,
     };
     use crate::multiplexer::{Multiplexer, PaneHandshake};
+    use crate::test_support;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
-    use crate::test_support::CWD_LOCK;
     use std::process::Command;
     use std::sync::Arc;
     use std::time::Duration;
@@ -974,8 +974,6 @@ mod tests {
 
     #[test]
     fn workflow_create_uses_explicit_repo_not_process_cwd() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_a = temp.path().join("repo-a");
         let repo_b = temp.path().join("repo-b");
@@ -986,44 +984,42 @@ mod tests {
         init_repo(&repo_a);
         init_repo(&repo_b);
 
-        std::env::set_current_dir(&non_repo).unwrap();
-        let result = (|| {
-            let config = Config::default();
-            let ctx =
-                WorkflowContext::new_in(&repo_b, config.clone(), Arc::new(TestMux), None).unwrap();
-            let mut options = SetupOptions::new(false, false, false);
-            options.focus_window = false;
-            let result = create(
-                &ctx,
-                CreateArgs {
-                    branch_name: "feature",
-                    handle: "feature",
-                    base_branch: Some("main"),
-                    remote_branch: None,
-                    pr_number: None,
-                    prompt: None,
-                    options,
-                    mode_override: None,
-                    agent: None,
-                    is_explicit_name: false,
-                    prompt_file_only: false,
-                    fork_source: None,
-                },
-            )
-            .unwrap();
+        let mut process = test_support::process_state().unwrap();
+        process.set_current_dir(&non_repo).unwrap();
 
-            assert!(result.worktree_path.exists());
-            assert_eq!(
-                git::get_worktree_meta_in("feature", "mode", Some(&repo_b)).as_deref(),
-                Some("window")
-            );
-            assert!(!git::branch_exists_in("feature", Some(&repo_a)).unwrap());
-            assert_eq!(
-                std::env::current_dir().unwrap(),
-                non_repo.canonicalize().unwrap()
-            );
-        })();
-        std::env::set_current_dir(original_cwd).unwrap();
-        result
+        let config = Config::default();
+        let ctx =
+            WorkflowContext::new_in(&repo_b, config.clone(), Arc::new(TestMux), None).unwrap();
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+        let result = create(
+            &ctx,
+            CreateArgs {
+                branch_name: "feature",
+                handle: "feature",
+                base_branch: Some("main"),
+                remote_branch: None,
+                pr_number: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(result.worktree_path.exists());
+        assert_eq!(
+            git::get_worktree_meta_in("feature", "mode", Some(&repo_b)).as_deref(),
+            Some("window")
+        );
+        assert!(!git::branch_exists_in("feature", Some(&repo_a)).unwrap());
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            non_repo.canonicalize().unwrap()
+        );
     }
 }

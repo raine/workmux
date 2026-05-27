@@ -1,15 +1,77 @@
 //! Test-only helpers shared across modules.
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
-/// Process-wide lock used to serialize tests that mutate the process's
-/// current working directory via `std::env::set_current_dir`.
-///
-/// Several tests need to verify that workmux code consults an explicit
-/// repo path argument and does not fall back to the process cwd. Those
-/// tests temporarily change cwd to a known-bad value, run the code under
-/// test, then restore the original cwd. Because cargo runs tests in
-/// parallel by default, every such test **must** acquire this single
-/// crate-wide lock; otherwise concurrent cwd mutations from sibling test
-/// modules will race and cause spurious failures.
-pub static CWD_LOCK: Mutex<()> = Mutex::new(());
+static PROCESS_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct ProcessStateGuard {
+    _lock: MutexGuard<'static, ()>,
+    original_cwd: PathBuf,
+    saved_env: HashMap<OsString, Option<OsString>>,
+}
+
+pub fn process_state() -> std::io::Result<ProcessStateGuard> {
+    let lock = PROCESS_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original_cwd = std::env::current_dir()?;
+
+    Ok(ProcessStateGuard {
+        _lock: lock,
+        original_cwd,
+        saved_env: HashMap::new(),
+    })
+}
+
+impl ProcessStateGuard {
+    pub fn set_current_dir(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::env::set_current_dir(path)
+    }
+
+    pub fn set_env(&mut self, key: &'static str, value: impl AsRef<OsStr>) {
+        self.save_env(key);
+        // SAFETY: tests that mutate process env must do it through this guard,
+        // which serializes mutation behind PROCESS_STATE_LOCK.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    pub fn remove_env(&mut self, key: &'static str) {
+        self.save_env(key);
+        // SAFETY: tests that mutate process env must do it through this guard,
+        // which serializes mutation behind PROCESS_STATE_LOCK.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn save_env(&mut self, key: &'static str) {
+        let key = OsString::from(key);
+        self.saved_env
+            .entry(key.clone())
+            .or_insert_with(|| std::env::var_os(&key));
+    }
+}
+
+impl Drop for ProcessStateGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::env::set_current_dir(&self.original_cwd) {
+            eprintln!("failed to restore cwd after test: {err}");
+        }
+
+        for (key, value) in &self.saved_env {
+            // SAFETY: tests that mutate process env must do it through this guard,
+            // which serializes mutation behind PROCESS_STATE_LOCK.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
