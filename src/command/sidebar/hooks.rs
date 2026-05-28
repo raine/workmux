@@ -40,7 +40,10 @@ pub(super) fn install_hooks() -> Result<()> {
         ("window-resized[99]", &reflow_cmd),
         ("after-select-window[98]", dirty_cmd),
         ("client-session-changed[98]", dirty_cmd),
-        ("after-kill-pane[98]", dirty_cmd),
+        (
+            "after-kill-pane[98]",
+            &format!("{reflow_cmd} ; {dirty_cmd}"),
+        ),
     ];
 
     for (hook, cmd) in hooks {
