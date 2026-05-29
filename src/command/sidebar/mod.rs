@@ -414,11 +414,14 @@ pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
 /// Reflow sidebar layouts in all windows. Called by the window-resized hook
 /// so inactive windows get their sidebar widths corrected without waiting for
 /// the user to visit them.
-pub fn reflow_all() -> Result<()> {
-    reflow_all_to_window_extent(None)
+pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
+    reflow_all_to_window_extent(None, exclude_window)
 }
 
-pub(super) fn reflow_all_to_window_extent(window_extent: Option<u16>) -> Result<()> {
+pub(super) fn reflow_all_to_window_extent(
+    window_extent: Option<u16>,
+    exclude_window: Option<&str>,
+) -> Result<()> {
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());
@@ -430,6 +433,10 @@ pub(super) fn reflow_all_to_window_extent(window_extent: Option<u16>) -> Result<
     let synced_height = read_sidebar_height();
 
     for (window_id, pane_id) in panes::list_sidebar_panes() {
+        if exclude_window.is_some_and(|ex| ex == window_id) {
+            continue;
+        }
+
         // Scope filter
         if !apply_scope_filter(&scope, &window_id) {
             continue;

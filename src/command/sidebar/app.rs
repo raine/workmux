@@ -154,6 +154,8 @@ pub struct SidebarApp {
     pub has_loaded_snapshot: bool,
     pub list_state: ListState,
     pub should_quit: bool,
+    /// When true, quit without triggering global sidebar shutdown (last-pane auto-exit).
+    pub quit_silent: bool,
     pub quit_reason: Option<String>,
     pub palette: ThemePalette,
     pub status_icons: StatusIcons,
@@ -231,6 +233,7 @@ impl SidebarApp {
             has_loaded_snapshot: true,
             list_state: ListState::default(),
             should_quit: false,
+            quit_silent: false,
             quit_reason: None,
             palette: ThemePalette::from_config(
                 &Config::default().theme,
@@ -312,6 +315,7 @@ impl SidebarApp {
             has_loaded_snapshot: false,
             list_state: ListState::default(),
             should_quit: false,
+            quit_silent: false,
             quit_reason: None,
             palette,
             status_icons,
@@ -710,7 +714,7 @@ impl SidebarApp {
                     self.pending_resize_cols = None;
                     self.pending_resize_rows = None;
                     self.resize_deadline = None;
-                    let _ = super::reflow_all_to_window_extent(Some(window_w));
+                    let _ = super::reflow_all_to_window_extent(Some(window_w), None);
                     return;
                 }
                 self.pending_resize_cols = Some(cols);
@@ -722,7 +726,7 @@ impl SidebarApp {
                     self.pending_resize_cols = None;
                     self.pending_resize_rows = None;
                     self.resize_deadline = None;
-                    let _ = super::reflow_all_to_window_extent(Some(window_h));
+                    let _ = super::reflow_all_to_window_extent(Some(window_h), None);
                     return;
                 }
                 self.pending_resize_rows = Some(rows);

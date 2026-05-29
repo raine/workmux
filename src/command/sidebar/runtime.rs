@@ -182,7 +182,9 @@ pub fn run_sidebar() -> Result<()> {
                 quit_reason = app.quit_reason.as_deref().unwrap_or("unknown"),
                 "sidebar-run quitting"
             );
-            shutdown_all_sidebars();
+            if !app.quit_silent {
+                shutdown_all_sidebars();
+            }
             break;
         }
     }
@@ -225,6 +227,7 @@ fn process_event(
                     && snapshot.window_pane_counts.get(wid).copied().unwrap_or(2) <= 1
                 {
                     app.quit_reason = Some(format!("last-pane: window {} has <= 1 pane", wid));
+                    app.quit_silent = true;
                     app.should_quit = true;
                 }
                 app.apply_snapshot(snapshot);

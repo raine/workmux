@@ -42,7 +42,10 @@ pub(super) fn install_hooks() -> Result<()> {
         ("client-session-changed[98]", dirty_cmd),
         (
             "after-kill-pane[98]",
-            &format!("{reflow_cmd} ; {dirty_cmd}"),
+            &format!(
+                "run-shell -b 'sh -c \"{} _sidebar-reflow-all --exclude #{{window_id}} ; kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true\"'",
+                exe_str
+            ),
         ),
     ];
 
