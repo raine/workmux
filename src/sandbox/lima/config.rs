@@ -54,7 +54,7 @@ sudo apt-get install -y --no-install-recommends nodejs
 # Install pi coding agent CLI to /usr/local (avoids sudo permission issues)
 sudo mkdir -p /usr/local/bin /usr/local/lib/node_modules
 npm config set prefix /usr/local
-npm install -g @mariozechner/pi-coding-agent
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 "#
         .to_string(),
 
@@ -541,8 +541,8 @@ mod tests {
         let sandbox_config = SandboxConfig::default();
         let yaml = generate_lima_config("test-vm", &mounts, &sandbox_config, "pi", true).unwrap();
 
-        assert!(yaml.contains("@mariozechner/pi-coding-agent"));
-        assert!(yaml.contains("npm install -g"));
+        assert!(yaml.contains("@earendil-works/pi-coding-agent"));
+        assert!(yaml.contains("npm install -g --ignore-scripts"));
         assert!(!yaml.contains("claude.ai/install.sh"));
         assert!(!yaml.contains(".claude.json"));
     }
@@ -557,8 +557,8 @@ mod tests {
         assert!(yaml.contains("bun install -g"));
         assert!(yaml.contains("python3"));
         assert!(!yaml.contains("nodesource.com"));
-        assert!(!yaml.contains("npm install -g"));
-        assert!(!yaml.contains("@mariozechner/pi-coding-agent"));
+        assert!(!yaml.contains("npm install -g --ignore-scripts"));
+        assert!(!yaml.contains("@earendil-works/pi-coding-agent"));
         assert!(!yaml.contains("claude.ai/install.sh"));
         assert!(!yaml.contains(".claude.json"));
     }
@@ -637,8 +637,8 @@ mod tests {
     #[test]
     fn test_lima_install_script_for_agent_pi() {
         let script = lima_install_script_for_agent("pi");
-        assert!(script.contains("@mariozechner/pi-coding-agent"));
-        assert!(script.contains("npm install -g"));
+        assert!(script.contains("@earendil-works/pi-coding-agent"));
+        assert!(script.contains("npm install -g --ignore-scripts"));
     }
 
     #[test]
@@ -648,8 +648,8 @@ mod tests {
         assert!(script.contains("bun install -g"));
         assert!(script.contains("python3"));
         assert!(!script.contains("nodesource.com"));
-        assert!(!script.contains("npm install -g"));
-        assert!(!script.contains("@mariozechner/pi-coding-agent"));
+        assert!(!script.contains("npm install -g --ignore-scripts"));
+        assert!(!script.contains("@earendil-works/pi-coding-agent"));
         assert!(!script.contains("claude.ai/install.sh"));
         assert!(!script.contains(".claude.json"));
     }
