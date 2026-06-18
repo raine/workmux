@@ -8,7 +8,7 @@ workmux is designed with AI agent workflows in mind. Run multiple agents in para
 
 ## Agent integration
 
-When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`, `pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
+When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`, `pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started with the given prompt.
 - You can keep your `.workmux.yaml` pane configuration simple (e.g., `panes: [{ command: "<agent>" }]`) and let workmux handle prompt injection at runtime.
@@ -134,7 +134,7 @@ Named agents are global-only for security. Define them in `~/.config/workmux/con
 
 ## Per-pane agents
 
-workmux automatically recognizes built-in agent commands (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`) in pane commands. This means prompt injection works without the `<agent>` placeholder or a matching `agent` config:
+workmux automatically recognizes built-in agent commands (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`) in pane commands. This means prompt injection works without the `<agent>` placeholder or a matching `agent` config:
 
 ```yaml
 panes:
@@ -144,7 +144,9 @@ panes:
     split: vertical
 ```
 
-Each agent receives the prompt using its native format (e.g., Claude uses `--`, Gemini uses `-i`). Auto-detection matches the executable name regardless of flags or path. Just provide a prompt via `-p`, `-P`, or `-e`.
+Each agent receives the prompt using its native format (e.g., Claude uses `--`, Gemini and Antigravity use `-i`). Auto-detection matches the executable name regardless of flags or path. Just provide a prompt via `-p`, `-P`, or `-e`.
+
+Antigravity CLI support covers command detection, prompt injection, and status tracking hook setup via `workmux setup`.
 
 See [pane configuration](/guide/configuration#agent-placeholders) for details.
 

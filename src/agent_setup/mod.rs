@@ -4,6 +4,7 @@
 //! hooks are installed, and offers to install them. Used by both the
 //! `workmux setup` command and the first-run wizard.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -29,6 +30,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
+    #[serde(rename = "agy")]
+    Antigravity,
     Claude,
     Codex,
     Copilot,
@@ -42,6 +45,7 @@ pub enum Agent {
 impl Agent {
     pub fn name(&self) -> &'static str {
         match self {
+            Agent::Antigravity => "Antigravity CLI",
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Copilot => "Copilot CLI",
@@ -56,6 +60,7 @@ impl Agent {
     /// even when the agent CLI is no longer detected.
     pub fn all() -> Vec<Agent> {
         vec![
+            Agent::Antigravity,
             Agent::Claude,
             Agent::Codex,
             Agent::Copilot,
@@ -99,6 +104,18 @@ pub fn check_all() -> Vec<AgentCheck> {
         };
         results.push(AgentCheck {
             agent: Agent::Claude,
+            reason,
+            status,
+        });
+    }
+
+    if let Some(reason) = antigravity::detect() {
+        let status = match antigravity::check() {
+            Ok(s) => s,
+            Err(e) => StatusCheck::Error(e.to_string()),
+        };
+        results.push(AgentCheck {
+            agent: Agent::Antigravity,
             reason,
             status,
         });
@@ -182,6 +199,7 @@ pub fn check_all() -> Vec<AgentCheck> {
 /// Install status tracking for the given agent.
 pub fn install(agent: Agent) -> Result<String> {
     match agent {
+        Agent::Antigravity => antigravity::install(),
         Agent::Claude => claude::install(),
         Agent::Codex => codex::install(),
         Agent::Copilot => copilot::install(),
@@ -195,6 +213,7 @@ pub fn install(agent: Agent) -> Result<String> {
 /// Remove status tracking hooks for the given agent.
 pub fn uninstall_one(agent: Agent) -> Result<String> {
     match agent {
+        Agent::Antigravity => antigravity::uninstall(),
         Agent::Claude => claude::uninstall(),
         Agent::Codex => codex::uninstall(),
         Agent::Copilot => copilot::uninstall(),
@@ -407,6 +426,7 @@ mod tests {
 
     #[test]
     fn test_agent_name() {
+        assert_eq!(Agent::Antigravity.name(), "Antigravity CLI");
         assert_eq!(Agent::Claude.name(), "Claude Code");
         assert_eq!(Agent::Codex.name(), "Codex");
         assert_eq!(Agent::Copilot.name(), "Copilot CLI");
@@ -418,6 +438,10 @@ mod tests {
 
     #[test]
     fn test_agent_serialization() {
+        assert_eq!(
+            serde_json::to_string(&Agent::Antigravity).unwrap(),
+            "\"agy\""
+        );
         assert_eq!(serde_json::to_string(&Agent::Claude).unwrap(), "\"claude\"");
         assert_eq!(serde_json::to_string(&Agent::Codex).unwrap(), "\"codex\"");
         assert_eq!(
@@ -435,6 +459,8 @@ mod tests {
 
     #[test]
     fn test_agent_deserialization() {
+        let agent: Agent = serde_json::from_str("\"agy\"").unwrap();
+        assert_eq!(agent, Agent::Antigravity);
         let agent: Agent = serde_json::from_str("\"claude\"").unwrap();
         assert_eq!(agent, Agent::Claude);
         let agent: Agent = serde_json::from_str("\"codex\"").unwrap();

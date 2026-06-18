@@ -626,6 +626,28 @@ mod tests {
     }
 
     #[test]
+    fn resolve_structured_pane_command_injects_antigravity_prompt() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let config = config_with_agent("agy");
+        let resolved = resolve_pane_command_with_config(
+            Some("agy"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+
+        assert!(resolved.prompt_injected);
+        assert!(resolved.command.contains("-i"));
+        assert!(resolved.command.contains("PROMPT.md"));
+        assert_eq!(resolved.selected_agent.unwrap().kind(), "agy");
+    }
+
+    #[test]
     fn resolve_structured_pane_command_inserts_default_subcommand_before_flags() {
         let mut config = config_with_agent("kiro");
         config.agents.insert(

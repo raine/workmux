@@ -74,7 +74,7 @@ fn skills_dir_with_env(
         Agent::Omp => {
             Some(crate::agent_setup::omp::omp_agent_dir_with_env(home, get_env).join("skills"))
         }
-        Agent::Codex | Agent::Copilot | Agent::Gemini => None,
+        Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Gemini => None,
     }
 }
 

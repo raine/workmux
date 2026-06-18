@@ -130,6 +130,34 @@ impl AgentProfile for GeminiProfile {
     }
 }
 
+pub struct AntigravityProfile;
+
+impl AgentProfile for AntigravityProfile {
+    fn name(&self) -> &'static str {
+        "agy"
+    }
+
+    fn needs_auto_status(&self) -> bool {
+        true
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--dangerously-skip-permissions")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("-i \"$(cat {})\"", prompt_path)
+    }
+
+    fn auto_name_command(&self) -> Option<&'static str> {
+        Some("agy -p")
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct OpenCodeProfile;
 
 impl AgentProfile for OpenCodeProfile {
@@ -279,6 +307,7 @@ impl AgentProfile for DefaultProfile {
 static PROFILES: &[&dyn AgentProfile] = &[
     &ClaudeProfile,
     &GeminiProfile,
+    &AntigravityProfile,
     &OpenCodeProfile,
     &CodexProfile,
     &PiProfile,
@@ -623,6 +652,24 @@ mod tests {
     }
 
     #[test]
+    fn test_antigravity_profile() {
+        let profile = AntigravityProfile;
+        assert_eq!(profile.name(), "agy");
+        assert!(!profile.needs_bang_delay());
+        assert!(profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "-i \"$(cat PROMPT.md)\""
+        );
+        assert_eq!(
+            profile.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
+        assert_eq!(profile.auto_name_command(), Some("agy -p"));
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
     fn test_opencode_profile() {
         let profile = OpenCodeProfile;
         assert_eq!(profile.name(), "opencode");
@@ -750,6 +797,12 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_profile_agy() {
+        let profile = resolve_profile(Some("agy"));
+        assert_eq!(profile.name(), "agy");
+    }
+
+    #[test]
     fn test_resolve_profile_opencode() {
         let profile = resolve_profile(Some("opencode"));
         assert_eq!(profile.name(), "opencode");
@@ -803,6 +856,7 @@ mod tests {
     fn test_is_known_agent_bare_names() {
         assert!(is_known_agent("claude"));
         assert!(is_known_agent("gemini"));
+        assert!(is_known_agent("agy"));
         assert!(is_known_agent("codex"));
         assert!(is_known_agent("opencode"));
         assert!(is_known_agent("pi"));
@@ -816,6 +870,7 @@ mod tests {
         assert!(is_known_agent("claude --dangerously-skip-permissions"));
         assert!(is_known_agent("codex --yolo"));
         assert!(is_known_agent("gemini -i foo"));
+        assert!(is_known_agent("agy --continue"));
     }
 
     #[test]
@@ -899,6 +954,7 @@ mod tests {
         assert!(is_known_agent("env -u FOO claude"));
         assert!(is_known_agent("env FOO=bar codex --yolo"));
         assert!(is_known_agent("FOO=bar gemini -i foo"));
+        assert!(is_known_agent("env FOO=bar agy -i foo"));
         assert!(is_known_agent("env FOO=bar omp --continue"));
     }
 

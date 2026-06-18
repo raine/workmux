@@ -181,7 +181,7 @@ workmux add feature/ai-session --mode session -p "Implement the new API"
 
 ## AI agent integration
 
-When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`, `pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
+When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`, workmux automatically injects the prompt into panes running the configured agent command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`, `pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started with the given prompt.
 - You can keep your `.workmux.yaml` pane configuration simple (e.g., `panes: [{ command: "<agent>" }]`) and let workmux handle prompt injection at runtime.
@@ -195,7 +195,7 @@ If your editor has an embedded agent (e.g., neovim with an agent plugin), use `-
 The `--auto-name` (`-A`) flag generates a branch name from your prompt using an LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`): uses the agent's CLI with a fast/cheap model
+2. `config.agent` is a known agent (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`): uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
 ### Usage

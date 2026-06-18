@@ -4125,6 +4125,10 @@ extra_mounts:
         let home = home::home_dir().unwrap();
         assert_eq!(dir, home.join(".claude"));
         let dir = config
+            .resolved_agent_config_dir_with_env("agy", |_| None)
+            .unwrap();
+        assert_eq!(dir, home.join(".gemini/antigravity-cli"));
+        let dir = config
             .resolved_agent_config_dir_with_env("omp", |_| None)
             .unwrap();
         assert_eq!(dir, home.join(".omp/agent"));

@@ -332,7 +332,7 @@ Each pane supports:
 - `<agent>`: resolves to the configured agent (from `agent` config or `--agent`
   flag)
 
-Built-in agents (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`,
+Built-in agents (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`,
 `pi`, `omp`) are auto-detected when used as literal commands and receive prompt
 injection automatically, without needing the `<agent>` placeholder or a matching
 `agent` config:
@@ -348,6 +348,9 @@ panes:
 Each agent receives the prompt (via `-p`/`-P`/`-e`) using the correct format for
 that agent. Auto-detection matches the executable name regardless of flags or
 path.
+
+Antigravity CLI support covers command detection, prompt injection, and status
+tracking hook setup via `workmux setup`.
 
 #### Named layouts
 
@@ -751,7 +754,7 @@ done
 
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
-command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`,
+command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
 `pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without
 requiring any `.workmux.yaml` changes:
 
@@ -776,7 +779,7 @@ The `--auto-name` (`-A`) flag generates a branch name from your prompt using an
 LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`,
+2. `config.agent` is a known agent (`claude`, `gemini`, `agy`, `codex`, `opencode`,
    `kiro-cli`, `vibe`, `pi`, `omp`): uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
@@ -1950,6 +1953,7 @@ at-a-glance visibility into what the agent in each window doing.
 | Pi           | ✅ Supported\*                                                              |
 | Oh My Pi    | ✅ Supported                                                                |
 | Gemini CLI   | ✅ Supported                                                                |
+| Antigravity CLI (`agy`) | ✅ Supported\*                                                   |
 | Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
 
@@ -1958,13 +1962,15 @@ at-a-glance visibility into what the agent in each window doing.
 - **Codex**: No 💬 waiting state
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
+- **Antigravity CLI (`agy`)**: No 💬 waiting state
 - **Kiro**: Hooks support is messy: requires a custom agent since the default
   can't be edited
 
 ### Setup
 
-Run `workmux setup` to automatically detect Claude Code, Copilot CLI, OpenCode,
-Pi, Oh My Pi, and other supported agent CLIs, install status tracking hooks, and install skills:
+Run `workmux setup` to automatically detect Claude Code, Antigravity CLI,
+Copilot CLI, OpenCode, Pi, Oh My Pi, and other supported agent CLIs, install
+status tracking hooks, and install skills:
 
 ```bash
 workmux setup

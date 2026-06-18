@@ -384,7 +384,16 @@ fn build_pane_title(
     let title_project = extract_project_name(&agent.path);
     sanitize_pane_title(agent.pane_title.as_deref(), &title_worktree, &title_project)
         .filter(|t| *t != primary && *t != secondary)
+        .filter(|t| !is_hostname_title(t))
         .map(|s| s.to_string())
+}
+
+fn is_hostname_title(title: &str) -> bool {
+    is_hostname_title_with(title, std::env::var("HOSTNAME").ok().as_deref())
+}
+
+fn is_hostname_title_with(title: &str, hostname: Option<&str>) -> bool {
+    hostname.is_some_and(|hostname| !hostname.is_empty() && title == hostname)
 }
 
 fn is_agent_stale(
@@ -516,6 +525,21 @@ mod tests {
         let icons = ResolvedAgentIcons::default();
         assert_eq!(resolve_agent_label(kind(None, Some("gemini"))), "Gemini");
         assert_eq!(resolve_agent_icon(kind(None, Some("gemini")), &icons), "G");
+    }
+
+    #[test]
+    fn antigravity_uses_curved_default_icon() {
+        let icons = ResolvedAgentIcons::default();
+        assert_eq!(resolve_agent_label(kind(None, Some("agy"))), "Antigravity");
+        assert_eq!(resolve_agent_icon(kind(None, Some("agy")), &icons), "⋂");
+    }
+
+    #[test]
+    fn hostname_pane_title_is_noise() {
+        assert!(is_hostname_title_with("framework", Some("framework")));
+        assert!(!is_hostname_title_with("framework", Some("other")));
+        assert!(!is_hostname_title_with("framework", None));
+        assert!(!is_hostname_title_with("framework", Some("")));
     }
 
     #[test]
