@@ -141,19 +141,28 @@ curl -o ~/.gemini/settings.json \
 
 ## Antigravity CLI (`agy`) setup
 
-If you prefer manual setup, download the hooks configuration and merge the `workmux-status` group into both Antigravity hook files:
+`workmux setup` installs an Antigravity `statusLine` wrapper at `~/.gemini/config/workmux-hooks/workmux-statusline` and enables it in `~/.gemini/antigravity-cli/settings.json`. The wrapper prints nothing by default; it only reads Antigravity's `agent_state` payload and updates Workmux. If you already have a custom Antigravity status line, Workmux stores and chains that command so your visible status line continues to render.
+
+Antigravity may need to reload settings after installation. If an existing `agy` session does not update immediately, run `/statusline on` inside `agy` or restart the session.
+
+If you prefer manual setup, create a silent statusLine wrapper and point Antigravity at it:
 
 ```
-mkdir -p ~/.gemini/config ~/.gemini/antigravity-cli
-curl -o /tmp/workmux-antigravity-hooks.json \
-  https://raw.githubusercontent.com/raine/workmux/main/resources/antigravity/hooks.json
-jq -s '.[0] * .[1]' ~/.gemini/config/hooks.json /tmp/workmux-antigravity-hooks.json \
-  > /tmp/agy-hooks.json && mv /tmp/agy-hooks.json ~/.gemini/config/hooks.json
-jq -s '.[0] * .[1]' ~/.gemini/antigravity-cli/hooks.json /tmp/workmux-antigravity-hooks.json \
-  > /tmp/agy-hooks.json && mv /tmp/agy-hooks.json ~/.gemini/antigravity-cli/hooks.json
+mkdir -p ~/.gemini/config/workmux-hooks ~/.gemini/antigravity-cli
+cat > ~/.gemini/config/workmux-hooks/workmux-statusline <<'EOF'
+#!/bin/sh
+pane="${TMUX_PANE-}"
+export WORKMUX_TARGET_PANE="$pane"
+exec workmux set-window-status antigravity-statusline >/dev/null 2>&1
+EOF
+chmod +x ~/.gemini/config/workmux-hooks/workmux-statusline
+test -f ~/.gemini/antigravity-cli/settings.json || echo '{}' > ~/.gemini/antigravity-cli/settings.json
+jq '.statusLine = {"command":"'"$HOME"'/.gemini/config/workmux-hooks/workmux-statusline","enabled":true}' \
+  ~/.gemini/antigravity-cli/settings.json > /tmp/agy-settings.json \
+  && mv /tmp/agy-settings.json ~/.gemini/antigravity-cli/settings.json
 ```
 
-If either file does not exist yet, copy `resources/antigravity/hooks.json` there directly. Antigravity hooks track working/done states around model invocations and tool calls, but do not provide a waiting-state hook.
+Workmux also installs Antigravity lifecycle hooks as a compatibility fallback for marking panes working promptly, but the `statusLine` signal is the source of truth for clearing back to done/idle.
 
 ## Copilot CLI setup
 
