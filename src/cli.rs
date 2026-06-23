@@ -781,6 +781,14 @@ enum Commands {
     #[command(hide = true, name = "last-done")]
     LastDone,
 
+    /// Show a desktop notification; clicking it focuses the last-done agent
+    #[command(hide = true, name = "notify")]
+    Notify {
+        /// Notification body text (e.g. the agent's final answer)
+        #[arg(long)]
+        body: Option<String>,
+    },
+
     /// Switch to the last visited agent (toggle between two)
     #[command(hide = true, name = "last-agent")]
     LastAgent,
@@ -1126,6 +1134,7 @@ pub fn run() -> Result<()> {
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
+        Commands::Notify { body } => command::notify::run(body.as_deref()),
         Commands::LastAgent => command::last_agent::run(),
         Commands::HostExec { args } => {
             let (command, cmd_args) = args

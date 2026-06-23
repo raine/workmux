@@ -12,6 +12,7 @@ pub mod host_exec;
 pub mod last_agent;
 pub mod last_done;
 pub mod list;
+pub mod notify;
 pub mod merge;
 pub mod open;
 pub mod path;
