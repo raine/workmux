@@ -9,7 +9,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   function setStatus(status: string) {
-    pi.exec("workmux", ["set-window-status", status]).catch(() => {});
+    return pi
+      .exec("workmux", ["set-window-status", status])
+      .then(() => {}, () => {});
   }
 
   function lastAssistantText(messages: any[]): string {
@@ -28,11 +30,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("agent_start", async () => {
-    setStatus("working");
+    await setStatus("working");
   });
 
   pi.on("agent_end", async (event: any) => {
-    setStatus("done");
+    await setStatus("done");
 
     const summary = lastAssistantText(event?.messages ?? []);
     const args = summary
