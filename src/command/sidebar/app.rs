@@ -222,6 +222,7 @@ pub struct SidebarApp {
     pending_resize_rows: Option<u16>,
     /// Deadline after which pending resize should be processed.
     pub(super) resize_deadline: Option<Instant>,
+    suppress_resize_once: bool,
 }
 
 impl SidebarApp {
@@ -276,6 +277,7 @@ impl SidebarApp {
             pending_resize_cols: None,
             pending_resize_rows: None,
             resize_deadline: None,
+            suppress_resize_once: false,
         }
     }
 
@@ -351,6 +353,7 @@ impl SidebarApp {
             pending_resize_cols: None,
             pending_resize_rows: None,
             resize_deadline: None,
+            suppress_resize_once: false,
         })
     }
 
@@ -706,6 +709,14 @@ impl SidebarApp {
 
     /// Record a resize event for debounced manual pane resize processing.
     pub fn on_resize_event(&mut self, cols: u16, rows: u16) {
+        if self.suppress_resize_once {
+            self.suppress_resize_once = false;
+            self.pending_resize_cols = None;
+            self.pending_resize_rows = None;
+            self.resize_deadline = None;
+            return;
+        }
+
         match self.position {
             SidebarPosition::Left => {
                 let window_w = self.query_host_window_width();
@@ -781,8 +792,9 @@ impl SidebarApp {
                         if let Some(wid) = self.host_window_id() {
                             super::reflow_all_sidebars_except(wid);
                         }
-                    } else if let Some(wid) = self.host_window_id() {
-                        let _ = super::reflow(Some(wid));
+                    } else if let Some(wid) = self.host_window_id().map(str::to_string) {
+                        self.suppress_resize_once = true;
+                        let _ = super::reflow(Some(&wid));
                     }
                 }
             }
@@ -810,8 +822,9 @@ impl SidebarApp {
                         if let Some(wid) = self.host_window_id() {
                             super::reflow_all_sidebars_except(wid);
                         }
-                    } else if let Some(wid) = self.host_window_id() {
-                        let _ = super::reflow(Some(wid));
+                    } else if let Some(wid) = self.host_window_id().map(str::to_string) {
+                        self.suppress_resize_once = true;
+                        let _ = super::reflow(Some(&wid));
                     }
                 }
             }

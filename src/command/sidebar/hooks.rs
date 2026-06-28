@@ -32,9 +32,7 @@ pub(super) fn install_hooks() -> Result<()> {
 
     // Dirty signal: send SIGUSR1 to daemon on window/session/pane changes
     let dirty_cmd = "run-shell -b 'kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true'";
-    let after_kill_pane_cmd = run_shell_hook(&format!(
-        "{exe_arg} _sidebar-reflow-all --exclude #{{window_id}}; kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true"
-    ));
+    let after_kill_pane_cmd = after_kill_pane_hook_command(&exe_arg);
 
     let hooks: &[(&str, &str)] = &[
         ("after-new-window[99]", &sync_cmd),
@@ -56,6 +54,12 @@ pub(super) fn install_hooks() -> Result<()> {
 
 fn run_shell_hook(command: &str) -> String {
     format!("run-shell -b {}", tmux_double_quote(command))
+}
+
+fn after_kill_pane_hook_command(exe_arg: &str) -> String {
+    run_shell_hook(&format!(
+        "{exe_arg} _sidebar-reflow --window #{{window_id}}; kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true"
+    ))
 }
 
 fn tmux_double_quote(value: &str) -> String {
@@ -89,5 +93,14 @@ mod tests {
         let command = run_shell_hook("printf \"ok\"");
 
         assert_eq!(command, "run-shell -b \"printf \\\"ok\\\"\"");
+    }
+
+    #[test]
+    fn after_kill_pane_hook_reflows_affected_window() {
+        let exe_arg = shell_quote("/tmp/work mux/workmux");
+        let command = after_kill_pane_hook_command(&exe_arg);
+
+        assert!(command.contains("_sidebar-reflow --window #{window_id}"));
+        assert!(!command.contains("_sidebar-reflow-all --exclude"));
     }
 }

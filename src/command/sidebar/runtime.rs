@@ -15,7 +15,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::cmd::Cmd;
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::shell::shell_quote;
 
 use super::app::SidebarApp;
 use super::client;
@@ -182,7 +184,9 @@ pub fn run_sidebar() -> Result<()> {
                 quit_reason = app.quit_reason.as_deref().unwrap_or("unknown"),
                 "sidebar-run quitting"
             );
-            if !app.quit_silent {
+            if app.quit_silent {
+                schedule_current_pane_kill();
+            } else {
                 shutdown_all_sidebars();
             }
             break;
@@ -208,6 +212,24 @@ fn advance_spinner_if_due(
         app.tick();
         *needs_render = true;
     }
+}
+
+fn schedule_current_pane_kill() {
+    let pane = Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{pane_id}"])
+        .run_and_capture_stdout()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if pane.is_empty() {
+        return;
+    }
+
+    let cmd = format!(
+        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null",
+        shell_quote(&pane)
+    );
+    let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
 }
 
 fn process_event(
