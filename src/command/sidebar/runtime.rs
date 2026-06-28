@@ -36,6 +36,8 @@ impl Drop for TerminalGuard {
 enum AppEvent {
     /// A new snapshot is available in the SnapshotHandle.
     SnapshotReady,
+    /// Periodic UI tick for spinner animation.
+    Tick,
     /// A terminal input event (key press, resize, etc.).
     Input(Event),
 }
@@ -49,6 +51,15 @@ fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
             if tx.send(AppEvent::Input(ev)).is_err() {
                 break;
             }
+        }
+    });
+}
+
+fn spawn_tick_thread(tx: mpsc::Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(250));
+        if tx.send(AppEvent::Tick).is_err() {
+            break;
         }
     });
 }
@@ -96,7 +107,8 @@ pub fn run_sidebar() -> Result<()> {
     };
 
     // Input reader thread (terminal is already in raw mode)
-    spawn_input_thread(tx);
+    spawn_input_thread(tx.clone());
+    spawn_tick_thread(tx);
 
     let mut needs_render = true;
     let startup = std::time::Instant::now();
@@ -109,30 +121,19 @@ pub fn run_sidebar() -> Result<()> {
             needs_render = false;
         }
 
-        // Adaptive timeout: 250ms when active (for spinner), block when hidden.
-        // If a resize debounce is pending, wake early to process it.
+        // Block until the next event, but wake earlier if a resize debounce is
+        // pending so manual sidebar resizes are processed promptly.
         let timeout = if let Some(deadline) = app.resize_deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             remaining.min(Duration::from_millis(250))
-        } else if app.host_window_active() {
-            Duration::from_millis(250)
         } else {
-            // Block until a snapshot or input wakes us. Use a large timeout
-            // since recv() without timeout would prevent clean shutdown if
-            // all senders drop.
             Duration::from_secs(3600)
         };
 
         let first_event = match rx.recv_timeout(timeout) {
             Ok(ev) => Some(ev),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Process any pending resize detection before ticking
                 app.process_pending_resize(&startup, startup_grace);
-                // Spinner tick (only fires when active, guaranteed by timeout choice)
-                if app.host_window_active() {
-                    app.tick();
-                    needs_render = true;
-                }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -205,6 +206,10 @@ fn process_event(
                 app.apply_snapshot(snapshot);
                 *needs_render = true;
             }
+        }
+        AppEvent::Tick => {
+            app.tick();
+            *needs_render = true;
         }
         AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
             match (key.code, key.modifiers) {
