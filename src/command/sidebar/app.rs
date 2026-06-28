@@ -778,9 +778,11 @@ impl SidebarApp {
                 if delta > 0 {
                     if config.sidebar.width.is_none() {
                         super::set_sidebar_width(actual_width);
-                    }
-                    if let Some(wid) = self.host_window_id() {
-                        super::reflow_all_sidebars_except(wid);
+                        if let Some(wid) = self.host_window_id() {
+                            super::reflow_all_sidebars_except(wid);
+                        }
+                    } else if let Some(wid) = self.host_window_id() {
+                        let _ = super::reflow(Some(wid));
                     }
                 }
             }
@@ -805,9 +807,11 @@ impl SidebarApp {
                 if delta > 0 {
                     if config.sidebar.height.is_none() {
                         super::set_sidebar_height(actual_height);
-                    }
-                    if let Some(wid) = self.host_window_id() {
-                        super::reflow_all_sidebars_except(wid);
+                        if let Some(wid) = self.host_window_id() {
+                            super::reflow_all_sidebars_except(wid);
+                        }
+                    } else if let Some(wid) = self.host_window_id() {
+                        let _ = super::reflow(Some(wid));
                     }
                 }
             }
