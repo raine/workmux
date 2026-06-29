@@ -151,7 +151,7 @@ Custom colors persist when cycling themes with `T`.
 
 ### Panes
 
-Define your tmux pane layout with the `panes` array. For multiple windows in session mode, use [windows](#windows) instead (they are mutually exclusive).
+Define your multiplexer pane layout with the `panes` array. For multiple windows in session mode, use [windows](#windows) instead (they are mutually exclusive).
 
 ```yaml
 panes:
@@ -169,9 +169,11 @@ Each pane supports:
 | `command`    | Command to run (see [agent placeholders](#agent-placeholders) below) | Shell   |
 | `focus`      | Whether this pane receives focus                                     | `false` |
 | `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                      | `false` |
-| `split`      | Split direction (`horizontal` or `vertical`)                         | ---     |
+| `split`      | Split direction (`horizontal`, `vertical`, or Zellij-only `stacked`)  | ---     |
 | `size`       | Absolute size in lines/cells                                         | 50%     |
 | `percentage` | Size as percentage (1-100)                                           | 50%     |
+
+`split: stacked` is supported only with the Zellij backend. It creates the pane in a Zellij stack with the previous pane, or with the pane selected by `target`.
 
 #### Agent placeholders
 

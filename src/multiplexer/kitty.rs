@@ -238,6 +238,11 @@ impl KittyBackend {
         let location_arg = match direction {
             SplitDirection::Horizontal => "vsplit",
             SplitDirection::Vertical => "hsplit",
+            SplitDirection::Stacked => {
+                return Err(anyhow!(
+                    "split: stacked is only supported by the Zellij backend"
+                ));
+            }
         };
 
         let cwd_str = cwd.to_string_lossy();

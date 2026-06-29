@@ -209,6 +209,11 @@ impl WezTermBackend {
         let direction_arg = match direction {
             SplitDirection::Horizontal => "--horizontal",
             SplitDirection::Vertical => "--top-level",
+            SplitDirection::Stacked => {
+                return Err(anyhow!(
+                    "split: stacked is only supported by the Zellij backend"
+                ));
+            }
         };
 
         let cwd_str = cwd.to_string_lossy();

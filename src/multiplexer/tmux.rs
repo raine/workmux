@@ -159,6 +159,11 @@ impl TmuxBackend {
         let split_arg = match direction {
             ConfigSplitDirection::Horizontal => "-h",
             ConfigSplitDirection::Vertical => "-v",
+            ConfigSplitDirection::Stacked => {
+                return Err(anyhow!(
+                    "split: stacked is only supported by the Zellij backend"
+                ));
+            }
         };
 
         let working_dir_str = working_dir

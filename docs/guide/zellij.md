@@ -21,12 +21,14 @@ The Zellij backend is new and experimental. It depends on unreleased Zellij feat
 | Scope                | tmux session         | Zellij session    |
 | Session mode         | Yes                  | No (window only)  |
 | Pane size control    | Percentage-based     | 50/50 splits only |
+| Stacked panes        | No                   | Yes               |
 | Dashboard preview    | Yes                  | No                |
 
 - **Tab ordering**: New tabs appear at the end of the tab bar (no "insert after" support like tmux)
 - **Session isolation**: workmux operates within the current Zellij session. Tabs in other sessions are not affected.
 - **Window mode only**: Session mode (`--session`) is not supported. Use window mode instead.
-- **Pane splits**: All splits are 50/50 — percentage-based sizing is not available via the Zellij CLI.
+- **Pane splits**: Horizontal and vertical splits are 50/50 — percentage-based sizing is not available via the Zellij CLI.
+- **Stacked panes**: Use `split: stacked` in a pane config to create a Zellij stack with the previous pane, or with the pane selected by `target`.
 - **No dashboard preview**: Zellij's `dump-screen` only captures the focused pane, so preview in the dashboard is disabled.
 
 ## Requirements
@@ -55,13 +57,26 @@ If you want to override the auto-detected backend, set the `WORKMUX_BACKEND` env
 export WORKMUX_BACKEND=zellij
 ```
 
+Zellij stacked panes are supported with `split: stacked`:
+
+```yaml
+panes:
+  - command: <agent>
+    focus: true
+  - command: just test --watch
+    split: stacked
+  - command: tail -f app.log
+    split: stacked
+    target: 0
+```
+
 ## Known limitations
 
 - Windows is not supported (requires Unix-specific features)
 - Session mode is not supported — only window mode works
 - Agent status icons do not appear in tab titles
 - Dashboard preview pane is disabled (captures focused pane only)
-- Pane splits are always 50/50 (no percentage-based sizing)
+- Horizontal and vertical pane splits are always 50/50 (no percentage-based sizing)
 - Tab insertion ordering is not supported (new tabs always appear at the end)
 - Some edge cases may not be as thoroughly tested as the tmux backend
 

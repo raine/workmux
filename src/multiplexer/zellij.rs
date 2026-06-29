@@ -94,6 +94,14 @@ fn parse_tab_name_from_output(output: &str) -> Option<String> {
         .map(|l| l["name: ".len()..].to_string())
 }
 
+fn zellij_new_pane_direction_args(direction: &SplitDirection) -> &'static [&'static str] {
+    match direction {
+        SplitDirection::Horizontal => &["--direction", "right"],
+        SplitDirection::Vertical => &["--direction", "down"],
+        SplitDirection::Stacked => &["--stacked"],
+    }
+}
+
 impl Default for ZellijBackend {
     fn default() -> Self {
         Self::new()
@@ -223,6 +231,14 @@ impl ZellijBackend {
             session_id: None,
             window_id: None,
         }
+    }
+
+    fn focus_pane_by_id(pane_id: &str) -> Result<()> {
+        Cmd::new("zellij")
+            .args(&["action", "focus-pane-id", pane_id])
+            .run()
+            .with_context(|| format!("Failed to focus zellij pane '{}'", pane_id))?;
+        Ok(())
     }
 }
 
@@ -497,8 +513,12 @@ impl Multiplexer for ZellijBackend {
     // === Pane Management ===
 
     fn select_pane(&self, pane_id: &str) -> Result<()> {
-        // Zellij doesn't have a focus-pane-by-id action, so we need to navigate
-        // using focus-next-pane or focus-previous-pane
+        if Self::focus_pane_by_id(pane_id).is_ok() {
+            return Ok(());
+        }
+
+        // Fallback for older Zellij builds without focus-pane-id: navigate with
+        // focus-next-pane/focus-previous-pane in the current tab.
 
         // Extract numeric ID from pane_id
         let target_id: u32 =
@@ -801,8 +821,6 @@ impl Multiplexer for ZellijBackend {
     /// Split a pane in Zellij.
     ///
     /// **Zellij CLI Limitations:**
-    /// - `target_pane_id` is ignored - Zellij's `new-pane` command doesn't support
-    ///   targeting specific panes for splitting (always splits the focused pane).
     /// - `size`/`percentage` are ignored - all splits are 50/50.
     ///
     /// **Returns:** The pane ID from `new-pane` stdout (e.g., "terminal_5").
@@ -815,28 +833,30 @@ impl Multiplexer for ZellijBackend {
         _percentage: Option<u8>,
         command: Option<&str>,
     ) -> Result<String> {
-        debug!(
-            "split_pane: target_pane_id '{}' (note: new-pane splits focused pane only)",
-            target_pane_id
-        );
+        if let Err(err) = Self::focus_pane_by_id(target_pane_id) {
+            if matches!(direction, SplitDirection::Stacked) {
+                return Err(anyhow!(
+                    "Failed to focus target pane '{}' before creating stacked pane: {}",
+                    target_pane_id,
+                    err
+                ));
+            }
 
-        let dir_arg = match direction {
-            SplitDirection::Horizontal => "right", // panes side-by-side (left/right)
-            SplitDirection::Vertical => "down",    // panes stacked (top/bottom)
-        };
+            debug!(
+                target_pane_id,
+                error = %err,
+                "split_pane: failed to focus target pane, falling back to current focus"
+            );
+        }
 
         let cwd_str = cwd
             .to_str()
             .ok_or_else(|| anyhow!("Path contains non-UTF8 characters"))?;
 
-        let mut cmd = Cmd::new("zellij").args(&[
-            "action",
-            "new-pane",
-            "--direction",
-            dir_arg,
-            "--cwd",
-            cwd_str,
-        ]);
+        let mut cmd = Cmd::new("zellij")
+            .args(&["action", "new-pane"])
+            .args(zellij_new_pane_direction_args(direction))
+            .args(&["--cwd", cwd_str]);
 
         // Pass command inline via -- syntax (runs as `sh -c 'script'`)
         if let Some(script) = command {
@@ -1041,6 +1061,32 @@ mod tests {
         assert_eq!(
             parse_tab_name_from_output(output),
             Some("middle-tab".to_string())
+        );
+    }
+
+    // === zellij_new_pane_direction_args ===
+
+    #[test]
+    fn new_pane_direction_args_horizontal() {
+        assert_eq!(
+            zellij_new_pane_direction_args(&SplitDirection::Horizontal),
+            &["--direction", "right"]
+        );
+    }
+
+    #[test]
+    fn new_pane_direction_args_vertical() {
+        assert_eq!(
+            zellij_new_pane_direction_args(&SplitDirection::Vertical),
+            &["--direction", "down"]
+        );
+    }
+
+    #[test]
+    fn new_pane_direction_args_stacked() {
+        assert_eq!(
+            zellij_new_pane_direction_args(&SplitDirection::Stacked),
+            &["--stacked"]
         );
     }
 
