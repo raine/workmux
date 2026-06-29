@@ -8,11 +8,13 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
+  const pid = (globalThis as any).process?.pid;
+  const fromPidArgs = typeof pid === "number" ? ["--from-pid", String(pid)] : [];
   let lastStatus: string | undefined;
   let statusQueue = Promise.resolve();
 
   function writeStatus(status: string) {
-    return pi.exec("workmux", ["set-window-status", status]).then(() => {}, () => {});
+    return pi.exec("workmux", ["set-window-status", status, ...fromPidArgs]).then(() => {}, () => {});
   }
 
   function setStatus(status: string) {

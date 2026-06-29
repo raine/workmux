@@ -8,8 +8,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
+  const pid = (globalThis as any).process?.pid;
+  const fromPidArgs = typeof pid === "number" ? ["--from-pid", String(pid)] : [];
+
   function setStatus(status: string) {
-    pi.exec("workmux", ["set-window-status", status]).catch(() => {});
+    pi.exec("workmux", ["set-window-status", status, ...fromPidArgs]).catch(() => {});
   }
 
   pi.on("agent_start", async () => {

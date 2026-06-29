@@ -759,6 +759,10 @@ enum Commands {
     SetWindowStatus {
         #[arg(value_enum)]
         command: command::set_window_status::SetWindowStatusCommand,
+
+        /// PID of the Pi process emitting this status update; child Pi done events keep parent panes working
+        #[arg(long = "from-pid")]
+        from_pid: Option<u32>,
     },
 
     /// Set the base branch for the current worktree (used after rebasing)
@@ -1123,7 +1127,9 @@ pub fn run() -> Result<()> {
             ClaudeCommands::Prune => prune_claude_config(),
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
-        Commands::SetWindowStatus { command } => command::set_window_status::run(command),
+        Commands::SetWindowStatus { command, from_pid } => {
+            command::set_window_status::run(command, from_pid)
+        }
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
         Commands::LastAgent => command::last_agent::run(),

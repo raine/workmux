@@ -4,6 +4,7 @@
 //! terminal multiplexer backends (tmux, WezTerm, Zellij).
 
 pub mod codex_status;
+pub mod process_tree;
 pub mod run;
 pub mod store;
 mod types;

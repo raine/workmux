@@ -17,7 +17,7 @@ pub enum SetWindowStatusCommand {
     Clear,
 }
 
-pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
+pub fn run(cmd: SetWindowStatusCommand, from_pid: Option<u32>) -> Result<()> {
     if std::env::var_os("WORKMUX_DISABLE_SET_WINDOW_STATUS").is_some() {
         return Ok(());
     }
@@ -75,6 +75,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
             } else {
                 requested_status
             };
+            let status = resolve_pi_process_status(status, from_pid);
 
             let (icon, auto_clear) = match status {
                 AgentStatus::Working => (config.status_icons.working(), false),
@@ -96,6 +97,32 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// If a `done` status comes from a child Pi process that still has a live
+/// parent Pi ancestor, keep the pane `working` so a subagent finishing
+/// doesn't mark the parent's pane done.
+fn resolve_pi_process_status(status: AgentStatus, from_pid: Option<u32>) -> AgentStatus {
+    resolve_pi_process_status_with(
+        status,
+        from_pid,
+        crate::state::process_tree::has_pi_ancestor,
+    )
+}
+
+fn resolve_pi_process_status_with<F>(
+    status: AgentStatus,
+    from_pid: Option<u32>,
+    mut has_pi_ancestor: F,
+) -> AgentStatus
+where
+    F: FnMut(u32) -> bool,
+{
+    if matches!(status, AgentStatus::Done) && from_pid.is_some_and(|pid| has_pi_ancestor(pid)) {
+        AgentStatus::Working
+    } else {
+        status
+    }
 }
 
 /// Send a status update via RPC when running inside a sandbox guest.
@@ -121,5 +148,42 @@ fn run_via_rpc(cmd: SetWindowStatusCommand) -> Result<()> {
             Ok(()) // Fail silently like the host path does
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_without_from_pid_stays_done() {
+        assert_eq!(
+            resolve_pi_process_status_with(AgentStatus::Done, None, |_| true),
+            AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn done_with_pi_ancestor_renders_working() {
+        assert_eq!(
+            resolve_pi_process_status_with(AgentStatus::Done, Some(42), |_| true),
+            AgentStatus::Working
+        );
+    }
+
+    #[test]
+    fn done_without_pi_ancestor_stays_done() {
+        assert_eq!(
+            resolve_pi_process_status_with(AgentStatus::Done, Some(42), |_| false),
+            AgentStatus::Done
+        );
+    }
+
+    #[test]
+    fn working_is_not_changed_by_pi_ancestor() {
+        assert_eq!(
+            resolve_pi_process_status_with(AgentStatus::Working, Some(42), |_| true),
+            AgentStatus::Working
+        );
     }
 }
