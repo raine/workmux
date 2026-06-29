@@ -444,6 +444,22 @@ impl StateStore {
                             pane_id,
                             "reconcile: preserving agent from previous server lifecycle for resurrect"
                         );
+                    } else if is_live_pi_state_with_command_drift(&state, live) {
+                        trace!(
+                            pane_id,
+                            stored_command = state.command,
+                            live_command = live.current_command.as_deref().unwrap_or(""),
+                            "reconcile: preserving live Pi agent despite foreground command drift"
+                        );
+                        let agent_pane = state.to_agent_pane(
+                            live.session
+                                .clone()
+                                .unwrap_or_else(|| state.session_name.clone().unwrap_or_default()),
+                            live.window
+                                .clone()
+                                .unwrap_or_else(|| state.window_name.clone().unwrap_or_default()),
+                        );
+                        valid_agents.push(agent_pane);
                     } else {
                         // Command changed - agent exited (e.g., "node" -> "zsh")
                         info!(
@@ -490,6 +506,20 @@ impl StateStore {
 
         Ok(valid_agents)
     }
+}
+
+/// True when a cached `pi` agent's foreground command has drifted away from
+/// `pi` but the pane shell still has a live Pi descendant. tmux can briefly
+/// report the shell or a transient tool command while the long-lived Pi
+/// process is still running below it.
+fn is_live_pi_state_with_command_drift(
+    state: &AgentState,
+    live: &crate::multiplexer::LivePaneInfo,
+) -> bool {
+    state.agent_kind.as_deref() == Some("pi")
+        && live
+            .pid
+            .is_some_and(crate::state::process_tree::has_pi_descendant)
 }
 
 fn tmux_auto_renamed_windows(

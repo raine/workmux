@@ -10,7 +10,7 @@
 //! `has_pi_ancestor` returns `false`, so child `done` events are not
 //! suppressed there.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessInfo {
@@ -29,6 +29,18 @@ const MAX_ANCESTOR_DEPTH: usize = 32;
 /// returns true for the child Pi process while the parent is still alive.
 pub fn has_pi_ancestor(pid: u32) -> bool {
     has_pi_ancestor_with(pid, read_process_info)
+}
+
+/// Return true when `pid` has a live descendant that looks like a Pi process.
+///
+/// tmux can transiently report a pane's foreground command as the shell (for
+/// example `zsh`) even while the long-lived Pi process is still running as a
+/// child of that shell. Reconciliation uses this to avoid deleting a live Pi
+/// pane just because `pane_current_command` briefly drifted away from `pi`.
+pub fn has_pi_descendant(pid: u32) -> bool {
+    read_all_processes()
+        .map(|processes| has_pi_descendant_with(pid, processes))
+        .unwrap_or(false)
 }
 
 pub(crate) fn has_pi_ancestor_with<F>(pid: u32, mut read_info: F) -> bool
@@ -56,6 +68,33 @@ where
         }
 
         next = info.ppid;
+    }
+
+    false
+}
+
+pub(crate) fn has_pi_descendant_with<I>(pid: u32, processes: I) -> bool
+where
+    I: IntoIterator<Item = ProcessInfo>,
+{
+    let mut children: HashMap<u32, Vec<ProcessInfo>> = HashMap::new();
+    for process in processes {
+        children.entry(process.ppid).or_default().push(process);
+    }
+
+    let mut stack = children.remove(&pid).unwrap_or_default();
+    let mut seen = HashSet::from([pid]);
+
+    while let Some(process) = stack.pop() {
+        if !seen.insert(process.pid) {
+            continue;
+        }
+        if is_pi_command(&process.command) {
+            return true;
+        }
+        if let Some(grandchildren) = children.remove(&process.pid) {
+            stack.extend(grandchildren);
+        }
     }
 
     false
@@ -91,6 +130,18 @@ fn is_pi_command(command: &str) -> bool {
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+#[cfg(target_os = "linux")]
+fn read_all_processes() -> Option<Vec<ProcessInfo>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+            .filter_map(read_process_info)
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -131,6 +182,11 @@ fn parse_linux_stat(stat: &str) -> Option<ProcessInfo> {
     let ppid = fields.next()?.parse().ok()?;
 
     Some(ProcessInfo { pid, ppid, command })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_all_processes() -> Option<Vec<ProcessInfo>> {
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -195,6 +251,29 @@ mod tests {
         let map = HashMap::from([(20, info(20, 10, "pi"))]);
 
         assert!(!has_pi_ancestor_with(20, lookup(map)));
+    }
+
+    #[test]
+    fn shell_with_pi_child_has_pi_descendant() {
+        let processes = vec![
+            info(8, 1, "tmux: server"),
+            info(9, 8, "zsh"),
+            info(10, 9, "pi"),
+            info(11, 10, "bash"),
+        ];
+
+        assert!(has_pi_descendant_with(9, processes));
+    }
+
+    #[test]
+    fn shell_without_pi_child_has_no_pi_descendant() {
+        let processes = vec![
+            info(8, 1, "tmux: server"),
+            info(9, 8, "zsh"),
+            info(10, 9, "bash"),
+        ];
+
+        assert!(!has_pi_descendant_with(9, processes));
     }
 
     #[test]
