@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::config::Config;
-use crate::multiplexer::{AgentStatus, LivePaneInfo, Multiplexer, create_backend, detect_backend};
+use crate::multiplexer::{
+    AgentStatus, BackendType, LivePaneInfo, Multiplexer, create_backend, detect_backend,
+};
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum SetWindowStatusCommand {
@@ -35,15 +37,27 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     let config = Config::load(None)?;
-    let mux = create_backend(detect_backend());
 
     // Fail silently if not in a multiplexer session. Some agents, including
-    // Codex, strip TMUX/TMUX_PANE from hook command environments; in that case
-    // fall back to matching the hook cwd to a live pane cwd.
-    let Some(pane_id) = resolve_status_pane_id(&*mux) else {
-        return Ok(());
-    };
+    // Codex, strip multiplexer env vars from hook command environments; in that
+    // case fall back to matching the hook cwd to a live pane cwd.
+    for backend in status_backend_candidates() {
+        let mux = create_backend(backend);
+        if let Some(pane_id) = resolve_status_pane_id(&*mux) {
+            return apply_status_update(&cmd, &config, codex_context.as_ref(), &*mux, &pane_id);
+        }
+    }
 
+    Ok(())
+}
+
+fn apply_status_update(
+    cmd: &SetWindowStatusCommand,
+    config: &Config,
+    codex_context: Option<&crate::state::codex_status::CodexHookContext>,
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+) -> Result<()> {
     let pane_key = crate::state::PaneKey {
         backend: mux.name().to_string(),
         instance: mux.instance_id(),
@@ -68,11 +82,9 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
             };
 
             let status = if let Some(context) = codex_context {
-                match crate::state::codex_status::apply_status(
-                    &pane_key,
-                    &context,
-                    requested_status,
-                ) {
+                let applied =
+                    crate::state::codex_status::apply_status(&pane_key, context, requested_status);
+                match applied {
                     Ok(status) => status,
                     Err(error) => {
                         warn!(%pane_id, ?requested_status, error = %error, "failed to update Codex status workaround state");
@@ -103,6 +115,51 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct StatusBackendSignals {
+    workmux_backend: bool,
+    tmux: bool,
+    wezterm: bool,
+    zellij: bool,
+    kitty: bool,
+}
+
+impl StatusBackendSignals {
+    fn from_env() -> Self {
+        Self {
+            workmux_backend: std::env::var_os("WORKMUX_BACKEND").is_some(),
+            tmux: std::env::var_os("TMUX").is_some() || std::env::var_os("TMUX_PANE").is_some(),
+            wezterm: std::env::var_os("WEZTERM_PANE").is_some(),
+            zellij: std::env::var_os("ZELLIJ").is_some()
+                || std::env::var_os("ZELLIJ_PANE_ID").is_some()
+                || std::env::var_os("ZELLIJ_SESSION_NAME").is_some(),
+            kitty: std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        }
+    }
+
+    fn has_any_signal(&self) -> bool {
+        self.workmux_backend || self.tmux || self.wezterm || self.zellij || self.kitty
+    }
+}
+
+fn status_backend_candidates() -> Vec<BackendType> {
+    let signals = StatusBackendSignals::from_env();
+    status_backend_candidates_for(detect_backend(), &signals)
+}
+
+fn status_backend_candidates_for(
+    detected: BackendType,
+    signals: &StatusBackendSignals,
+) -> Vec<BackendType> {
+    let mut backends = vec![detected];
+
+    if !signals.has_any_signal() && detected != BackendType::Zellij {
+        backends.push(BackendType::Zellij);
+    }
+
+    backends
 }
 
 fn resolve_status_pane_id(mux: &dyn Multiplexer) -> Option<String> {
@@ -200,6 +257,10 @@ mod tests {
         }
     }
 
+    fn no_backend_signals() -> StatusBackendSignals {
+        StatusBackendSignals::default()
+    }
+
     #[test]
     fn select_pane_for_cwd_prefers_exact_match() {
         let mut panes = HashMap::new();
@@ -231,5 +292,39 @@ mod tests {
         panes.insert("%2".to_string(), live_pane("/repo"));
 
         assert_eq!(select_pane_for_cwd(&panes, Path::new("/repo")), None);
+    }
+
+    #[test]
+    fn status_backend_candidates_preserve_detected_backend_when_signaled() {
+        let signals = StatusBackendSignals {
+            tmux: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            status_backend_candidates_for(BackendType::Tmux, &signals),
+            vec![BackendType::Tmux]
+        );
+    }
+
+    #[test]
+    fn status_backend_candidates_use_zellij_when_zellij_env_is_detected() {
+        let signals = StatusBackendSignals {
+            zellij: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            status_backend_candidates_for(BackendType::Zellij, &signals),
+            vec![BackendType::Zellij]
+        );
+    }
+
+    #[test]
+    fn status_backend_candidates_try_zellij_after_default_tmux_without_env() {
+        assert_eq!(
+            status_backend_candidates_for(BackendType::Tmux, &no_backend_signals()),
+            vec![BackendType::Tmux, BackendType::Zellij]
+        );
     }
 }

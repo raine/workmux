@@ -742,7 +742,7 @@ pub trait Multiplexer: Send + Sync {
 /// 1. `$WORKMUX_BACKEND` set → use that backend
 /// 2. `$TMUX` set → tmux
 /// 3. `$WEZTERM_PANE` set → WezTerm
-/// 4. `$ZELLIJ` set → Zellij
+/// 4. `$ZELLIJ`, `$ZELLIJ_PANE_ID`, or `$ZELLIJ_SESSION_NAME` set → Zellij
 /// 5. `$KITTY_WINDOW_ID` set → Kitty
 /// 6. None → defaults to tmux (for backward compatibility)
 ///
@@ -763,7 +763,9 @@ pub fn detect_backend() -> BackendType {
     resolve_backend(
         std::env::var("TMUX").is_ok(),
         std::env::var("WEZTERM_PANE").is_ok(),
-        std::env::var("ZELLIJ").is_ok(),
+        std::env::var("ZELLIJ").is_ok()
+            || std::env::var("ZELLIJ_PANE_ID").is_ok()
+            || std::env::var("ZELLIJ_SESSION_NAME").is_ok(),
         std::env::var("KITTY_WINDOW_ID").is_ok(),
     )
 }
