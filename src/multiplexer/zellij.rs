@@ -204,6 +204,23 @@ impl ZellijBackend {
             .ok_or_else(|| anyhow!("Window '{}' not found", full_name))
     }
 
+    fn go_to_tab_by_id(tab_id: u32) -> Result<()> {
+        Cmd::new("zellij")
+            .args(&["action", "go-to-tab-by-id", &tab_id.to_string()])
+            .run()
+            .with_context(|| format!("Failed to switch to zellij tab {}", tab_id))?;
+        Ok(())
+    }
+
+    fn tab_id_for_pane(pane_id: &str) -> Result<Option<u32>> {
+        let numeric_id =
+            parse_pane_id(pane_id).ok_or_else(|| anyhow!("Invalid pane_id: {}", pane_id))?;
+        Ok(Self::list_panes()?
+            .into_iter()
+            .find(|p| p.id == numeric_id && !p.is_plugin)
+            .and_then(|p| p.tab_id))
+    }
+
     fn build_live_pane_info(pane: &PaneInfo) -> LivePaneInfo {
         let current_command = extract_base_command(
             pane.pane_command.as_deref(),
@@ -376,6 +393,8 @@ impl Multiplexer for ZellijBackend {
             .trim()
             .parse()
             .with_context(|| format!("Invalid tab ID from new-tab: '{}'", tab_id_str.trim()))?;
+
+        Self::go_to_tab_by_id(tab_id)?;
 
         // Find the initial pane in the new tab by tab_id
         let panes = Self::list_panes()?;
@@ -833,19 +852,15 @@ impl Multiplexer for ZellijBackend {
         _percentage: Option<u8>,
         command: Option<&str>,
     ) -> Result<String> {
-        if let Err(err) = Self::focus_pane_by_id(target_pane_id) {
-            if matches!(direction, SplitDirection::Stacked) {
-                return Err(anyhow!(
-                    "Failed to focus target pane '{}' before creating stacked pane: {}",
-                    target_pane_id,
-                    err
-                ));
-            }
+        if let Some(tab_id) = Self::tab_id_for_pane(target_pane_id)? {
+            Self::go_to_tab_by_id(tab_id)?;
+        }
 
+        if let Err(err) = Self::focus_pane_by_id(target_pane_id) {
             debug!(
                 target_pane_id,
                 error = %err,
-                "split_pane: failed to focus target pane, falling back to current focus"
+                "split_pane: failed to focus target pane, falling back to zellij's current focus"
             );
         }
 
