@@ -508,7 +508,14 @@ fn tmux_auto_renamed_windows(
 ///
 /// This ensures the target file is never partially written.
 fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    // Use a unique temp filename per writer so concurrent writes to the same
+    // target don't clobber each other's temp file. rename() is atomic on the
+    // same filesystem.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nanos));
     fs::write(&tmp, content).context("Failed to write temp file")?;
     fs::rename(&tmp, path).context("Failed to rename temp file")?;
     Ok(())
@@ -678,7 +685,10 @@ mod tests {
         for entry in fs::read_dir(&agents_dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
-            assert!(!name.ends_with(".tmp"), "temp file should be cleaned up");
+            assert!(
+                !name.contains(".tmp"),
+                "temp file should be cleaned up: {name}"
+            );
         }
     }
 
