@@ -294,15 +294,17 @@ customize.
 
 #### Panes
 
-Define your tmux pane layout with the `panes` array. For multiple windows in
+Define your multiplexer pane layout with the `panes` array. For multiple windows in
 session mode, use [`windows`](#multiple-windows-per-session) instead (they are
 mutually exclusive).
 
 ```yaml
 panes:
   - command: <agent>
+    name: agent
     focus: true
   - command: npm run dev
+    name: dev
     split: horizontal
     size: 15
 ```
@@ -311,6 +313,7 @@ Each pane supports:
 
 | Option       | Description                                                    | Default |
 | ------------ | -------------------------------------------------------------- | ------- |
+| `name`       | Pane display name (currently applied by the Zellij backend)    | —       |
 | `command`    | Command to run (see [agent placeholders](#agent-placeholders)) | Shell   |
 | `focus`      | Whether this pane receives focus                               | `false` |
 | `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                | `false` |

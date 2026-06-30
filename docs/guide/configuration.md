@@ -156,8 +156,10 @@ Define your multiplexer pane layout with the `panes` array. For multiple windows
 ```yaml
 panes:
   - command: <agent>
+    name: agent
     focus: true
   - command: npm run dev
+    name: dev
     split: horizontal
     size: 15
 ```
@@ -166,6 +168,7 @@ Each pane supports:
 
 | Option       | Description                                                          | Default |
 | ------------ | -------------------------------------------------------------------- | ------- |
+| `name`       | Pane display name (currently applied by the Zellij backend)          | ---     |
 | `command`    | Command to run (see [agent placeholders](#agent-placeholders) below) | Shell   |
 | `focus`      | Whether this pane receives focus                                     | `false` |
 | `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                      | `false` |

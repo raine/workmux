@@ -62,13 +62,19 @@ Zellij stacked panes are supported with `split: stacked`:
 ```yaml
 panes:
   - command: <agent>
+    name: agent
     focus: true
   - command: just test --watch
+    name: tests
     split: stacked
   - command: tail -f app.log
+    name: logs
     split: stacked
     target: 0
 ```
+
+Zellij pane display names are supported with `name`. workmux applies them using
+`zellij action rename-pane --pane-id`, so the pane does not need to be focused.
 
 ## Known limitations
 

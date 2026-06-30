@@ -14,7 +14,7 @@ pub mod util;
 pub mod wezterm;
 pub mod zellij;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -316,6 +316,13 @@ pub trait Multiplexer: Send + Sync {
 
     /// Respawn a pane with optional command. Returns the (possibly new) pane ID.
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String>;
+
+    /// Set a user-facing display name for a pane.
+    ///
+    /// Backends that do not support stable pane names can ignore this.
+    fn set_pane_name(&self, _pane_id: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Capture the content of a pane
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String>;
@@ -637,6 +644,11 @@ pub trait Multiplexer: Send + Sync {
                 pane_ids[0] = pane_id.clone();
             } else {
                 pane_ids.push(pane_id.clone());
+            }
+
+            if let Some(name) = pane_config.name.as_deref() {
+                self.set_pane_name(&pane_id, name)
+                    .with_context(|| format!("Failed to set pane name '{}'", name))?;
             }
 
             if pane_config.zoom || pane_config.focus {

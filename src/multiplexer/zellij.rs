@@ -695,6 +695,14 @@ impl Multiplexer for ZellijBackend {
         Ok(pane_id.to_string())
     }
 
+    fn set_pane_name(&self, pane_id: &str, name: &str) -> Result<()> {
+        Cmd::new("zellij")
+            .args(&["action", "rename-pane", "--pane-id", pane_id, name])
+            .run()
+            .with_context(|| format!("Failed to rename zellij pane '{}'", pane_id))?;
+        Ok(())
+    }
+
     fn capture_pane(&self, _pane_id: &str, _lines: u16) -> Option<String> {
         // Zellij limitation: dump-screen always captures the focused pane,
         // not the pane specified by pane_id. When the dashboard is focused,
@@ -817,8 +825,7 @@ impl Multiplexer for ZellijBackend {
     // === Status ===
 
     fn set_status(&self, _pane_id: &str, _icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
-        // No-op: can't target specific panes, and rename-pane would hijack
-        // the user's focused pane. Status is tracked in StateStore by tab name.
+        // No-op: status is tracked in StateStore by tab name.
         Ok(())
     }
 
