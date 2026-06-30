@@ -69,6 +69,45 @@ fn parse_pane_id(pane_id: &str) -> Option<u32> {
         .and_then(|s| s.parse().ok())
 }
 
+fn normalize_terminal_pane_id(raw: &str) -> Option<String> {
+    raw.split_whitespace().find_map(|token| {
+        if let Some(id) = parse_pane_id(token) {
+            Some(format!("terminal_{}", id))
+        } else {
+            token
+                .parse::<u32>()
+                .ok()
+                .map(|id| format!("terminal_{}", id))
+        }
+    })
+}
+
+fn is_terminal_pane_in_tab(pane: &PaneInfo, tab_id: Option<u32>) -> bool {
+    !pane.is_plugin && tab_id.map(|id| pane.tab_id == Some(id)).unwrap_or(true)
+}
+
+fn terminal_pane_ids_in_tab(panes: &[PaneInfo], tab_id: Option<u32>) -> HashSet<u32> {
+    panes
+        .iter()
+        .filter(|pane| is_terminal_pane_in_tab(pane, tab_id))
+        .map(|pane| pane.id)
+        .collect()
+}
+
+fn find_created_terminal_pane_id(
+    before_ids: &HashSet<u32>,
+    panes: &[PaneInfo],
+    tab_id: Option<u32>,
+) -> Option<String> {
+    panes
+        .iter()
+        .filter(|pane| is_terminal_pane_in_tab(pane, tab_id))
+        .filter(|pane| !before_ids.contains(&pane.id))
+        .map(|pane| pane.id)
+        .max()
+        .map(|id| format!("terminal_{}", id))
+}
+
 /// Extract the base command name from a full command path/string.
 ///
 /// Takes an optional command string (e.g., "/usr/bin/bash --login"),
@@ -859,7 +898,8 @@ impl Multiplexer for ZellijBackend {
         _percentage: Option<u8>,
         command: Option<&str>,
     ) -> Result<String> {
-        if let Some(tab_id) = Self::tab_id_for_pane(target_pane_id)? {
+        let target_tab_id = Self::tab_id_for_pane(target_pane_id)?;
+        if let Some(tab_id) = target_tab_id {
             Self::go_to_tab_by_id(tab_id)?;
         }
 
@@ -870,6 +910,10 @@ impl Multiplexer for ZellijBackend {
                 "split_pane: failed to focus target pane, falling back to zellij's current focus"
             );
         }
+
+        let panes_before =
+            Self::list_panes().context("Failed to list zellij panes before split")?;
+        let before_ids = terminal_pane_ids_in_tab(&panes_before, target_tab_id);
 
         let cwd_str = cwd
             .to_str()
@@ -885,12 +929,36 @@ impl Multiplexer for ZellijBackend {
             cmd = cmd.args(&["--", "sh", "-c", script]);
         }
 
-        // new-pane returns pane ID on stdout (e.g., "terminal_5")
-        let pane_id = cmd
+        // new-pane normally returns pane ID on stdout (e.g., "terminal_5").
+        // Zellij 0.44.3 can return empty stdout when a command is supplied
+        // after `--`, so fall back to detecting the new terminal pane.
+        let pane_stdout = cmd
             .run_and_capture_stdout()
             .context("Failed to split pane")?;
 
-        Ok(pane_id.trim().to_string())
+        if let Some(pane_id) = normalize_terminal_pane_id(&pane_stdout) {
+            return Ok(pane_id);
+        }
+
+        debug!(
+            stdout = %pane_stdout,
+            "split_pane: new-pane did not return a terminal pane id; checking list-panes"
+        );
+
+        for _ in 0..5 {
+            let panes_after =
+                Self::list_panes().context("Failed to list zellij panes after split")?;
+            if let Some(pane_id) =
+                find_created_terminal_pane_id(&before_ids, &panes_after, target_tab_id)
+            {
+                return Ok(pane_id);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Err(anyhow!(
+            "Zellij new-pane did not return a pane ID and no new terminal pane appeared"
+        ))
     }
 
     // === State Reconciliation ===
@@ -971,6 +1039,20 @@ impl Multiplexer for ZellijBackend {
 mod tests {
     use super::*;
 
+    fn test_pane(id: u32, is_plugin: bool, tab_id: Option<u32>) -> PaneInfo {
+        PaneInfo {
+            id,
+            is_plugin,
+            is_focused: false,
+            terminal_command: None,
+            pane_command: None,
+            pane_cwd: None,
+            tab_id,
+            tab_name: String::new(),
+            title: String::new(),
+        }
+    }
+
     // === parse_pane_id ===
 
     #[test]
@@ -995,6 +1077,64 @@ mod tests {
         assert_eq!(parse_pane_id("terminal_"), None);
         assert_eq!(parse_pane_id("terminal_1.5"), None);
         assert_eq!(parse_pane_id("terminal_-1"), None);
+    }
+
+    // === normalize_terminal_pane_id ===
+
+    #[test]
+    fn normalize_terminal_pane_id_accepts_terminal_id() {
+        assert_eq!(
+            normalize_terminal_pane_id("terminal_42\n"),
+            Some("terminal_42".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_terminal_pane_id_accepts_bare_numeric_id() {
+        assert_eq!(
+            normalize_terminal_pane_id("42"),
+            Some("terminal_42".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_terminal_pane_id_rejects_empty_or_plugin_ids() {
+        assert_eq!(normalize_terminal_pane_id(""), None);
+        assert_eq!(normalize_terminal_pane_id("plugin_42"), None);
+    }
+
+    // === find_created_terminal_pane_id ===
+
+    #[test]
+    fn find_created_terminal_pane_id_finds_new_terminal_in_target_tab() {
+        let before_ids = HashSet::from([1, 2]);
+        let panes = vec![
+            test_pane(1, false, Some(7)),
+            test_pane(2, false, Some(7)),
+            test_pane(3, false, Some(7)),
+            test_pane(4, false, Some(8)),
+            test_pane(5, true, Some(7)),
+        ];
+
+        assert_eq!(
+            find_created_terminal_pane_id(&before_ids, &panes, Some(7)),
+            Some("terminal_3".to_string())
+        );
+    }
+
+    #[test]
+    fn find_created_terminal_pane_id_returns_none_without_new_terminal() {
+        let before_ids = HashSet::from([1, 2]);
+        let panes = vec![
+            test_pane(1, false, Some(7)),
+            test_pane(2, false, Some(7)),
+            test_pane(3, true, Some(7)),
+        ];
+
+        assert_eq!(
+            find_created_terminal_pane_id(&before_ids, &panes, Some(7)),
+            None
+        );
     }
 
     // === extract_base_command ===
