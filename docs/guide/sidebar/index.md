@@ -126,8 +126,27 @@ the list. Requires `set -g mouse on` in your `~/.tmux.conf`.
 | `Enter` | Jump to agent pane       |
 | `g`/`G` | Jump to first/last       |
 | `v`     | Toggle layout mode       |
+| `f`     | Toggle session filter    |
 | `z`     | Toggle sleeping on agent |
 | `q`     | Quit sidebar             |
+
+### Session filter
+
+By default, the sidebar shows agents across all tmux sessions. Press `f` to
+show only agents in the same tmux session as the current window; press `f` again
+to return to all sessions.
+
+The filter also applies to agent navigation hotkeys (`next`/`prev`/`jump`), so
+`Alt+j`/`Alt+k` cycle through the current session when the session filter is
+active.
+
+You can also toggle the filter from the command line:
+
+```bash
+workmux sidebar filter          # Toggle between none and session
+workmux sidebar filter session  # Filter to current session
+workmux sidebar filter none     # Show all agents (no filter)
+```
 
 ### Sleeping agents
 

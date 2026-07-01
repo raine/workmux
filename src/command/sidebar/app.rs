@@ -44,6 +44,59 @@ impl SidebarLayoutMode {
     }
 }
 
+/// Sidebar filter mode: show all agents or only those in the host tmux session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarFilterMode {
+    #[default]
+    None,
+    Session,
+}
+
+impl SidebarFilterMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::None => Self::Session,
+            Self::Session => Self::None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Session => "session",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "none" | "all" => Self::None,
+            "session" | "project" => Self::Session,
+            _ => Self::None,
+        }
+    }
+}
+
+fn host_agent_index(
+    agents: &[AgentPane],
+    host_window_id: Option<&str>,
+    active_pane_ids: &std::collections::HashSet<String>,
+) -> Option<usize> {
+    host_window_id.and_then(|wid| {
+        let mut first_match = None;
+        for (i, agent) in agents.iter().enumerate() {
+            if agent.window_id != wid {
+                continue;
+            }
+            if active_pane_ids.contains(&agent.pane_id) {
+                return Some(i);
+            }
+            first_match.get_or_insert(i);
+        }
+        first_match
+    })
+}
+
 /// Whether the sidebar auto-follows its host window or the user is navigating manually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionMode {
@@ -223,6 +276,8 @@ pub struct SidebarApp {
     /// Deadline after which pending resize should be processed.
     pub(super) resize_deadline: Option<Instant>,
     suppress_resize_once: bool,
+    /// Filter mode: show all agents or only those in the host tmux session.
+    pub filter_mode: SidebarFilterMode,
 }
 
 impl SidebarApp {
@@ -278,6 +333,7 @@ impl SidebarApp {
             pending_resize_rows: None,
             resize_deadline: None,
             suppress_resize_once: false,
+            filter_mode: SidebarFilterMode::default(),
         }
     }
 
@@ -354,6 +410,7 @@ impl SidebarApp {
             pending_resize_rows: None,
             resize_deadline: None,
             suppress_resize_once: false,
+            filter_mode: SidebarFilterMode::default(),
         })
     }
 
@@ -364,19 +421,11 @@ impl SidebarApp {
         // Compute host agent index from the new snapshot first so that a
         // config_version bump anchors the reload to the *current* host path,
         // not whatever was selected from the previous snapshot.
-        self.host_agent_idx = self.host_window_id.as_ref().and_then(|wid| {
-            let mut first_match = None;
-            for (i, agent) in snapshot.agents.iter().enumerate() {
-                if agent.window_id != *wid {
-                    continue;
-                }
-                if snapshot.active_pane_ids.contains(&agent.pane_id) {
-                    return Some(i);
-                }
-                first_match.get_or_insert(i);
-            }
-            first_match
-        });
+        self.host_agent_idx = host_agent_index(
+            &snapshot.agents,
+            self.host_window_id.as_deref(),
+            &snapshot.active_pane_ids,
+        );
 
         if snapshot.config_version != self.last_config_version {
             self.last_config_version = snapshot.config_version;
@@ -385,6 +434,7 @@ impl SidebarApp {
 
         self.position = snapshot.position;
         self.layout_mode = snapshot.layout_mode;
+        self.filter_mode = snapshot.filter_mode;
         self.git_statuses = snapshot.git_statuses;
         self.pr_statuses = snapshot.pr_statuses;
         self.interrupted_pane_ids = snapshot.interrupted_pane_ids;
@@ -414,6 +464,19 @@ impl SidebarApp {
             .map(|a| a.pane_id.clone());
 
         self.agents = snapshot.agents;
+
+        // Apply session filter: retain only agents in the sidebar's host session.
+        if self.filter_mode == SidebarFilterMode::Session
+            && let Some(host_session) = self.host_session.as_deref()
+        {
+            self.agents.retain(|a| a.session == host_session);
+            // Recompute host_agent_idx after filtering
+            self.host_agent_idx = host_agent_index(
+                &self.agents,
+                self.host_window_id.as_deref(),
+                &snapshot.active_pane_ids,
+            );
+        }
 
         // Restore selection
         if let Some(ref pane_id) = selected_pane {
@@ -491,6 +554,10 @@ impl SidebarApp {
 
     pub fn host_window_id(&self) -> Option<&str> {
         self.host_window_id.as_deref()
+    }
+
+    pub fn host_session(&self) -> Option<&str> {
+        self.host_session.as_deref()
     }
 
     pub fn host_window_active(&self) -> bool {
@@ -700,6 +767,33 @@ impl SidebarApp {
         }
 
         // Signal daemon for immediate refresh (re-sort + broadcast)
+        super::daemon_ctrl::signal_daemon();
+    }
+
+    pub fn toggle_filter_mode(&mut self) {
+        self.filter_mode = self.filter_mode.toggle();
+        // Persist to tmux so all sidebar instances pick it up immediately
+        if let Err(error) = Cmd::new("tmux")
+            .args(&[
+                "set-option",
+                "-g",
+                "@workmux_sidebar_filter",
+                self.filter_mode.as_str(),
+            ])
+            .run()
+        {
+            warn!(%error, "failed to persist sidebar filter mode to tmux");
+        }
+        // Persist to settings.json so it survives tmux restarts
+        match crate::state::StateStore::new().and_then(|store| {
+            let mut settings = store.load_settings()?;
+            settings.sidebar_filter = Some(self.filter_mode.as_str().to_string());
+            store.save_settings(&settings)
+        }) {
+            Ok(()) => {}
+            Err(error) => warn!(%error, "failed to persist sidebar filter mode to settings"),
+        }
+        // Signal daemon for immediate refresh
         super::daemon_ctrl::signal_daemon();
     }
 
@@ -1325,4 +1419,92 @@ fn detect_host_window() -> (Option<String>, Option<String>) {
     let session = parts.next().flatten();
     let window_id = parts.next().flatten();
     (session, window_id)
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn host_agent_index_prefers_active_pane() {
+        let agents = vec![
+            AgentPane {
+                session: "s".to_string(),
+                window_name: "w".to_string(),
+                pane_id: "%1".to_string(),
+                window_id: "@1".to_string(),
+                path: PathBuf::from("/tmp/a"),
+                pane_title: None,
+                status: None,
+                status_ts: None,
+                updated_ts: None,
+                window_cmd: None,
+                agent_command: None,
+                agent_kind: None,
+            },
+            AgentPane {
+                session: "s".to_string(),
+                window_name: "w".to_string(),
+                pane_id: "%2".to_string(),
+                window_id: "@1".to_string(),
+                path: PathBuf::from("/tmp/b"),
+                pane_title: None,
+                status: None,
+                status_ts: None,
+                updated_ts: None,
+                window_cmd: None,
+                agent_command: None,
+                agent_kind: None,
+            },
+        ];
+        let active_panes = std::collections::HashSet::from(["%2".to_string()]);
+
+        assert_eq!(
+            host_agent_index(&agents, Some("@1"), &active_panes),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn filter_mode_toggle() {
+        assert_eq!(SidebarFilterMode::None.toggle(), SidebarFilterMode::Session);
+        assert_eq!(SidebarFilterMode::Session.toggle(), SidebarFilterMode::None);
+    }
+
+    #[test]
+    fn filter_mode_roundtrip_strings() {
+        for mode in [SidebarFilterMode::None, SidebarFilterMode::Session] {
+            assert_eq!(SidebarFilterMode::from_str(mode.as_str()), mode);
+        }
+    }
+
+    #[test]
+    fn invalid_filter_mode_maps_to_all() {
+        assert_eq!(SidebarFilterMode::from_str(""), SidebarFilterMode::None);
+        assert_eq!(
+            SidebarFilterMode::from_str("unknown"),
+            SidebarFilterMode::None
+        );
+    }
+
+    #[test]
+    fn filter_mode_from_str_case_insensitive() {
+        assert_eq!(
+            SidebarFilterMode::from_str("Session"),
+            SidebarFilterMode::Session
+        );
+        assert_eq!(
+            SidebarFilterMode::from_str("SESSION"),
+            SidebarFilterMode::Session
+        );
+        assert_eq!(
+            SidebarFilterMode::from_str("project"),
+            SidebarFilterMode::Session
+        );
+    }
+
+    #[test]
+    fn filter_mode_default_shows_all_sessions() {
+        assert_eq!(SidebarFilterMode::default(), SidebarFilterMode::None);
+    }
 }

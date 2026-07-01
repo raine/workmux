@@ -271,6 +271,7 @@ fn process_event(
                 (KeyCode::Char('g'), _) => app.select_first(),
                 (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
                 (KeyCode::Char('z'), _) => app.toggle_sleeping(),
+                (KeyCode::Char('f'), _) => app.toggle_filter_mode(),
                 _ => {}
             }
             *needs_render = true;

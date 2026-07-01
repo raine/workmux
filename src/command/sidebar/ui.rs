@@ -14,7 +14,7 @@ use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::tmux_style;
 use crate::ui::theme::ThemePalette;
 
-use super::app::{SidebarApp, SidebarLayoutMode};
+use super::app::{SidebarApp, SidebarFilterMode, SidebarLayoutMode};
 use super::template::TokenId;
 use super::template::context::RowContext;
 use super::template::layout::{
@@ -466,12 +466,40 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
 
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let list_area = render_template_error(f, app, inner);
+    let inner = render_template_error(f, app, inner);
+
+    let (list_area, filter_area) = if app.filter_mode == SidebarFilterMode::Session {
+        if inner.height > 1 {
+            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
+            let filter = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            (list, Some(filter))
+        } else {
+            (inner, None)
+        }
+    } else {
+        (inner, None)
+    };
     app.list_area = list_area;
 
     match app.layout_mode {
         SidebarLayoutMode::Compact => render_compact_list(f, app, list_area),
         SidebarLayoutMode::Tiles => render_tile_list(f, app, list_area),
+    }
+
+    if let Some(filter_rect) = filter_area {
+        let label = app
+            .host_session()
+            .map(|s| format!("[session: {}]", s))
+            .unwrap_or_else(|| "[session]".to_string());
+        let label = truncate_to_width(&label, filter_rect.width as usize);
+        let line = Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(app.palette.dimmed)
+                .add_modifier(Modifier::DIM),
+        ))
+        .alignment(Alignment::Center);
+        f.render_widget(line, filter_rect);
     }
 }
 
@@ -682,6 +710,20 @@ fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
     } else {
         0
     }
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
 }
 
 /// Compact single-line-per-agent list (original layout).
@@ -992,6 +1034,7 @@ mod tests {
             location: "tiles[0]".to_string(),
             message: "unknown token 'pr_status' at column 1".to_string(),
         });
+        app.filter_mode = super::SidebarFilterMode::None;
 
         terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
 

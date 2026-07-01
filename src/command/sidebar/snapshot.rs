@@ -10,7 +10,7 @@ use crate::git::GitStatus;
 use crate::github::PrSummary;
 use crate::multiplexer::{AgentPane, AgentStatus};
 
-use super::app::SidebarLayoutMode;
+use super::app::{SidebarFilterMode, SidebarLayoutMode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PrPathEntry {
@@ -23,6 +23,8 @@ pub(crate) struct PrPathEntry {
 pub struct SidebarSnapshot {
     pub position: SidebarPosition,
     pub layout_mode: SidebarLayoutMode,
+    #[serde(default)]
+    pub filter_mode: SidebarFilterMode,
     pub active_windows: HashSet<(String, String)>,
     #[serde(default)]
     pub active_pane_ids: HashSet<String>,
@@ -59,6 +61,7 @@ pub fn build_snapshot(
     window_pane_counts: HashMap<String, usize>,
     position: SidebarPosition,
     layout_mode: SidebarLayoutMode,
+    filter_mode: SidebarFilterMode,
     status_icons: &StatusIcons,
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
@@ -137,6 +140,7 @@ pub fn build_snapshot(
     SidebarSnapshot {
         position,
         layout_mode,
+        filter_mode,
         active_windows,
         active_pane_ids,
         window_pane_counts,
@@ -203,6 +207,7 @@ mod tests {
             HashMap::new(),
             SidebarPosition::Left,
             SidebarLayoutMode::default(),
+            SidebarFilterMode::default(),
             &StatusIcons::default(),
             git_statuses,
             pr_statuses,

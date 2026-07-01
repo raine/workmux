@@ -1729,9 +1729,10 @@ Then press `prefix + Ctrl-s` to open the dashboard as a tmux popup.
 ### `workmux sidebar`
 
 Toggles a live agent status sidebar on the left or top edge of all tmux
-windows. Shows all active agents across all sessions and projects with live
-status updates, providing an always-visible overview without taking over the
-full screen like the dashboard.
+windows. By default, each sidebar pane shows active agents across all tmux
+sessions with live status updates, providing an always-visible overview without
+taking over the full screen like the dashboard. Use `workmux sidebar filter session`
+to show only agents in the current tmux session.
 
 ```bash
 workmux sidebar                 # Toggle sidebar on/off (all sessions)
@@ -1745,13 +1746,14 @@ The sidebar displays:
 - Project and worktree name (e.g. `myproject/fix-bug`)
 - Elapsed time since last status change
 
-| Key     | Action             |
-| ------- | ------------------ |
-| `j`/`k` | Navigate up/down   |
-| `Enter` | Jump to agent      |
-| `g`/`G` | Jump to first/last |
-| `v`     | Toggle layout mode |
-| `q`     | Quit sidebar       |
+| Key     | Action                |
+| ------- | --------------------- |
+| `j`/`k` | Navigate up/down      |
+| `Enter` | Jump to agent         |
+| `g`/`G` | Jump to first/last    |
+| `v`     | Toggle layout mode    |
+| `f`     | Toggle session filter |
+| `q`     | Quit sidebar          |
 
 With tmux mouse mode enabled (`set -g mouse on`), click an agent row or top-bar
 chip to jump to its pane, or scroll to navigate the list.

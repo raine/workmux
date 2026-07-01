@@ -2,19 +2,20 @@
 
 use anyhow::Result;
 
+use crate::command::pane_history::pane_to_remember;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::state::StateStore;
 
 /// Switch to the last visited agent.
 ///
 /// Reads `last_pane_id` from GlobalSettings and switches to that pane.
-/// Updates last_pane_id to the current pane after successful switch,
-/// but only if the current pane is also an agent pane.
+/// Updates last_pane_id to the current pane after a successful switch when it
+/// differs from the target pane.
 pub fn run() -> Result<()> {
     let mux = create_backend(detect_backend());
     let store = StateStore::new()?;
 
-    // Load agents to verify panes are actually agent panes
+    // Load agents for window hints when the target is an agent pane.
     let agents = store
         .load_reconciled_agents(mux.as_ref())
         .unwrap_or_default();
@@ -25,9 +26,8 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
 
-    // Verify target is still an agent pane
-    if !agents.iter().any(|a| a.pane_id == target_pane_id) {
-        println!("Last agent pane no longer exists");
+    if mux.get_live_pane_info(&target_pane_id)?.is_none() {
+        println!("Last pane no longer exists");
         return Ok(());
     }
 
@@ -50,12 +50,11 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Only persist after successful switch, and only if current pane is an agent
-    if let Some(ref current) = current_pane
-        && agents.iter().any(|a| a.pane_id == *current)
-    {
+    // Persist the pane we came from so hotkeys can toggle back even when
+    // invoked from a normal shell/editor pane.
+    if let Some(current) = pane_to_remember(current_pane.as_deref(), &target_pane_id) {
         let mut settings = store.load_settings()?;
-        settings.last_pane_id = Some(current.clone());
+        settings.last_pane_id = Some(current.to_string());
         store.save_settings(&settings)?;
     }
 

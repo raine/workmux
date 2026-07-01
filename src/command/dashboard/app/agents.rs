@@ -18,6 +18,7 @@ use super::super::settings::{load_last_pane_id, save_hide_stale, save_last_pane_
 use super::super::sort::SortMode;
 use super::super::spinner::SPINNER_FRAMES;
 use super::App;
+use crate::command::pane_history::pane_to_remember;
 
 /// Selected agent pane target for multiplexer operations.
 pub(crate) struct PaneTarget {
@@ -267,14 +268,8 @@ impl App {
             self.should_jump = true;
         }
 
-        // Only update last_pane_id if:
-        // 1. We actually moved to a different pane
-        // 2. The previous pane was an agent pane (not just any tmux pane)
-        if let Some(ref current) = current_pane
-            && current != target_pane_id
-            && self.agents.iter().any(|a| a.pane_id == *current)
-        {
-            self.last_pane_id = Some(current.clone());
+        if let Some(current) = pane_to_remember(current_pane.as_deref(), target_pane_id) {
+            self.last_pane_id = Some(current.to_string());
             save_last_pane_id(current);
         }
     }

@@ -14,6 +14,7 @@ pub mod last_done;
 pub mod list;
 pub mod merge;
 pub mod open;
+pub mod pane_history;
 pub mod path;
 pub mod reap_agents;
 pub mod rebase;

@@ -5,8 +5,9 @@ description: Toggle a live agent status sidebar in tmux
 # sidebar
 
 Toggles a live agent status sidebar on the left or top edge of all tmux
-windows. Shows all active agents across all sessions and projects with live
-status updates.
+windows. By default, each sidebar pane shows active agents across all tmux
+sessions with live status updates. Use `workmux sidebar filter session` to show
+only agents in the current tmux session.
 
 ```bash
 workmux sidebar                 # Toggle sidebar on/off (all sessions)
@@ -31,6 +32,7 @@ Each agent row displays:
 | `Enter` | Jump to agent pane       |
 | `g`/`G` | Jump to first/last       |
 | `v`     | Toggle layout mode       |
+| `f`     | Toggle session filter    |
 | `z`     | Toggle sleeping on agent |
 | `q`     | Quit sidebar             |
 
@@ -42,13 +44,16 @@ chip to jump to its pane, or scroll to navigate the list.
 ## Navigation commands
 
 Switch between agents from any tmux pane, in the same order shown in the
-sidebar:
+sidebar. Navigation uses the same filter mode as the sidebar view, so it cycles
+through all sessions by default:
 
-| Command                    | Action                               |
-| -------------------------- | ------------------------------------ |
-| `workmux sidebar next`     | Switch to the next agent (wraps)     |
-| `workmux sidebar prev`     | Switch to the previous agent (wraps) |
-| `workmux sidebar jump <N>` | Jump to the Nth agent (1-indexed)    |
+| Command                         | Action                                               |
+| ------------------------------- | ---------------------------------------------------- |
+| `workmux sidebar next`          | Switch to the next agent (wraps)                     |
+| `workmux sidebar prev`          | Switch to the previous agent (wraps)                 |
+| `workmux sidebar jump <N>`      | Jump to the Nth agent (1-indexed)                    |
+| `workmux sidebar filter`        | Toggle session filter (none/session)                 |
+| `workmux sidebar filter <MODE>` | Set filter mode: `none`/`all` or `session`/`project` |
 
 ### Example tmux keybindings
 

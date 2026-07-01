@@ -30,10 +30,9 @@ mod snapshot;
 mod template;
 mod ui;
 
-use anyhow::{Result, anyhow};
-
 use crate::cmd::Cmd;
 use crate::config::SidebarPosition;
+use anyhow::{Result, anyhow, bail};
 
 use self::daemon_ctrl::{ensure_daemon_running, kill_daemon, signal_daemon};
 use self::hooks::{install_hooks, remove_hooks};
@@ -774,7 +773,99 @@ fn compute_nav_target(action: &NavAction, current_idx: Option<usize>, len: usize
     })
 }
 
+fn pane_window_ids() -> std::collections::HashMap<String, String> {
+    Cmd::new("tmux")
+        .args(&["list-panes", "-a", "-F", "#{pane_id}\t#{window_id}"])
+        .run_and_capture_stdout()
+        .ok()
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|line| {
+                    let (pane_id, window_id) = line.split_once('\t')?;
+                    Some((pane_id.to_string(), window_id.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pane_session_ids() -> std::collections::HashMap<String, String> {
+    Cmd::new("tmux")
+        .args(&["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}"])
+        .run_and_capture_stdout()
+        .ok()
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|line| {
+                    let (pane_id, session_name) = line.split_once('\t')?;
+                    Some((pane_id.to_string(), session_name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_sidebar_filter_mode(raw: &str) -> Result<app::SidebarFilterMode> {
+    match raw.trim().to_lowercase().as_str() {
+        "none" | "all" => Ok(app::SidebarFilterMode::None),
+        "session" | "project" => Ok(app::SidebarFilterMode::Session),
+        other => bail!("invalid sidebar filter mode {other:?}; expected none or session"),
+    }
+}
+
+fn read_sidebar_filter_mode() -> app::SidebarFilterMode {
+    if let Ok(output) = Cmd::new("tmux")
+        .args(&["show-option", "-gqv", "@workmux_sidebar_filter"])
+        .run_and_capture_stdout()
+    {
+        let trimmed = output.trim();
+        if !trimmed.is_empty() {
+            return parse_sidebar_filter_mode(trimmed).unwrap_or_default();
+        }
+    }
+
+    if let Ok(store) = crate::state::StateStore::new()
+        && let Ok(settings) = store.load_settings()
+        && let Some(ref mode) = settings.sidebar_filter
+    {
+        return parse_sidebar_filter_mode(mode).unwrap_or_default();
+    }
+
+    app::SidebarFilterMode::default()
+}
+
+fn current_listed_window_pane<'a>(
+    panes: &'a [&str],
+    current_pane_id: &'a str,
+    current_window_id: &str,
+    pane_window_ids: &std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    if panes.contains(&current_pane_id) {
+        return Some(current_pane_id);
+    }
+
+    panes.iter().copied().find(|pane_id| {
+        pane_window_ids
+            .get(*pane_id)
+            .is_some_and(|window_id| window_id == current_window_id)
+    })
+}
+
+fn navigation_anchor_pane<'a>(
+    panes: &'a [&str],
+    current_pane_id: &'a str,
+    current_window_id: &str,
+    pane_window_ids: &std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    current_listed_window_pane(panes, current_pane_id, current_window_id, pane_window_ids)
+        .or(Some(current_pane_id).filter(|pane_id| panes.contains(pane_id)))
+}
+
 /// Navigate to an agent by reading the daemon's ordered agent list from tmux.
+/// Respects the sidebar filter mode: when set to "session", only navigates
+/// among agents in the current tmux session.
 pub fn navigate(action: NavAction) -> Result<()> {
     if std::env::var("TMUX").is_err() {
         return Err(anyhow!("Sidebar requires tmux"));
@@ -791,20 +882,48 @@ pub fn navigate(action: NavAction) -> Result<()> {
     }
 
     // Parse space-separated pane IDs
-    let panes: Vec<&str> = agents_str.split_whitespace().collect();
+    let mut panes: Vec<&str> = agents_str.split_whitespace().collect();
 
     if panes.is_empty() {
         anyhow::bail!("no sidebar agents found");
     }
 
-    // Find current agent by active pane ID
+    // Find current pane/window context
     let current_pane_id = Cmd::new("tmux")
         .args(&["display-message", "-p", "#{pane_id}"])
         .run_and_capture_stdout()
         .unwrap_or_default();
     let current_pane_id = current_pane_id.trim();
+    let current_window_id = Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{window_id}"])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+    let current_window_id = current_window_id.trim();
+    let pane_window_ids = pane_window_ids();
+    let pane_session_ids = pane_session_ids();
+    let current_session = Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{session_name}"])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+    let current_session = current_session.trim();
 
-    let current_idx = panes.iter().position(|&pid| pid == current_pane_id);
+    // Apply session filter if active.
+    if read_sidebar_filter_mode() == app::SidebarFilterMode::Session {
+        panes.retain(|pane_id| {
+            pane_session_ids
+                .get(*pane_id)
+                .is_some_and(|session| session == current_session)
+        });
+    }
+
+    if panes.is_empty() {
+        anyhow::bail!("no matching agents found");
+    }
+
+    let current_anchor =
+        navigation_anchor_pane(&panes, current_pane_id, current_window_id, &pane_window_ids);
+    let current_idx =
+        current_anchor.and_then(|pane_id| panes.iter().position(|&pid| pid == pane_id));
 
     let len = panes.len();
     let target_idx = match &action {
@@ -818,6 +937,33 @@ pub fn navigate(action: NavAction) -> Result<()> {
     Cmd::new("tmux")
         .args(&["switch-client", "-t", target_pane])
         .run()?;
+
+    signal_daemon();
+    Ok(())
+}
+
+/// Set sidebar filter mode from CLI. Toggles if no mode is given.
+pub fn set_filter_mode(mode: Option<&str>) -> Result<()> {
+    let new_mode = match mode {
+        Some(m) => parse_sidebar_filter_mode(m)?,
+        None => read_sidebar_filter_mode().toggle(),
+    };
+
+    // Write to tmux global
+    Cmd::new("tmux")
+        .args(&[
+            "set-option",
+            "-g",
+            "@workmux_sidebar_filter",
+            new_mode.as_str(),
+        ])
+        .run()?;
+
+    // Persist to settings.json
+    let store = crate::state::StateStore::new()?;
+    let mut settings = store.load_settings()?;
+    settings.sidebar_filter = Some(new_mode.as_str().to_string());
+    store.save_settings(&settings)?;
 
     signal_daemon();
     Ok(())
@@ -846,6 +992,11 @@ mod tests {
     fn serializes_session_id_set_deterministically() {
         let ids = parse_session_id_set("$2 $0 $1");
         assert_eq!(serialize_session_id_set(&ids), "$0 $1 $2");
+    }
+
+    #[test]
+    fn parse_sidebar_filter_mode_rejects_invalid_values() {
+        assert!(parse_sidebar_filter_mode("sessoin").is_err());
     }
 
     #[test]
@@ -915,33 +1066,48 @@ mod tests {
     #[test]
     fn resolve_width_uses_synced_width() {
         let config = crate::config::Config::default();
-        // Synced width of 40 in a 200-col window should return 40
         assert_eq!(resolve_width_for(&config, 200, Some(40)), 40);
     }
 
     #[test]
     fn resolve_width_clamps_synced_to_window() {
         let config = crate::config::Config::default();
-        // Synced width of 80 in a 60-col window should clamp to 50 (60 - 10)
         assert_eq!(resolve_width_for(&config, 60, Some(80)), 50);
-        // Synced width of 5 should clamp to minimum 10
         assert_eq!(resolve_width_for(&config, 200, Some(5)), 10);
     }
 
     #[test]
     fn resolve_width_clamps_narrow_window() {
         let config = crate::config::Config::default();
-        // In a 25-col window, max is 15 (25 - 10), clamp 50 to [10, 15] = 15
         assert_eq!(resolve_width_for(&config, 25, Some(50)), 15);
     }
 
     #[test]
     fn resolve_width_falls_back_to_default_without_sync() {
         let config = crate::config::Config::default();
-        // Default is 10% of window width, clamped to [25, 50]
-        assert_eq!(resolve_width_for(&config, 200, None), 25); // 10% = 20, clamped to 25
-        assert_eq!(resolve_width_for(&config, 500, None), 50); // 10% = 50, at max
-        assert_eq!(resolve_width_for(&config, 400, None), 40); // 10% = 40
+        assert_eq!(resolve_width_for(&config, 200, None), 25);
+        assert_eq!(resolve_width_for(&config, 500, None), 50);
+        assert_eq!(resolve_width_for(&config, 400, None), 40);
+    }
+
+    #[test]
+    fn resolve_width_uses_default_for_excessive_synced_width() {
+        let config = crate::config::Config::default();
+        assert_eq!(resolve_width_for(&config, 200, Some(150)), 25);
+    }
+
+    #[test]
+    fn resolve_width_uses_default_for_excessive_explicit_width() {
+        let mut config = crate::config::Config::default();
+        config.sidebar.width = Some(crate::config::SidebarWidth::Absolute(150));
+        assert_eq!(resolve_width_for(&config, 200, Some(40)), 25);
+    }
+
+    #[test]
+    fn resolve_width_keeps_explicit_width_at_defensive_max() {
+        let mut config = crate::config::Config::default();
+        config.sidebar.width = Some(crate::config::SidebarWidth::Absolute(80));
+        assert_eq!(resolve_width_for(&config, 200, None), 80);
     }
 
     #[test]
@@ -975,7 +1141,6 @@ mod tests {
     fn resolve_width_uses_explicit_config_before_synced_width() {
         let mut config = crate::config::Config::default();
         config.sidebar.width = Some(crate::config::SidebarWidth::Percent(10));
-        // Synced width of 150 should be ignored; 10% of 200 = 20
         assert_eq!(resolve_width_for(&config, 200, Some(150)), 20);
     }
 
@@ -984,5 +1149,99 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.sidebar.width = Some(crate::config::SidebarWidth::Absolute(80));
         assert_eq!(resolve_width_for(&config, 100, None), 80);
+    }
+
+    #[test]
+    fn current_window_falls_back_to_listed_agent_pane() {
+        let panes = vec!["%1", "%2"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%1".to_string(), "@10".to_string()),
+            ("%2".to_string(), "@20".to_string()),
+        ]);
+
+        assert_eq!(
+            current_listed_window_pane(&panes, "%99", "@20", &pane_window_ids),
+            Some("%2")
+        );
+    }
+
+    #[test]
+    fn current_listed_pane_wins_over_window_fallback() {
+        let panes = vec!["%1", "%2"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%1".to_string(), "@10".to_string()),
+            ("%2".to_string(), "@10".to_string()),
+        ]);
+
+        assert_eq!(
+            current_listed_window_pane(&panes, "%2", "@10", &pane_window_ids),
+            Some("%2")
+        );
+    }
+
+    #[test]
+    fn navigation_anchor_uses_agent_in_current_window() {
+        let panes = vec!["%1", "%2"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%sidebar".to_string(), "@10".to_string()),
+            ("%1".to_string(), "@10".to_string()),
+            ("%2".to_string(), "@20".to_string()),
+        ]);
+
+        assert_eq!(
+            navigation_anchor_pane(&panes, "%sidebar", "@10", &pane_window_ids),
+            Some("%1")
+        );
+    }
+
+    #[test]
+    fn navigation_anchor_prefers_current_agent_pane() {
+        let panes = vec!["%1", "%2"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%1".to_string(), "@10".to_string()),
+            ("%2".to_string(), "@10".to_string()),
+        ]);
+
+        assert_eq!(
+            navigation_anchor_pane(&panes, "%2", "@10", &pane_window_ids),
+            Some("%2")
+        );
+    }
+
+    #[test]
+    fn next_from_sidebar_in_filtered_two_window_session_advances_to_other_window() {
+        let panes = vec!["%0", "%317"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%sidebar".to_string(), "@0".to_string()),
+            ("%0".to_string(), "@0".to_string()),
+            ("%317".to_string(), "@33".to_string()),
+        ]);
+
+        let current_idx = navigation_anchor_pane(&panes, "%sidebar", "@0", &pane_window_ids)
+            .and_then(|pane_id| panes.iter().position(|&pid| pid == pane_id));
+
+        assert_eq!(current_idx, Some(0));
+        assert_eq!(
+            compute_nav_target(&NavAction::Next, current_idx, panes.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn next_from_agent_in_filtered_two_window_session_advances_to_other_window() {
+        let panes = vec!["%0", "%317"];
+        let pane_window_ids = std::collections::HashMap::from([
+            ("%0".to_string(), "@0".to_string()),
+            ("%317".to_string(), "@33".to_string()),
+        ]);
+
+        let current_idx = navigation_anchor_pane(&panes, "%0", "@0", &pane_window_ids)
+            .and_then(|pane_id| panes.iter().position(|&pid| pid == pane_id));
+
+        assert_eq!(current_idx, Some(0));
+        assert_eq!(
+            compute_nav_target(&NavAction::Next, current_idx, panes.len()),
+            Some(1)
+        );
     }
 }
