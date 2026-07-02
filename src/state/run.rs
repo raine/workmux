@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::store::get_state_dir;
+use crate::util::write_atomic;
 
 /// Specification for a command to execute.
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,12 +88,10 @@ pub fn read_result(run_dir: &Path) -> Result<Option<RunResult>> {
 
 /// Write the result atomically to a run directory.
 pub fn write_result(run_dir: &Path, result: &RunResult) -> Result<()> {
-    let tmp_path = run_dir.join("result.json.tmp");
     let final_path = run_dir.join("result.json");
 
     let content = serde_json::to_string_pretty(result)?;
-    fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, &final_path)?;
+    write_atomic(&final_path, content.as_bytes())?;
     Ok(())
 }
 

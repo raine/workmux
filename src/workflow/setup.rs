@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{MuxMode, WindowConfig};
+use crate::config::{MuxMode, WindowConfig, WindowPlacement};
 use crate::multiplexer::{
     CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, Multiplexer,
     PaneSetupOptions,
@@ -177,36 +177,40 @@ pub fn setup_environment(
             let panes = window_plans[0].panes.as_deref().unwrap_or(&[]);
             let resolved_panes = resolve_pane_configuration(panes, config, agent);
 
-            let initial_pane_id =
-                if let Some(parent_session) = options.window_session_name.as_deref() {
-                    let parent_session_full_name = parent_session.to_string();
-                    if mux.session_exists(&parent_session_full_name)? {
-                        mux.create_window_in_session(CreateWindowInSessionParams {
-                            session_name: &parent_session_full_name,
-                            name: Some(&mux_target_full_name),
-                            cwd: effective_working_dir,
-                        })
-                        .context("Failed to create window in session")?
-                    } else {
-                        mux.create_session(CreateSessionParams {
-                            prefix: "",
-                            name: &parent_session_full_name,
-                            cwd: effective_working_dir,
-                            initial_window_name: Some(&mux_target_full_name),
-                        })
-                        .context("Failed to create session")?
-                    }
-                } else {
-                    let current_window_id = mux.current_window_id()?;
-                    let insertion_target = after_window.as_deref().or(current_window_id.as_deref());
-                    mux.create_window(CreateWindowParams {
-                        prefix,
-                        name: target_window_name,
+            let initial_pane_id = if let Some(parent_session) =
+                options.window_session_name.as_deref()
+            {
+                let parent_session_full_name = parent_session.to_string();
+                if mux.session_exists(&parent_session_full_name)? {
+                    mux.create_window_in_session(CreateWindowInSessionParams {
+                        session_name: &parent_session_full_name,
+                        name: Some(&mux_target_full_name),
                         cwd: effective_working_dir,
-                        after_window: insertion_target,
                     })
-                    .context("Failed to create window")?
+                    .context("Failed to create window in session")?
+                } else {
+                    mux.create_session(CreateSessionParams {
+                        prefix: "",
+                        name: &parent_session_full_name,
+                        cwd: effective_working_dir,
+                        initial_window_name: Some(&mux_target_full_name),
+                    })
+                    .context("Failed to create session")?
+                }
+            } else {
+                let placement_window_id = match config.window_placement() {
+                    WindowPlacement::AfterCurrent => mux.current_window_id()?,
+                    WindowPlacement::Rightmost => mux.rightmost_window_id()?,
                 };
+                let insertion_target = after_window.as_deref().or(placement_window_id.as_deref());
+                mux.create_window(CreateWindowParams {
+                    prefix,
+                    name: target_window_name,
+                    cwd: effective_working_dir,
+                    after_window: insertion_target,
+                })
+                .context("Failed to create window")?
+            };
             info!(
                 branch = branch_name,
                 handle = handle,
@@ -541,6 +545,70 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Validates that a prompt will actually be consumed by an agent pane.
+///
+/// This prevents the case where a user provides `-p "some prompt"` but no pane
+/// is configured to run an agent that would receive it.
+fn validate_prompt_consumption(
+    panes: &[config::PaneConfig],
+    cli_agent: Option<&str>,
+    config: &config::Config,
+    options: &super::types::SetupOptions,
+) -> Result<()> {
+    if !options.run_pane_commands {
+        return Err(anyhow!(
+            "Prompt provided (-p/-P/-e) but pane commands are disabled (--no-pane-cmds). \
+             The prompt would be ignored."
+        ));
+    }
+
+    // Known agent commands always consume prompts (they have their own agent
+    // profile), so the prompt is consumed regardless of whether a global agent
+    // is configured.
+    let has_self_identifying_agent = panes.iter().any(|pane| {
+        pane.command
+            .as_deref()
+            .is_some_and(crate::multiplexer::agent::is_known_agent)
+    });
+
+    if has_self_identifying_agent {
+        return Ok(());
+    }
+
+    let effective_agent = resolve_effective_agent(config, cli_agent);
+
+    let Some(agent_cmd) = effective_agent else {
+        return Err(anyhow!(
+            "Prompt provided but no agent is configured to consume it. \
+             Set 'agent' in config or use -a/--agent flag."
+        ));
+    };
+
+    let consumes_prompt = panes.iter().any(|pane| {
+        pane.command
+            .as_deref()
+            .map(|cmd| pane_runs_agent(cmd, &agent_cmd, config.agent_type.as_deref()))
+            .unwrap_or(false)
+    });
+
+    if !consumes_prompt {
+        let commands: Vec<_> = panes
+            .iter()
+            .map(|p| p.command.as_deref().unwrap_or("<shell>"))
+            .collect();
+
+        return Err(anyhow!(
+            "Prompt provided, but no pane is configured to run the agent '{}'.\n\
+             Resolved pane commands: {:?}\n\
+             Ensure your panes config includes '<agent>' or runs the configured agent.",
+            agent_cmd,
+            commands
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -927,68 +995,4 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "test prompt");
     }
-}
-
-/// Validates that a prompt will actually be consumed by an agent pane.
-///
-/// This prevents the case where a user provides `-p "some prompt"` but no pane
-/// is configured to run an agent that would receive it.
-fn validate_prompt_consumption(
-    panes: &[config::PaneConfig],
-    cli_agent: Option<&str>,
-    config: &config::Config,
-    options: &super::types::SetupOptions,
-) -> Result<()> {
-    if !options.run_pane_commands {
-        return Err(anyhow!(
-            "Prompt provided (-p/-P/-e) but pane commands are disabled (--no-pane-cmds). \
-             The prompt would be ignored."
-        ));
-    }
-
-    // Known agent commands always consume prompts (they have their own agent
-    // profile), so the prompt is consumed regardless of whether a global agent
-    // is configured.
-    let has_self_identifying_agent = panes.iter().any(|pane| {
-        pane.command
-            .as_deref()
-            .is_some_and(crate::multiplexer::agent::is_known_agent)
-    });
-
-    if has_self_identifying_agent {
-        return Ok(());
-    }
-
-    let effective_agent = resolve_effective_agent(config, cli_agent);
-
-    let Some(agent_cmd) = effective_agent else {
-        return Err(anyhow!(
-            "Prompt provided but no agent is configured to consume it. \
-             Set 'agent' in config or use -a/--agent flag."
-        ));
-    };
-
-    let consumes_prompt = panes.iter().any(|pane| {
-        pane.command
-            .as_deref()
-            .map(|cmd| pane_runs_agent(cmd, &agent_cmd, config.agent_type.as_deref()))
-            .unwrap_or(false)
-    });
-
-    if !consumes_prompt {
-        let commands: Vec<_> = panes
-            .iter()
-            .map(|p| p.command.as_deref().unwrap_or("<shell>"))
-            .collect();
-
-        return Err(anyhow!(
-            "Prompt provided, but no pane is configured to run the agent '{}'.\n\
-             Resolved pane commands: {:?}\n\
-             Ensure your panes config includes '<agent>' or runs the configured agent.",
-            agent_cmd,
-            commands
-        ));
-    }
-
-    Ok(())
 }

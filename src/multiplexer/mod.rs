@@ -44,6 +44,10 @@ pub trait Multiplexer: Send + Sync {
         Ok(None)
     }
 
+    fn rightmost_window_id(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     fn current_session_id(&self) -> Result<Option<String>> {
         Ok(None)
     }

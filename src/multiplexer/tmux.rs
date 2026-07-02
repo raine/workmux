@@ -468,6 +468,31 @@ impl Multiplexer for TmuxBackend {
         }
     }
 
+    fn rightmost_window_id(&self) -> Result<Option<String>> {
+        let Some(pane_id) = self.current_pane_id() else {
+            return Ok(None);
+        };
+        let session_id =
+            match self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{session_id}"]) {
+                Ok(id) => id.trim().to_string(),
+                Err(_) => return Ok(None),
+            };
+        if session_id.is_empty() {
+            return Ok(None);
+        }
+
+        match self.tmux_query(&["list-windows", "-t", &session_id, "-F", "#{window_id}"]) {
+            Ok(ids) => Ok(ids
+                .lines()
+                .filter_map(|id| {
+                    let id = id.trim();
+                    (!id.is_empty()).then(|| id.to_string())
+                })
+                .last()),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn current_session_id(&self) -> Result<Option<String>> {
         let Some(pane_id) = self.current_pane_id() else {
             return Ok(None);

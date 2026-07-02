@@ -1,6 +1,6 @@
 [package]
 name = "workmux"
-version = "0.1.217"
+version = "0.1.218"
 edition = "2024"
 authors = ["workmux contributors"]
 description = "An opinionated workflow tool that orchestrates git worktrees and tmux"
@@ -32,7 +32,7 @@ clap_complete = "4.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-anyhow = "1.0"
+anyhow = "1.0.103"
 thiserror = "2.0"
 glob = "0.3"
 pathdiff = "0.2"
@@ -44,8 +44,7 @@ tracing-appender = "0.2"
 edit = "0.1"
 which = "8.0"
 minijinja = "2.19"
-tabled = { version = "0.20", features = ["ansi"] }
-git-url-parse = "0.6.0"
+tabled = { version = "0.21", default-features = false, features = ["ansi"] }
 shlex = "1.3"
 slug = "0.1"
 indicatif = "0.18"

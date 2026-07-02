@@ -168,7 +168,14 @@ fn calc_worktrees_dir(project_root: &Path) -> Result<PathBuf> {
 /// Get the host-side state directory for a Lima VM.
 /// Uses XDG state dir: $XDG_STATE_HOME/workmux/lima/<vm_name>/
 fn lima_state_dir(vm_name: &str) -> Result<PathBuf> {
-    let state_dir = crate::xdg::state_dir()?.join("lima").join(vm_name);
+    lima_state_dir_with_root(vm_name, None)
+}
+
+fn lima_state_dir_with_root(vm_name: &str, state_root: Option<&Path>) -> Result<PathBuf> {
+    let state_dir = match state_root {
+        Some(root) => root.join("lima").join(vm_name),
+        None => crate::xdg::state_dir()?.join("lima").join(vm_name),
+    };
     std::fs::create_dir_all(&state_dir)?;
     Ok(state_dir)
 }
@@ -204,6 +211,17 @@ pub fn generate_mounts(
     config: &Config,
     vm_name: &str,
     agent: &str,
+) -> Result<Vec<Mount>> {
+    generate_mounts_with_state_root(worktree, isolation, config, vm_name, agent, None)
+}
+
+fn generate_mounts_with_state_root(
+    worktree: &Path,
+    isolation: IsolationLevel,
+    config: &Config,
+    vm_name: &str,
+    agent: &str,
+    state_root: Option<&Path>,
 ) -> Result<Vec<Mount>> {
     let mut mounts = Vec::new();
 
@@ -279,7 +297,7 @@ pub fn generate_mounts(
         // arch-keyed directory there so the guest's Linux downloads never
         // clobber the host's Mach-O binaries via the parent bind mount.
         if agent == "pi" {
-            let state_dir = lima_state_dir(vm_name)?;
+            let state_dir = lima_state_dir_with_root(vm_name, state_root)?;
             let overlay = crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)?;
             mounts.push(Mount {
                 host_path: overlay,
@@ -429,29 +447,35 @@ mod tests {
         let mut config = Config::default();
         config.sandbox.agent_config_dir = Some(custom_agent_config_dir(tmp_path));
 
-        generate_mounts(
+        generate_mounts_with_state_root(
             &project_root,
             IsolationLevel::Project,
             &config,
             vm_name,
             agent_name,
+            Some(tmp_path),
         )
         .unwrap()
+    }
+
+    fn agent_config_host_path(tmp_path: &Path, agent_name: &str) -> PathBuf {
+        tmp_path.join("agent-cfg").join(agent_name)
     }
 
     #[test]
     fn test_pi_agent_appends_bin_overlay_after_parent() {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "pi");
+        let parent_host_path = agent_config_host_path(tmp.path(), "pi");
 
-        // Find the parent and bin mounts by guest_path suffix.
         let parent_idx = mounts
             .iter()
-            .position(|m| m.guest_path.ends_with(".pi/agent"))
-            .expect("parent .pi/agent mount missing");
+            .position(|m| m.host_path == parent_host_path)
+            .expect("parent pi agent mount missing");
+        let parent_guest_path = mounts[parent_idx].guest_path.clone();
         let bin_idx = mounts
             .iter()
-            .position(|m| m.guest_path.ends_with(".pi/agent/bin"))
+            .position(|m| m.guest_path == parent_guest_path.join("bin"))
             .expect("bin overlay mount missing");
         assert!(
             bin_idx > parent_idx,
@@ -483,14 +507,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "omp");
 
-        assert!(
-            mounts.iter().any(|m| m.guest_path.ends_with(".omp/agent")),
-            "parent .omp/agent mount missing"
-        );
+        let omp_host_path = agent_config_host_path(tmp.path(), "omp");
+        let parent_mount = mounts
+            .iter()
+            .find(|m| m.host_path == omp_host_path)
+            .expect("parent omp agent mount missing");
         assert!(
             !mounts
                 .iter()
-                .any(|m| m.guest_path.ends_with(".omp/agent/bin")),
+                .any(|m| m.guest_path == parent_mount.guest_path.join("bin")),
             "omp agent should not get a bin overlay"
         );
         assert!(

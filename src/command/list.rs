@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::IsTerminal;
 
 use crate::config;
@@ -14,22 +15,42 @@ use tabled::{
     settings::{Padding, Style, disable::Remove, location::ByColumnName, object::Columns},
 };
 
-#[derive(Tabled)]
 struct WorktreeRow {
-    #[tabled(rename = "BRANCH")]
     branch: String,
-    #[tabled(rename = "AGE")]
     age: String,
-    #[tabled(rename = "PR")]
     pr_status: String,
-    #[tabled(rename = "AGENT")]
     agent_status: String,
-    #[tabled(rename = "MUX")]
     mux_status: String,
-    #[tabled(rename = "UNMERGED")]
     unmerged_status: String,
-    #[tabled(rename = "PATH")]
     path_str: String,
+}
+
+impl Tabled for WorktreeRow {
+    const LENGTH: usize = 7;
+
+    fn fields(&self) -> Vec<Cow<'_, str>> {
+        vec![
+            Cow::Borrowed(&self.branch),
+            Cow::Borrowed(&self.age),
+            Cow::Borrowed(&self.pr_status),
+            Cow::Borrowed(&self.agent_status),
+            Cow::Borrowed(&self.mux_status),
+            Cow::Borrowed(&self.unmerged_status),
+            Cow::Borrowed(&self.path_str),
+        ]
+    }
+
+    fn headers() -> Vec<Cow<'static, str>> {
+        vec![
+            Cow::Borrowed("BRANCH"),
+            Cow::Borrowed("AGE"),
+            Cow::Borrowed("PR"),
+            Cow::Borrowed("AGENT"),
+            Cow::Borrowed("MUX"),
+            Cow::Borrowed("UNMERGED"),
+            Cow::Borrowed("PATH"),
+        ]
+    }
 }
 
 fn format_pr_status(pr_info: Option<crate::github::PrSummary>) -> String {

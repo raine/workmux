@@ -22,6 +22,14 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.218 (2026-07-02)
+
+- Add a sidebar filter for switching between all sessions and the current tmux session, with jump navigation that works across sessions. ([#124](https://github.com/raine/workmux/pull/124))
+- Add `window_placement` to choose whether new tmux windows open next to the current window or at the right edge of the session.
+- Keep PR numbers and states visible in `workmux list --pr` when GitHub check rollup queries fail.
+- Make concurrent agent state writes safer, preventing overlapping updates from clobbering each other. ([#188](https://github.com/raine/workmux/pull/188))
+- Keep Nix package builds reliable in sandboxed build environments.
+
 ## v0.1.217 (2026-06-29)
 
 - Keep the sidebar spinner moving while panes are active. ([#180](https://github.com/raine/workmux/issues/180))

@@ -271,9 +271,10 @@ customize.
 | `main_branch`    | Branch to merge into                                                                                  | Auto-detected               |
 | `base_branch`    | Default base branch for new worktrees                                                                 | Current branch              |
 | `worktree_dir`   | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.                         | `<project>__worktrees/`     |
-| `window_prefix`  | Prefix for tmux window/session names                                                                  | `wm-`                       |
-| `mode`           | Tmux mode (`window` or `session`)                                                                     | `window`                    |
-| `agent`          | Default agent for `<agent>` placeholder                                                               | `claude`                    |
+| `window_prefix`    | Prefix for tmux window/session names                                                                  | `wm-`                       |
+| `mode`             | Tmux mode (`window` or `session`)                                                                     | `window`                    |
+| `window_placement` | New tmux window placement (`after_current` or `rightmost`)                                            | `after_current`             |
+| `agent`            | Default agent for `<agent>` placeholder                                                               | `claude`                    |
 | `agents`         | Named agent commands ([docs](https://workmux.raine.dev/guide/agents#named-agents), global-only)       | `{}`                        |
 | `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`)                                                  | `merge`                     |
 | `merge_keep`     | Keep resources after `workmux merge` by default                                                       | `false`                     |

@@ -747,7 +747,8 @@ mod tests {
         ];
 
         for layout in layouts {
-            let node = parse_layout(layout).expect(&format!("failed to parse: {}", layout));
+            let node =
+                parse_layout(layout).unwrap_or_else(|| panic!("failed to parse: {}", layout));
             let result = serialize_layout(&node);
             assert_eq!(result, layout, "roundtrip failed");
         }

@@ -497,13 +497,13 @@ mod tests {
         // First mount: read-write, same host/guest
         let m0 = &mount_list[0];
         assert_eq!(m0["location"].as_str().unwrap(), "/tmp/project");
-        assert_eq!(m0["writable"].as_bool().unwrap(), true);
+        assert!(m0["writable"].as_bool().unwrap());
         assert!(m0["mountPoint"].is_null());
 
         // Second mount: read-only, different guest path
         let m1 = &mount_list[1];
         assert_eq!(m1["location"].as_str().unwrap(), "/tmp/notes");
-        assert_eq!(m1["writable"].as_bool().unwrap(), false);
+        assert!(!m1["writable"].as_bool().unwrap());
         assert_eq!(m1["mountPoint"].as_str().unwrap(), "/mnt/notes");
     }
 

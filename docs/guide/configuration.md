@@ -79,6 +79,7 @@ Most options have sensible defaults. You only need to configure what you want to
 | `worktree_dir`     | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.       | `<project>__worktrees/`     |
 | `nerdfont`         | Enable nerdfont icons (prompted on first run)                                       | Prompted                    |
 | `window_prefix`    | Override tmux window/session prefix                                                 | Icon or `wm-`               |
+| `window_placement` | New tmux window placement (`after_current` or `rightmost`)                          | `after_current`             |
 | `agent`            | Default agent for `<agent>` placeholder                                             | `claude`                    |
 | `agents`           | Named agent commands (global-only). See [named agents](/guide/agents#named-agents). | `{}`                        |
 | `prompt_file_only` | Write prompt files without injecting into agent commands                            | `false`                     |

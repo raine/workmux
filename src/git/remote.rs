@@ -1,6 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use git_url_parse::GitUrl;
-use git_url_parse::types::provider::GenericProvider;
 use std::path::Path;
 use tracing::info;
 
@@ -185,24 +183,20 @@ pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
 pub fn ensure_fork_remote_in(fork_owner: &str, workdir: Option<&Path>) -> Result<String> {
     // Parse origin URL to get base repo identity
     let origin_url = get_remote_url_in("origin", workdir)?;
-    let origin_parsed = GitUrl::parse(&origin_url).with_context(|| {
+    let origin_parsed = parse_git_remote_url(&origin_url).with_context(|| {
         format!(
             "Failed to parse origin URL for fork remote construction: {}",
             origin_url
         )
     })?;
 
-    let origin_host = origin_parsed.host().unwrap_or("github.com").to_string();
-    let scheme = origin_parsed.scheme().unwrap_or("ssh");
-
-    let origin_provider: GenericProvider = origin_parsed
-        .provider_info()
-        .with_context(|| "Failed to extract provider info from origin URL")?;
-    let repo_name = origin_provider.repo();
+    let origin_host = origin_parsed.host.to_string();
+    let scheme = origin_parsed.scheme;
+    let repo_name = origin_parsed.repo;
 
     // If the fork owner is the same as the origin owner, just use origin
-    let current_owner = origin_provider.owner();
-    if !current_owner.is_empty() && fork_owner.eq_ignore_ascii_case(current_owner) {
+    let current_owner = origin_parsed.owner;
+    if fork_owner.eq_ignore_ascii_case(current_owner) {
         return Ok("origin".to_string());
     }
 
@@ -254,36 +248,81 @@ pub struct RepoIdentity {
     pub repo: String,
 }
 
+struct ParsedGitRemote<'a> {
+    scheme: &'a str,
+    host: &'a str,
+    owner: &'a str,
+    repo: &'a str,
+}
+
+fn parse_git_remote_url(url: &str) -> Option<ParsedGitRemote<'_>> {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let scheme = if url.starts_with("https://") {
+            "https"
+        } else {
+            "http"
+        };
+        return parse_remote_path(rest, scheme, '/');
+    }
+
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return parse_owner_repo_path(path).map(|(owner, repo)| ParsedGitRemote {
+            scheme: "ssh",
+            host,
+            owner,
+            repo,
+        });
+    }
+
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let host_and_path = rest.split_once('@').map(|(_, value)| value).unwrap_or(rest);
+        return parse_remote_path(host_and_path, "ssh", '/');
+    }
+
+    None
+}
+
+fn parse_remote_path<'a>(
+    value: &'a str,
+    scheme: &'a str,
+    separator: char,
+) -> Option<ParsedGitRemote<'a>> {
+    let (host, path) = value.split_once(separator)?;
+    parse_owner_repo_path(path).map(|(owner, repo)| ParsedGitRemote {
+        scheme,
+        host,
+        owner,
+        repo,
+    })
+}
+
+fn parse_owner_repo_path(path: &str) -> Option<(&str, &str)> {
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo_part = parts.next()?;
+    let repo = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+    (!owner.is_empty() && !repo.is_empty()).then_some((owner, repo))
+}
+
 /// Parse full repository identity (host, owner, repo) from a git remote URL.
 /// Supports both HTTPS and SSH formats.
 fn parse_repo_identity_from_git_url(url: &str) -> Option<RepoIdentity> {
-    let parsed = GitUrl::parse(url).ok()?;
-    let host = parsed.host()?.to_string();
-    let provider: GenericProvider = parsed.provider_info().ok()?;
+    let parsed = parse_git_remote_url(url)?;
     Some(RepoIdentity {
-        host,
-        owner: provider.owner().to_string(),
-        repo: provider.repo().to_string(),
+        host: parsed.host.to_string(),
+        owner: parsed.owner.to_string(),
+        repo: parsed.repo.to_string(),
     })
 }
 
 /// Parse the repository owner from a git remote URL
 /// Supports both HTTPS and SSH formats for github.com and GitHub Enterprise domains
 fn parse_owner_from_git_url(url: &str) -> Option<&str> {
-    if let Some(https_part) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        // HTTPS format: https://github.com/owner/repo.git or https://github.enterprise.com/owner/repo.git
-        https_part.split('/').nth(1)
-    } else if url.starts_with("git@") {
-        // SSH format: git@github.com:owner/repo.git or git@github.enterprise.com:owner/repo.git
-        url.split(':')
-            .nth(1)
-            .and_then(|path| path.split('/').next())
-    } else {
-        None
-    }
+    parse_git_remote_url(url).map(|parsed| parsed.owner)
 }
 
 /// Get the repository owner from the origin remote URL

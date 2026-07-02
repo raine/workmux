@@ -248,6 +248,57 @@ pub fn build_docker_run_args(
     shim_host_dir: Option<&Path>,
     network_deny: bool,
 ) -> Result<Vec<String>> {
+    build_docker_run_args_inner(
+        command,
+        config,
+        agent,
+        worktree_root,
+        pane_cwd,
+        extra_envs,
+        shim_host_dir,
+        network_deny,
+        None,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn build_docker_run_args_with_state_dir(
+    command: &str,
+    config: &SandboxConfig,
+    agent: &str,
+    worktree_root: &Path,
+    pane_cwd: &Path,
+    extra_envs: &[(&str, &str)],
+    shim_host_dir: Option<&Path>,
+    network_deny: bool,
+    state_root: &Path,
+) -> Result<Vec<String>> {
+    build_docker_run_args_inner(
+        command,
+        config,
+        agent,
+        worktree_root,
+        pane_cwd,
+        extra_envs,
+        shim_host_dir,
+        network_deny,
+        Some(state_root),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_docker_run_args_inner(
+    command: &str,
+    config: &SandboxConfig,
+    agent: &str,
+    worktree_root: &Path,
+    pane_cwd: &Path,
+    extra_envs: &[(&str, &str)],
+    shim_host_dir: Option<&Path>,
+    network_deny: bool,
+    state_root: Option<&Path>,
+) -> Result<Vec<String>> {
     let image = config.resolved_image(agent);
     let worktree_root_str = worktree_root.to_string_lossy();
     let pane_cwd_str = pane_cwd.to_string_lossy();
@@ -569,7 +620,10 @@ pub fn build_docker_run_args(
                 slug::slugify(basename),
                 crate::sandbox::pi::path_hash(&canonical)
             );
-            let state_dir = crate::xdg::state_dir()?.join("container").join(cache_key);
+            let state_dir = match state_root {
+                Some(root) => root.join("container").join(&cache_key),
+                None => crate::xdg::state_dir()?.join("container").join(cache_key),
+            };
             std::fs::create_dir_all(&state_dir)?;
             let overlay = crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)?;
             args.push("--mount".to_string());
@@ -854,6 +908,25 @@ mod tests {
         .unwrap()
     }
 
+    fn test_build_run_args_for_agent_with_state(
+        agent: &str,
+        config: &SandboxConfig,
+        state_root: &Path,
+    ) -> Vec<String> {
+        build_docker_run_args_with_state_dir(
+            agent,
+            config,
+            agent,
+            Path::new("/tmp/project"),
+            Path::new("/tmp/project"),
+            &[],
+            None,
+            false,
+            state_root,
+        )
+        .unwrap()
+    }
+
     fn agent_sandbox_config(runtime: SandboxRuntime) -> SandboxConfig {
         SandboxConfig {
             enabled: Some(true),
@@ -862,6 +935,13 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    fn agent_sandbox_config_with_dir(runtime: SandboxRuntime, dir: &Path) -> SandboxConfig {
+        SandboxConfig {
+            agent_config_dir: Some(dir.join("{agent}").to_string_lossy().to_string()),
+            ..agent_sandbox_config(runtime)
         }
     }
 
@@ -1369,7 +1449,7 @@ mod tests {
 
         let args_str = args.join(" ");
         assert!(args_str.contains("type=bind,source=/tmp/data,target=/mnt/data"));
-        // Should NOT contain readonly
+        // Readonly stays absent.
         assert!(!args_str.contains("/tmp/data,target=/mnt/data,readonly"));
     }
 
@@ -1687,8 +1767,9 @@ mod tests {
 
     #[test]
     fn test_build_args_pi_agent_apple_container_mounts_config_dir() {
-        let config = agent_sandbox_config(SandboxRuntime::AppleContainer);
-        let args = test_build_run_args_for_agent("pi", &config);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = agent_sandbox_config_with_dir(SandboxRuntime::AppleContainer, tmp.path());
+        let args = test_build_run_args_for_agent_with_state("pi", &config, tmp.path());
 
         let args_str = args.join(" ");
         // Pi agent should mount ~/.pi/agent to /tmp/.pi/agent
@@ -1697,7 +1778,7 @@ mod tests {
             "pi agent config mount missing: {}",
             args_str
         );
-        // Should NOT have Claude-specific mounts
+        // Claude-specific mounts stay absent.
         assert!(
             !args_str.contains("/tmp/.claude.json"),
             "no claude mount expected for pi"
@@ -1707,7 +1788,8 @@ mod tests {
 
     #[test]
     fn test_build_args_omp_agent_mounts_config_dir() {
-        let config = agent_sandbox_config(SandboxRuntime::AppleContainer);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = agent_sandbox_config_with_dir(SandboxRuntime::AppleContainer, tmp.path());
         let args = test_build_run_args_for_agent("omp", &config);
 
         let args_str = args.join(" ");
@@ -1726,11 +1808,13 @@ mod tests {
     #[test]
     fn test_build_args_pi_agent_overlays_bin_after_parent() {
         use crate::config::SandboxConfig;
+        let tmp = tempfile::tempdir().unwrap();
         let config = SandboxConfig {
             enabled: Some(true),
+            agent_config_dir: Some(tmp.path().join("{agent}").to_string_lossy().to_string()),
             ..Default::default()
         };
-        let args = build_docker_run_args(
+        let args = build_docker_run_args_with_state_dir(
             "pi",
             &config,
             "pi",
@@ -1739,6 +1823,7 @@ mod tests {
             &[],
             None,
             false,
+            tmp.path(),
         )
         .unwrap();
 
@@ -1764,7 +1849,7 @@ mod tests {
             "bin overlay source should contain arch key: {}",
             bin_arg
         );
-        // Per-worktree-handle, NOT container_name (which contains the PID).
+        // The per-worktree handle excludes the container name PID suffix.
         assert!(
             !bin_arg.contains(&format!("-{}", std::process::id())),
             "bin overlay path must not contain PID: {}",
@@ -1780,8 +1865,10 @@ mod tests {
     #[test]
     fn test_build_args_non_pi_agent_has_no_bin_overlay() {
         use crate::config::SandboxConfig;
+        let tmp = tempfile::tempdir().unwrap();
         let config = SandboxConfig {
             enabled: Some(true),
+            agent_config_dir: Some(tmp.path().join("{agent}").to_string_lossy().to_string()),
             ..Default::default()
         };
         let args = build_docker_run_args(

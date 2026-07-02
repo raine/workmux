@@ -65,7 +65,9 @@ pub fn get_repo_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 /// Get the root directory of the git repository containing the given path.
 /// Uses `git -C <dir>` to run git from the target directory.
 pub fn get_repo_root_for(dir: &Path) -> Result<PathBuf> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    clear_ambient_git_env(&mut command);
+    let output = command
         .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
         .output()
         .context("Failed to run git rev-parse")?;
@@ -76,6 +78,30 @@ pub fn get_repo_root_for(dir: &Path) -> Result<PathBuf> {
 
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(PathBuf::from(path))
+}
+
+fn clear_ambient_git_env(command: &mut std::process::Command) {
+    for key in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_QUARANTINE_PATH",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ] {
+        command.env_remove(key);
+    }
+    command.env_remove("GIT_CONFIG_COUNT");
+    command.env_remove("GIT_CONFIG_PARAMETERS");
+    for i in 0..32 {
+        command.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+        command.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
+    }
 }
 
 /// Get the common git directory (shared across all worktrees).

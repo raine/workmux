@@ -672,27 +672,33 @@ mod tests {
             ""
         );
 
-        let mut status = GitStatus::default();
-        status.has_upstream = true;
-        status.ahead = 3;
-        status.behind = 0;
+        let status = GitStatus {
+            has_upstream: true,
+            ahead: 3,
+            behind: 0,
+            ..Default::default()
+        };
         let ctx = make_context(&agent, Some(&status), 0);
         assert_eq!(ctx.resolve(TokenId::GitAhead), "\u{2191}3");
         assert_eq!(ctx.resolve(TokenId::GitBehind), "");
 
-        let mut status = GitStatus::default();
-        status.has_upstream = true;
-        status.ahead = 0;
-        status.behind = 5;
+        let status = GitStatus {
+            has_upstream: true,
+            ahead: 0,
+            behind: 5,
+            ..Default::default()
+        };
         let ctx = make_context(&agent, Some(&status), 0);
         assert_eq!(ctx.resolve(TokenId::GitAhead), "");
         assert_eq!(ctx.resolve(TokenId::GitBehind), "\u{2193}5");
 
         // No upstream: even nonzero counts collapse to empty.
-        let mut status = GitStatus::default();
-        status.has_upstream = false;
-        status.ahead = 3;
-        status.behind = 5;
+        let status = GitStatus {
+            has_upstream: false,
+            ahead: 3,
+            behind: 5,
+            ..Default::default()
+        };
         let ctx = make_context(&agent, Some(&status), 0);
         assert_eq!(ctx.resolve(TokenId::GitAhead), "");
         assert_eq!(ctx.resolve(TokenId::GitBehind), "");
@@ -708,9 +714,11 @@ mod tests {
         assert_eq!(ctx.resolve(TokenId::GitDirty), "");
         assert_eq!(ctx.resolve(TokenId::GitConflict), "");
 
-        let mut dirty = GitStatus::default();
-        dirty.is_dirty = true;
-        dirty.has_conflict = true;
+        let dirty = GitStatus {
+            is_dirty: true,
+            has_conflict: true,
+            ..Default::default()
+        };
         let ctx = make_context(&agent, Some(&dirty), 0);
         assert_eq!(ctx.resolve(TokenId::GitDirty), icons.diff);
         assert_eq!(ctx.resolve(TokenId::GitConflict), icons.conflict);
@@ -719,8 +727,10 @@ mod tests {
     #[test]
     fn resolve_git_branch() {
         let agent = test_agent();
-        let mut status = GitStatus::default();
-        status.branch = Some("feature/x".to_string());
+        let status = GitStatus {
+            branch: Some("feature/x".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             make_context(&agent, Some(&status), 0).resolve(TokenId::GitBranch),
             "feature/x"

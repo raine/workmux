@@ -1,2 +1,11 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+mapfile -t git_local_env < <(git rev-parse --local-env-vars)
+if ((${#git_local_env[@]} > 0)); then
+  unset "${git_local_env[@]}"
+fi
+cd "$repo_root"
+
 exec checkle pre-commit

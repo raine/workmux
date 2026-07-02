@@ -1,0 +1,37 @@
+name: Nix
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/nix.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'src/**'
+      - 'tests/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/nix.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'src/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build default package
+        run: nix build .# --print-build-logs

@@ -238,7 +238,7 @@ impl App {
             WorktreeSortMode::Natural => {} // Keep original order from git
             WorktreeSortMode::Age => {
                 self.worktrees
-                    .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    .sort_by_key(|worktree| std::cmp::Reverse(worktree.created_at));
             }
         }
     }

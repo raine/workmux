@@ -472,6 +472,10 @@ pub struct Config {
     #[serde(default)]
     pub mode: Option<MuxMode>,
 
+    /// Placement for new tmux windows in window mode.
+    #[serde(default)]
+    pub window_placement: Option<WindowPlacement>,
+
     /// Automatically check for updates in the background. Default: true
     #[serde(default)]
     pub auto_update_check: Option<bool>,
@@ -916,6 +920,17 @@ impl<'de> serde::Deserialize<'de> for ThemeConfig {
 
         d.deserialize_any(ThemeVisitor)
     }
+}
+
+/// Placement for new tmux windows in window mode.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowPlacement {
+    /// Place the new window immediately after the calling window.
+    #[default]
+    AfterCurrent,
+    /// Place the new window after the rightmost window in the current session.
+    Rightmost,
 }
 
 /// Mode for multiplexer operations: create windows within the current session or create new sessions
@@ -2401,6 +2416,9 @@ impl Config {
         // Special case: mode (project wins if explicitly set)
         merged.mode = project.mode.or(self.mode);
 
+        // Special case: window_placement (project wins if explicitly set)
+        merged.window_placement = project.window_placement.or(self.window_placement);
+
         // List values with "<global>" placeholder support
         merged.post_create = merge_vec_with_placeholder(self.post_create, project.post_create);
         merged.pre_merge = merge_vec_with_placeholder(self.pre_merge, project.pre_merge);
@@ -2653,6 +2671,11 @@ impl Config {
         self.mode.unwrap_or(MuxMode::Window)
     }
 
+    /// Get the window placement strategy.
+    pub fn window_placement(&self) -> WindowPlacement {
+        self.window_placement.unwrap_or_default()
+    }
+
     /// Create an example .workmux.yaml configuration file
     pub fn init() -> anyhow::Result<()> {
         use std::path::PathBuf;
@@ -2751,10 +2774,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 
 # Mode for tmux operations: window (default) or session.
 # - window: Create windows within the current tmux session
-# - session: Create new tmux sessions for each worktree (useful for session-per-project workflows)
+# - session: Create tmux sessions for each worktree
 # mode: session
 
-# Custom pane layout (mutually exclusive with 'windows').
+# Placement for new tmux windows in window mode.
+# Options: after_current (default), rightmost
+# window_placement: rightmost
+
+# Custom tmux pane layout (mutually exclusive with 'windows').
 # Default: Two-pane layout with shell and clear command.
 # panes:
 #   - command: pnpm install
@@ -3031,8 +3058,10 @@ mod tests {
         Config, ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig, LimaConfig,
         NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
         SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
-        is_agent_command, validate_domain, validate_group_add_entry, validate_layouts_config,
+        WindowPlacement, is_agent_command, validate_domain, validate_group_add_entry,
+        validate_layouts_config,
     };
+    use crate::test_support;
     use tempfile::TempDir;
 
     fn cfg(edit: impl FnOnce(&mut Config)) -> Config {
@@ -3107,7 +3136,9 @@ mod tests {
 
     fn git_tempdir() -> TempDir {
         let temp = TempDir::new().unwrap();
-        std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        test_support::clear_local_git_env(&mut command);
+        command
             .args(["init"])
             .current_dir(temp.path())
             .output()
@@ -3122,6 +3153,34 @@ mod tests {
 
         let disabled: Config = serde_yaml::from_str("merge_keep: false").unwrap();
         assert_eq!(disabled.merge_keep, Some(false));
+    }
+
+    #[test]
+    fn window_placement_parses_values() {
+        let after_current: Config =
+            serde_yaml::from_str("window_placement: after_current").unwrap();
+        assert_eq!(
+            after_current.window_placement(),
+            WindowPlacement::AfterCurrent
+        );
+
+        let rightmost: Config = serde_yaml::from_str("window_placement: rightmost").unwrap();
+        assert_eq!(rightmost.window_placement(), WindowPlacement::Rightmost);
+    }
+
+    #[test]
+    fn window_placement_project_overrides_global() {
+        let global = Config {
+            window_placement: Some(WindowPlacement::AfterCurrent),
+            ..Default::default()
+        };
+        let project = Config {
+            window_placement: Some(WindowPlacement::Rightmost),
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.window_placement(), WindowPlacement::Rightmost);
     }
 
     #[test]
@@ -3441,7 +3500,9 @@ agents:
         let result = find_project_config(&src).unwrap();
         assert!(result.is_some());
         let loc = result.unwrap();
-        assert!(loc.config_path.ends_with("backend/.workmux.yaml"));
+        let backend_config = backend.join(".workmux.yaml").canonicalize().unwrap();
+        assert_eq!(loc.config_path, backend_config);
+        assert_eq!(loc.config_dir, backend.canonicalize().unwrap());
         assert_eq!(loc.rel_dir, std::path::PathBuf::from("backend"));
     }
 
@@ -3462,7 +3523,9 @@ agents:
         let result = find_project_config(&backend).unwrap();
         assert!(result.is_some());
         let loc = result.unwrap();
-        assert!(loc.config_path.ends_with("backend/.workmux.yaml"));
+        let backend_config = backend.join(".workmux.yaml").canonicalize().unwrap();
+        assert_eq!(loc.config_path, backend_config);
+        assert_eq!(loc.config_dir, backend.canonicalize().unwrap());
     }
 
     #[test]

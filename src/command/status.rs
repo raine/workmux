@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -32,18 +33,36 @@ struct GitInfo {
     has_unmerged_commits: bool,
 }
 
-#[derive(Tabled)]
 struct StatusRow {
-    #[tabled(rename = "WORKTREE")]
     worktree: String,
-    #[tabled(rename = "STATUS")]
     status: String,
-    #[tabled(rename = "ELAPSED")]
     elapsed: String,
-    #[tabled(rename = "GIT")]
     git: String,
-    #[tabled(rename = "TITLE")]
     title: String,
+}
+
+impl Tabled for StatusRow {
+    const LENGTH: usize = 5;
+
+    fn fields(&self) -> Vec<Cow<'_, str>> {
+        vec![
+            Cow::Borrowed(&self.worktree),
+            Cow::Borrowed(&self.status),
+            Cow::Borrowed(&self.elapsed),
+            Cow::Borrowed(&self.git),
+            Cow::Borrowed(&self.title),
+        ]
+    }
+
+    fn headers() -> Vec<Cow<'static, str>> {
+        vec![
+            Cow::Borrowed("WORKTREE"),
+            Cow::Borrowed("STATUS"),
+            Cow::Borrowed("ELAPSED"),
+            Cow::Borrowed("GIT"),
+            Cow::Borrowed("TITLE"),
+        ]
+    }
 }
 
 fn git_label(git: &Option<GitInfo>) -> String {

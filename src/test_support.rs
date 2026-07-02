@@ -78,7 +78,7 @@ pub fn init_repo(dir: &Path) {
     run_git(dir, &["commit", "-m", "initial"]);
 }
 
-fn clear_local_git_env(command: &mut Command) {
+pub(crate) fn clear_local_git_env(command: &mut Command) {
     for key in [
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_COMMON_DIR",
@@ -93,5 +93,11 @@ fn clear_local_git_env(command: &mut Command) {
         "GIT_WORK_TREE",
     ] {
         command.env_remove(key);
+    }
+    command.env_remove("GIT_CONFIG_COUNT");
+    command.env_remove("GIT_CONFIG_PARAMETERS");
+    for i in 0..32 {
+        command.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+        command.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
     }
 }

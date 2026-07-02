@@ -88,6 +88,30 @@ class TestWorktreeCreation:
             f"{inserted} should appear before {existing}. Windows: {windows}"
         )
 
+    @pytest.mark.tmux_only
+    def test_add_rightmost_window_placement(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        """Verifies that window_placement: rightmost appends workmux windows."""
+        env = mux_server
+
+        write_workmux_config(mux_repo_path, window_placement="rightmost")
+        caller = "caller"
+        env.new_window(caller)
+        env.select_window(caller)
+
+        run_workmux_add(env, workmux_exe_path, mux_repo_path, "feature-existing")
+        env.select_window(caller)
+        run_workmux_add(env, workmux_exe_path, mux_repo_path, "feature-rightmost")
+
+        windows = env.list_windows()
+        inserted = get_window_name("feature-rightmost")
+
+        assert inserted in windows, f"Expected {inserted} in {windows}"
+        assert windows[-1] == inserted, (
+            f"{inserted} should be rightmost. Windows: {windows}"
+        )
+
     def test_add_from_inside_worktree_creates_sibling_worktree(
         self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
     ):

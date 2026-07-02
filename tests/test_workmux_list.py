@@ -63,6 +63,39 @@ def parse_list_output(output: str) -> List[Dict[str, str]]:
     return results
 
 
+def install_fake_gh_pr_list_retry(env: MuxEnvironment, branch_name: str) -> None:
+    """Install a fake gh that fails check rollup queries and serves PR metadata."""
+    gh_path = env.fake_bin_dir / "gh"
+    pr_json = json.dumps(
+        [
+            {
+                "number": 77,
+                "title": "Keep PR metadata available",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": branch_name,
+                "url": "https://github.example.test/test/repo/pull/77",
+            }
+        ]
+    )
+    gh_path.write_text(
+        f"""#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:3] == ["pr", "list"]:
+    if any("statusCheckRollup" in arg for arg in sys.argv):
+        print("upstream timed out while resolving statusCheckRollup", file=sys.stderr)
+        sys.exit(1)
+    print({pr_json!r})
+    sys.exit(0)
+
+print("unexpected gh command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+sys.exit(1)
+"""
+    )
+    gh_path.chmod(0o755)
+
+
 def write_agent_state_file(env: MuxEnvironment, worktree_path: Path, status: str):
     """
     Creates a fake agent state file in XDG_STATE_HOME to simulate an active agent.
@@ -188,6 +221,26 @@ def test_list_with_active_worktree(
     expected_path = get_worktree_path(mux_repo_path, branch_name)
     expected_relative = os.path.relpath(expected_path, mux_repo_path)
     assert worktree_entry["PATH"] == expected_relative
+
+
+def test_list_pr_falls_back_without_status_check_rollup(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """Verifies `list --pr` keeps PR metadata when check rollup fails."""
+    env = mux_server
+    branch_name = "feature-pr-fallback"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    install_fake_gh_pr_list_retry(env, branch_name)
+
+    output = run_workmux_list(env, workmux_exe_path, mux_repo_path, "--pr")
+    parsed_output = parse_list_output(output)
+
+    worktree_entry = next(
+        (r for r in parsed_output if r["BRANCH"] == branch_name), None
+    )
+    assert worktree_entry is not None
+    assert worktree_entry["PR"].startswith("#77")
 
 
 def test_list_with_unmerged_commits(

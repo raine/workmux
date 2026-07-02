@@ -1333,6 +1333,7 @@ def write_workmux_config(
     worktree_prefix: Optional[str] = None,
     base_branch: Optional[str] = None,
     prompt_file_only: Optional[bool] = None,
+    window_placement: Optional[str] = None,
     layouts: Optional[Dict[str, Any]] = None,
 ):
     """Creates a .workmux.yaml file from structured data and optionally commits it."""
@@ -1367,6 +1368,8 @@ def write_workmux_config(
         config["base_branch"] = base_branch
     if prompt_file_only is not None:
         config["prompt_file_only"] = prompt_file_only
+    if window_placement is not None:
+        config["window_placement"] = window_placement
     (repo_path / ".workmux.yaml").write_text(yaml.dump(config))
 
     # If env is provided, commit the config file to avoid uncommitted changes in merge tests

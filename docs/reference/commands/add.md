@@ -57,7 +57,7 @@ These options allow you to skip expensive setup steps when they're not needed (e
 2. Creates a git worktree at `<worktree_dir>/<handle>` (the `worktree_dir` is configurable and defaults to a sibling directory of your project; supports `~` and a `{project}` placeholder, e.g. `~/.workmux/{project}`)
 3. Runs any configured file operations (copy/symlink)
 4. Executes `post_create` commands if defined (runs before the tmux window/session opens, so keep them fast)
-5. Creates a new tmux window named `<window_prefix><handle>` (e.g., `wm-feature-auth` with `window_prefix: wm-`). With `--target-name`, the managed tmux target uses that name instead of `<handle>`. With `--parent-session`, a window-mode target is created inside that tmux session. With `--mode session` or `--session`, the worktree is created in its own dedicated tmux session.
+5. Creates a new tmux window named `<window_prefix><handle>` (e.g., `wm-feature-auth` with `window_prefix: wm-`). In window mode, `window_placement` controls whether the window is created after the calling window or at the right edge. With `--target-name`, the managed tmux target uses that name instead of `<handle>`. With `--parent-session`, a window-mode target is created inside that tmux session. With `--mode session` or `--session`, the worktree is created in its own dedicated tmux session.
 6. Sets up your configured tmux pane layout
 7. Automatically switches your tmux client to the new window
 

@@ -98,7 +98,7 @@ impl ClaudeForker {
             }
         }
 
-        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.timestamp));
         Ok(sessions)
     }
 }

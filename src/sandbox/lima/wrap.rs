@@ -156,7 +156,7 @@ mod tests {
         // Verify env var values with special characters are properly escaped
         let env_var = "MY_VAR";
         let val = "hello'world";
-        let flag = format!(" --setenv {}='{}'", env_var, shell_escape(&val));
+        let flag = format!(" --setenv {}='{}'", env_var, shell_escape(val));
         assert_eq!(flag, " --setenv MY_VAR='hello'\\''world'");
     }
 }

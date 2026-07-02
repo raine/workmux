@@ -121,7 +121,9 @@ fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
     let mut entries = Vec::new();
 
     for key in &["user.name", "user.email"] {
-        if let Ok(output) = Command::new("git")
+        let mut command = Command::new("git");
+        clear_ambient_git_env(&mut command);
+        if let Ok(output) = command
             .args(["config", key])
             .current_dir(worktree_dir)
             .output()
@@ -145,6 +147,30 @@ fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
         envs.push((format!("GIT_CONFIG_VALUE_{}", i), val.clone()));
     }
     envs
+}
+
+fn clear_ambient_git_env(command: &mut Command) {
+    for key in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_QUARANTINE_PATH",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ] {
+        command.env_remove(key);
+    }
+    command.env_remove("GIT_CONFIG_COUNT");
+    command.env_remove("GIT_CONFIG_PARAMETERS");
+    for i in 0..32 {
+        command.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+        command.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
+    }
 }
 
 fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32> {
@@ -517,17 +543,22 @@ mod tests {
     /// Create a temp directory with a git repo and local user config.
     fn git_repo_with_user(name: &str, email: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
+        let mut init = Command::new("git");
+        clear_ambient_git_env(&mut init);
+        init.args(["init"])
             .current_dir(tmp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        let mut set_name = Command::new("git");
+        clear_ambient_git_env(&mut set_name);
+        set_name
             .args(["config", "user.name", name])
             .current_dir(tmp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        let mut set_email = Command::new("git");
+        clear_ambient_git_env(&mut set_email);
+        set_email
             .args(["config", "user.email", email])
             .current_dir(tmp.path())
             .output()

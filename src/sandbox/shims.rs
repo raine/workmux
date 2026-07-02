@@ -209,7 +209,7 @@ mod tests {
 
         let shim_bin = create_shim_directory(tmp.path(), &commands).unwrap();
         assert!(shim_bin.join("valid").exists());
-        assert!(!shim_bin.join("/bin/evil").exists());
+        assert!(!shim_bin.join("bin/evil").exists());
     }
 
     #[test]
