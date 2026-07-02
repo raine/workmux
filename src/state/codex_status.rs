@@ -24,6 +24,7 @@ use tracing::warn;
 
 use crate::multiplexer::AgentStatus;
 use crate::state::{PaneKey, StateStore};
+use crate::util::write_atomic;
 
 #[derive(Debug, Deserialize)]
 struct CodexHookProbe {
@@ -227,20 +228,6 @@ fn delete_status(dir: &Path, pane_key: &PaneKey) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).context("Failed to delete Codex status file"),
     }
-}
-
-fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    // Use a unique temp filename per writer so concurrent writes to the same
-    // target don't clobber each other's temp file. rename() is atomic on the
-    // same filesystem.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nanos));
-    fs::write(&tmp, content).context("Failed to write Codex status temp file")?;
-    fs::rename(&tmp, path).context("Failed to rename Codex status temp file")?;
-    Ok(())
 }
 
 #[cfg(test)]

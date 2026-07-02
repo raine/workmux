@@ -9,6 +9,7 @@ use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
 use crate::config::SandboxRuntime;
+use crate::util::write_atomic;
 
 /// Manages filesystem-based state persistence for workmux agents.
 ///
@@ -502,23 +503,6 @@ fn tmux_auto_renamed_windows(
             _ => None,
         })
         .collect()
-}
-
-/// Write content atomically using temp file + rename.
-///
-/// This ensures the target file is never partially written.
-fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    // Use a unique temp filename per writer so concurrent writes to the same
-    // target don't clobber each other's temp file. rename() is atomic on the
-    // same filesystem.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nanos));
-    fs::write(&tmp, content).context("Failed to write temp file")?;
-    fs::rename(&tmp, path).context("Failed to rename temp file")?;
-    Ok(())
 }
 
 /// Get the workmux state directory (`$XDG_STATE_HOME/workmux`).

@@ -1,6 +1,77 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+const STALE_ATOMIC_TEMP_AGE: Duration = Duration::from_secs(60);
+
+/// Write content through a same-directory temporary file and atomically replace the target.
+pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    cleanup_stale_atomic_temps(path)?;
+
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let prefix = atomic_temp_prefix(path);
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)
+        .with_context(|| format!("Failed to create temp file for {}", path.display()))?;
+
+    tmp.write_all(content)
+        .with_context(|| format!("Failed to write temp file for {}", path.display()))?;
+    tmp.flush()
+        .with_context(|| format!("Failed to flush temp file for {}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Failed to rename temp file for {}", path.display()))?;
+    Ok(())
+}
+
+fn cleanup_stale_atomic_temps(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Ok(());
+    };
+    let prefix = atomic_temp_prefix(path);
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        if !is_stale_atomic_temp(&entry) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
+
+    Ok(())
+}
+
+fn is_stale_atomic_temp(entry: &fs::DirEntry) -> bool {
+    entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age >= STALE_ATOMIC_TEMP_AGE)
+}
+
+fn atomic_temp_prefix(path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("atomic");
+    format!(".{file_name}.tmp.")
+}
 
 /// Canonicalize a path, falling back to the original if canonicalization fails.
 pub fn canon_or_self(p: &Path) -> PathBuf {
@@ -173,6 +244,36 @@ pub fn format_elapsed_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_atomic_replaces_target_and_removes_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        let leftovers = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn write_atomic_does_not_remove_fresh_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let temp = dir.path().join(".state.json.tmp.keep");
+        fs::write(&temp, "pending").unwrap();
+
+        write_atomic(&path, b"stored").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "stored");
+        assert_eq!(fs::read_to_string(&temp).unwrap(), "pending");
+    }
 
     #[test]
     fn expand_worktree_dir_tilde_and_project() {

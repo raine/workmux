@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tracing::debug;
 
+use crate::util::write_atomic;
+
 #[derive(Debug, Deserialize)]
 pub struct PrDetails {
     #[serde(rename = "headRefName")]
@@ -923,10 +925,7 @@ pub fn save_pr_cache(statuses: &HashMap<PathBuf, HashMap<String, PrSummary>>) {
     let Ok(content) = serde_json::to_string(&merged) else {
         return;
     };
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, content).is_ok() {
-        let _ = std::fs::rename(tmp, path);
-    }
+    let _ = write_atomic(&path, content.as_bytes());
 }
 
 #[cfg(test)]
