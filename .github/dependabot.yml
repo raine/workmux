@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      flake-inputs:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
