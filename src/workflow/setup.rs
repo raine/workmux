@@ -42,6 +42,7 @@ pub fn setup_environment(
     options: &super::types::SetupOptions,
     agent: Option<&str>,
     after_window: Option<String>,
+    initial_pane_id_override: Option<String>,
 ) -> Result<CreateResult> {
     debug!(
         branch = branch_name,
@@ -169,10 +170,7 @@ pub fn setup_environment(
 
     let target_window_name = options.target_window_name.as_deref().unwrap_or(handle);
     let target_session_name = options.target_session_name.as_deref().unwrap_or(handle);
-    let mux_target_full_name = match options.mode {
-        MuxMode::Window => crate::multiplexer::util::prefixed(prefix, target_window_name),
-        MuxMode::Session => crate::multiplexer::util::prefixed(prefix, target_session_name),
-    };
+    let mux_target_full_name = options.primary_mux_label(prefix, handle);
 
     // Track the focus and zoom pane across all windows
     let mut focus_pane_id: Option<String> = None;
@@ -184,9 +182,9 @@ pub fn setup_environment(
             let panes = window_plans[0].panes.as_deref().unwrap_or(&[]);
             let resolved_panes = resolve_pane_configuration(panes, config, agent);
 
-            let initial_pane_id = if let Some(parent_session) =
-                options.window_session_name.as_deref()
-            {
+            let initial_pane_id = if let Some(override_id) = initial_pane_id_override {
+                override_id
+            } else if let Some(parent_session) = options.window_session_name.as_deref() {
                 let parent_session_full_name = parent_session.to_string();
                 if mux.session_exists(&parent_session_full_name)? {
                     mux.create_window_in_session(CreateWindowInSessionParams {

@@ -85,6 +85,10 @@ pub struct DeferredCleanup {
     /// Path to the git worktree admin directory (e.g., $GIT_COMMON_DIR/worktrees/<name>/).
     /// Used to remove lock files before pruning, since `git worktree prune` skips locked entries.
     pub worktree_admin_dir: Option<PathBuf>,
+    /// Backend-supplied command that removes the worktree and its workspace in
+    /// one step. When set, the deferred script runs it instead of the
+    /// mv+prune+trash sequence. Branch delete and config cleanup still run after.
+    pub worktree_removal_cmd: Option<String>,
 }
 
 /// Result of cleanup operations
@@ -212,6 +216,15 @@ impl SetupOptions {
             MuxMode::Window => self.target_window_name.as_deref().unwrap_or(handle),
             MuxMode::Session => self.target_session_name.as_deref().unwrap_or(handle),
         }
+    }
+
+    /// The full mux label for this worktree's primary window/session.
+    ///
+    /// Backends that create the workspace before setup runs must label it with
+    /// exactly this; every later `kill_window`/`select_window` lookup resolves
+    /// the workspace by label.
+    pub fn primary_mux_label(&self, prefix: &str, handle: &str) -> String {
+        crate::multiplexer::util::prefixed(prefix, self.primary_mux_target_name(handle))
     }
 
     pub fn has_explicit_primary_mux_target(&self) -> bool {

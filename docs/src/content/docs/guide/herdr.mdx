@@ -1,0 +1,89 @@
+---
+title: "herdr"
+description: Use herdr as an alternative multiplexer backend
+---
+
+:::caution[Experimental]
+The herdr backend is new. Expect rough edges.
+:::
+
+[herdr](https://herdr.dev) is an agent multiplexer that lives in your terminal.
+Detected automatically via `$HERDR_PANE_ID`.
+
+herdr calls its top-level containers workspaces. workmux maps one worktree onto
+one workspace, the same way it maps one worktree onto one tmux window.
+
+## Requirements
+
+- herdr 0.7.1 or later
+- `herdr` on `PATH`, or `$HERDR_BIN_PATH` pointing at the binary
+
+## Differences from tmux
+
+| Feature           | tmux               | herdr                   |
+| ----------------- | ------------------ | ----------------------- |
+| Agent status      | Yes (window names) | Yes (pane names)        |
+| Scope             | tmux session       | herdr session           |
+| Session mode      | Yes                | No (window only)        |
+| Pane size control | Percentage-based   | Percentage-based        |
+| Stacked panes     | No                 | No                      |
+| Dashboard preview | Yes                | Yes                     |
+| Worktree creation | `git worktree add` | `herdr worktree create` |
+| Renaming a target | Yes                | No                      |
+
+## Worktree integration
+
+herdr manages git worktrees itself, so workmux delegates to it rather than
+running git directly. `workmux add` becomes a single `herdr worktree create`
+that makes the worktree and the workspace together, and `workmux remove` becomes
+a single `herdr worktree remove`.
+
+This matters when removal is deferred. Running `workmux remove` from inside the
+workspace being removed cannot tear down its own terminal, so workmux hands
+herdr a command to run after the workspace closes. On other backends that step
+renames the worktree to a trash directory and prunes it; on herdr the one
+command covers both, and no trash directory is created.
+
+workmux falls back to separate `git worktree add` and workspace creation when
+the combined call cannot express the request, namely when checking out an
+existing branch or tracking an upstream branch. Both paths produce the same
+result.
+
+## Configuration
+
+No herdr configuration is required. workmux drives herdr through its JSON CLI,
+which works out of the box.
+
+To override the auto-detected backend:
+
+```bash
+export WORKMUX_BACKEND=herdr
+```
+
+Two environment variables affect the backend.
+
+`$HERDR_BIN_PATH` is the path to the `herdr` binary, defaulting to `herdr` on
+`PATH`. Set it when herdr is installed elsewhere. Deferred cleanup commands
+embed this path, so they keep working in a detached shell.
+
+`$HERDR_SOCKET_PATH` is the socket of the herdr instance. herdr sets it, one
+value per named session, and workmux keys its stored state on it. Sessions
+started with `herdr --session <name>` therefore stay isolated from each other.
+
+## Detection order
+
+workmux checks `$TMUX` before `$HERDR_PANE_ID`. herdr exports `HERDR_PANE_ID`
+into every descendant process, so a tmux server started inside a herdr pane sets
+both; checking tmux first selects the inner multiplexer, which is the one the
+user is looking at. Set `$WORKMUX_BACKEND` to override.
+
+## Known limitations
+
+- Session mode is not supported, only window mode
+- `workmux rename` renames the worktree and branch, but leaves the workspace
+  label unchanged
+- Pane display names (`name` in a pane config) are not applied
+- Stacked panes are not supported
+- Agent status icons do not clear when a pane receives focus
+- herdr does not report pane PIDs or foreground commands, so workmux treats a
+  live pane as a live agent rather than checking the process

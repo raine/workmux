@@ -235,6 +235,89 @@ fn is_inside_matching_target(
     }
 }
 
+/// Kill the mux window(s)/session for `target_name`. Skipped entirely when a
+/// faster atomic removal path (e.g. herdr) already tore down the target.
+#[allow(clippy::too_many_arguments)]
+fn kill_target(
+    context: &WorkflowContext,
+    mux_running: bool,
+    is_session_mode: bool,
+    target_name: &str,
+    parent_session: Option<&str>,
+    window_token: Option<&str>,
+    handle: &str,
+    result: &mut CleanupResult,
+) -> Result<()> {
+    if mux_running {
+        if is_session_mode {
+            // For session mode, kill the session directly
+            let session_name = prefixed(&context.prefix, target_name);
+            if context.mux.session_exists(&session_name)? {
+                if let Err(e) = context.mux.kill_session(&session_name) {
+                    warn!(session = session_name, error = %e, "cleanup:failed to kill session");
+                } else {
+                    result.tmux_window_killed = true;
+                    info!(session = session_name, "cleanup:killed session");
+
+                    // Poll to confirm session is gone before proceeding
+                    const MAX_RETRIES: u32 = 20;
+                    const RETRY_DELAY: Duration = Duration::from_millis(50);
+                    for _ in 0..MAX_RETRIES {
+                        if !context.mux.session_exists(&session_name)? {
+                            break;
+                        }
+                        thread::sleep(RETRY_DELAY);
+                    }
+                }
+            }
+        } else {
+            // For window mode, find and kill all matching windows (including duplicates)
+            let matching_windows = find_matching_window_targets(
+                context.mux.as_ref(),
+                &context.prefix,
+                target_name,
+                parent_session,
+                window_token,
+            )?;
+            let mut killed_count = 0;
+            for target in &matching_windows {
+                if let Err(e) = context.mux.kill_window_target(target) {
+                    warn!(window = target.full_name, error = %e, "cleanup:failed to kill window");
+                } else {
+                    killed_count += 1;
+                    debug!(window = target.full_name, "cleanup:killed window");
+                }
+            }
+            if killed_count > 0 {
+                result.tmux_window_killed = true;
+                info!(
+                    count = killed_count,
+                    handle = handle,
+                    "cleanup:killed all matching windows"
+                );
+
+                // Poll to confirm windows are gone before proceeding
+                const MAX_RETRIES: u32 = 20;
+                const RETRY_DELAY: Duration = Duration::from_millis(50);
+                for _ in 0..MAX_RETRIES {
+                    let remaining = find_matching_window_targets(
+                        context.mux.as_ref(),
+                        &context.prefix,
+                        target_name,
+                        parent_session,
+                        window_token,
+                    )?;
+                    if remaining.is_empty() {
+                        break;
+                    }
+                    thread::sleep(RETRY_DELAY);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Centralized function to clean up tmux and git resources.
 /// `branch_name` is used for git operations (branch deletion).
 /// `handle` is used for tmux operations (window/session lookup/kill).
@@ -364,14 +447,22 @@ pub fn cleanup(
 
     // Helper closure to perform the actual filesystem and git cleanup.
     // This avoids code duplication while enforcing the correct operational order.
-    let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
+    //
+    // `hooks_already_ran` is set when the atomic-removal path fired the hooks
+    // before its attempt failed; re-running them here would execute the user's
+    // whole pre_remove suite a second time.
+    let perform_fs_git_cleanup = |result: &mut CleanupResult,
+                                  hooks_already_ran: bool|
+     -> Result<()> {
         // Resolve the admin dir before the rename so we can unlock it later.
         let worktree_admin_dir = resolve_worktree_admin_dir(worktree_path, &context.git_common_dir);
 
         // Run pre-remove hooks before removing the worktree directory.
         // Skip if the worktree directory doesn't exist (e.g., user manually deleted it).
         // Skip if --no-hooks is set (e.g., RPC-triggered merge).
-        if worktree_path.exists() && !no_hooks {
+        if hooks_already_ran {
+            debug!("cleanup:pre-remove hooks already ran on the atomic removal attempt");
+        } else if worktree_path.exists() && !no_hooks {
             run_pre_remove_hooks(
                 context,
                 handle,
@@ -493,6 +584,16 @@ pub fn cleanup(
         Ok(())
     };
 
+    // Gated on the capability, not just on the id being present: the id is
+    // written at create time and outlives the herdr session, so a worktree
+    // created under herdr and removed under tmux would emit a herdr command
+    // into a tmux `run-shell` script and fail silently behind `>/dev/null 2>&1`.
+    let herdr_workspace_id = if context.mux.supports_atomic_worktree_workspace() {
+        git::get_worktree_meta(handle, "workspace-id")
+    } else {
+        None
+    };
+
     if running_inside_target {
         let (current_target, current_target_id) = current_matching_target.unwrap();
         info!(
@@ -593,6 +694,10 @@ pub fn cleanup(
                 force,
                 git_common_dir: context.git_common_dir.clone(),
                 worktree_admin_dir,
+                worktree_removal_cmd: match herdr_workspace_id {
+                    Some(ref wid) => context.mux.shell_remove_worktree_and_workspace_cmd(wid)?,
+                    None => None,
+                },
             });
             debug!(
                 worktree = %worktree_path.display(),
@@ -601,76 +706,63 @@ pub fn cleanup(
             );
         }
     } else {
-        // Not running inside any matching target, so kill it first
-        if mux_running {
-            if is_session_mode {
-                // For session mode, kill the session directly
-                let session_name = prefixed(&context.prefix, &target_name);
-                if context.mux.session_exists(&session_name)? {
-                    if let Err(e) = context.mux.kill_session(&session_name) {
-                        warn!(session = session_name, error = %e, "cleanup:failed to kill session");
-                    } else {
-                        result.tmux_window_killed = true;
-                        info!(session = session_name, "cleanup:killed session");
-
-                        // Poll to confirm session is gone before proceeding
-                        const MAX_RETRIES: u32 = 20;
-                        const RETRY_DELAY: Duration = Duration::from_millis(50);
-                        for _ in 0..MAX_RETRIES {
-                            if !context.mux.session_exists(&session_name)? {
-                                break;
-                            }
-                            thread::sleep(RETRY_DELAY);
-                        }
-                    }
-                }
-            } else {
-                // For window mode, find and kill all matching windows (including duplicates)
-                let matching_windows = find_matching_window_targets(
-                    context.mux.as_ref(),
-                    &context.prefix,
-                    &target_name,
-                    parent_session.as_deref(),
-                    window_token.as_deref(),
+        // Not running inside any matching target.
+        //
+        // For herdr: a stored workspace_id means we can close the workspace and
+        // remove the git worktree in a single atomic `herdr worktree remove` call.
+        let mut hooks_ran = false;
+        let herdr_removed = if let Some(ref wid) = herdr_workspace_id {
+            if worktree_path.exists() && !no_hooks {
+                run_pre_remove_hooks(
+                    context,
+                    handle,
+                    worktree_path,
+                    branch_name,
+                    show_hook_output,
                 )?;
-                let mut killed_count = 0;
-                for target in &matching_windows {
-                    if let Err(e) = context.mux.kill_window_target(target) {
-                        warn!(window = target.full_name, error = %e, "cleanup:failed to kill window");
-                    } else {
-                        killed_count += 1;
-                        debug!(window = target.full_name, "cleanup:killed window");
-                    }
-                }
-                if killed_count > 0 {
+                hooks_ran = true;
+            }
+            cleanup_prompt_files(branch_name);
+            match context.mux.remove_worktree_and_workspace(wid) {
+                Ok(true) => {
                     result.tmux_window_killed = true;
+                    result.worktree_removed = true;
                     info!(
-                        count = killed_count,
                         handle = handle,
-                        "cleanup:killed all matching windows"
+                        workspace_id = %wid,
+                        "cleanup:herdr worktree+workspace removed atomically"
                     );
-
-                    // Poll to confirm windows are gone before proceeding
-                    const MAX_RETRIES: u32 = 20;
-                    const RETRY_DELAY: Duration = Duration::from_millis(50);
-                    for _ in 0..MAX_RETRIES {
-                        let remaining = find_matching_window_targets(
-                            context.mux.as_ref(),
-                            &context.prefix,
-                            &target_name,
-                            parent_session.as_deref(),
-                            window_token.as_deref(),
-                        )?;
-                        if remaining.is_empty() {
-                            break;
-                        }
-                        thread::sleep(RETRY_DELAY);
+                    if !keep_branch {
+                        git::delete_branch_in(branch_name, force, &context.git_common_dir)
+                            .context("Failed to delete local branch")?;
+                        result.local_branch_deleted = true;
+                        info!(branch = branch_name, "cleanup:local branch deleted");
                     }
+                    true
+                }
+                Ok(false) => false, // backend declined; fall through
+                Err(e) => {
+                    warn!(handle = handle, error = %e, "cleanup:herdr atomic remove failed, falling back");
+                    false
                 }
             }
+        } else {
+            false
+        };
+
+        if !herdr_removed {
+            kill_target(
+                context,
+                mux_running,
+                is_session_mode,
+                &target_name,
+                parent_session.as_deref(),
+                window_token.as_deref(),
+                handle,
+                &mut result,
+            )?;
+            perform_fs_git_cleanup(&mut result, hooks_ran)?;
         }
-        // Now that windows/sessions are gone, clean up filesystem and git state.
-        perform_fs_git_cleanup(&mut result)?;
     }
 
     // Clean up worktree metadata from git config.
@@ -687,7 +779,7 @@ pub fn cleanup(
 
 /// Build the deferred cleanup script for rename, prune, branch delete, and trash removal.
 ///
-/// Generates a semicolon-separated sequence of shell commands that:
+/// Generates a semicolon-separated sequence of shell commands:
 /// 1. Renames the worktree directory to a trash path (frees the original path)
 /// 2. Removes any worktree lock (so prune can clean up the metadata)
 /// 3. Prunes git worktree metadata
@@ -695,25 +787,41 @@ pub fn cleanup(
 /// 5. Removes workmux worktree metadata from git config
 /// 6. Deletes the trash directory
 ///
+/// A backend that owns its worktrees supplies `worktree_removal_cmd`, a single
+/// command covering steps 1, 2, 3 and 6; only the branch and config cleanup
+/// remain generic.
+///
 /// The returned string starts with "; " so it can be appended to other commands.
 fn build_deferred_cleanup_script(dc: &DeferredCleanup) -> String {
-    let wt = shell_quote(&dc.worktree_path.to_string_lossy());
-    let trash = shell_quote(&dc.trash_path.to_string_lossy());
     let git_dir = shell_quote(&dc.git_common_dir.to_string_lossy());
 
     let mut cmds = Vec::new();
-    // 1. Rename worktree to trash
-    cmds.push(format!("mv {} {} >/dev/null 2>&1", wt, trash));
-    // 2. Remove worktree lock if present (git worktree prune skips locked entries)
-    if let Some(ref admin_dir) = dc.worktree_admin_dir
-        && admin_dir.is_absolute()
-    {
-        let locked = shell_quote(&admin_dir.join("locked").to_string_lossy());
-        cmds.push(format!("rm -f {} >/dev/null 2>&1", locked));
-    }
-    // 3. Prune git worktrees
-    cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir));
-    // 4. Delete branch (if not keeping)
+
+    // A backend that removes the worktree itself never creates a trash dir.
+    let trash_to_delete = match dc.worktree_removal_cmd {
+        Some(ref cmd) => {
+            cmds.push(format!("{} >/dev/null 2>&1", cmd));
+            None
+        }
+        None => {
+            let wt = shell_quote(&dc.worktree_path.to_string_lossy());
+            let trash = shell_quote(&dc.trash_path.to_string_lossy());
+            // 1. Rename worktree to trash
+            cmds.push(format!("mv {} {} >/dev/null 2>&1", wt, trash));
+            // 2. Remove worktree lock if present (git worktree prune skips locked entries)
+            if let Some(ref admin_dir) = dc.worktree_admin_dir
+                && admin_dir.is_absolute()
+            {
+                let locked = shell_quote(&admin_dir.join("locked").to_string_lossy());
+                cmds.push(format!("rm -f {} >/dev/null 2>&1", locked));
+            }
+            // 3. Prune git worktrees
+            cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir));
+            Some(trash)
+        }
+    };
+
+    // Branch delete and config cleanup always run after worktree removal.
     if !dc.keep_branch {
         let branch = shell_quote(&dc.branch_name);
         let force_flag = if dc.force { "-D" } else { "-d" };
@@ -722,14 +830,14 @@ fn build_deferred_cleanup_script(dc: &DeferredCleanup) -> String {
             git_dir, force_flag, branch
         ));
     }
-    // 5. Remove worktree metadata from git config
     let handle = shell_quote(&dc.handle);
     cmds.push(format!(
         "git -C {} config --local --remove-section workmux.worktree.{} >/dev/null 2>&1",
         git_dir, handle
     ));
-    // 6. Delete trash
-    cmds.push(format!("rm -rf {} >/dev/null 2>&1", trash));
+    if let Some(trash) = trash_to_delete {
+        cmds.push(format!("rm -rf {} >/dev/null 2>&1", trash));
+    }
 
     format!("; {}", cmds.join("; "))
 }
@@ -984,6 +1092,7 @@ mod tests {
             force,
             git_common_dir: PathBuf::from(git_dir),
             worktree_admin_dir: None,
+            worktree_removal_cmd: None,
         }
     }
 
@@ -1215,6 +1324,77 @@ mod tests {
         assert!(
             !script.contains("/locked"),
             "Should not have lock removal without admin dir: {script}"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_backend_removal_replaces_mv_and_prune() {
+        let mut dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            false,
+            false,
+        );
+        dc.worktree_removal_cmd = Some("herdr worktree remove --workspace ws-abc123".to_string());
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            script.contains("herdr worktree remove --workspace ws-abc123"),
+            "backend removal command should be emitted: {script}"
+        );
+        assert!(
+            !script.contains("mv "),
+            "herdr path should not rename to trash: {script}"
+        );
+        assert!(
+            !script.contains("worktree prune"),
+            "herdr path should not call git worktree prune: {script}"
+        );
+        assert!(
+            !script.contains("rm -rf"),
+            "herdr path should not delete trash directory: {script}"
+        );
+        // Branch delete and config cleanup still run
+        assert!(
+            script.contains("branch -d feature"),
+            "herdr path should still delete the branch: {script}"
+        );
+        assert!(
+            script.contains("config --local --remove-section"),
+            "herdr path should still remove worktree metadata: {script}"
+        );
+    }
+
+    #[test]
+    fn deferred_cleanup_script_backend_removal_keep_branch_skips_branch_delete() {
+        let mut dc = make_deferred_cleanup(
+            "/repo/worktrees/feature",
+            "/repo/worktrees/.trash",
+            "feature",
+            "feature",
+            "/repo/.git",
+            true, // keep_branch
+            false,
+        );
+        dc.worktree_removal_cmd = Some("herdr worktree remove --workspace ws-xyz".to_string());
+
+        let script = build_deferred_cleanup_script(&dc);
+
+        assert!(
+            !script.contains("branch -d"),
+            "keep_branch should skip branch delete: {script}"
+        );
+        assert!(
+            !script.contains("branch -D"),
+            "keep_branch should skip branch delete: {script}"
+        );
+        assert!(
+            script.contains("herdr worktree remove"),
+            "should still emit the backend removal command: {script}"
         );
     }
 }

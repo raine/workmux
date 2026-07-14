@@ -7,6 +7,7 @@ pub mod agent;
 pub mod conversation;
 pub mod handle;
 pub mod handshake;
+pub mod herdr;
 pub mod kitty;
 pub mod tmux;
 pub mod types;
@@ -164,6 +165,69 @@ pub trait Multiplexer: Send + Sync {
     /// Kill a session by its full name (including prefix).
     fn kill_session(&self, _full_name: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether this backend owns git worktrees alongside its workspaces.
+    ///
+    /// Backends answering `true` must implement the atomic worktree hooks below.
+    fn supports_atomic_worktree_workspace(&self) -> bool {
+        false
+    }
+
+    /// Atomically create a git worktree and a multiplexer workspace/window.
+    ///
+    /// Returns `Some((workspace_id, initial_pane_id))` when the backend handled
+    /// both operations atomically (skipping the separate `git worktree add` +
+    /// `create_window` calls). Returns `Ok(None)` to fall back to the default
+    /// two-step path.
+    fn create_worktree_and_workspace(
+        &self,
+        _branch: &str,
+        _base: Option<&str>,
+        _path: &Path,
+        _label: &str,
+    ) -> Result<Option<(String, String)>> {
+        Ok(None)
+    }
+
+    /// Atomically remove a git worktree and its multiplexer workspace/window.
+    ///
+    /// Returns `true` when the backend handled both operations atomically
+    /// (skipping the separate `kill_window` + git cleanup calls). Returns
+    /// `false` to fall back to the default two-step path.
+    fn remove_worktree_and_workspace(&self, _workspace_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Shell command that performs `remove_worktree_and_workspace` from a
+    /// detached script, for the deferred-cleanup path where the process is
+    /// tearing down the window it is running in.
+    ///
+    /// Returns `Ok(None)` when the backend has no such command, and the caller
+    /// falls back to the generic mv/prune/trash sequence.
+    fn shell_remove_worktree_and_workspace_cmd(
+        &self,
+        _workspace_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Ensure a workspace/window labelled `label` is attached to the worktree
+    /// for `branch` at `path`, creating the worktree too if it is missing.
+    ///
+    /// The backend owns the "does it already exist" probe, so only backends
+    /// implementing this pay the mux round trip.
+    ///
+    /// Returns `Some((workspace_id, initial_pane_id))` when the backend
+    /// attached a workspace, `Ok(None)` when one was already present or the
+    /// backend does not handle this.
+    fn ensure_worktree_workspace(
+        &self,
+        _path: &Path,
+        _label: &str,
+        _branch: &str,
+    ) -> Result<Option<(String, String)>> {
+        Ok(None)
     }
 
     /// Kill a window by its full name (including prefix)
@@ -841,10 +905,11 @@ pub trait Multiplexer: Send + Sync {
 ///
 /// 1. `$WORKMUX_BACKEND` set → use that backend
 /// 2. `$TMUX` set → tmux
-/// 3. `$WEZTERM_PANE` set → WezTerm
-/// 4. `$ZELLIJ`, `$ZELLIJ_PANE_ID`, or `$ZELLIJ_SESSION_NAME` set → Zellij
-/// 5. `$KITTY_WINDOW_ID` set → Kitty
-/// 6. None → defaults to tmux (for backward compatibility)
+/// 3. `$HERDR_PANE_ID` set → herdr
+/// 4. `$WEZTERM_PANE` set → WezTerm
+/// 5. `$ZELLIJ`, `$ZELLIJ_PANE_ID`, or `$ZELLIJ_SESSION_NAME` set → Zellij
+/// 6. `$KITTY_WINDOW_ID` set → Kitty
+/// 7. None → defaults to tmux (for backward compatibility)
 ///
 /// This ordering ensures that running tmux inside kitty (or wezterm) correctly
 /// selects the innermost multiplexer.
@@ -854,7 +919,7 @@ pub fn detect_backend() -> BackendType {
             Ok(bt) => return bt,
             Err(_) => {
                 eprintln!(
-                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij|herdr"
                 );
             }
         }
@@ -869,7 +934,7 @@ pub fn detect_backend_strict() -> Result<BackendType> {
         && !value.trim().is_empty()
     {
         return value.parse().map_err(|_| {
-            anyhow!("invalid WORKMUX_BACKEND={value:?}, expected tmux|wezterm|kitty|zellij")
+            anyhow!("invalid WORKMUX_BACKEND={value:?}, expected tmux|wezterm|kitty|zellij|herdr")
         });
     }
 
@@ -878,6 +943,7 @@ pub fn detect_backend_strict() -> Result<BackendType> {
 
 fn detect_backend_from_environment() -> BackendType {
     resolve_backend(
+        std::env::var("HERDR_PANE_ID").is_ok(),
         std::env::var("TMUX").is_ok(),
         std::env::var("WEZTERM_PANE").is_ok(),
         std::env::var("ZELLIJ").is_ok()
@@ -888,9 +954,21 @@ fn detect_backend_from_environment() -> BackendType {
 }
 
 /// Pure auto-detection logic, separated for testability.
-fn resolve_backend(tmux: bool, wezterm: bool, zellij: bool, kitty: bool) -> BackendType {
+fn resolve_backend(
+    herdr: bool,
+    tmux: bool,
+    wezterm: bool,
+    zellij: bool,
+    kitty: bool,
+) -> BackendType {
+    // Checked after tmux: herdr exports HERDR_PANE_ID into every descendant, so
+    // tmux started inside a herdr pane sets both and the inner tmux should win.
     if tmux {
         return BackendType::Tmux;
+    }
+
+    if herdr {
+        return BackendType::Herdr;
     }
 
     if wezterm {
@@ -915,6 +993,7 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
+        BackendType::Herdr => Arc::new(herdr::HerdrBackend::new()),
     }
 }
 
@@ -949,15 +1028,23 @@ mod tests {
     #[test]
     fn no_env_defaults_to_tmux() {
         assert_eq!(
-            resolve_backend(false, false, false, false),
+            resolve_backend(false, false, false, false, false),
             BackendType::Tmux
+        );
+    }
+
+    #[test]
+    fn herdr_only() {
+        assert_eq!(
+            resolve_backend(true, false, false, false, false),
+            BackendType::Herdr
         );
     }
 
     #[test]
     fn tmux_only() {
         assert_eq!(
-            resolve_backend(true, false, false, false),
+            resolve_backend(false, true, false, false, false),
             BackendType::Tmux
         );
     }
@@ -965,7 +1052,7 @@ mod tests {
     #[test]
     fn wezterm_only() {
         assert_eq!(
-            resolve_backend(false, true, false, false),
+            resolve_backend(false, false, true, false, false),
             BackendType::WezTerm
         );
     }
@@ -973,7 +1060,7 @@ mod tests {
     #[test]
     fn zellij_only() {
         assert_eq!(
-            resolve_backend(false, false, true, false),
+            resolve_backend(false, false, false, true, false),
             BackendType::Zellij
         );
     }
@@ -981,30 +1068,47 @@ mod tests {
     #[test]
     fn kitty_only() {
         assert_eq!(
-            resolve_backend(false, false, false, true),
+            resolve_backend(false, false, false, false, true),
             BackendType::Kitty
         );
     }
 
     #[test]
+    fn tmux_inside_herdr() {
+        assert_eq!(
+            resolve_backend(true, true, false, false, false),
+            BackendType::Tmux
+        );
+    }
+
+    #[test]
     fn tmux_inside_kitty() {
-        assert_eq!(resolve_backend(true, false, false, true), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(false, true, false, false, true),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn tmux_inside_wezterm() {
-        assert_eq!(resolve_backend(true, true, false, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(false, true, true, false, false),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn tmux_inside_zellij() {
-        assert_eq!(resolve_backend(true, false, true, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(false, true, false, true, false),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn wezterm_inside_kitty() {
         assert_eq!(
-            resolve_backend(false, true, false, true),
+            resolve_backend(false, false, true, false, true),
             BackendType::WezTerm
         );
     }
@@ -1012,13 +1116,16 @@ mod tests {
     #[test]
     fn zellij_inside_kitty() {
         assert_eq!(
-            resolve_backend(false, false, true, true),
+            resolve_backend(false, false, false, true, true),
             BackendType::Zellij
         );
     }
 
     #[test]
     fn all_env_vars_set() {
-        assert_eq!(resolve_backend(true, true, true, true), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(true, true, true, true, true),
+            BackendType::Tmux
+        );
     }
 }

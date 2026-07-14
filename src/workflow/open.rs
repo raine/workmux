@@ -427,6 +427,36 @@ pub fn open(
         ..options
     };
 
+    // The workspace may have been lost while the worktree stayed on disk, e.g.
+    // after a herdr restart; ask the backend to re-attach one.
+    let herdr_initial_pane = if mode == MuxMode::Window {
+        let label = options_with_workdir.primary_mux_label(&context.prefix, &handle);
+        match context
+            .mux
+            .ensure_worktree_workspace(&worktree_path, &label, &branch_name)?
+        {
+            Some((workspace_id, pane_id)) => {
+                git::set_worktree_meta_in(
+                    &base_handle,
+                    "workspace-id",
+                    &workspace_id,
+                    Some(&context.execution_dir),
+                )
+                .context("Failed to store herdr workspace_id for re-opened worktree")?;
+                info!(
+                    branch = branch_name,
+                    workspace_id = %workspace_id,
+                    pane_id = %pane_id,
+                    "open:herdr workspace re-created for existing worktree"
+                );
+                Some(pane_id)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     // Setup the environment
     let result = setup::setup_environment(
         context.mux.as_ref(),
@@ -437,6 +467,7 @@ pub fn open(
         &options_with_workdir,
         agent,
         None,
+        herdr_initial_pane,
     )?;
     info!(
         handle = handle,

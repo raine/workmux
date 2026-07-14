@@ -30,6 +30,20 @@ fn is_registered_worktree(path: &Path, context: &WorkflowContext) -> Result<bool
     Ok(false)
 }
 
+/// Whether the backend's combined worktree-and-workspace call can be used.
+///
+/// Backends implementing it (herdr) create the git worktree and the mux workspace
+/// in one step. `herdr worktree create` always creates a new branch and has no
+/// flag for upstream tracking, and setup only consumes the pane it returns in
+/// window mode, so anything else has to take the two-step path instead.
+fn can_create_worktree_and_workspace(
+    mode: MuxMode,
+    create_new: bool,
+    track_upstream: bool,
+) -> bool {
+    mode == MuxMode::Window && create_new && !track_upstream
+}
+
 use super::cleanup;
 use super::context::WorkflowContext;
 use super::setup;
@@ -407,15 +421,57 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         );
     }
 
-    git::create_worktree_in(
-        &worktree_path,
-        branch_name,
-        create_new,
-        base_branch_for_creation.as_deref(),
-        track_upstream,
-        Some(&context.execution_dir),
-    )
-    .context("Failed to create git worktree")?;
+    // For herdr, a single `herdr worktree create` call creates both the git
+    // worktree and the workspace atomically. Other backends return None and fall
+    // back to the separate `git worktree add` path below.
+    let atomic_workspace =
+        if can_create_worktree_and_workspace(options.mode, create_new, track_upstream) {
+            let label = options.primary_mux_label(&context.prefix, &current_handle);
+            context.mux.create_worktree_and_workspace(
+                branch_name,
+                base_branch_for_creation.as_deref(),
+                &worktree_path,
+                &label,
+            )?
+        } else {
+            None
+        };
+
+    let herdr_initial_pane = match atomic_workspace {
+        Some((workspace_id, pane_id)) => {
+            git::set_worktree_meta_in(
+                &current_handle,
+                "workspace-id",
+                &workspace_id,
+                Some(&context.execution_dir),
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to store herdr workspace_id for worktree '{}'",
+                    current_handle
+                )
+            })?;
+            info!(
+                branch = branch_name,
+                workspace_id = %workspace_id,
+                pane_id = %pane_id,
+                "create:herdr worktree+workspace created atomically"
+            );
+            Some(pane_id)
+        }
+        None => {
+            git::create_worktree_in(
+                &worktree_path,
+                branch_name,
+                create_new,
+                base_branch_for_creation.as_deref(),
+                track_upstream,
+                Some(&context.execution_dir),
+            )
+            .context("Failed to create git worktree")?;
+            None
+        }
+    };
 
     // Store the tmux mode in git config for cleanup and reopen operations.
     // This allows remove/close/merge/open to know whether to kill a window or session.
@@ -566,6 +622,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         &options_with_prompt,
         agent,
         placement_window_id,
+        herdr_initial_pane,
     )?;
     result.base_branch = base_branch_for_creation.clone();
     info!(
@@ -938,6 +995,74 @@ mod tests {
         fn get_all_live_pane_info(&self) -> Result<HashMap<String, LivePaneInfo>> {
             Ok(HashMap::new())
         }
+    }
+
+    #[test]
+    fn atomic_workspace_used_for_a_plain_new_window() {
+        assert!(can_create_worktree_and_workspace(
+            MuxMode::Window,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn atomic_workspace_skipped_in_session_mode() {
+        // Setup only consumes the returned pane in window mode, so taking this
+        // path in session mode orphans the workspace when create_session fails.
+        assert!(!can_create_worktree_and_workspace(
+            MuxMode::Session,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn atomic_workspace_skipped_for_an_existing_branch() {
+        // `herdr worktree create` always creates the branch.
+        assert!(!can_create_worktree_and_workspace(
+            MuxMode::Window,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn atomic_workspace_skipped_when_tracking_upstream() {
+        // `herdr worktree create` has no flag for upstream tracking.
+        assert!(!can_create_worktree_and_workspace(
+            MuxMode::Window,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn atomic_workspace_label_follows_the_explicit_window_name() {
+        // The workspace is created before setup runs, so it has to be labelled
+        // with the name setup will later look it up by. Deriving the label from
+        // the handle instead leaves kill_window and select_window unable to
+        // resolve it.
+        let mut options = SetupOptions::new(false, false, false);
+        options.mode = MuxMode::Window;
+        options.target_window_name = Some("custom-window".to_string());
+
+        assert_eq!(
+            options.primary_mux_label("wm/", "worktree-dir-handle"),
+            "wm/custom-window"
+        );
+    }
+
+    #[test]
+    fn atomic_workspace_label_falls_back_to_the_handle() {
+        let mut options = SetupOptions::new(false, false, false);
+        options.mode = MuxMode::Window;
+        options.target_window_name = None;
+
+        assert_eq!(
+            options.primary_mux_label("wm/", "worktree-dir-handle"),
+            "wm/worktree-dir-handle"
+        );
     }
 
     #[test]

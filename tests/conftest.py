@@ -183,6 +183,9 @@ class MuxEnvironment(ABC):
 
         # Base environment setup
         self.env = os.environ.copy()
+        # Ambient herdr hijacks backend detection and drives the user's real
+        # session, so scrub it here rather than per-backend below.
+        self.env.pop("HERDR_PANE_ID", None)
         self.env["PATH"] = f"{self.fake_bin_dir}:{self.env.get('PATH', '')}"
         self.env["TMPDIR"] = str(self.tmp_path)
         self.env["HOME"] = str(self.home_path)
