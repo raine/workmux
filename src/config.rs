@@ -1454,11 +1454,25 @@ pub struct ContainerConfig {
     /// (Apple Container).
     #[serde(default)]
     pub excluded_files: Option<Vec<String>>,
+
+    /// OCI runtime to run the container under (docker/podman `--runtime`).
+    /// Unset = the runtime's default (runc). Set to e.g. "kata" to run the
+    /// container under a VM-based OCI runtime for stronger isolation. The named
+    /// runtime must be installed and registered with the container runtime.
+    /// Global-only: ignored in project config, since it changes the isolation
+    /// boundary.
+    #[serde(default)]
+    pub oci_runtime: Option<String>,
 }
 
 impl ContainerConfig {
     pub fn runtime(&self) -> SandboxRuntime {
         self.runtime.unwrap_or_else(SandboxRuntime::detect)
+    }
+
+    /// OCI runtime name to pass to `docker/podman run --runtime`, if configured.
+    pub fn oci_runtime(&self) -> Option<&str> {
+        self.oci_runtime.as_deref()
     }
 
     pub fn devices(&self) -> &[ContainerDevice] {
@@ -1486,10 +1500,10 @@ impl ContainerConfig {
         Ok(())
     }
 
-    /// Merge: project overrides global, per-field, EXCEPT for `devices` and
-    /// `group_add` which are security-sensitive and global-only. Warnings for
-    /// project-level attempts are emitted in `Config::merge` where both values
-    /// are visible.
+    /// Merge: project overrides global, per-field, EXCEPT for `devices`,
+    /// `group_add` and `oci_runtime` which are security-sensitive and
+    /// global-only. Warnings for project-level attempts are emitted in
+    /// `Config::merge` where both values are visible.
     fn merge(global: Self, project: Self) -> Self {
         // Security: excluded_files is global-only. Project config cannot set it --
         // otherwise a repo's .workmux.yaml could delete user-level secret
@@ -1507,6 +1521,7 @@ impl ContainerConfig {
             devices: global.devices,
             group_add: global.group_add,
             excluded_files: global.excluded_files,
+            oci_runtime: global.oci_runtime,
         }
     }
 }
@@ -2550,10 +2565,11 @@ impl Config {
                 self.sandbox.agent_config_dir.clone()
             },
             lima: LimaConfig::merge(self.sandbox.lima, project.sandbox.lima),
-            // Security: sandbox.container.devices and sandbox.container.group_add
-            // are global-only. They expose host hardware and can expand
-            // filesystem access via supplementary groups, so a malicious repo
-            // must not be able to enable them via .workmux.yaml.
+            // Security: sandbox.container.devices, group_add and oci_runtime
+            // are global-only. devices/group_add expose host hardware and can
+            // expand filesystem access via supplementary groups; oci_runtime
+            // changes the isolation boundary (e.g. a VM runtime vs runc). A
+            // malicious repo must not be able to set them via .workmux.yaml.
             container: {
                 if project.sandbox.container.devices.is_some() {
                     tracing::warn!(
@@ -2564,6 +2580,12 @@ impl Config {
                 if project.sandbox.container.group_add.is_some() {
                     tracing::warn!(
                         "sandbox.container.group_add in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                if project.sandbox.container.oci_runtime.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.oci_runtime in project config (.workmux.yaml) is ignored -- \
                         move it to your global config (~/.config/workmux/config.yaml)"
                     );
                 }
@@ -2918,6 +2940,10 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   #   runtime: docker          # docker | podman | apple-container
 #   #   # memory: 16G            # VM memory limit (apple-container default: 16G)
 #   #   # cpus: 4                # VM CPU count (only passed when set)
+#   #   # OCI runtime to run under (docker/podman --runtime). Unset = runc.
+#   #   # Set to e.g. "kata" for VM-based isolation (runtime must be installed
+#   #   # and registered). GLOBAL-ONLY: ignored in a project .workmux.yaml.
+#   #   # oci_runtime: kata
 #   #   # Mask files out of the worktree bind mounts (paths relative to the
 #   #   # worktree root). Each listed file is shadowed by /dev/null so the
 #   #   # sandboxed agent cannot read it. Missing files are skipped.
@@ -3727,6 +3753,32 @@ agents:
         let project = Config::default();
         let merged = global.merge(project);
         assert_eq!(merged.sandbox.host_commands(), &["just".to_string()]);
+    }
+
+    #[test]
+    fn container_oci_runtime_is_global_only() {
+        // oci_runtime changes the isolation boundary, so a project .workmux.yaml
+        // must not be able to override the global value.
+        let global = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let project = container_cfg(|c| c.oci_runtime = Some("runc".into()));
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), Some("kata"));
+    }
+
+    #[test]
+    fn container_oci_runtime_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), None);
+    }
+
+    #[test]
+    fn container_oci_runtime_uses_global() {
+        let global = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let project = Config::default();
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), Some("kata"));
     }
 
     #[test]

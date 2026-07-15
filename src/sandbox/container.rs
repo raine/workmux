@@ -310,6 +310,15 @@ fn build_docker_run_args_inner(
 
     // Base command (no runtime name -- caller prepends that)
     args.push("run".to_string());
+
+    // Optional VM/sandboxed OCI runtime (docker/podman `--runtime`). Unset =
+    // the runtime's default (runc). Placed right after `run` so it applies
+    // before all other flags; callers still insert `--name` at index 1.
+    if let Some(oci_runtime) = config.container.oci_runtime() {
+        args.push("--runtime".to_string());
+        args.push(oci_runtime.to_string());
+    }
+
     args.push("--rm".to_string());
     args.push("-it".to_string());
 
@@ -997,6 +1006,29 @@ mod tests {
         assert!(args.contains(&"sh".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn test_oci_runtime_inserted_after_run() {
+        let config = sandbox_config(SandboxRuntime::Docker, |c| {
+            c.oci_runtime = Some("kata".to_string());
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert_eq!(args[0], "run");
+        assert_eq!(args[1], "--runtime");
+        assert_eq!(args[2], "kata");
+    }
+
+    #[test]
+    fn test_oci_runtime_absent_by_default() {
+        let config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--runtime").is_empty(),
+            "no --runtime should be added when oci_runtime is unset, got: {args:?}"
+        );
     }
 
     #[test]
