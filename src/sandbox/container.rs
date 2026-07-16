@@ -366,6 +366,19 @@ fn build_docker_run_args_inner(
         args.push(dev.to_arg());
     }
 
+    // Extra capabilities / security options (global-only). Applied in both
+    // network modes. Primary use: docker-in-docker under `oci_runtime: kata`,
+    // where `--privileged` cannot be used. These relax confinement only inside
+    // the (VM-isolated) guest.
+    for cap in config.container.cap_add() {
+        args.push("--cap-add".to_string());
+        args.push(cap.clone());
+    }
+    for opt in config.container.security_opt() {
+        args.push("--security-opt".to_string());
+        args.push(opt.clone());
+    }
+
     if network_deny {
         // Deny mode: start as root for iptables setup, drop privileges via setpriv.
         // Do NOT use --userns=keep-id (Podman) in deny mode since the container
@@ -1028,6 +1041,39 @@ mod tests {
         assert!(
             find_flag_value(&args, "--runtime").is_empty(),
             "no --runtime should be added when oci_runtime is unset, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_emitted() {
+        let config = sandbox_config(SandboxRuntime::Docker, |c| {
+            c.cap_add = Some(vec!["ALL".to_string()]);
+            c.security_opt = Some(vec![
+                "seccomp=unconfined".to_string(),
+                "systempaths=unconfined".to_string(),
+            ]);
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert_eq!(find_flag_value(&args, "--cap-add"), vec!["ALL"]);
+        assert_eq!(
+            find_flag_value(&args, "--security-opt"),
+            vec!["seccomp=unconfined", "systempaths=unconfined"]
+        );
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_absent_by_default() {
+        let config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--cap-add").is_empty(),
+            "no --cap-add when cap_add is unset, got: {args:?}"
+        );
+        assert!(
+            find_flag_value(&args, "--security-opt").is_empty(),
+            "no --security-opt when security_opt is unset, got: {args:?}"
         );
     }
 

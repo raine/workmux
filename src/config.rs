@@ -1463,6 +1463,27 @@ pub struct ContainerConfig {
     /// boundary.
     #[serde(default)]
     pub oci_runtime: Option<String>,
+
+    /// Extra Linux capabilities to grant the container (docker/podman
+    /// `--cap-add`). Each entry is passed verbatim, e.g. "ALL" or "SYS_ADMIN".
+    /// Global-only: ignored in project config, since capabilities relax the
+    /// isolation boundary. Empty by default.
+    ///
+    /// Needed for docker-in-docker under a VM runtime (`oci_runtime: kata`),
+    /// where `--privileged` is not usable (it injects host device nodes that
+    /// collide with the guest's, failing to boot). Granting capabilities +
+    /// security_opt instead boots cleanly, and the daemon stays confined to
+    /// the guest VM.
+    #[serde(default)]
+    pub cap_add: Option<Vec<String>>,
+
+    /// Extra security options for the container (docker/podman
+    /// `--security-opt`). Each entry is passed verbatim, e.g.
+    /// "seccomp=unconfined" or "systempaths=unconfined". Global-only: ignored
+    /// in project config, since these relax the isolation boundary. Empty by
+    /// default. See `cap_add` for the docker-in-docker rationale.
+    #[serde(default)]
+    pub security_opt: Option<Vec<String>>,
 }
 
 impl ContainerConfig {
@@ -1483,6 +1504,18 @@ impl ContainerConfig {
         self.group_add.as_deref().unwrap_or(&[])
     }
 
+    /// Extra capabilities to pass to `docker/podman run --cap-add`.
+    /// Returns empty slice when unset.
+    pub fn cap_add(&self) -> &[String] {
+        self.cap_add.as_deref().unwrap_or(&[])
+    }
+
+    /// Extra security options to pass to `docker/podman run --security-opt`.
+    /// Returns empty slice when unset.
+    pub fn security_opt(&self) -> &[String] {
+        self.security_opt.as_deref().unwrap_or(&[])
+    }
+
     /// Files to mask out of the worktree bind mount (relative to worktree root).
     /// Returns empty slice when unset.
     pub fn excluded_files(&self) -> &[String] {
@@ -1501,9 +1534,9 @@ impl ContainerConfig {
     }
 
     /// Merge: project overrides global, per-field, EXCEPT for `devices`,
-    /// `group_add` and `oci_runtime` which are security-sensitive and
-    /// global-only. Warnings for project-level attempts are emitted in
-    /// `Config::merge` where both values are visible.
+    /// `group_add`, `oci_runtime`, `cap_add` and `security_opt` which are
+    /// security-sensitive and global-only. Warnings for project-level attempts
+    /// are emitted in `Config::merge` where both values are visible.
     fn merge(global: Self, project: Self) -> Self {
         // Security: excluded_files is global-only. Project config cannot set it --
         // otherwise a repo's .workmux.yaml could delete user-level secret
@@ -1522,6 +1555,8 @@ impl ContainerConfig {
             group_add: global.group_add,
             excluded_files: global.excluded_files,
             oci_runtime: global.oci_runtime,
+            cap_add: global.cap_add,
+            security_opt: global.security_opt,
         }
     }
 }
@@ -2565,11 +2600,13 @@ impl Config {
                 self.sandbox.agent_config_dir.clone()
             },
             lima: LimaConfig::merge(self.sandbox.lima, project.sandbox.lima),
-            // Security: sandbox.container.devices, group_add and oci_runtime
-            // are global-only. devices/group_add expose host hardware and can
-            // expand filesystem access via supplementary groups; oci_runtime
-            // changes the isolation boundary (e.g. a VM runtime vs runc). A
-            // malicious repo must not be able to set them via .workmux.yaml.
+            // Security: sandbox.container.devices, group_add, oci_runtime,
+            // cap_add and security_opt are global-only. devices/group_add
+            // expose host hardware and can expand filesystem access via
+            // supplementary groups; oci_runtime changes the isolation boundary
+            // (e.g. a VM runtime vs runc); cap_add/security_opt relax the
+            // container's capability/seccomp/apparmor confinement. A malicious
+            // repo must not be able to set them via .workmux.yaml.
             container: {
                 if project.sandbox.container.devices.is_some() {
                     tracing::warn!(
@@ -2586,6 +2623,18 @@ impl Config {
                 if project.sandbox.container.oci_runtime.is_some() {
                     tracing::warn!(
                         "sandbox.container.oci_runtime in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                if project.sandbox.container.cap_add.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.cap_add in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                if project.sandbox.container.security_opt.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.security_opt in project config (.workmux.yaml) is ignored -- \
                         move it to your global config (~/.config/workmux/config.yaml)"
                     );
                 }
@@ -2944,6 +2993,11 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   #   # Set to e.g. "kata" for VM-based isolation (runtime must be installed
 #   #   # and registered). GLOBAL-ONLY: ignored in a project .workmux.yaml.
 #   #   # oci_runtime: kata
+#   #   # Extra capabilities / security options (docker --cap-add /
+#   #   # --security-opt). Empty by default. GLOBAL-ONLY. Main use: enabling
+#   #   # docker-in-docker under oci_runtime: kata (where --privileged fails).
+#   #   # cap_add: [ALL]
+#   #   # security_opt: [seccomp=unconfined, apparmor=unconfined, systempaths=unconfined]
 #   #   # Mask files out of the worktree bind mounts (paths relative to the
 #   #   # worktree root). Each listed file is shadowed by /dev/null so the
 #   #   # sandboxed agent cannot read it. Missing files are skipped.
@@ -3763,6 +3817,35 @@ agents:
         let project = container_cfg(|c| c.oci_runtime = Some("runc".into()));
         let merged = global.merge(project);
         assert_eq!(merged.sandbox.container.oci_runtime(), Some("kata"));
+    }
+
+    #[test]
+    fn container_cap_add_and_security_opt_are_global_only() {
+        // Capabilities / security options relax confinement, so a project
+        // .workmux.yaml must not be able to override the global values.
+        let global = container_cfg(|c| {
+            c.cap_add = Some(vec!["ALL".into()]);
+            c.security_opt = Some(vec!["seccomp=unconfined".into()]);
+        });
+        let project = container_cfg(|c| {
+            c.cap_add = Some(vec!["NET_ADMIN".into()]);
+            c.security_opt = Some(vec!["seccomp=default".into()]);
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.cap_add(), &["ALL".to_string()]);
+        assert_eq!(
+            merged.sandbox.container.security_opt(),
+            &["seccomp=unconfined".to_string()]
+        );
+    }
+
+    #[test]
+    fn container_cap_add_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = container_cfg(|c| c.cap_add = Some(vec!["ALL".into()]));
+        let merged = global.merge(project);
+        assert!(merged.sandbox.container.cap_add().is_empty());
+        assert!(merged.sandbox.container.security_opt().is_empty());
     }
 
     #[test]
