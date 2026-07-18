@@ -6,6 +6,7 @@
 //! - No visual status indicator (set_status is a no-op)
 
 use anyhow::{Context, Result, anyhow};
+use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -98,14 +99,57 @@ fn find_created_terminal_pane_id(
     before_ids: &HashSet<u32>,
     panes: &[PaneInfo],
     tab_id: Option<u32>,
+    expected_command: Option<&str>,
 ) -> Option<String> {
-    panes
+    let candidates: Vec<_> = panes
         .iter()
         .filter(|pane| is_terminal_pane_in_tab(pane, tab_id))
         .filter(|pane| !before_ids.contains(&pane.id))
-        .map(|pane| pane.id)
-        .max()
-        .map(|id| format!("terminal_{}", id))
+        .collect();
+
+    if let Some(expected_command) = expected_command {
+        let matching: Vec<_> = candidates
+            .iter()
+            .filter(|pane| {
+                pane.terminal_command
+                    .as_deref()
+                    .into_iter()
+                    .chain(pane.pane_command.as_deref())
+                    .any(|command| command.contains(expected_command))
+            })
+            .collect();
+        if let [pane] = matching.as_slice() {
+            return Some(format!("terminal_{}", pane.id));
+        }
+    }
+
+    match candidates.as_slice() {
+        [pane] => Some(format!("terminal_{}", pane.id)),
+        _ => None,
+    }
+}
+
+fn query_json_with_retry<T, F>(mut query: F, parse_context: &str, delay: Duration) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnMut() -> Result<String>,
+{
+    const ATTEMPTS: usize = 5;
+
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        let output = query()?;
+        match serde_json::from_str(&output) {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(delay);
+        }
+    }
+
+    Err(last_error.expect("at least one JSON parse attempt"))
+        .with_context(|| parse_context.to_string())
 }
 
 /// Extract the base command name from a full command path/string.
@@ -213,24 +257,30 @@ impl ZellijBackend {
     /// The `--tab` flag includes `tab_id`, `tab_name`, `tab_position`.
     /// The `--command` flag includes `pane_command`, `pane_cwd`.
     fn list_panes(&self) -> Result<Vec<PaneInfo>> {
-        let output = self
-            .command()
-            .args(&["action", "list-panes", "--json", "--tab", "--command"])
-            .run_and_capture_stdout()
-            .context("Failed to list panes")?;
-
-        serde_json::from_str(&output).context("Failed to parse list-panes JSON output")
+        query_json_with_retry(
+            || {
+                self.command()
+                    .args(&["action", "list-panes", "--json", "--tab", "--command"])
+                    .run_and_capture_stdout()
+                    .context("Failed to list panes")
+            },
+            "Failed to parse list-panes JSON output",
+            Duration::from_millis(50),
+        )
     }
 
     /// Query all tabs using `zellij action list-tabs --json`
     fn list_tabs(&self) -> Result<Vec<TabInfo>> {
-        let output = self
-            .command()
-            .args(&["action", "list-tabs", "--json"])
-            .run_and_capture_stdout()
-            .context("Failed to list tabs")?;
-
-        serde_json::from_str(&output).context("Failed to parse list-tabs JSON output")
+        query_json_with_retry(
+            || {
+                self.command()
+                    .args(&["action", "list-tabs", "--json"])
+                    .run_and_capture_stdout()
+                    .context("Failed to list tabs")
+            },
+            "Failed to parse list-tabs JSON output",
+            Duration::from_millis(50),
+        )
     }
 
     /// Get focused pane ID from list-panes output
@@ -997,7 +1047,7 @@ impl Multiplexer for ZellijBackend {
                 .list_panes()
                 .context("Failed to list zellij panes after split")?;
             if let Some(pane_id) =
-                find_created_terminal_pane_id(&before_ids, &panes_after, target_tab_id)
+                find_created_terminal_pane_id(&before_ids, &panes_after, target_tab_id, command)
             {
                 return Ok(pane_id);
             }
@@ -1173,8 +1223,39 @@ mod tests {
         ];
 
         assert_eq!(
-            find_created_terminal_pane_id(&before_ids, &panes, Some(7)),
+            find_created_terminal_pane_id(&before_ids, &panes, Some(7), None),
             Some("terminal_3".to_string())
+        );
+    }
+
+    #[test]
+    fn find_created_terminal_pane_id_matches_command_with_higher_id_intruder() {
+        let before_ids = HashSet::from([1]);
+        let mut created = test_pane(2, false, Some(7));
+        created.terminal_command =
+            Some("sh -c echo ready > /tmp/workmux_pipe_1; exec '/bin/sh' -l".to_string());
+        let mut intruder = test_pane(3, false, Some(7));
+        intruder.terminal_command = Some("sh -c exec unrelated-command".to_string());
+
+        assert_eq!(
+            find_created_terminal_pane_id(
+                &before_ids,
+                &[created, intruder],
+                Some(7),
+                Some("echo ready > /tmp/workmux_pipe_1; exec '/bin/sh' -l"),
+            ),
+            Some("terminal_2".to_string())
+        );
+    }
+
+    #[test]
+    fn find_created_terminal_pane_id_rejects_ambiguous_new_panes() {
+        let before_ids = HashSet::from([1]);
+        let panes = vec![test_pane(2, false, Some(7)), test_pane(3, false, Some(7))];
+
+        assert_eq!(
+            find_created_terminal_pane_id(&before_ids, &panes, Some(7), None),
+            None
         );
     }
 
@@ -1188,9 +1269,34 @@ mod tests {
         ];
 
         assert_eq!(
-            find_created_terminal_pane_id(&before_ids, &panes, Some(7)),
+            find_created_terminal_pane_id(&before_ids, &panes, Some(7), None),
             None
         );
+    }
+
+    #[test]
+    fn query_json_with_retry_accepts_eventual_json() {
+        let mut outputs = ["", "[]"].into_iter();
+        let parsed: Vec<PaneInfo> = query_json_with_retry(
+            || Ok(outputs.next().unwrap().to_string()),
+            "parse panes",
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn query_json_with_retry_reports_final_parse_error() {
+        let error = query_json_with_retry::<Vec<PaneInfo>, _>(
+            || Ok(String::new()),
+            "parse panes",
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("parse panes"));
     }
 
     // === extract_base_command ===
