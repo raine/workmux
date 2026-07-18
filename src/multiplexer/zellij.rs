@@ -129,6 +129,30 @@ fn find_created_terminal_pane_id(
     }
 }
 
+fn pane_navigation(panes: &[PaneInfo], target_id: u32) -> Result<(u32, isize)> {
+    let target = panes
+        .iter()
+        .find(|pane| pane.id == target_id && !pane.is_plugin)
+        .ok_or_else(|| anyhow!("Target pane terminal_{} not found", target_id))?;
+    let tab_id = target
+        .tab_id
+        .ok_or_else(|| anyhow!("Target pane terminal_{} has no tab ID", target_id))?;
+    let tab_panes: Vec<_> = panes
+        .iter()
+        .filter(|pane| !pane.is_plugin && pane.tab_id == Some(tab_id))
+        .collect();
+    let current_idx = tab_panes
+        .iter()
+        .position(|pane| pane.is_focused)
+        .ok_or_else(|| anyhow!("No focused pane found in tab {}", tab_id))?;
+    let target_idx = tab_panes
+        .iter()
+        .position(|pane| pane.id == target_id)
+        .expect("target pane is included in its tab");
+
+    Ok((tab_id, target_idx as isize - current_idx as isize))
+}
+
 fn query_json_with_retry<T, F>(mut query: F, parse_context: &str, delay: Duration) -> Result<T>
 where
     T: DeserializeOwned,
@@ -663,68 +687,23 @@ impl Multiplexer for ZellijBackend {
             return Ok(());
         }
 
-        // Fallback for older Zellij builds without focus-pane-id: navigate with
-        // focus-next-pane/focus-previous-pane in the current tab.
-
-        // Extract numeric ID from pane_id
-        let target_id: u32 =
+        let target_id =
             parse_pane_id(pane_id).ok_or_else(|| anyhow!("Invalid pane_id: {}", pane_id))?;
+        let panes = self.list_panes()?;
+        let (tab_id, steps) = pane_navigation(&panes, target_id)?;
+        self.go_to_tab_by_id(tab_id)?;
 
-        // Get focused tab name to filter panes
-        let focused_tab = self
-            .focused_tab_name()
-            .ok_or_else(|| anyhow!("Could not determine focused tab"))?;
-
-        // Get all panes in the current tab
-        let all_panes = self.list_panes()?;
-        let tab_panes: Vec<_> = all_panes
-            .iter()
-            .filter(|p| !p.is_plugin && p.tab_name == focused_tab)
-            .collect();
-
-        // Find current and target indices
-        let current_idx = tab_panes
-            .iter()
-            .position(|p| p.is_focused)
-            .ok_or_else(|| anyhow!("No focused pane found in current tab"))?;
-
-        let target_idx = tab_panes
-            .iter()
-            .position(|p| p.id == target_id)
-            .ok_or_else(|| anyhow!("Target pane {} not found in current tab", pane_id))?;
-
-        if current_idx == target_idx {
-            // Already focused
-            return Ok(());
-        }
-
-        // Navigate to target pane
-        if target_idx < current_idx {
-            // Navigate backwards
-            let steps = current_idx - target_idx;
-            debug!(
-                current_idx,
-                target_idx, steps, "Navigating backwards to focused pane"
-            );
-            for _ in 0..steps {
-                self.command()
-                    .args(&["action", "focus-previous-pane"])
-                    .run()
-                    .context("Failed to navigate to previous pane")?;
-            }
+        let (action, count) = if steps < 0 {
+            ("focus-previous-pane", steps.unsigned_abs())
         } else {
-            // Navigate forwards
-            let steps = target_idx - current_idx;
-            debug!(
-                current_idx,
-                target_idx, steps, "Navigating forwards to focused pane"
-            );
-            for _ in 0..steps {
-                self.command()
-                    .args(&["action", "focus-next-pane"])
-                    .run()
-                    .context("Failed to navigate to next pane")?;
-            }
+            ("focus-next-pane", steps as usize)
+        };
+        debug!(pane_id, tab_id, steps, "Navigating to focused pane");
+        for _ in 0..count {
+            self.command()
+                .args(&["action", action])
+                .run()
+                .with_context(|| format!("Failed to navigate to pane {}", pane_id))?;
         }
 
         Ok(())
@@ -1207,6 +1186,20 @@ mod tests {
     fn normalize_terminal_pane_id_rejects_empty_or_plugin_ids() {
         assert_eq!(normalize_terminal_pane_id(""), None);
         assert_eq!(normalize_terminal_pane_id("plugin_42"), None);
+    }
+
+    #[test]
+    fn pane_navigation_uses_target_tab_focus() {
+        let mut other_tab_focus = test_pane(1, false, Some(3));
+        other_tab_focus.is_focused = true;
+        let mut target_tab_focus = test_pane(10, false, Some(7));
+        target_tab_focus.is_focused = true;
+        let target = test_pane(11, false, Some(7));
+
+        assert_eq!(
+            pane_navigation(&[other_tab_focus, target_tab_focus, target], 11).unwrap(),
+            (7, 1)
+        );
     }
 
     // === find_created_terminal_pane_id ===
