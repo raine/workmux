@@ -6,7 +6,9 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::multiplexer::{
-    AgentStatus, BackendType, LivePaneInfo, Multiplexer, create_backend, detect_backend,
+    AgentStatus, BackendType, LivePaneInfo, Multiplexer, STATUS_TARGET_BACKEND_ENV,
+    STATUS_TARGET_INSTANCE_ENV, STATUS_TARGET_PANE_ENV, create_backend,
+    create_backend_for_instance, detect_backend,
 };
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -19,6 +21,56 @@ pub enum SetWindowStatusCommand {
     Done,
     /// Clear the status
     Clear,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StatusTarget {
+    backend: BackendType,
+    instance: String,
+    pane_id: String,
+}
+
+impl StatusTarget {
+    fn from_env() -> Result<Option<Self>> {
+        Self::from_values(
+            std::env::var(STATUS_TARGET_BACKEND_ENV).ok(),
+            std::env::var(STATUS_TARGET_INSTANCE_ENV).ok(),
+            std::env::var(STATUS_TARGET_PANE_ENV).ok(),
+        )
+    }
+
+    fn from_values(
+        backend: Option<String>,
+        instance: Option<String>,
+        pane_id: Option<String>,
+    ) -> Result<Option<Self>> {
+        if backend.is_none() && instance.is_none() && pane_id.is_none() {
+            return Ok(None);
+        }
+
+        let backend = backend
+            .ok_or_else(|| anyhow::anyhow!("{} is missing", STATUS_TARGET_BACKEND_ENV))?
+            .parse::<BackendType>()
+            .map_err(anyhow::Error::msg)?;
+        if backend != BackendType::Zellij {
+            return Err(anyhow::anyhow!(
+                "status targets do not support the {} backend",
+                backend
+            ));
+        }
+        let instance = instance
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{} is missing", STATUS_TARGET_INSTANCE_ENV))?;
+        let pane_id = pane_id
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{} is missing", STATUS_TARGET_PANE_ENV))?;
+
+        Ok(Some(Self {
+            backend,
+            instance,
+            pane_id,
+        }))
+    }
 }
 
 pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
@@ -37,6 +89,46 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     let config = Config::load(None)?;
+
+    match StatusTarget::from_env() {
+        Ok(Some(target)) => {
+            let mux = create_backend_for_instance(target.backend, &target.instance);
+            match mux.get_live_pane_info(&target.pane_id) {
+                Ok(Some(_)) => {
+                    return apply_status_update(
+                        &cmd,
+                        &config,
+                        codex_context.as_ref(),
+                        &*mux,
+                        &target.pane_id,
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        backend = %target.backend,
+                        instance = %target.instance,
+                        pane_id = %target.pane_id,
+                        "status target pane is unavailable"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        backend = %target.backend,
+                        instance = %target.instance,
+                        pane_id = %target.pane_id,
+                        error = %error,
+                        "failed to validate status target pane"
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(error = %error, "invalid status target environment");
+            return Ok(());
+        }
+    }
 
     // Fail silently if not in a multiplexer session. Some agents, including
     // Codex, strip multiplexer env vars from hook command environments; in that
@@ -259,6 +351,36 @@ mod tests {
 
     fn no_backend_signals() -> StatusBackendSignals {
         StatusBackendSignals::default()
+    }
+
+    #[test]
+    fn status_target_accepts_complete_identity() {
+        assert_eq!(
+            StatusTarget::from_values(
+                Some("zellij".to_string()),
+                Some("dev session".to_string()),
+                Some("terminal_7".to_string()),
+            )
+            .unwrap(),
+            Some(StatusTarget {
+                backend: BackendType::Zellij,
+                instance: "dev session".to_string(),
+                pane_id: "terminal_7".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn status_target_rejects_partial_identity() {
+        assert!(
+            StatusTarget::from_values(Some("zellij".to_string()), Some("dev".to_string()), None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn status_target_is_absent_without_identity_variables() {
+        assert_eq!(StatusTarget::from_values(None, None, None).unwrap(), None);
     }
 
     #[test]

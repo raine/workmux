@@ -28,6 +28,28 @@ pub use types::*;
 
 use crate::config::{Config, PaneConfig, SplitDirection};
 
+pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
+pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
+pub const STATUS_TARGET_PANE_ENV: &str = "WORKMUX_STATUS_PANE_ID";
+
+fn command_with_status_target(
+    command: &str,
+    backend: &str,
+    instance: &str,
+    pane_id: &str,
+) -> String {
+    format!(
+        "env {}={} {}={} {}={} {}",
+        STATUS_TARGET_BACKEND_ENV,
+        agent::shell_quote(backend),
+        STATUS_TARGET_INSTANCE_ENV,
+        agent::shell_quote(instance),
+        STATUS_TARGET_PANE_ENV,
+        agent::shell_quote(pane_id),
+        command
+    )
+}
+
 /// Main trait for terminal multiplexer backends.
 ///
 /// Implementations must be Send + Sync to allow sharing via Arc<dyn Multiplexer>.
@@ -606,6 +628,17 @@ pub trait Multiplexer: Send + Sync {
                     resolved.render_command()
                 };
 
+                let final_command = if is_agent_pane && self.name() == "zellij" {
+                    command_with_status_target(
+                        &final_command,
+                        self.name(),
+                        &self.instance_id(),
+                        &spawned_id,
+                    )
+                } else {
+                    final_command
+                };
+
                 let _ = self.clear_pane(&spawned_id);
                 self.send_keys(&spawned_id, &final_command)?;
 
@@ -817,9 +850,33 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
     }
 }
 
+pub fn create_backend_for_instance(
+    backend_type: BackendType,
+    instance: &str,
+) -> Arc<dyn Multiplexer> {
+    match backend_type {
+        BackendType::Zellij => Arc::new(zellij::ZellijBackend::for_session(instance)),
+        _ => create_backend(backend_type),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_target_command_quotes_identity_values() {
+        assert_eq!(
+            command_with_status_target(
+                "claude --continue",
+                "zellij",
+                "session with spaces",
+                "terminal_7",
+            ),
+            "env WORKMUX_STATUS_BACKEND=zellij WORKMUX_STATUS_INSTANCE='session with spaces' \
+             WORKMUX_STATUS_PANE_ID=terminal_7 claude --continue"
+        );
+    }
 
     #[test]
     fn no_env_defaults_to_tmux() {
