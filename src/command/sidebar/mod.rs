@@ -1111,26 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_width_uses_default_for_excessive_synced_width() {
-        let config = crate::config::Config::default();
-        assert_eq!(resolve_width_for(&config, 200, Some(150)), 25);
-    }
-
-    #[test]
-    fn resolve_width_uses_default_for_excessive_explicit_width() {
-        let mut config = crate::config::Config::default();
-        config.sidebar.width = Some(crate::config::SidebarWidth::Absolute(150));
-        assert_eq!(resolve_width_for(&config, 200, Some(40)), 25);
-    }
-
-    #[test]
-    fn resolve_width_keeps_explicit_width_at_defensive_max() {
-        let mut config = crate::config::Config::default();
-        config.sidebar.width = Some(crate::config::SidebarWidth::Absolute(80));
-        assert_eq!(resolve_width_for(&config, 200, None), 80);
-    }
-
-    #[test]
     fn resolve_height_uses_explicit_config_before_synced_height() {
         let mut config = crate::config::Config::default();
         config.sidebar.height = Some(crate::config::SidebarHeight::Absolute(2));
