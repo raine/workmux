@@ -637,7 +637,10 @@ pub struct PaneConfig {
     #[serde(default)]
     pub focus: bool,
 
-    /// Split direction from the previous pane (horizontal or vertical)
+    /// Split direction for the new pane (horizontal or vertical).
+    ///
+    /// The pane splits from `target` when specified, otherwise from the most
+    /// recently created pane.
     #[serde(default)]
     pub split: Option<SplitDirection>,
 
@@ -5142,6 +5145,70 @@ panes:
         let panes = config.panes.unwrap();
         assert!(panes[0].zoom);
         assert!(!panes[1].zoom);
+    }
+
+    #[test]
+    fn target_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+    focus: true
+  - command: pnpm install
+    split: vertical
+    size: 15
+  - command: echo hi
+    split: horizontal
+    target: 0
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[1].size, Some(15));
+        assert_eq!(panes[2].target, Some(0));
+        assert_eq!(panes[2].size, None);
+    }
+
+    #[test]
+    fn validate_panes_target_can_reference_previous_pane() {
+        let panes = vec![
+            PaneConfig {
+                command: Some("vim".to_string()),
+                focus: true,
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("hi".to_string()),
+                split: Some(SplitDirection::Horizontal),
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("pnpm install".to_string()),
+                split: Some(SplitDirection::Vertical),
+                size: Some(15),
+                target: Some(0),
+                ..Default::default()
+            },
+        ];
+
+        assert!(super::validate_panes_config(&panes).is_ok());
+    }
+
+    #[test]
+    fn validate_panes_target_must_reference_existing_pane() {
+        let panes = vec![
+            PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("make install".to_string()),
+                split: Some(SplitDirection::Vertical),
+                target: Some(1),
+                ..Default::default()
+            },
+        ];
+
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("invalid target 1"));
     }
 
     #[test]
