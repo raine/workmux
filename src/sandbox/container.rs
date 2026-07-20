@@ -306,23 +306,27 @@ fn build_docker_run_args_inner(
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
+    let runtime = config.runtime();
+
     let mut args = Vec::new();
 
     // Base command (no runtime name -- caller prepends that)
     args.push("run".to_string());
 
     // Optional VM/sandboxed OCI runtime (docker/podman `--runtime`). Unset =
-    // the runtime's default (runc). Placed right after `run` so it applies
-    // before all other flags; callers still insert `--name` at index 1.
-    if let Some(oci_runtime) = config.container.oci_runtime() {
+    // the engine default (runc on Docker, crun on Podman). Placed right after
+    // `run` so it applies before all other flags; callers still insert `--name`
+    // at index 1. Apple Container manages its own VM and has no `--runtime`
+    // concept, so it's omitted there (matching the documented behavior).
+    if runtime != SandboxRuntime::AppleContainer
+        && let Some(oci_runtime) = config.container.oci_runtime()
+    {
         args.push("--runtime".to_string());
         args.push(oci_runtime.to_string());
     }
 
     args.push("--rm".to_string());
     args.push("-it".to_string());
-
-    let runtime = config.runtime();
 
     // Resource limits: user config overrides runtime default.
     // Apple Container VMs default to 1 GB RAM which is too low for most workloads.
@@ -369,14 +373,17 @@ fn build_docker_run_args_inner(
     // Extra capabilities / security options (global-only). Applied in both
     // network modes. Primary use: docker-in-docker under `oci_runtime: kata`,
     // where `--privileged` cannot be used. These relax confinement only inside
-    // the (VM-isolated) guest.
-    for cap in config.container.cap_add() {
-        args.push("--cap-add".to_string());
-        args.push(cap.clone());
-    }
-    for opt in config.container.security_opt() {
-        args.push("--security-opt".to_string());
-        args.push(opt.clone());
+    // the (VM-isolated) guest. Apple Container doesn't accept Docker/Podman
+    // `--cap-add`/`--security-opt`, so they're omitted there.
+    if runtime != SandboxRuntime::AppleContainer {
+        for cap in config.container.cap_add() {
+            args.push("--cap-add".to_string());
+            args.push(cap.clone());
+        }
+        for opt in config.container.security_opt() {
+            args.push("--security-opt".to_string());
+            args.push(opt.clone());
+        }
     }
 
     if network_deny {
@@ -1074,6 +1081,42 @@ mod tests {
         assert!(
             find_flag_value(&args, "--security-opt").is_empty(),
             "no --security-opt when security_opt is unset, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_oci_runtime_omitted_on_apple_container() {
+        // Apple Container has no `--runtime` concept and would misread the
+        // value (e.g. treat `kata` as an Apple-native plugin), so a globally
+        // configured oci_runtime must be dropped rather than passed through.
+        let config = sandbox_config(SandboxRuntime::AppleContainer, |c| {
+            c.oci_runtime = Some("kata".to_string());
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--runtime").is_empty(),
+            "--runtime must be omitted on Apple Container, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_omitted_on_apple_container() {
+        // Apple Container does not accept Docker/Podman `--cap-add` /
+        // `--security-opt`; they must be dropped rather than passed through.
+        let config = sandbox_config(SandboxRuntime::AppleContainer, |c| {
+            c.cap_add = Some(vec!["ALL".to_string()]);
+            c.security_opt = Some(vec!["seccomp=unconfined".to_string()]);
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--cap-add").is_empty(),
+            "--cap-add must be omitted on Apple Container, got: {args:?}"
+        );
+        assert!(
+            find_flag_value(&args, "--security-opt").is_empty(),
+            "--security-opt must be omitted on Apple Container, got: {args:?}"
         );
     }
 
