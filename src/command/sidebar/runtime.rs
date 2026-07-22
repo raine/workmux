@@ -225,11 +225,15 @@ fn schedule_current_pane_kill() {
         return;
     }
 
-    let cmd = format!(
-        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null",
-        shell_quote(&pane)
-    );
+    let cmd = current_pane_kill_command(&pane);
     let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
+}
+
+fn current_pane_kill_command(pane: &str) -> String {
+    format!(
+        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null || true",
+        shell_quote(pane)
+    )
 }
 
 fn process_event(
@@ -355,5 +359,13 @@ mod tests {
 
         assert!(app.should_quit);
         assert_eq!(app.quit_reason.as_deref(), Some("confirmed user exit"));
+    }
+
+    #[test]
+    fn delayed_pane_cleanup_is_idempotent() {
+        assert_eq!(
+            current_pane_kill_command("%79"),
+            "sleep 0.05; tmux kill-pane -t '%79' 2>/dev/null || true"
+        );
     }
 }
