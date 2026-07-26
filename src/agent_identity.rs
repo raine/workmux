@@ -77,7 +77,7 @@ impl AgentKind {
             AgentKind::Codex => "CX",
             AgentKind::OpenCode => "OC",
             AgentKind::Gemini => "G",
-            AgentKind::Antigravity => "AG",
+            AgentKind::Antigravity => "⋂",
             AgentKind::Pi => "π",
             AgentKind::Omp => "⌥",
             AgentKind::KiroCli => "K",

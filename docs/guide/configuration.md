@@ -198,7 +198,7 @@ panes:
 
 Each agent receives the prompt (via `-p`/`-P`/`-e`) using the correct format for that agent. Auto-detection matches the executable name regardless of flags or path.
 
-Antigravity CLI support covers command detection, prompt injection, and status tracking via `workmux setup` (using Antigravity's `statusLine` signal, with hooks as a fallback).
+Antigravity CLI support covers command detection, prompt injection, and status tracking through lifecycle hooks installed by `workmux setup`.
 
 ### Named layouts
 

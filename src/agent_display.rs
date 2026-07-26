@@ -261,8 +261,6 @@ pub fn sanitize_pane_title<'a>(
             ('\u{2800}'..='\u{28FF}').contains(&c)
                 || matches!(c, '✳' | '⠀' | '●' | '○' | '◌' | '✓' | '✗')
         })
-        .trim()
-        .trim_start_matches('·')
         .trim();
 
     let title = strip_oc_title_prefix(title);

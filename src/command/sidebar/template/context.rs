@@ -88,21 +88,14 @@ impl<'a> RowContext<'a> {
             .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
             .unwrap_or_default();
 
+        let pane_title = build_pane_title(agent, &primary, &secondary, app.window_prefix());
+        let git_status = app.git_statuses.get(&agent.path);
+        let pr_summary = app.pr_statuses.get(&agent.path);
         let kind =
             effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
         let agent_icon_color = resolve_agent_icon_color(kind, &app.agent_icons);
         let agent_label = resolve_agent_label(kind);
-        let pane_title = build_pane_title(
-            agent,
-            &primary,
-            &secondary,
-            app.window_prefix(),
-            kind,
-            &agent_icon,
-        );
-        let git_status = app.git_statuses.get(&agent.path);
-        let pr_summary = app.pr_statuses.get(&agent.path);
 
         Self {
             agent,
@@ -380,8 +373,6 @@ fn build_pane_title(
     primary: &str,
     secondary: &str,
     window_prefix: &str,
-    kind: Option<AgentKind>,
-    agent_icon: &str,
 ) -> Option<String> {
     let title_worktree = extract_worktree_name(
         &agent.session,
@@ -391,36 +382,14 @@ fn build_pane_title(
     )
     .0;
     let title_project = extract_project_name(&agent.path);
-    let title = sanitize_pane_title(agent.pane_title.as_deref(), &title_worktree, &title_project)?;
-    if title == primary || title == secondary {
-        return None;
-    }
-
-    if kind == Some(AgentKind::Antigravity)
-        && !agent_icon.is_empty()
-        && is_system_hostname_title(title)
-    {
-        return Some(format!("{agent_icon} · {title}"));
-    }
-
-    if is_hostname_title(title) {
-        return None;
-    }
-
-    Some(title.to_string())
+    sanitize_pane_title(agent.pane_title.as_deref(), &title_worktree, &title_project)
+        .filter(|t| *t != primary && *t != secondary)
+        .filter(|t| !is_hostname_title(t))
+        .map(|s| s.to_string())
 }
 
 fn is_hostname_title(title: &str) -> bool {
     is_hostname_title_with(title, std::env::var("HOSTNAME").ok().as_deref())
-}
-
-fn is_system_hostname_title(title: &str) -> bool {
-    is_hostname_title(title)
-        || std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-            .ok()
-            .map(|hostname| hostname.trim().to_string())
-            .is_some_and(|hostname| is_hostname_title_with(title, Some(&hostname)))
 }
 
 fn is_hostname_title_with(title: &str, hostname: Option<&str>) -> bool {
@@ -559,10 +528,10 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_uses_ascii_default_icon() {
+    fn antigravity_uses_curved_default_icon() {
         let icons = ResolvedAgentIcons::default();
         assert_eq!(resolve_agent_label(kind(None, Some("agy"))), "Antigravity");
-        assert_eq!(resolve_agent_icon(kind(None, Some("agy")), &icons), "AG");
+        assert_eq!(resolve_agent_icon(kind(None, Some("agy")), &icons), "⋂");
     }
 
     #[test]

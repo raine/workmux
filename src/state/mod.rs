@@ -34,8 +34,8 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
 ///
 /// Merges with existing state so partial updates don't wipe other fields:
 /// - If `status` is Some, updates the agent's status. If None, preserves existing.
-/// - If `title_override` is Some, uses it. If None, uses the live pane title,
-///   falling back to the existing stored title.
+/// - If `title_override` is Some, uses it. If None, preserves existing stored title,
+///   falling back to the live pane title.
 ///
 /// Logs warnings on failure without propagating errors (best-effort persistence).
 pub fn persist_agent_update(
@@ -82,31 +82,17 @@ pub fn persist_agent_update(
         now
     };
 
-    let live_command_for_merge = live_info.current_command.clone();
-    let existing_matches_live_command = existing
-        .as_ref()
-        .is_none_or(|e| Some(e.command.as_str()) == live_command_for_merge.as_deref());
-
-    // Preserve cached identity only while the stored foreground command still
-    // matches the live foreground command. After tmux server restarts or pane ID
-    // reuse, a stale state file can otherwise keep `agent_kind = pi` while the
-    // live command is now `agy`.
-    let existing_agent_kind = existing_matches_live_command
-        .then(|| existing.as_ref().and_then(|e| e.agent_kind.clone()))
-        .flatten();
+    // Capture existing agent_kind before `existing` is consumed below.
+    let existing_agent_kind = existing.as_ref().and_then(|e| e.agent_kind.clone());
 
     // Snapshot the live title for classification before the resolved
     // `pane_title` consumes `live_info.title`.
     let live_title_for_classify = live_info.title.clone();
 
-    // Resolve title: explicit override wins, then live title, then existing
-    // stored title if it belongs to the same foreground command. The live title
-    // must win so sidebar metadata doesn't stick on old line-editing/tool-call
-    // titles between updates.
-    let existing_pane_title = existing_matches_live_command
-        .then(|| existing.as_ref().and_then(|e| e.pane_title.clone()))
-        .flatten();
-    let pane_title = title_override.or(live_info.title).or(existing_pane_title);
+    // Resolve title: explicit override wins, then existing stored title, then live
+    let pane_title = title_override
+        .or(existing.and_then(|e| e.pane_title))
+        .or(live_info.title);
 
     // Get server boot ID for crash detection (best-effort)
     let boot_id = mux.server_boot_id().unwrap_or(None);

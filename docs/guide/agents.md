@@ -146,7 +146,7 @@ panes:
 
 Each agent receives the prompt using its native format (e.g., Claude uses `--`, Gemini and Antigravity use `-i`). Auto-detection matches the executable name regardless of flags or path. Just provide a prompt via `-p`, `-P`, or `-e`.
 
-Antigravity CLI support covers command detection, prompt injection, and status tracking via `workmux setup` (using Antigravity's `statusLine` signal, with hooks as a fallback).
+Antigravity CLI support covers command detection, prompt injection, and status tracking through lifecycle hooks installed by `workmux setup`.
 
 See [pane configuration](/guide/configuration#agent-placeholders) for details.
 

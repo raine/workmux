@@ -219,66 +219,6 @@ impl TmuxBackend {
     }
 }
 
-fn process_ancestors(mut pid: u32) -> HashSet<u32> {
-    let mut ancestors = HashSet::new();
-
-    while pid > 1 && ancestors.insert(pid) {
-        let stat_path = format!("/proc/{pid}/stat");
-        let Ok(stat) = std::fs::read_to_string(stat_path) else {
-            break;
-        };
-
-        let Some(after_comm) = stat.rsplit_once(") ").map(|(_, rest)| rest) else {
-            break;
-        };
-
-        let mut fields = after_comm.split_whitespace();
-        let _state = fields.next();
-        let Some(ppid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            break;
-        };
-
-        if ppid == 0 || ppid == pid {
-            break;
-        }
-        pid = ppid;
-    }
-
-    ancestors
-}
-
-fn pane_pid(backend: &TmuxBackend, pane_id: &str) -> Option<u32> {
-    backend
-        .tmux_query(&["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
-        .ok()
-        .and_then(|output| output.trim().parse::<u32>().ok())
-}
-
-fn pane_for_process_ancestors(backend: &TmuxBackend, ancestors: &HashSet<u32>) -> Option<String> {
-    if ancestors.is_empty() {
-        return None;
-    }
-
-    let output = backend
-        .tmux_query(&["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"])
-        .ok()?;
-
-    for line in output.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(pane_id) = parts.next() else {
-            continue;
-        };
-        let Some(pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        if ancestors.contains(&pid) {
-            return Some(pane_id.to_string());
-        }
-    }
-
-    None
-}
-
 impl Multiplexer for TmuxBackend {
     fn name(&self) -> &'static str {
         "tmux"
@@ -291,26 +231,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn current_pane_id(&self) -> Option<String> {
-        if let Ok(target) = std::env::var("WORKMUX_TARGET_PANE")
-            && !target.trim().is_empty()
-        {
-            return Some(target);
-        }
-
-        let env_pane = std::env::var("TMUX_PANE").ok();
-
-        // Hooks launched by some terminal agents can inherit a stale TMUX_PANE
-        // from the pane that originally launched the agent rather than the pane
-        // the agent is currently running in. Prefer TMUX_PANE when it matches
-        // this process ancestry; otherwise fall back to resolving by pane PID.
-        let ancestors = process_ancestors(std::process::id());
-        if let Some(pane_id) = env_pane.as_deref()
-            && pane_pid(self, pane_id).is_some_and(|pid| ancestors.contains(&pid))
-        {
-            return env_pane;
-        }
-
-        pane_for_process_ancestors(self, &ancestors).or(env_pane)
+        std::env::var("TMUX_PANE").ok()
     }
 
     fn active_pane_id(&self) -> Option<String> {

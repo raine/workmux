@@ -1825,6 +1825,7 @@ impl SandboxConfig {
                 "claude" => Some(home.join(".claude")),
                 "copilot" => Some(home.join(".copilot")),
                 "gemini" => Some(home.join(".gemini")),
+                "agy" => Some(home.join(".gemini/antigravity-cli")),
                 "codex" => Some(home.join(".codex")),
                 "opencode" => Some(home.join(".local/share/opencode")),
                 "pi" => Some(home.join(".pi/agent")),

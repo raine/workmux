@@ -150,7 +150,7 @@ impl AgentProfile for AntigravityProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("agy -p")
+        Some(r#"sh -c 'agy -p "$(cat)"'"#)
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -665,7 +665,10 @@ mod tests {
             profile.skip_permissions_flag(),
             Some("--dangerously-skip-permissions")
         );
-        assert_eq!(profile.auto_name_command(), Some("agy -p"));
+        assert_eq!(
+            profile.auto_name_command(),
+            Some(r#"sh -c 'agy -p "$(cat)"'"#)
+        );
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 

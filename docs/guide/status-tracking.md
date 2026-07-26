@@ -12,18 +12,18 @@ Workmux can display the status of the agent in your tmux window list, giving you
 
 ## Agent support
 
-| Agent        | Status                                                                      |
-| ------------ | --------------------------------------------------------------------------- |
-| Claude Code  | ✅ Supported                                                                |
-| OpenCode     | ✅ Supported                                                                |
-| Codex        | ✅ Supported\*                                                              |
-| Copilot CLI  | ✅ Supported\*                                                              |
-| Pi           | ✅ Supported\*                                                              |
-| Oh My Pi     | ✅ Supported                                                                |
-| Gemini CLI   | ✅ Supported                                                                |
-| Antigravity CLI (`agy`) | ✅ Supported\*                                                   |
-| Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
-| Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
+| Agent                   | Status                                                                      |
+| ----------------------- | --------------------------------------------------------------------------- |
+| Claude Code             | ✅ Supported                                                                |
+| OpenCode                | ✅ Supported                                                                |
+| Codex                   | ✅ Supported\*                                                              |
+| Copilot CLI             | ✅ Supported\*                                                              |
+| Pi                      | ✅ Supported\*                                                              |
+| Oh My Pi                | ✅ Supported                                                                |
+| Gemini CLI              | ✅ Supported                                                                |
+| Antigravity CLI (`agy`) | ✅ Supported\*                                                              |
+| Kiro                    | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
+| Mistral Vibe            | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
 
 **Notes:**
 
@@ -141,28 +141,41 @@ curl -o ~/.gemini/settings.json \
 
 ## Antigravity CLI (`agy`) setup
 
-`workmux setup` installs an Antigravity `statusLine` wrapper at `~/.gemini/config/workmux-hooks/workmux-statusline` and enables it in `~/.gemini/antigravity-cli/settings.json`. The wrapper prints nothing by default; it only reads Antigravity's `agent_state` payload and updates Workmux. If you already have a custom Antigravity status line, Workmux stores and chains that command so your visible status line continues to render.
+`workmux setup` installs Antigravity lifecycle hooks in `~/.gemini/config/hooks.json`. `PreInvocation` and `PreToolUse` mark the pane working, and the terminal `Stop` event marks it done.
 
-Antigravity may need to reload settings after installation. If an existing `agy` session does not update immediately, run `/statusline on` inside `agy` or restart the session.
+Antigravity loads hook configuration when a session starts, so restart existing `agy` sessions after setup.
 
-If you prefer manual setup, create a silent statusLine wrapper and point Antigravity at it:
+For manual setup, merge this named hook group into `~/.gemini/config/hooks.json`:
 
+```json
+{
+  "workmux-status": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "workmux set-window-status working >/dev/null 2>&1 || true; printf '{}\\n'"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "workmux set-window-status working >/dev/null 2>&1 || true; printf '{}\\n'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "workmux set-window-status done >/dev/null 2>&1 || true; printf '{}\\n'"
+      }
+    ]
+  }
+}
 ```
-mkdir -p ~/.gemini/config/workmux-hooks ~/.gemini/antigravity-cli
-cat > ~/.gemini/config/workmux-hooks/workmux-statusline <<'EOF'
-#!/bin/sh
-pane="${TMUX_PANE-}"
-export WORKMUX_TARGET_PANE="$pane"
-exec workmux set-window-status antigravity-statusline >/dev/null 2>&1
-EOF
-chmod +x ~/.gemini/config/workmux-hooks/workmux-statusline
-test -f ~/.gemini/antigravity-cli/settings.json || echo '{}' > ~/.gemini/antigravity-cli/settings.json
-jq '.statusLine = {"command":"'"$HOME"'/.gemini/config/workmux-hooks/workmux-statusline","enabled":true}' \
-  ~/.gemini/antigravity-cli/settings.json > /tmp/agy-settings.json \
-  && mv /tmp/agy-settings.json ~/.gemini/antigravity-cli/settings.json
-```
-
-Workmux also installs Antigravity lifecycle hooks as a compatibility fallback for marking panes working promptly, but the `statusLine` signal is the source of truth for clearing back to done/idle.
 
 ## Copilot CLI setup
 

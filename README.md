@@ -350,7 +350,7 @@ that agent. Auto-detection matches the executable name regardless of flags or
 path.
 
 Antigravity CLI support covers command detection, prompt injection, and status
-tracking via `workmux setup` (using Antigravity's `statusLine` signal, with hooks as a fallback).
+tracking via lifecycle hooks installed by `workmux setup`.
 
 #### Named layouts
 
@@ -2013,11 +2013,9 @@ curl -o .github/hooks/workmux-status/hooks.json \
 Note: Copilot hooks are per-repository. The waiting state is not supported due
 to limitations in the Copilot CLI hooks implementation.
 
-**Antigravity CLI (`agy`)**: `workmux setup` installs a silent `statusLine`
-wrapper and enables it in `~/.gemini/antigravity-cli/settings.json`. If an
-already-running `agy` session does not pick it up immediately, run `/statusline
-on` inside `agy` or restart the session. Existing custom statusLine commands are
-chained so their visible output is preserved.
+**Antigravity CLI (`agy`)**: `workmux setup` installs lifecycle hooks in
+`~/.gemini/config/hooks.json`. `PreInvocation` marks the pane working, and the
+terminal `Stop` event marks it done.
 
 **OpenCode**: download the workmux status plugin:
 
