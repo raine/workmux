@@ -287,6 +287,24 @@ fn build_docker_run_args_with_state_dir(
     )
 }
 
+fn podman_uses_remote_connection() -> bool {
+    !cfg!(target_os = "linux")
+        || std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some()
+}
+
+fn validate_oci_runtime_support(runtime: SandboxRuntime, podman_remote: bool) -> Result<()> {
+    if runtime == SandboxRuntime::Podman && podman_remote {
+        anyhow::bail!(
+            "sandbox.container.oci_runtime is not supported by remote Podman; \
+             podman run --runtime is available only with local Podman on Linux. \
+             Use sandbox.container.runtime: docker, connect to local Podman, or \
+             unset sandbox.container.oci_runtime."
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_docker_run_args_inner(
     command: &str,
@@ -313,14 +331,14 @@ fn build_docker_run_args_inner(
     // Base command (no runtime name -- caller prepends that)
     args.push("run".to_string());
 
-    // Optional VM/sandboxed OCI runtime (docker/podman `--runtime`). Unset =
-    // the engine default (runc on Docker, crun on Podman). Placed right after
-    // `run` so it applies before all other flags; callers still insert `--name`
-    // at index 1. Apple Container manages its own VM and has no `--runtime`
-    // concept, so it's omitted there (matching the documented behavior).
-    if runtime != SandboxRuntime::AppleContainer
-        && let Some(oci_runtime) = config.container.oci_runtime()
+    // Optional VM/sandboxed OCI runtime. Apple Container manages its own VM
+    // and has no `--runtime` concept. Remote Podman does not expose its local
+    // engine's `--runtime` flag, so reject the setting instead of silently
+    // running under a different isolation boundary.
+    if let Some(oci_runtime) = config.container.oci_runtime()
+        && runtime != SandboxRuntime::AppleContainer
     {
+        validate_oci_runtime_support(runtime, podman_uses_remote_connection())?;
         args.push("--runtime".to_string());
         args.push(oci_runtime.to_string());
     }
@@ -372,9 +390,10 @@ fn build_docker_run_args_inner(
 
     // Extra capabilities / security options (global-only). Applied in both
     // network modes. Primary use: docker-in-docker under `oci_runtime: kata`,
-    // where `--privileged` cannot be used. These relax confinement only inside
-    // the (VM-isolated) guest. Apple Container doesn't accept Docker/Podman
-    // `--cap-add`/`--security-opt`, so they're omitted there.
+    // where `--privileged` cannot be used and the guest VM remains the isolation
+    // boundary. Permissive values weaken host-kernel container isolation when
+    // used without a VM-based OCI runtime. Apple Container doesn't accept
+    // Docker/Podman `--cap-add`/`--security-opt`, so they're omitted there.
     if runtime != SandboxRuntime::AppleContainer {
         for cap in config.container.cap_add() {
             args.push("--cap-add".to_string());
@@ -1049,6 +1068,28 @@ mod tests {
             find_flag_value(&args, "--runtime").is_empty(),
             "no --runtime should be added when oci_runtime is unset, got: {args:?}"
         );
+    }
+
+    #[test]
+    fn test_remote_podman_rejects_oci_runtime() {
+        let err = validate_oci_runtime_support(SandboxRuntime::Podman, true)
+            .expect_err("remote Podman must reject oci_runtime");
+        assert!(err.to_string().contains("remote Podman"));
+
+        assert!(validate_oci_runtime_support(SandboxRuntime::Podman, false).is_ok());
+        assert!(validate_oci_runtime_support(SandboxRuntime::Docker, true).is_ok());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_oci_runtime_rejected_for_podman_on_remote_platform() {
+        let config = sandbox_config(SandboxRuntime::Podman, |c| {
+            c.oci_runtime = Some("crun".to_string());
+        });
+        let err = test_build_run_args_result(&config, false)
+            .expect_err("Podman is remote on non-Linux platforms");
+
+        assert!(err.to_string().contains("remote Podman"));
     }
 
     #[test]

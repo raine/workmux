@@ -49,7 +49,9 @@ workmux sandbox pull
 | `container.cpus`          | none                                    | CPU count for the container. Only passed when explicitly set. Apple Container defaults to 4 CPUs which is sufficient for most workloads.                                                                                                                                                                                                                                  |
 | `container.devices`       | `[]`                                    | Host device nodes exposed to the sandbox (e.g. `/dev/kvm`, `/dev/ttyUSB0`). Passed to the runtime as `--device`. Docker and Podman only; Apple Container rejects. **Global config only.**                                                                                                                                                                                 |
 | `container.group_add`     | `[]`                                    | Supplementary groups added to the sandboxed process (e.g. `dialout`, `video`, or numeric GIDs). Passed to the runtime as `--group-add`. Docker and Podman only; Apple Container rejects. **Global config only.**                                                                                                                                                          |
-| `container.oci_runtime`   | none (engine default)                   | OCI runtime to run the container under, passed as `docker`/`podman` `--runtime`. Unset omits `--runtime`, deferring to the engine's configured default (`runc` on Docker, typically `crun` on Podman). Set to e.g. `kata` to run under a VM-based runtime for stronger isolation. Docker only in practice (see note); Apple Container ignores it. **Global config only.** |
+| `container.cap_add`       | `[]`                                    | Extra Linux capabilities granted to the container, passed verbatim as `--cap-add` (e.g. `ALL` or `SYS_ADMIN`). Docker and Podman only; Apple Container ignores it. Permissive values weaken host-kernel container isolation. **Global config only.**                                                                                                                     |
+| `container.security_opt`  | `[]`                                    | Security options passed verbatim as `--security-opt` (e.g. `seccomp=unconfined` or `no-new-privileges`). Docker and Podman only; Apple Container ignores it. Options can strengthen or weaken confinement. **Global config only.**                                                                                                                                      |
+| `container.oci_runtime`   | none (engine default)                   | OCI runtime to run the container under, passed as Docker or local Podman `--runtime`. Unset omits `--runtime`, deferring to the engine's configured default. Set to e.g. `kata` for stronger VM-based isolation. Remote Podman rejects this flag; Apple Container ignores it. **Global config only.**                                                                   |
 | `target`                  | `agent`                                 | Which panes to sandbox: `agent` or `all`                                                                                                                                                                                                                                                                                                                                  |
 | `image`                   | `ghcr.io/raine/workmux-sandbox:{agent}` | Container image name (auto-resolved from configured agent).                                                                                                                                                                                                                                                                                                               |
 | `rpc_host`                | auto                                    | Override hostname for guest-to-host RPC. Defaults to `host.docker.internal` (Docker), `host.containers.internal` (Podman), or `192.168.64.1` (Apple Container). **Global config only.**                                                                                                                                                                                   |
@@ -159,17 +161,17 @@ sandbox:
     oci_runtime: kata
 ```
 
-`oci_runtime` is passed straight through to `docker`/`podman` as `--runtime`, so
-the container runs under whatever OCI runtime you name instead of the engine
-default (`runc` on Docker, typically `crun` on Podman). Pointing it at a VM-based
-runtime such as [Kata Containers](https://katacontainers.io/) gives each sandbox
-a hardware-VM boundary while reusing the exact same container image, mounts, user
-mapping, and RPC path as the normal container backend. Leaving it unset keeps the
-engine's default behavior.
+`oci_runtime` is passed straight through to Docker or local Podman as `--runtime`,
+so the container runs under whatever OCI runtime you name instead of the engine's
+configured default. Pointing it at a VM-based runtime such as
+[Kata Containers](https://katacontainers.io/) gives each sandbox a hardware-VM
+boundary while reusing the exact same container image, mounts, user mapping, and
+RPC path as the normal container backend. Leaving it unset keeps the engine's
+default behavior.
 
 The named runtime must already be installed on the host and registered with your
 container engine (for Docker, listed under `docker info`'s runtimes). Setting it
-up is out of scope here — see the runtime's own documentation.
+up is out of scope here. See the runtime's own documentation.
 
 Notes:
 
@@ -178,8 +180,13 @@ Notes:
   a repository must not be able to select (or downgrade) it via its own config.
 - **Kata needs Docker.** Kata Containers does not officially support Podman as a
   container manager ([Kata limitations](https://github.com/kata-containers/kata-containers/blob/main/docs/Limitations.md)),
-  so use `runtime: docker` for the `kata` example above. Other OCI runtimes may
-  work under Podman via `--runtime`; check the specific runtime's support matrix.
+  so use `runtime: docker` for the `kata` example above.
+- **Podman support is local-only.** Other OCI runtimes may work with local Podman
+  on Linux. Remote Podman clients, including all macOS and Windows builds, do
+  not expose `podman run --runtime`. Workmux rejects `oci_runtime` on non-Linux
+  hosts and when `CONTAINER_HOST` or `CONTAINER_CONNECTION` selects a remote
+  service. Other remote Podman configurations are unsupported and may return
+  `unknown flag: --runtime` directly from Podman.
 - **Apple Container ignores it.** Apple Container manages its own VM and has no
   `--runtime` concept, so a configured `oci_runtime` is silently omitted there
   (as are `cap_add`/`security_opt`). This lets one global config target Kata on a
@@ -188,6 +195,32 @@ Notes:
   inside the container, which needs a real in-guest kernel. It works under a
   VM-based runtime like Kata, but may not under a userspace-kernel runtime such
   as gVisor.
+
+**Docker-in-Docker under Kata:**
+
+```yaml
+sandbox:
+  enabled: true
+  container:
+    runtime: docker
+    oci_runtime: kata
+    cap_add: [ALL]
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+```
+
+`cap_add` and `security_opt` are global-only passthroughs for Docker and Podman.
+They support an inner Docker daemon under Kata without `--privileged`, which
+injects host device nodes that conflict with devices in the guest. The values
+above grant every Linux capability and disable several container-level security
+controls, while Kata's guest VM remains the host isolation boundary.
+
+These fields are independent of `oci_runtime`. Without a VM-based OCI runtime,
+permissive values apply to a host-kernel container and weaken the sandbox's
+isolation from the host. `security_opt` values such as `no-new-privileges` can
+instead strengthen confinement. Apple Container silently omits both fields.
 
 **Sandbox all panes (not just agent):**
 

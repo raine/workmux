@@ -1455,12 +1455,12 @@ pub struct ContainerConfig {
     #[serde(default)]
     pub excluded_files: Option<Vec<String>>,
 
-    /// OCI runtime to run the container under (docker/podman `--runtime`).
-    /// Unset = the runtime's default (runc). Set to e.g. "kata" to run the
-    /// container under a VM-based OCI runtime for stronger isolation. The named
-    /// runtime must be installed and registered with the container runtime.
-    /// Global-only: ignored in project config, since it changes the isolation
-    /// boundary.
+    /// OCI runtime to run the container under (docker/local Podman `--runtime`).
+    /// When unset, workmux omits `--runtime` and the engine uses its configured
+    /// default. Set to e.g. "kata" to run the container under a VM-based OCI
+    /// runtime for stronger isolation. The named runtime must be installed and
+    /// registered with the container runtime. Global-only: ignored in project
+    /// config, since it changes the isolation boundary.
     #[serde(default)]
     pub oci_runtime: Option<String>,
 
@@ -1480,8 +1480,8 @@ pub struct ContainerConfig {
     /// Extra security options for the container (docker/podman
     /// `--security-opt`). Each entry is passed verbatim, e.g.
     /// "seccomp=unconfined" or "systempaths=unconfined". Global-only: ignored
-    /// in project config, since these relax the isolation boundary. Empty by
-    /// default. See `cap_add` for the docker-in-docker rationale.
+    /// in project config, since these options control the isolation boundary.
+    /// Empty by default. See `cap_add` for the docker-in-docker rationale.
     #[serde(default)]
     pub security_opt: Option<Vec<String>>,
 }
@@ -2604,9 +2604,10 @@ impl Config {
             // cap_add and security_opt are global-only. devices/group_add
             // expose host hardware and can expand filesystem access via
             // supplementary groups; oci_runtime changes the isolation boundary
-            // (e.g. a VM runtime vs runc); cap_add/security_opt relax the
-            // container's capability/seccomp/apparmor confinement. A malicious
-            // repo must not be able to set them via .workmux.yaml.
+            // (e.g. a VM runtime vs runc); cap_add/security_opt control the
+            // container's capability/seccomp/apparmor confinement, and permissive
+            // values relax it. A malicious repo must not be able to set them via
+            // .workmux.yaml.
             container: {
                 if project.sandbox.container.devices.is_some() {
                     tracing::warn!(
@@ -2989,13 +2990,15 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   #   runtime: docker          # docker | podman | apple-container
 #   #   # memory: 16G            # VM memory limit (apple-container default: 16G)
 #   #   # cpus: 4                # VM CPU count (only passed when set)
-#   #   # OCI runtime to run under (docker/podman --runtime). Unset = runc.
+#   #   # OCI runtime to run under (docker/local Podman --runtime). Unset omits
+#   #   # the flag and uses the engine's configured default.
 #   #   # Set to e.g. "kata" for VM-based isolation (runtime must be installed
 #   #   # and registered). GLOBAL-ONLY: ignored in a project .workmux.yaml.
 #   #   # oci_runtime: kata
-#   #   # Extra capabilities / security options (docker --cap-add /
-#   #   # --security-opt). Empty by default. GLOBAL-ONLY. Main use: enabling
-#   #   # docker-in-docker under oci_runtime: kata (where --privileged fails).
+#   #   # Extra capabilities / security options (docker/podman --cap-add /
+#   #   # --security-opt). Empty by default and GLOBAL-ONLY. Permissive values
+#   #   # weaken host-kernel container isolation unless paired with a VM runtime.
+#   #   # Main use: docker-in-docker under oci_runtime: kata.
 #   #   # cap_add: [ALL]
 #   #   # security_opt: [seccomp=unconfined, apparmor=unconfined, systempaths=unconfined]
 #   #   # Mask files out of the worktree bind mounts (paths relative to the
