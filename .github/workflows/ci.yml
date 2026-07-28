@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Full checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+      - name: Install tools and Python dependencies
+        run: |
+          cargo install checkle just --locked
+          python -m venv tests/venv
+          tests/venv/bin/pip install -r tests/requirements.txt pyright ruff
+      - name: Run full checks
+        run: just check-ci
+
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+      - name: Install tmux, just, and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+          cargo install just --locked
+          python -m venv tests/venv
+          tests/venv/bin/pip install -r tests/requirements.txt
+      - name: Run Python test suite
+        run: just itest
