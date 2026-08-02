@@ -31,6 +31,7 @@ doing.
 | Pi                      | ✅ Supported\*                                                              |
 | Oh My Pi                | ✅ Supported                                                                |
 | Gemini CLI              | ✅ Supported                                                                |
+| Grok                    | ✅ Supported                                                                |
 | Antigravity CLI (`agy`) | ✅ Supported\*                                                              |
 | Kiro                    | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe            | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
@@ -56,7 +57,7 @@ Run `workmux setup` to automatically detect your agent CLIs and install status t
 workmux setup
 ```
 
-This detects Claude Code, Antigravity CLI, Copilot CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. For Claude Code, `CLAUDE_CONFIG_DIR` is respected when locating `settings.json`. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
+This detects Claude Code, Antigravity CLI, Copilot CLI, OpenCode, Pi, Oh My Pi, and Grok by checking for their executable or configuration directories, then offers to install the appropriate hooks. For Claude Code, `CLAUDE_CONFIG_DIR` is respected when locating `settings.json`. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
 
 Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
 
@@ -147,6 +148,21 @@ mkdir -p ~/.gemini
 curl -o ~/.gemini/settings.json \
   https://raw.githubusercontent.com/raine/workmux/main/resources/gemini/settings.json
 ```
+
+## Grok setup
+
+`workmux setup` installs Grok lifecycle hooks under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset. Start a new Grok session after setup so it discovers the hook.
+
+For manual setup, download the hooks configuration:
+
+```bash
+grok_home="${GROK_HOME:-$HOME/.grok}"
+mkdir -p "$grok_home/hooks"
+curl -o "$grok_home/hooks/workmux-status.json" \
+  https://raw.githubusercontent.com/raine/workmux/main/.grok/hooks/workmux-status.json
+```
+
+`UserPromptSubmit` and `PostToolUse` mark the pane working, `Notification` marks it waiting, and `Stop` or `SessionEnd` marks it done. Grok permission prompts do not all emit `Notification`, so some prompts may remain marked as working while waiting for input.
 
 ## Antigravity CLI (`agy`) setup
 

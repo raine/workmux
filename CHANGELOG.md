@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Add Grok (SpaceXAI) as a supported agent for status tracking, interactive
+  prompt injection, and skills. `workmux setup` installs status hooks and
+  bundled skills under `~/.grok/` or `$GROK_HOME`.
+
 ## v0.1.242 (2026-08-20)
 
 - `workmux setup` installs the Copilot CLI status hook once at the user level

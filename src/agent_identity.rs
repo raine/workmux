@@ -32,6 +32,7 @@ pub enum AgentKind {
     KiroCli,
     Vibe,
     Copilot,
+    Grok,
 }
 
 impl AgentKind {
@@ -49,6 +50,7 @@ impl AgentKind {
             AgentKind::KiroCli => "kiro-cli",
             AgentKind::Vibe => "vibe",
             AgentKind::Copilot => "copilot",
+            AgentKind::Grok => "grok",
         }
     }
 
@@ -65,6 +67,7 @@ impl AgentKind {
             "kiro-cli" => Some(AgentKind::KiroCli),
             "vibe" => Some(AgentKind::Vibe),
             "copilot" => Some(AgentKind::Copilot),
+            "grok" => Some(AgentKind::Grok),
             _ => None,
         }
     }
@@ -83,6 +86,7 @@ impl AgentKind {
             AgentKind::KiroCli => "K",
             AgentKind::Vibe => "V",
             AgentKind::Copilot => "CP",
+            AgentKind::Grok => "GK",
         }
     }
 
@@ -100,6 +104,7 @@ impl AgentKind {
             AgentKind::KiroCli => "Kiro",
             AgentKind::Vibe => "Vibe",
             AgentKind::Copilot => "Copilot",
+            AgentKind::Grok => "Grok",
         }
     }
 
@@ -121,6 +126,7 @@ impl AgentKind {
             AgentKind::Omp => Color::Rgb(0xe0, 0x57, 0x35),
             AgentKind::OpenCode => Color::Blue,
             AgentKind::KiroCli => return None,
+            AgentKind::Grok => Color::Rgb(0x1d, 0x9b, 0xf0),
         })
     }
 }
@@ -264,6 +270,15 @@ mod tests {
     }
 
     #[test]
+    fn grok_command_matches() {
+        assert_eq!(classify("grok", ""), Some("grok".into()));
+        assert_eq!(classify("/usr/local/bin/grok", ""), Some("grok".into()));
+        assert_eq!(classify("grok", "anything"), Some("grok".into()));
+        assert_eq!(classify("grok-build", ""), None);
+        assert_eq!(classify("grokster", ""), None);
+    }
+
+    #[test]
     fn direct_stem_matches_for_known_binaries() {
         assert_eq!(classify("claude", ""), Some("claude".into()));
         assert_eq!(classify("gemini", ""), Some("gemini".into()));
@@ -271,6 +286,7 @@ mod tests {
         assert_eq!(classify("pi", ""), Some("pi".into()));
         assert_eq!(classify("omp", ""), Some("omp".into()));
         assert_eq!(classify("vibe", ""), Some("vibe".into()));
+        assert_eq!(classify("grok", ""), Some("grok".into()));
     }
 
     #[test]
@@ -384,6 +400,7 @@ mod tests {
             AgentKind::KiroCli,
             AgentKind::Vibe,
             AgentKind::Copilot,
+            AgentKind::Grok,
         ];
         for kind in all {
             assert!(!kind.default_icon().is_empty(), "{:?} icon empty", kind);

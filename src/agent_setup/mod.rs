@@ -10,6 +10,7 @@ pub mod codex;
 pub mod copilot;
 pub mod extension_file;
 pub mod gemini;
+pub mod grok;
 pub mod hooks;
 pub mod json_config;
 pub mod omp;
@@ -36,6 +37,7 @@ pub enum Agent {
     Codex,
     Copilot,
     Gemini,
+    Grok,
     OpenCode,
     Pi,
     #[serde(rename = "omp")]
@@ -50,6 +52,7 @@ impl Agent {
             Agent::Codex => "Codex",
             Agent::Copilot => "Copilot CLI",
             Agent::Gemini => "Gemini CLI",
+            Agent::Grok => "Grok",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "pi",
             Agent::Omp => "Oh My Pi",
@@ -65,6 +68,7 @@ impl Agent {
             Agent::Codex,
             Agent::Copilot,
             Agent::Gemini,
+            Agent::Grok,
             Agent::OpenCode,
             Agent::Pi,
             Agent::Omp,
@@ -157,6 +161,18 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
+    if let Some(reason) = grok::detect() {
+        let status = match grok::check() {
+            Ok(s) => s,
+            Err(e) => StatusCheck::Error(e.to_string()),
+        };
+        results.push(AgentCheck {
+            agent: Agent::Grok,
+            reason,
+            status,
+        });
+    }
+
     if let Some(reason) = pi::detect() {
         let status = match pi::check() {
             Ok(s) => s,
@@ -204,6 +220,7 @@ pub fn install(agent: Agent) -> Result<String> {
         Agent::Codex => codex::install(),
         Agent::Copilot => copilot::install(),
         Agent::Gemini => gemini::install(),
+        Agent::Grok => grok::install(),
         Agent::OpenCode => opencode::install(),
         Agent::Pi => pi::install(),
         Agent::Omp => omp::install(),
@@ -218,6 +235,7 @@ pub fn uninstall_one(agent: Agent) -> Result<String> {
         Agent::Codex => codex::uninstall(),
         Agent::Copilot => copilot::uninstall(),
         Agent::Gemini => gemini::uninstall(),
+        Agent::Grok => grok::uninstall(),
         Agent::OpenCode => opencode::uninstall(),
         Agent::Pi => pi::uninstall(),
         Agent::Omp => omp::uninstall(),
@@ -431,6 +449,7 @@ mod tests {
         assert_eq!(Agent::Codex.name(), "Codex");
         assert_eq!(Agent::Copilot.name(), "Copilot CLI");
         assert_eq!(Agent::Gemini.name(), "Gemini CLI");
+        assert_eq!(Agent::Grok.name(), "Grok");
         assert_eq!(Agent::OpenCode.name(), "OpenCode");
         assert_eq!(Agent::Pi.name(), "pi");
         assert_eq!(Agent::Omp.name(), "Oh My Pi");
@@ -449,6 +468,7 @@ mod tests {
             "\"copilot\""
         );
         assert_eq!(serde_json::to_string(&Agent::Gemini).unwrap(), "\"gemini\"");
+        assert_eq!(serde_json::to_string(&Agent::Grok).unwrap(), "\"grok\"");
         assert_eq!(
             serde_json::to_string(&Agent::OpenCode).unwrap(),
             "\"opencode\""
@@ -469,6 +489,8 @@ mod tests {
         assert_eq!(agent, Agent::Copilot);
         let agent: Agent = serde_json::from_str("\"gemini\"").unwrap();
         assert_eq!(agent, Agent::Gemini);
+        let agent: Agent = serde_json::from_str("\"grok\"").unwrap();
+        assert_eq!(agent, Agent::Grok);
         let agent: Agent = serde_json::from_str("\"opencode\"").unwrap();
         assert_eq!(agent, Agent::OpenCode);
         let agent: Agent = serde_json::from_str("\"pi\"").unwrap();

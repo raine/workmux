@@ -246,6 +246,30 @@ impl AgentProfile for VibeProfile {
     }
 }
 
+pub struct GrokProfile;
+
+impl AgentProfile for GrokProfile {
+    fn name(&self) -> &'static str {
+        "grok"
+    }
+
+    fn needs_auto_status(&self) -> bool {
+        true
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("--prompt-file {}", prompt_path)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct PiProfile;
 
 impl AgentProfile for PiProfile {
@@ -314,6 +338,7 @@ static PROFILES: &[&dyn AgentProfile] = &[
     &OmpProfile,
     &KiroProfile,
     &VibeProfile,
+    &GrokProfile,
 ];
 
 /// Check if a command matches a known agent profile.
@@ -731,6 +756,21 @@ mod tests {
             profile.skip_permissions_flag(),
             Some("--agent auto-approve")
         );
+        assert_eq!(profile.auto_name_command(), None);
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
+    fn test_grok_profile() {
+        let profile = GrokProfile;
+        assert_eq!(profile.name(), "grok");
+        assert!(!profile.needs_bang_delay());
+        assert!(profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "--prompt-file PROMPT.md"
+        );
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
         assert_eq!(profile.auto_name_command(), None);
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }

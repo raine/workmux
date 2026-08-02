@@ -194,7 +194,7 @@ Each pane supports:
 
 Named agent profiles can provide structured `command`, `args`, `env`, and `type` fields, including `env` values loaded with `from_env`. See [named agents](/guide/agents/#named-agents) for the full profile schema.
 
-Built-in agents (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`) are auto-detected when used as literal commands and receive prompt injection automatically, without needing the `<agent>` placeholder or a matching `agent` config:
+Built-in agents (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`, `pi`, `omp`, `grok`) are auto-detected when used as literal commands and receive prompt injection automatically, without needing the `<agent>` placeholder or a matching `agent` config:
 
 ```yaml
 panes:

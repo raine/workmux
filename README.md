@@ -339,7 +339,7 @@ Each pane supports:
   flag)
 
 Built-in agents (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`,
-`pi`, `omp`) are auto-detected when used as literal commands and receive prompt
+`pi`, `omp`, `grok`) are auto-detected when used as literal commands and receive prompt
 injection automatically, without needing the `<agent>` placeholder or a matching
 `agent` config:
 
@@ -769,7 +769,7 @@ done
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
 command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
-`pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without
+`pi`, `omp`, `grok`, or whatever you've set via the `agent` config or `--agent` flag) without
 requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started
@@ -1999,6 +1999,7 @@ at-a-glance visibility into what the agent in each window doing.
 | Pi           | ✅ Supported\*                                                              |
 | Oh My Pi    | ✅ Supported                                                                |
 | Gemini CLI   | ✅ Supported                                                                |
+| Grok         | ✅ Supported                                                                |
 | Antigravity CLI (`agy`) | ✅ Supported\*                                                   |
 | Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
@@ -2014,7 +2015,7 @@ at-a-glance visibility into what the agent in each window doing.
 ### Setup
 
 Run `workmux setup` to automatically detect Claude Code, Antigravity CLI,
-Copilot CLI, OpenCode, Pi, Oh My Pi, and other supported agent CLIs, install
+Copilot CLI, OpenCode, Pi, Oh My Pi, Grok, and other supported agent CLIs, install
 status tracking hooks, and install skills:
 
 ```bash
