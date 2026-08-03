@@ -1626,11 +1626,12 @@ pub fn run() -> Result<()> {
                 .ok();
             let Some(agents) = agents else { continue };
 
-            let (position, layout_mode) = {
+            let (position, layout_mode, sort) = {
                 let cfg = config.lock().unwrap();
                 (
                     super::read_sidebar_position(&cfg),
                     read_sidebar_layout_mode(&cfg).unwrap_or_default(),
+                    cfg.sidebar.sort.unwrap_or_default(),
                 )
             };
             let filter_mode = read_sidebar_filter_mode();
@@ -1661,6 +1662,7 @@ pub fn run() -> Result<()> {
                     position,
                     layout_mode,
                     filter_mode,
+                    sort,
                     git_statuses,
                     pr_statuses,
                     check_statuses,
@@ -1830,6 +1832,7 @@ struct TickInput {
     position: SidebarPosition,
     layout_mode: SidebarLayoutMode,
     filter_mode: SidebarFilterMode,
+    sort: crate::config::SidebarSort,
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     check_statuses: HashMap<PathBuf, CheckPathEntry>,
@@ -1875,6 +1878,7 @@ fn compute_tick(
         position,
         layout_mode,
         filter_mode,
+        sort,
         git_statuses,
         pr_statuses,
         check_statuses,
@@ -1911,6 +1915,7 @@ fn compute_tick(
         position,
         layout_mode,
         filter_mode,
+        sort,
         status_icons,
         git_statuses,
         pr_statuses,
@@ -2484,6 +2489,7 @@ mod tests {
                         window_pane_counts: HashMap::new(),
                     },
                     captured_panes: captures,
+                    sort: crate::config::SidebarSort::default(),
                     now,
                     now_ts,
                     position: SidebarPosition::Left,

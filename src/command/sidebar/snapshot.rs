@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{SidebarPosition, StatusIcons};
+use crate::config::{SidebarPosition, SidebarSort, StatusIcons};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{AgentPane, AgentStatus};
@@ -72,6 +72,7 @@ pub fn build_snapshot(
     position: SidebarPosition,
     layout_mode: SidebarLayoutMode,
     filter_mode: SidebarFilterMode,
+    sort: SidebarSort,
     status_icons: &StatusIcons,
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
@@ -96,33 +97,46 @@ pub fn build_snapshot(
         }
     }
 
-    // Sort by recency
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    agents.sort_by_cached_key(|a| {
-        let is_sleeping = sleeping_pane_ids.contains(&a.pane_id);
-        let elapsed = a
-            .status_ts
-            .map(|ts| now.saturating_sub(ts))
-            .unwrap_or(u64::MAX);
-        let pane_num: u64 = a
-            .pane_id
-            .strip_prefix('%')
-            .unwrap_or(&a.pane_id)
-            .parse()
-            .unwrap_or(u64::MAX);
-        (is_sleeping, elapsed, pane_num)
-    });
-
     // Populate window_id and window_index from the tmux state lookup
+    // (before sorting: window sort reads the freshly stamped index)
     for agent in &mut agents {
         if let Some(wid) = pane_window_ids.get(&agent.pane_id) {
             agent.window_id = wid.clone();
         }
         agent.window_index = pane_window_indexes.get(&agent.pane_id).copied();
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let pane_num = |a: &AgentPane| -> u64 {
+        a.pane_id
+            .strip_prefix('%')
+            .unwrap_or(&a.pane_id)
+            .parse()
+            .unwrap_or(u64::MAX)
+    };
+
+    match sort {
+        SidebarSort::Recency => agents.sort_by_cached_key(|a| {
+            let is_sleeping = sleeping_pane_ids.contains(&a.pane_id);
+            let elapsed = a
+                .status_ts
+                .map(|ts| now.saturating_sub(ts))
+                .unwrap_or(u64::MAX);
+            (is_sleeping, elapsed, pane_num(a))
+        }),
+        // Stable window order: session, then window index (unresolved last).
+        // Sleeping agents keep their place; stability is the point.
+        SidebarSort::Window => agents.sort_by_cached_key(|a| {
+            (
+                a.session.clone(),
+                a.window_index.map(u64::from).unwrap_or(u64::MAX),
+                pane_num(a),
+            )
+        }),
     }
 
     // Prune sleeping set to only include live agents
@@ -254,6 +268,7 @@ mod tests {
             SidebarPosition::Left,
             SidebarLayoutMode::default(),
             SidebarFilterMode::default(),
+            SidebarSort::default(),
             &StatusIcons::default(),
             git_statuses,
             pr_statuses,
@@ -277,6 +292,7 @@ mod tests {
             SidebarPosition::Left,
             SidebarLayoutMode::default(),
             SidebarFilterMode::default(),
+            SidebarSort::default(),
             &StatusIcons::default(),
             HashMap::new(),
             HashMap::new(),
@@ -291,6 +307,40 @@ mod tests {
         let snapshot =
             build_with_checks(vec![stale], HashMap::new(), HashMap::new(), HashMap::new());
         assert_eq!(snapshot.agents[0].window_index, None);
+    }
+
+    #[test]
+    fn window_sort_orders_by_index_not_recency() {
+        let mut a = agent("/repo/a");
+        a.pane_id = "%1".to_string();
+        a.status_ts = Some(1); // oldest — recency sort would put it last
+        let mut b = agent("/repo/b");
+        b.pane_id = "%2".to_string();
+        b.status_ts = Some(999);
+        let mut c = agent("/repo/c");
+        c.pane_id = "%3".to_string();
+        c.status_ts = Some(500);
+        let indexes = HashMap::from([("%1".to_string(), 2u32), ("%2".to_string(), 7u32)]);
+        let snapshot = build_snapshot(
+            vec![b, c, a],
+            &HashMap::new(),
+            &HashMap::new(),
+            &indexes,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+            SidebarPosition::Left,
+            SidebarLayoutMode::default(),
+            SidebarFilterMode::default(),
+            SidebarSort::Window,
+            &StatusIcons::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            &HashSet::new(),
+        );
+        let order: Vec<_> = snapshot.agents.iter().map(|a| a.pane_id.clone()).collect();
+        assert_eq!(order, vec!["%1", "%2", "%3"]); // idx 2, idx 7, unresolved
     }
 
     #[test]

@@ -221,6 +221,21 @@ pub struct SidebarConfig {
 
     /// Per-agent icon overrides.
     pub agent_icons: Option<AgentIcons>,
+
+    /// Row ordering: "recency" (default) or "window".
+    pub sort: Option<SidebarSort>,
+}
+
+/// Sidebar row ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSort {
+    /// Most recent status change first, sleeping agents last.
+    #[default]
+    Recency,
+    /// Multiplexer window order (session name, then window index). Keeps
+    /// rows stable while agents work, matching the tmux window list.
+    Window,
 }
 
 /// Sidebar pane position.
@@ -2531,6 +2546,7 @@ impl Config {
                 }
                 (g, p) => p.or(g),
             },
+            sort: project.sidebar.sort.or(self.sidebar.sort),
         };
 
         // Sandbox config: per-field override with nested struct merging

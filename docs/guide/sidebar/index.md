@@ -72,6 +72,11 @@ sidebar:
 
   # Layout mode for the left sidebar: "compact" or "tiles" (default)
   layout: tiles
+
+  # Row ordering: "recency" (default, most recent status change first)
+  # or "window" (tmux window order — stable rows that match the window
+  # list, pairs well with the {window_index} template token)
+  sort: recency
 ```
 
 For a horizontal top bar:
