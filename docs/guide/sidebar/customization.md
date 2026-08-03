@@ -44,6 +44,7 @@ sidebars without a restart.
 | `{project}`      | Project name (parent of the worktree).                                                                                     |
 | `{session}`      | Tmux session name (blank for workmux-prefixed sessions).                                                                   |
 | `{window}`       | Tmux window name (blank for generic shell names like `zsh`, `bash`).                                                       |
+| `{window_index}` | Tmux window number as shown in the status bar (e.g. `3` for `3:wm-fix-auth`), usable with `prefix+N`. Empty on backends without window indexes. |
 | `{pane_title}`   | Sanitized agent task title from the pane title.                                                                            |
 | `{pane_suffix}`  | Disambiguator like `(1)`, `(2)` when multiple agents share a window. Empty otherwise.                                      |
 | `{status_icon}`  | Status indicator (working spinner, waiting, done, sleeping, etc.).                                                         |

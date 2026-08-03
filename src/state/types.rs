@@ -139,6 +139,7 @@ impl AgentState {
             window_name,
             pane_id: self.pane_key.pane_id.clone(),
             window_id: String::new(),
+            window_index: None,
             path: self.workdir.clone(),
             pane_title: self.pane_title.clone(),
             status: self.status,

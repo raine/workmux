@@ -133,6 +133,11 @@ impl<'a> RowContext<'a> {
             TokenId::Project => self.project_name(),
             TokenId::Session => self.agent.session.clone(),
             TokenId::Window => self.agent.window_name.clone(),
+            TokenId::WindowIndex => self
+                .agent
+                .window_index
+                .map(|index| index.to_string())
+                .unwrap_or_default(),
             TokenId::PaneTitle => self.pane_title.clone().unwrap_or_default(),
             TokenId::AgentLabel => self.agent_label.clone(),
             TokenId::StatusIcon => self
@@ -312,6 +317,7 @@ impl<'a> RowContext<'a> {
             TokenId::StatusLabel => Style::default().fg(self.status_color),
             TokenId::Idx => Style::default().fg(self.palette.dimmed),
             TokenId::JumpKey => Style::default().fg(self.palette.dimmed),
+            TokenId::WindowIndex => Style::default().fg(self.palette.dimmed),
             TokenId::AgentIcon => {
                 let fg = self.agent_icon_color.unwrap_or(self.palette.text);
                 Style::default().fg(fg)
@@ -578,6 +584,7 @@ mod tests {
             window_name: "w".to_string(),
             pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
+            window_index: None,
             path: PathBuf::from("/tmp/x"),
             pane_title: None,
             status: None,
@@ -655,6 +662,20 @@ mod tests {
         let ctx9 = make_context(&agent, None, 9);
         assert_eq!(ctx0.resolve(TokenId::Idx), "1");
         assert_eq!(ctx9.resolve(TokenId::Idx), "10");
+    }
+
+    #[test]
+    fn resolve_window_index_empty_when_unset() {
+        let mut agent = test_agent();
+        assert_eq!(
+            make_context(&agent, None, 0).resolve(TokenId::WindowIndex),
+            ""
+        );
+        agent.window_index = Some(3);
+        assert_eq!(
+            make_context(&agent, None, 0).resolve(TokenId::WindowIndex),
+            "3"
+        );
     }
 
     #[test]

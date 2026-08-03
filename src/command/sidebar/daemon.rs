@@ -36,13 +36,14 @@ struct TmuxState {
     window_statuses: HashMap<String, Option<String>>,
     active_windows: HashSet<(String, String)>,
     pane_window_ids: HashMap<String, String>,
+    pane_window_indexes: HashMap<String, u32>,
     active_pane_ids: HashSet<String>,
     window_pane_counts: HashMap<String, usize>,
 }
 
 /// Query all sidebar-relevant tmux state in a single command.
 fn query_tmux_state() -> TmuxState {
-    let format = "#{pane_id}\t#{session_name}\t#{window_id}\t#{@workmux_pane_status}\t#{window_active}\t#{session_attached}\t#{pane_active}";
+    let format = "#{pane_id}\t#{session_name}\t#{window_id}\t#{@workmux_pane_status}\t#{window_active}\t#{session_attached}\t#{pane_active}\t#{window_index}";
     let output = Cmd::new("tmux")
         .args(&["list-panes", "-a", "-F", format])
         .run_and_capture_stdout()
@@ -51,6 +52,7 @@ fn query_tmux_state() -> TmuxState {
     let mut window_statuses = HashMap::new();
     let mut active_windows = HashSet::new();
     let mut pane_window_ids = HashMap::new();
+    let mut pane_window_indexes = HashMap::new();
     let mut active_pane_ids = HashSet::new();
     let mut window_pane_counts: HashMap<String, usize> = HashMap::new();
 
@@ -87,6 +89,11 @@ fn query_tmux_state() -> TmuxState {
         };
         window_statuses.insert(pane_id.to_string(), status_val);
         pane_window_ids.insert(pane_id.to_string(), window_id.to_string());
+        // Trailing field so older/newer daemons tolerate each other's lines;
+        // absent or non-numeric values simply leave the index unset.
+        if let Some(index) = parts.next().and_then(|value| value.parse().ok()) {
+            pane_window_indexes.insert(pane_id.to_string(), index);
+        }
         *window_pane_counts.entry(window_id.to_string()).or_default() += 1;
 
         if win_active && sess_attached {
@@ -101,6 +108,7 @@ fn query_tmux_state() -> TmuxState {
         window_statuses,
         active_windows,
         pane_window_ids,
+        pane_window_indexes,
         active_pane_ids,
         window_pane_counts,
     }
@@ -1896,6 +1904,7 @@ fn compute_tick(
         agents,
         &tmux_state.window_statuses,
         &tmux_state.pane_window_ids,
+        &tmux_state.pane_window_indexes,
         tmux_state.active_windows,
         tmux_state.active_pane_ids,
         tmux_state.window_pane_counts,
@@ -1987,6 +1996,7 @@ mod tests {
             window_name: String::new(),
             pane_id: pane_id.to_string(),
             window_id: String::new(),
+            window_index: None,
             path: PathBuf::new(),
             pane_title: None,
             status: Some(AgentStatus::Working),
@@ -2469,6 +2479,7 @@ mod tests {
                         window_statuses: HashMap::new(),
                         active_windows: HashSet::new(),
                         pane_window_ids: HashMap::new(),
+                        pane_window_indexes: HashMap::new(),
                         active_pane_ids: HashSet::new(),
                         window_pane_counts: HashMap::new(),
                     },

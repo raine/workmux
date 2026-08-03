@@ -65,6 +65,7 @@ pub fn build_snapshot(
     mut agents: Vec<AgentPane>,
     tmux_statuses: &HashMap<String, Option<String>>,
     pane_window_ids: &HashMap<String, String>,
+    pane_window_indexes: &HashMap<String, u32>,
     active_windows: HashSet<(String, String)>,
     active_pane_ids: HashSet<String>,
     window_pane_counts: HashMap<String, usize>,
@@ -116,11 +117,12 @@ pub fn build_snapshot(
         (is_sleeping, elapsed, pane_num)
     });
 
-    // Populate window_id from the tmux state lookup
+    // Populate window_id and window_index from the tmux state lookup
     for agent in &mut agents {
         if let Some(wid) = pane_window_ids.get(&agent.pane_id) {
             agent.window_id = wid.clone();
         }
+        agent.window_index = pane_window_indexes.get(&agent.pane_id).copied();
     }
 
     // Prune sleeping set to only include live agents
@@ -186,6 +188,7 @@ mod tests {
             window_name: "w".to_string(),
             pane_id: "%1".to_string(),
             window_id: String::new(),
+            window_index: None,
             path: PathBuf::from(path),
             pane_title: None,
             status: None,
@@ -244,6 +247,7 @@ mod tests {
             agents,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             HashSet::new(),
             HashSet::new(),
             HashMap::new(),
@@ -256,6 +260,37 @@ mod tests {
             check_statuses,
             &HashSet::new(),
         )
+    }
+
+    #[test]
+    fn window_index_stamped_from_tmux_state() {
+        let agents = vec![agent("/repo")];
+        let indexes = HashMap::from([("%1".to_string(), 4u32)]);
+        let snapshot = build_snapshot(
+            agents,
+            &HashMap::new(),
+            &HashMap::new(),
+            &indexes,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+            SidebarPosition::Left,
+            SidebarLayoutMode::default(),
+            SidebarFilterMode::default(),
+            &StatusIcons::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(snapshot.agents[0].window_index, Some(4));
+
+        // A pane missing from the lookup clears any stale index.
+        let mut stale = agent("/repo");
+        stale.window_index = Some(9);
+        let snapshot =
+            build_with_checks(vec![stale], HashMap::new(), HashMap::new(), HashMap::new());
+        assert_eq!(snapshot.agents[0].window_index, None);
     }
 
     #[test]

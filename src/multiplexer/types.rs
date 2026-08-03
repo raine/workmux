@@ -63,6 +63,12 @@ pub struct AgentPane {
     /// Stable window ID (e.g., @42 in tmux). Empty when not yet resolved.
     #[serde(default)]
     pub window_id: String,
+    /// Window index as shown in the multiplexer's window list (e.g., 3 for
+    /// tmux window `3:wm-feature-auth`). Refreshed from the live tmux poll
+    /// because indexes change on renumber/move. `None` on backends without
+    /// window indexes.
+    #[serde(default)]
+    pub window_index: Option<u32>,
     /// Working directory path of the pane
     pub path: PathBuf,
     /// Pane title (set by Claude Code to show session summary)

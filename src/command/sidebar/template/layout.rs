@@ -527,6 +527,7 @@ mod tests {
             window_name: format!("wm-{}", name),
             pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
+            window_index: None,
             path: PathBuf::from(format!("/tmp/{}", name)),
             pane_title: None,
             status: None,

@@ -86,6 +86,7 @@ mod tests {
             window_name: format!("wm-{pane_id}"),
             pane_id: pane_id.to_string(),
             window_id: String::new(),
+            window_index: None,
             path: PathBuf::from(path),
             pane_title: None,
             status: None,

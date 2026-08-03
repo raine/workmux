@@ -166,6 +166,7 @@ mod tests {
             window_name: "window".to_string(),
             pane_id: pane_id.to_string(),
             window_id: String::new(),
+            window_index: None,
             path: PathBuf::from("/repo/worktree"),
             pane_title: None,
             status: None,
