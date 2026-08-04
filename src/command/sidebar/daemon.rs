@@ -1169,6 +1169,25 @@ fn spawn_git_worker(
     (cache, tx)
 }
 
+const CONFIG_BASENAMES: [&str; 4] = ["config.yaml", "config.yml", ".workmux.yaml", ".workmux.yml"];
+
+/// Whether a filesystem event on a watched config dir should schedule a
+/// config reload.
+///
+/// Access events (open/read/close-nowrite) must be ignored: on Linux the
+/// notify backend also reports reads of watched files, and a reload itself
+/// reads the config — so reacting to Access events makes every reload
+/// schedule the next one, reloading and re-rendering every sidebar client
+/// once per debounce interval, forever.
+fn config_event_triggers_reload(event: &notify::Event) -> bool {
+    !matches!(event.kind, notify::EventKind::Access(_))
+        && event.paths.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| CONFIG_BASENAMES.contains(&n))
+        })
+}
+
 /// Spawn a thread that watches the global config file and per-project
 /// `.workmux.yaml` files and bumps `config_version` whenever a reload succeeds.
 ///
@@ -1233,8 +1252,6 @@ fn spawn_config_watcher(
                 }
             }
         }
-
-        let interesting_basenames = ["config.yaml", "config.yml", ".workmux.yaml", ".workmux.yml"];
 
         while !term.load(Ordering::Relaxed) {
             // 1. Reconcile per-project watches from incoming path sets.
@@ -1303,12 +1320,7 @@ fn spawn_config_watcher(
 
             match fs_rx.recv_timeout(timeout) {
                 Ok(Ok(event)) => {
-                    let interesting = event.paths.iter().any(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| interesting_basenames.contains(&n))
-                    });
-                    if interesting {
+                    if config_event_triggers_reload(&event) {
                         // Lock the deadline on the FIRST event in a burst; do
                         // not slide it forward on every subsequent event.
                         pending_reload_at.get_or_insert(Instant::now() + debounce);
@@ -2010,6 +2022,46 @@ mod tests {
         assert!(!github_fetch_due(false, Duration::from_secs(29)));
         assert!(github_fetch_due(false, Duration::from_secs(30)));
         assert!(github_fetch_due(true, Duration::ZERO));
+    }
+
+    #[test]
+    fn config_reload_triggers_on_mutations_of_config_files() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+        let config = PathBuf::from("/home/u/.config/workmux/config.yaml");
+        for kind in [
+            notify::EventKind::Modify(ModifyKind::Any),
+            notify::EventKind::Create(CreateKind::File),
+            notify::EventKind::Remove(RemoveKind::File),
+        ] {
+            let event = notify::Event::new(kind).add_path(config.clone());
+            assert!(config_event_triggers_reload(&event), "kind: {kind:?}");
+        }
+
+        let project = notify::Event::new(notify::EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/repo/.workmux.yaml"));
+        assert!(config_event_triggers_reload(&project));
+    }
+
+    #[test]
+    fn config_reload_ignores_access_events_and_other_files() {
+        use notify::event::{AccessKind, AccessMode, ModifyKind};
+
+        // A reload reads the config; reacting to that read would schedule the
+        // next reload and loop forever.
+        let config = PathBuf::from("/home/u/.config/workmux/config.yaml");
+        for kind in [
+            notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            notify::EventKind::Access(AccessKind::Read),
+            notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        ] {
+            let event = notify::Event::new(kind).add_path(config.clone());
+            assert!(!config_event_triggers_reload(&event), "kind: {kind:?}");
+        }
+
+        let unrelated = notify::Event::new(notify::EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/home/u/.config/workmux/other.txt"));
+        assert!(!config_event_triggers_reload(&unrelated));
     }
 
     #[test]
