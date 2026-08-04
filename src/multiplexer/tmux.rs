@@ -1293,6 +1293,17 @@ impl Multiplexer for TmuxBackend {
             ]);
             let hook_cmd = auto_clear_status_hook();
             let _ = self.tmux_cmd(&["set-hook", "-w", "-t", pane_id, "pane-focus-in", &hook_cmd]);
+
+            // A status in the focused pane is already acknowledged. Background
+            // panes retain the status until their pane-focus-in hook runs.
+            let _ = self.tmux_cmd(&[
+                "if-shell",
+                "-F",
+                "-t",
+                pane_id,
+                FOCUSED_PANE_FORMAT,
+                &hook_cmd,
+            ]);
         } else {
             // Statuses that are not acknowledged on focus must clear the option, so a
             // hook left installed by an earlier acknowledgeable status does not match.
@@ -1396,6 +1407,9 @@ impl Multiplexer for TmuxBackend {
         parse_live_pane_snapshot(&output)
     }
 }
+/// A pane is focused when it is selected in a visible, attached session.
+const FOCUSED_PANE_FORMAT: &str = "#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}";
+
 /// Build the pane-focus hook that acknowledges a status and refreshes sidebar clients.
 ///
 /// The body is a constant. The icon reaches tmux only as an option value, which tmux

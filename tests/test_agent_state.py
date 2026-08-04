@@ -154,6 +154,94 @@ def test_set_window_status_disabled_by_env(
 
 
 @pytest.mark.tmux_only
+def test_done_status_acknowledges_focused_pane_and_waits_for_background_focus(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-focused-done-status"
+    window_name = get_window_name(branch_name)
+    initial_window_id = env.mux_command(
+        ["display-message", "-p", "#{window_id}"]
+    ).stdout.strip()
+
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+    pane_id = env.mux_command(
+        ["display-message", "-p", "-t", window_name, "#{pane_id}"]
+    ).stdout.strip()
+    env.mux_command(["set-option", "-g", "focus-events", "on"])
+
+    client = subprocess.Popen(
+        [
+            "tmux",
+            "-S",
+            str(env.socket_path),
+            "-C",
+            "attach-session",
+            "-t",
+            "test",
+        ],
+        env=env.env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def window_status() -> str:
+        return env.mux_command(
+            ["show-options", "-wqv", "-t", pane_id, "@workmux_status"],
+            check=False,
+        ).stdout.strip()
+
+    def pane_status() -> str:
+        return env.mux_command(
+            ["show-options", "-pqv", "-t", pane_id, "@workmux_pane_status"],
+            check=False,
+        ).stdout.strip()
+
+    try:
+        assert poll_until(
+            lambda: env.mux_command(
+                ["display-message", "-p", "-t", window_name, "#{session_attached}"]
+            ).stdout.strip()
+            == "1",
+            timeout=5.0,
+        )
+        env.select_window(window_name)
+
+        focused_marker = env.tmp_path / "focused-done-finished"
+        env.send_keys(
+            window_name,
+            build_status_cmd_with_marker(env, workmux_exe_path, "done", focused_marker),
+        )
+        assert poll_until(lambda: focused_marker.exists(), timeout=5.0)
+        assert poll_until(
+            lambda: window_status() == "" and pane_status() == "", timeout=5.0
+        )
+
+        env.mux_command(["select-window", "-t", initial_window_id])
+        background_marker = env.tmp_path / "background-done-finished"
+        env.send_keys(
+            window_name,
+            build_status_cmd_with_marker(
+                env, workmux_exe_path, "done", background_marker
+            ),
+        )
+        assert poll_until(lambda: background_marker.exists(), timeout=5.0)
+        assert window_status() != ""
+        assert pane_status() != ""
+
+        env.select_window(window_name)
+        assert poll_until(
+            lambda: window_status() == "" and pane_status() == "", timeout=5.0
+        )
+    finally:
+        client.terminate()
+        client.wait(timeout=5)
+
+
+@pytest.mark.tmux_only
 def test_set_window_status_without_tmux_env_uses_process_ancestry(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
