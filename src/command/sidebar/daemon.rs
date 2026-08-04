@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use ignore::gitignore::Gitignore;
-use notify::{RecursiveMode, Watcher};
+use notify::{EventKindMask, RecursiveMode, Watcher};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -902,6 +902,11 @@ fn spawn_github_worker(
     (path_cache, check_path_cache, tx)
 }
 
+/// Configure filesystem watchers for mutation events without read noise.
+fn mutation_watcher_config() -> notify::Config {
+    notify::Config::default().with_event_kinds(EventKindMask::CORE)
+}
+
 /// Spawn a background thread that watches for git changes and updates the cache.
 ///
 /// Uses the `notify` crate for OS-level filesystem event detection (FSEvents on macOS).
@@ -942,7 +947,7 @@ fn spawn_git_worker(
                     fs_overflow_clone.store(true, Ordering::Relaxed);
                 }
             },
-            notify::Config::default(),
+            mutation_watcher_config(),
         ) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -1174,12 +1179,14 @@ const CONFIG_BASENAMES: [&str; 4] = ["config.yaml", "config.yml", ".workmux.yaml
 /// Whether a filesystem event on a watched config dir should schedule a
 /// config reload.
 ///
-/// Access events (open/read/close-nowrite) must be ignored: on Linux the
-/// notify backend also reports reads of watched files, and a reload itself
-/// reads the config — so reacting to Access events makes every reload
-/// schedule the next one, reloading and re-rendering every sidebar client
-/// once per debounce interval, forever.
+/// Access events must be ignored because reading a config file produces them
+/// on Linux. Reacting to those reads makes each reload schedule another one.
+/// Rescan events reload defensively because their paths may be incomplete.
 fn config_event_triggers_reload(event: &notify::Event) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+
     !matches!(event.kind, notify::EventKind::Access(_))
         && event.paths.iter().any(|p| {
             p.file_name()
@@ -1208,11 +1215,17 @@ fn spawn_config_watcher(
         let overflow_clone = overflow.clone();
         let mut watcher: notify::RecommendedWatcher = match notify::RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
+                if event
+                    .as_ref()
+                    .is_ok_and(|event| !config_event_triggers_reload(event))
+                {
+                    return;
+                }
                 if let Err(mpsc::TrySendError::Full(_)) = fs_tx.try_send(event) {
                     overflow_clone.store(true, Ordering::Relaxed);
                 }
             },
-            notify::Config::default(),
+            mutation_watcher_config(),
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -2025,8 +2038,13 @@ mod tests {
     }
 
     #[test]
+    fn mutation_watchers_exclude_access_events() {
+        assert_eq!(mutation_watcher_config().event_kinds(), EventKindMask::CORE);
+    }
+
+    #[test]
     fn config_reload_triggers_on_mutations_of_config_files() {
-        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+        use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
 
         let config = PathBuf::from("/home/u/.config/workmux/config.yaml");
         for kind in [
@@ -2041,19 +2059,24 @@ mod tests {
         let project = notify::Event::new(notify::EventKind::Modify(ModifyKind::Any))
             .add_path(PathBuf::from("/repo/.workmux.yaml"));
         assert!(config_event_triggers_reload(&project));
+
+        let atomic_rename = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(PathBuf::from("/home/u/.config/workmux/config.yaml.tmp"))
+        .add_path(config);
+        assert!(config_event_triggers_reload(&atomic_rename));
     }
 
     #[test]
     fn config_reload_ignores_access_events_and_other_files() {
         use notify::event::{AccessKind, AccessMode, ModifyKind};
 
-        // A reload reads the config; reacting to that read would schedule the
-        // next reload and loop forever.
         let config = PathBuf::from("/home/u/.config/workmux/config.yaml");
         for kind in [
-            notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
-            notify::EventKind::Access(AccessKind::Read),
+            notify::EventKind::Access(AccessKind::Open(AccessMode::Any)),
             notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            notify::EventKind::Access(AccessKind::Close(AccessMode::Write)),
         ] {
             let event = notify::Event::new(kind).add_path(config.clone());
             assert!(!config_event_triggers_reload(&event), "kind: {kind:?}");
@@ -2062,6 +2085,14 @@ mod tests {
         let unrelated = notify::Event::new(notify::EventKind::Modify(ModifyKind::Any))
             .add_path(PathBuf::from("/home/u/.config/workmux/other.txt"));
         assert!(!config_event_triggers_reload(&unrelated));
+    }
+
+    #[test]
+    fn config_reload_triggers_on_rescan() {
+        let event =
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan);
+
+        assert!(config_event_triggers_reload(&event));
     }
 
     #[test]
