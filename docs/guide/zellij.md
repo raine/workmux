@@ -4,8 +4,8 @@ description: Use Zellij as an alternative multiplexer backend
 
 # Zellij
 
-::: warning Experimental
-The Zellij backend is new and experimental. Expect rough edges and potential issues.
+::: warning Experimental — requires Zellij built from source
+The Zellij backend is new and experimental. It depends on unreleased Zellij features, so you must [build Zellij from source](#building-zellij-from-source). Expect rough edges and potential issues.
 :::
 
 [Zellij](https://zellij.dev/) can be used as an alternative to tmux. Detected automatically via `$ZELLIJ`.
@@ -33,9 +33,19 @@ The Zellij backend is new and experimental. Expect rough edges and potential iss
 
 ## Requirements
 
-- Zellij 0.44.0 or newer
+- Zellij built from source (uses unreleased features: `--pane-id` targeting, `close-tab-by-id`, `go-to-tab-by-id`, tab ID APIs). These will ship in a future release after 0.43.
 - Unix-like OS (named pipes for handshakes)
 - Windows is **not supported**
+
+### Building Zellij from source
+
+```bash
+git clone https://github.com/zellij-org/zellij.git
+cd zellij
+cargo build --release
+# optionally install to PATH
+cargo install --path .
+```
 
 ## Configuration
 
