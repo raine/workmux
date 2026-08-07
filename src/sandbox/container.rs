@@ -635,7 +635,10 @@ fn build_docker_run_args_inner(
     if let Some(config_dir) = config.resolved_agent_config_dir(agent) {
         let target = match agent {
             "claude" => "/tmp/.claude",
+            "copilot" => "/tmp/.copilot",
+            "devin" => "/tmp/.config/devin",
             "gemini" => "/tmp/.gemini",
+            "agy" => "/tmp/.gemini/antigravity-cli",
             "codex" => "/home/user/.codex",
             "opencode" => "/tmp/.local/share/opencode",
             "pi" => "/tmp/.pi/agent",

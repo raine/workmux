@@ -762,7 +762,7 @@ done
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
 command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
-`pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without
+`pi`, `omp`, `devin`, or whatever you've set via the `agent` config or `--agent` flag) without
 requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started
@@ -1971,6 +1971,7 @@ at-a-glance visibility into what the agent in each window doing.
 | Claude Code  | ✅ Supported                                                                |
 | OpenCode     | ✅ Supported                                                                |
 | Codex        | ✅ Supported                                                                |
+| Devin        | ✅ Supported\*                                                              |
 | Copilot CLI  | ✅ Supported\*                                                              |
 | Pi           | ✅ Supported\*                                                              |
 | Oh My Pi    | ✅ Supported                                                                |
@@ -1981,6 +1982,7 @@ at-a-glance visibility into what the agent in each window doing.
 
 **Notes:**
 
+- **Devin**: No 💬 waiting state
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
 - **Antigravity CLI (`agy`)**: No 💬 waiting state
@@ -1990,7 +1992,7 @@ at-a-glance visibility into what the agent in each window doing.
 ### Setup
 
 Run `workmux setup` to automatically detect Claude Code, Antigravity CLI,
-Copilot CLI, OpenCode, Pi, Oh My Pi, and other supported agent CLIs, install
+Copilot CLI, Devin, OpenCode, Pi, Oh My Pi, and other supported agent CLIs, install
 status tracking hooks, and install skills:
 
 ```bash
@@ -2033,6 +2035,18 @@ curl -o .github/hooks/workmux-status/hooks.json \
 
 Note: Copilot hooks are per-repository. The waiting state is not supported due
 to limitations in the Copilot CLI hooks implementation.
+
+**Devin**: merge the hooks configuration into `~/.config/devin/config.json`
+(which also holds Devin's other settings, so merge rather than replace):
+
+```bash
+curl -s https://raw.githubusercontent.com/raine/workmux/main/.devin/hooks/workmux-status.json \
+  | jq -s '.[0] * .[1]' ~/.config/devin/config.json - > /tmp/devin-config.json \
+  && mv /tmp/devin-config.json ~/.config/devin/config.json
+```
+
+Devin does not currently expose a permission-prompt hook, so only
+working/done states are tracked (no waiting state).
 
 **Antigravity CLI (`agy`)**: `workmux setup` installs lifecycle hooks in
 `~/.gemini/config/hooks.json`. `PreInvocation` marks the pane working, and the

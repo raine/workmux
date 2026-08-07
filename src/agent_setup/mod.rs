@@ -8,6 +8,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
+pub mod devin;
 pub mod extension_file;
 pub mod gemini;
 pub mod hooks;
@@ -35,6 +36,7 @@ pub enum Agent {
     Claude,
     Codex,
     Copilot,
+    Devin,
     Gemini,
     OpenCode,
     Pi,
@@ -49,6 +51,7 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Copilot => "Copilot CLI",
+            Agent::Devin => "Devin",
             Agent::Gemini => "Gemini CLI",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "pi",
@@ -64,6 +67,7 @@ impl Agent {
             Agent::Claude,
             Agent::Codex,
             Agent::Copilot,
+            Agent::Devin,
             Agent::Gemini,
             Agent::OpenCode,
             Agent::Pi,
@@ -145,6 +149,18 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
+    if let Some(reason) = devin::detect() {
+        let status = match devin::check() {
+            Ok(s) => s,
+            Err(e) => StatusCheck::Error(e.to_string()),
+        };
+        results.push(AgentCheck {
+            agent: Agent::Devin,
+            reason,
+            status,
+        });
+    }
+
     if let Some(reason) = gemini::detect() {
         let status = match gemini::check() {
             Ok(s) => s,
@@ -203,6 +219,7 @@ pub fn install(agent: Agent) -> Result<String> {
         Agent::Claude => claude::install(),
         Agent::Codex => codex::install(),
         Agent::Copilot => copilot::install(),
+        Agent::Devin => devin::install(),
         Agent::Gemini => gemini::install(),
         Agent::OpenCode => opencode::install(),
         Agent::Pi => pi::install(),
@@ -217,6 +234,7 @@ pub fn uninstall_one(agent: Agent) -> Result<String> {
         Agent::Claude => claude::uninstall(),
         Agent::Codex => codex::uninstall(),
         Agent::Copilot => copilot::uninstall(),
+        Agent::Devin => devin::uninstall(),
         Agent::Gemini => gemini::uninstall(),
         Agent::OpenCode => opencode::uninstall(),
         Agent::Pi => pi::uninstall(),
@@ -430,6 +448,7 @@ mod tests {
         assert_eq!(Agent::Claude.name(), "Claude Code");
         assert_eq!(Agent::Codex.name(), "Codex");
         assert_eq!(Agent::Copilot.name(), "Copilot CLI");
+        assert_eq!(Agent::Devin.name(), "Devin");
         assert_eq!(Agent::Gemini.name(), "Gemini CLI");
         assert_eq!(Agent::OpenCode.name(), "OpenCode");
         assert_eq!(Agent::Pi.name(), "pi");
@@ -448,6 +467,7 @@ mod tests {
             serde_json::to_string(&Agent::Copilot).unwrap(),
             "\"copilot\""
         );
+        assert_eq!(serde_json::to_string(&Agent::Devin).unwrap(), "\"devin\"");
         assert_eq!(serde_json::to_string(&Agent::Gemini).unwrap(), "\"gemini\"");
         assert_eq!(
             serde_json::to_string(&Agent::OpenCode).unwrap(),
@@ -467,6 +487,8 @@ mod tests {
         assert_eq!(agent, Agent::Codex);
         let agent: Agent = serde_json::from_str("\"copilot\"").unwrap();
         assert_eq!(agent, Agent::Copilot);
+        let agent: Agent = serde_json::from_str("\"devin\"").unwrap();
+        assert_eq!(agent, Agent::Devin);
         let agent: Agent = serde_json::from_str("\"gemini\"").unwrap();
         assert_eq!(agent, Agent::Gemini);
         let agent: Agent = serde_json::from_str("\"opencode\"").unwrap();

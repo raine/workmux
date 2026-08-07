@@ -17,6 +17,7 @@ Workmux can display the status of the agent in your tmux window list, giving you
 | Claude Code             | ✅ Supported                                                                |
 | OpenCode                | ✅ Supported                                                                |
 | Codex                   | ✅ Supported                                                                |
+| Devin                   | ✅ Supported\*                                                              |
 | Copilot CLI             | ✅ Supported\*                                                              |
 | Pi                      | ✅ Supported\*                                                              |
 | Oh My Pi                | ✅ Supported                                                                |
@@ -27,6 +28,7 @@ Workmux can display the status of the agent in your tmux window list, giving you
 
 **Notes:**
 
+- **Devin**: No 💬 waiting state
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
 - **Antigravity CLI (`agy`)**: No 💬 waiting state
@@ -46,7 +48,7 @@ Run `workmux setup` to automatically detect your agent CLIs and install status t
 workmux setup
 ```
 
-This detects Claude Code, Antigravity CLI, Copilot CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. For Claude Code, `CLAUDE_CONFIG_DIR` is respected when locating `settings.json`. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
+This detects Claude Code, Antigravity CLI, Copilot CLI, Devin, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. For Claude Code, `CLAUDE_CONFIG_DIR` is respected when locating `settings.json`. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
 
 Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
 
@@ -98,6 +100,18 @@ curl -o ~/.config/opencode/plugins/workmux-status.ts \
 ```
 
 Restart OpenCode for the plugin to take effect.
+
+## Devin setup
+
+If you prefer manual setup, merge the hooks configuration into `~/.config/devin/config.json` (which also holds Devin's other settings, so merge rather than replace):
+
+```bash
+curl -s https://raw.githubusercontent.com/raine/workmux/main/.devin/hooks/workmux-status.json \
+  | jq -s '.[0] * .[1]' ~/.config/devin/config.json - > /tmp/devin-config.json \
+  && mv /tmp/devin-config.json ~/.config/devin/config.json
+```
+
+Devin does not currently expose a permission-prompt hook, so only working/done states are tracked (no waiting state).
 
 ## Codex setup
 

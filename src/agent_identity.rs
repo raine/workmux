@@ -32,6 +32,7 @@ pub enum AgentKind {
     KiroCli,
     Vibe,
     Copilot,
+    Devin,
 }
 
 impl AgentKind {
@@ -49,6 +50,7 @@ impl AgentKind {
             AgentKind::KiroCli => "kiro-cli",
             AgentKind::Vibe => "vibe",
             AgentKind::Copilot => "copilot",
+            AgentKind::Devin => "devin",
         }
     }
 
@@ -65,6 +67,7 @@ impl AgentKind {
             "kiro-cli" => Some(AgentKind::KiroCli),
             "vibe" => Some(AgentKind::Vibe),
             "copilot" => Some(AgentKind::Copilot),
+            "devin" => Some(AgentKind::Devin),
             _ => None,
         }
     }
@@ -83,6 +86,7 @@ impl AgentKind {
             AgentKind::KiroCli => "K",
             AgentKind::Vibe => "V",
             AgentKind::Copilot => "CP",
+            AgentKind::Devin => "D",
         }
     }
 
@@ -100,6 +104,7 @@ impl AgentKind {
             AgentKind::KiroCli => "Kiro",
             AgentKind::Vibe => "Vibe",
             AgentKind::Copilot => "Copilot",
+            AgentKind::Devin => "Devin",
         }
     }
 
@@ -116,6 +121,7 @@ impl AgentKind {
             AgentKind::Gemini => Color::Rgb(0x07, 0x8e, 0xfa),
             AgentKind::Antigravity => Color::Rgb(0x89, 0x57, 0xe5),
             AgentKind::Copilot => Color::Rgb(0x89, 0x57, 0xe5),
+            AgentKind::Devin => Color::Rgb(0x5b, 0x5f, 0xe0),
             AgentKind::Vibe => Color::Rgb(0xff, 0x82, 0x05),
             AgentKind::Pi => Color::Rgb(0x96, 0xbb, 0xb5),
             AgentKind::Omp => Color::Rgb(0xe0, 0x57, 0x35),
@@ -264,6 +270,12 @@ mod tests {
     }
 
     #[test]
+    fn devin_matches() {
+        assert_eq!(classify("devin", ""), Some("devin".into()));
+        assert_eq!(classify("/usr/local/bin/devin", ""), Some("devin".into()));
+    }
+
+    #[test]
     fn direct_stem_matches_for_known_binaries() {
         assert_eq!(classify("claude", ""), Some("claude".into()));
         assert_eq!(classify("gemini", ""), Some("gemini".into()));
@@ -384,6 +396,7 @@ mod tests {
             AgentKind::KiroCli,
             AgentKind::Vibe,
             AgentKind::Copilot,
+            AgentKind::Devin,
         ];
         for kind in all {
             assert!(!kind.default_icon().is_empty(), "{:?} icon empty", kind);

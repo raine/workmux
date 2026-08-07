@@ -1890,6 +1890,7 @@ impl SandboxConfig {
             match agent {
                 "claude" => Some(home.join(".claude")),
                 "copilot" => Some(home.join(".copilot")),
+                "devin" => Some(home.join(".config/devin")),
                 "gemini" => Some(home.join(".gemini")),
                 "agy" => Some(home.join(".gemini/antigravity-cli")),
                 "codex" => Some(home.join(".codex")),
@@ -4281,6 +4282,10 @@ extra_mounts:
             .unwrap();
         let home = home::home_dir().unwrap();
         assert_eq!(dir, home.join(".claude"));
+        let dir = config
+            .resolved_agent_config_dir_with_env("devin", |_| None)
+            .unwrap();
+        assert_eq!(dir, home.join(".config/devin"));
         let dir = config
             .resolved_agent_config_dir_with_env("agy", |_| None)
             .unwrap();

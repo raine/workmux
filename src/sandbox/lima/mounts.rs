@@ -277,7 +277,10 @@ fn generate_mounts_with_state_root(
     if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent) {
         let guest_subpath = match agent {
             "claude" => ".claude",
+            "copilot" => ".copilot",
+            "devin" => ".config/devin",
             "gemini" => ".gemini",
+            "agy" => ".gemini/antigravity-cli",
             "codex" => ".codex",
             "opencode" => ".local/share/opencode",
             "pi" => ".pi/agent",

@@ -294,6 +294,22 @@ impl AgentProfile for OmpProfile {
     }
 }
 
+pub struct DevinProfile;
+
+impl AgentProfile for DevinProfile {
+    fn name(&self) -> &'static str {
+        "devin"
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--permission-mode dangerous")
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct DefaultProfile;
 
 impl AgentProfile for DefaultProfile {
@@ -314,6 +330,7 @@ static PROFILES: &[&dyn AgentProfile] = &[
     &OmpProfile,
     &KiroProfile,
     &VibeProfile,
+    &DevinProfile,
 ];
 
 /// Check if a command matches a known agent profile.
@@ -702,6 +719,23 @@ mod tests {
             Some(r#"codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini"#)
         );
         assert_eq!(profile.continue_flag(), Some("resume --last"));
+    }
+
+    #[test]
+    fn test_devin_profile() {
+        let profile = DevinProfile;
+        assert_eq!(profile.name(), "devin");
+        assert!(!profile.needs_bang_delay());
+        assert!(!profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "-- \"$(cat PROMPT.md)\""
+        );
+        assert_eq!(
+            profile.skip_permissions_flag(),
+            Some("--permission-mode dangerous")
+        );
+        assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
     #[test]
