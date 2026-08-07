@@ -209,9 +209,10 @@ status_icons:
   done: "#[fg=#a6e3a1]󰄴#[fg=default]"
 ```
 
-Zellij displays the visible icon text in its tab title and ignores tmux style
-codes. Zellij does not auto-clear waiting or done icons on tab focus; the next
-status update replaces them.
+Zellij displays an animated Braille spinner before the tab title while an agent
+is working. Waiting and done use their configured visible icon text. Zellij
+ignores tmux style codes and does not auto-clear waiting or done icons on tab
+focus; the next status update replaces them.
 
 If you prefer to manage the tmux format yourself, disable auto-modification and add the status variable to your `~/.tmux.conf`:
 
