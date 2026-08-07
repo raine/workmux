@@ -1,10 +1,12 @@
 ---
-description: Display agent status in your tmux window list for at-a-glance visibility
+description: Display agent status in multiplexer tabs for at-a-glance visibility
 ---
 
 # Status tracking
 
-Workmux can display the status of the agent in your tmux window list, giving you at-a-glance visibility into what the agent in each window is doing.
+Workmux can display the status of the agent in tmux window names and Zellij tab
+titles, giving you at-a-glance visibility into what the agent in each window is
+doing.
 
 <div style="display: flex; justify-content: center; margin: 1.5rem 0;">
   <img src="/status.webp" alt="tmux status showing agent icons" style="border-radius: 4px;">
@@ -36,7 +38,7 @@ Workmux can display the status of the agent in your tmux window list, giving you
 
 - 🤖 = agent is working
 - 💬 = agent is waiting for user input
-- ✅ = agent finished (auto-clears on window focus)
+- ✅ = agent finished (auto-clears on window focus in tmux)
 
 ## Automated setup
 
@@ -206,6 +208,10 @@ Tmux style codes are supported for colored icons, and work in both the tmux stat
 status_icons:
   done: "#[fg=#a6e3a1]󰄴#[fg=default]"
 ```
+
+Zellij displays the visible icon text in its tab title and ignores tmux style
+codes. Zellij does not auto-clear waiting or done icons on tab focus; the next
+status update replaces them.
 
 If you prefer to manage the tmux format yourself, disable auto-modification and add the status variable to your `~/.tmux.conf`:
 

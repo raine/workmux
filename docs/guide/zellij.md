@@ -4,8 +4,8 @@ description: Use Zellij as an alternative multiplexer backend
 
 # Zellij
 
-::: warning Experimental — requires Zellij built from source
-The Zellij backend is new and experimental. It depends on unreleased Zellij features, so you must [build Zellij from source](#building-zellij-from-source). Expect rough edges and potential issues.
+::: warning Experimental
+The Zellij backend is new and experimental. Expect rough edges and potential issues.
 :::
 
 [Zellij](https://zellij.dev/) can be used as an alternative to tmux. Detected automatically via `$ZELLIJ`.
@@ -16,7 +16,7 @@ The Zellij backend is new and experimental. It depends on unreleased Zellij feat
 
 | Feature              | tmux                 | Zellij            |
 | -------------------- | -------------------- | ----------------- |
-| Agent status in tabs | Yes (window names)   | No                |
+| Agent status in tabs | Yes (window names)   | Yes (tab titles)  |
 | Tab ordering         | Insert after current | Appends to end    |
 | Scope                | tmux session         | Zellij session    |
 | Session mode         | Yes                  | No (window only)  |
@@ -33,19 +33,9 @@ The Zellij backend is new and experimental. It depends on unreleased Zellij feat
 
 ## Requirements
 
-- Zellij built from source (uses unreleased features: `--pane-id` targeting, `close-tab-by-id`, `go-to-tab-by-id`, tab ID APIs). These will ship in a future release after 0.43.
+- Zellij 0.44.0 or newer
 - Unix-like OS (named pipes for handshakes)
 - Windows is **not supported**
-
-### Building Zellij from source
-
-```bash
-git clone https://github.com/zellij-org/zellij.git
-cd zellij
-cargo build --release
-# optionally install to PATH
-cargo install --path .
-```
 
 ## Configuration
 
@@ -76,11 +66,15 @@ panes:
 Zellij pane display names are supported with `name`. workmux applies them using
 `zellij action rename-pane --pane-id`, so the pane does not need to be focused.
 
+Agent status icons are appended to workmux tab titles. Zellij does not expose a
+focus hook equivalent to tmux, so waiting and done icons are replaced by the
+next status update rather than clearing when the tab receives focus.
+
 ## Known limitations
 
 - Windows is not supported (requires Unix-specific features)
 - Session mode is not supported — only window mode works
-- Agent status icons do not appear in tab titles
+- Agent status icons do not auto-clear when a tab receives focus
 - Dashboard preview pane is disabled (captures focused pane only)
 - Horizontal and vertical pane splits are always 50/50 (no percentage-based sizing)
 - Tab insertion ordering is not supported (new tabs always appear at the end)

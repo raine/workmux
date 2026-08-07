@@ -3,7 +3,6 @@
 //! Limitations:
 //! - No percentage-based pane size control (can resize with +/- but not set exact %)
 //! - No window insertion order (tabs always append)
-//! - No visual status indicator (set_status is a no-op)
 
 use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
@@ -17,6 +16,11 @@ use crate::config::SplitDirection;
 
 use super::types::{CreateWindowParams, LivePaneInfo};
 use super::{Multiplexer, util};
+
+// Zero-width markers let workmux replace or remove only the status suffix it
+// owns, without mistaking user-provided title text or custom icons for status.
+const STATUS_MARKER_OPEN: char = '\u{2063}';
+const STATUS_MARKER_CLOSE: char = '\u{2064}';
 
 /// Zellij multiplexer backend.
 pub struct ZellijBackend {
@@ -201,6 +205,26 @@ fn parse_tab_name_from_output(output: &str) -> Option<String> {
         .map(|l| l["name: ".len()..].to_string())
 }
 
+fn tab_name_without_status(name: &str) -> Option<&str> {
+    if !name.ends_with(STATUS_MARKER_CLOSE) {
+        return None;
+    }
+
+    let marker_start = name.rfind(STATUS_MARKER_OPEN)?;
+    name[..marker_start].strip_suffix(' ')
+}
+
+fn canonical_tab_name(name: &str) -> &str {
+    tab_name_without_status(name).unwrap_or(name)
+}
+
+fn tab_name_with_status(name: &str, icon: &str) -> String {
+    let base = canonical_tab_name(name);
+    let icon = crate::tmux_style::strip_tmux_styles(icon)
+        .replace([STATUS_MARKER_OPEN, STATUS_MARKER_CLOSE], "");
+    format!("{base} {STATUS_MARKER_OPEN}{icon}{STATUS_MARKER_CLOSE}")
+}
+
 fn zellij_new_pane_direction_args(direction: &SplitDirection) -> &'static [&'static str] {
     match direction {
         SplitDirection::Horizontal => &["--direction", "right"],
@@ -295,7 +319,7 @@ impl ZellijBackend {
 
     /// Query all tabs using `zellij action list-tabs --json`
     fn list_tabs(&self) -> Result<Vec<TabInfo>> {
-        query_json_with_retry(
+        let mut tabs: Vec<TabInfo> = query_json_with_retry(
             || {
                 self.command()
                     .args(&["action", "list-tabs", "--json"])
@@ -304,7 +328,11 @@ impl ZellijBackend {
             },
             "Failed to parse list-tabs JSON output",
             Duration::from_millis(50),
-        )
+        )?;
+        for tab in &mut tabs {
+            tab.name = canonical_tab_name(&tab.name).to_string();
+        }
+        Ok(tabs)
     }
 
     /// Get focused pane ID from list-panes output
@@ -366,6 +394,24 @@ impl ZellijBackend {
             .and_then(|p| p.tab_id))
     }
 
+    fn tab_for_pane(&self, pane_id: &str) -> Result<Option<(u32, String)>> {
+        let numeric_id =
+            parse_pane_id(pane_id).ok_or_else(|| anyhow!("Invalid pane_id: {}", pane_id))?;
+        Ok(self
+            .list_panes()?
+            .into_iter()
+            .find(|pane| pane.id == numeric_id && !pane.is_plugin)
+            .and_then(|pane| pane.tab_id.map(|tab_id| (tab_id, pane.tab_name))))
+    }
+
+    fn rename_tab_by_id(&self, tab_id: u32, name: &str) -> Result<()> {
+        self.command()
+            .args(&["action", "rename-tab-by-id", &tab_id.to_string(), name])
+            .run()
+            .with_context(|| format!("Failed to rename zellij tab {}", tab_id))?;
+        Ok(())
+    }
+
     fn build_live_pane_info(&self, pane: &PaneInfo) -> LivePaneInfo {
         let current_command = extract_base_command(
             pane.pane_command.as_deref(),
@@ -389,7 +435,7 @@ impl ZellijBackend {
             working_dir,
             title: Some(pane.title.clone()).filter(|t| !t.is_empty()),
             session: self.session_name(),
-            window: Some(pane.tab_name.clone()).filter(|t| !t.is_empty()),
+            window: Some(canonical_tab_name(&pane.tab_name).to_string()).filter(|t| !t.is_empty()),
             session_id: None,
             window_id: None,
         }
@@ -655,7 +701,9 @@ impl Multiplexer for ZellijBackend {
     }
 
     fn current_window_name(&self) -> Result<Option<String>> {
-        Ok(self.focused_tab_name())
+        Ok(self
+            .focused_tab_name()
+            .map(|name| canonical_tab_name(&name).to_string()))
     }
 
     fn get_all_window_names(&self) -> Result<HashSet<String>> {
@@ -937,13 +985,23 @@ impl Multiplexer for ZellijBackend {
 
     // === Status ===
 
-    fn set_status(&self, _pane_id: &str, _icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
-        // No-op: status is tracked in StateStore by tab name.
+    fn set_status(&self, pane_id: &str, icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
+        let Some((tab_id, current_name)) = self.tab_for_pane(pane_id)? else {
+            warn!(pane_id, "Cannot display status: zellij pane has no tab");
+            return Ok(());
+        };
+        let status_name = tab_name_with_status(&current_name, icon);
+        self.rename_tab_by_id(tab_id, &status_name)?;
         Ok(())
     }
 
-    fn clear_status(&self, _pane_id: &str) -> Result<()> {
-        // No-op: status is managed by StateStore
+    fn clear_status(&self, pane_id: &str) -> Result<()> {
+        let Some((tab_id, current_name)) = self.tab_for_pane(pane_id)? else {
+            return Ok(());
+        };
+        if let Some(base_name) = tab_name_without_status(&current_name) {
+            self.rename_tab_by_id(tab_id, base_name)?;
+        }
         Ok(())
     }
 
@@ -1379,6 +1437,38 @@ mod tests {
             parse_tab_name_from_output(output),
             Some("middle-tab".to_string())
         );
+    }
+
+    #[test]
+    fn status_tab_name_is_replaced_without_accumulating_icons() {
+        let working = tab_name_with_status("wm-feature", "🤖");
+        let waiting = tab_name_with_status(&working, "💬");
+
+        assert_eq!(tab_name_without_status(&waiting), Some("wm-feature"));
+        assert!(waiting.contains("💬"));
+        assert!(!waiting.contains("🤖"));
+    }
+
+    #[test]
+    fn status_tab_name_is_hidden_from_canonical_identity() {
+        let status_name = tab_name_with_status("wm-feature", "🤖");
+
+        assert_eq!(canonical_tab_name(&status_name), "wm-feature");
+        assert_eq!(canonical_tab_name("wm-feature ✅"), "wm-feature ✅");
+    }
+
+    #[test]
+    fn status_tab_name_strips_tmux_styles() {
+        let name = tab_name_with_status("wm-feature", "#[fg=#a6e3a1]✅#[fg=default]");
+
+        assert!(name.contains("✅"));
+        assert!(!name.contains("#["));
+        assert_eq!(tab_name_without_status(&name), Some("wm-feature"));
+    }
+
+    #[test]
+    fn unmarked_tab_name_is_not_owned_by_workmux_status() {
+        assert_eq!(tab_name_without_status("wm-feature ✅"), None);
     }
 
     // === zellij_new_pane_direction_args ===

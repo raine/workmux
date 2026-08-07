@@ -37,6 +37,17 @@ pub fn parse_tmux_styles(input: &str, base_style: Style) -> Vec<(String, Style)>
     spans
 }
 
+/// Remove tmux style directives while preserving their visible text.
+///
+/// Backends without tmux-style rendering use this to avoid displaying raw
+/// directives such as `#[fg=green]` in titles.
+pub fn strip_tmux_styles(input: &str) -> String {
+    parse_tmux_styles(input, Style::default())
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
 /// Apply comma-separated tmux style directives (e.g. `fg=#a6e3a1,bold`) to a style.
 pub fn apply_tmux_directives(mut current: Style, style_str: &str, base: Style) -> Style {
     for part in style_str.split(',') {
@@ -132,6 +143,14 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].0, "🤖");
         assert_eq!(spans[0].1, base);
+    }
+
+    #[test]
+    fn test_strip_tmux_styles_preserves_visible_text() {
+        assert_eq!(
+            strip_tmux_styles("#[fg=#a6e3a1]done#[default] now"),
+            "done now"
+        );
     }
 
     #[test]
