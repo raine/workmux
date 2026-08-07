@@ -22,6 +22,12 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.235 (2026-08-07)
+
+- Close and remove the correct tmux windows even after they are renamed, without affecting unrelated windows that reuse the original name. ([#212](https://github.com/raine/workmux/issues/212))
+- Redraw the full sidebar cleanly after terminal resizes, preventing fragments of the previous layout from remaining on screen.
+- Prevent sidebar auto-exit from killing the active pane in another window. ([#219](https://github.com/raine/workmux/issues/219))
+
 ## v0.1.234 (2026-08-04)
 
 - Sort sidebar rows by recent activity or tmux window order with `sidebar.sort`, and show native tmux window numbers in custom layouts with `{window_index}`. ([#214](https://github.com/raine/workmux/issues/214)) ([#215](https://github.com/raine/workmux/pull/215))
