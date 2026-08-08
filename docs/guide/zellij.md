@@ -76,10 +76,9 @@ panes:
 Zellij pane display names are supported with `name`. workmux applies them using
 `zellij action rename-pane --pane-id`, so the pane does not need to be focused.
 
-An animated Braille spinner appears before a workmux tab title while its agent
-is working. Waiting and done use their configured status icons. Zellij does not
-expose a focus hook equivalent to tmux, so waiting and done icons are replaced
-by the next status update rather than clearing when the tab receives focus.
+Agent status icons are appended to workmux tab titles. Zellij does not expose a
+focus hook equivalent to tmux, so waiting and done icons are replaced by the
+next status update rather than clearing when the tab receives focus.
 
 ## Known limitations
 

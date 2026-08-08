@@ -15,11 +15,12 @@ use crate::cmd::Cmd;
 use crate::config::SplitDirection;
 
 use super::types::{CreateWindowParams, LivePaneInfo};
-use super::zellij_status::{
-    SPINNER_FRAMES, canonical_tab_name, tab_name_with_spinner, tab_name_with_status,
-    tab_name_without_status,
-};
-use super::{Multiplexer, util, zellij_status};
+use super::{Multiplexer, util};
+
+// Zero-width markers let workmux replace or remove only the status suffix it
+// owns, without mistaking user-provided title text or custom icons for status.
+const STATUS_MARKER_OPEN: char = '\u{2063}';
+const STATUS_MARKER_CLOSE: char = '\u{2064}';
 
 /// Zellij multiplexer backend.
 pub struct ZellijBackend {
@@ -202,6 +203,26 @@ fn parse_tab_name_from_output(output: &str) -> Option<String> {
         .lines()
         .find(|l| l.starts_with("name: "))
         .map(|l| l["name: ".len()..].to_string())
+}
+
+fn tab_name_without_status(name: &str) -> Option<&str> {
+    if !name.ends_with(STATUS_MARKER_CLOSE) {
+        return None;
+    }
+
+    let marker_start = name.rfind(STATUS_MARKER_OPEN)?;
+    name[..marker_start].strip_suffix(' ')
+}
+
+fn canonical_tab_name(name: &str) -> &str {
+    tab_name_without_status(name).unwrap_or(name)
+}
+
+fn tab_name_with_status(name: &str, icon: &str) -> String {
+    let base = canonical_tab_name(name);
+    let icon = crate::tmux_style::strip_tmux_styles(icon)
+        .replace([STATUS_MARKER_OPEN, STATUS_MARKER_CLOSE], "");
+    format!("{base} {STATUS_MARKER_OPEN}{icon}{STATUS_MARKER_CLOSE}")
 }
 
 fn zellij_new_pane_direction_args(direction: &SplitDirection) -> &'static [&'static str] {
@@ -964,24 +985,11 @@ impl Multiplexer for ZellijBackend {
 
     // === Status ===
 
-    fn set_status(&self, pane_id: &str, icon: &str, auto_clear_on_focus: bool) -> Result<()> {
+    fn set_status(&self, pane_id: &str, icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
         let Some((tab_id, current_name)) = self.tab_for_pane(pane_id)? else {
             warn!(pane_id, "Cannot display status: zellij pane has no tab");
             return Ok(());
         };
-
-        if !auto_clear_on_focus {
-            let base_name = canonical_tab_name(&current_name);
-            if let Some(session) = self.session_name() {
-                return zellij_status::start_spinner(&session, tab_id);
-            }
-            return self
-                .rename_tab_by_id(tab_id, &tab_name_with_spinner(base_name, SPINNER_FRAMES[0]));
-        }
-
-        if let Some(session) = self.session_name() {
-            return zellij_status::set_static_status(&session, tab_id, icon);
-        }
         let status_name = tab_name_with_status(&current_name, icon);
         self.rename_tab_by_id(tab_id, &status_name)?;
         Ok(())
@@ -991,9 +999,6 @@ impl Multiplexer for ZellijBackend {
         let Some((tab_id, current_name)) = self.tab_for_pane(pane_id)? else {
             return Ok(());
         };
-        if let Some(session) = self.session_name() {
-            return zellij_status::clear_status(&session, tab_id);
-        }
         if let Some(base_name) = tab_name_without_status(&current_name) {
             self.rename_tab_by_id(tab_id, base_name)?;
         }
@@ -1436,17 +1441,17 @@ mod tests {
 
     #[test]
     fn status_tab_name_is_replaced_without_accumulating_icons() {
-        let working = tab_name_with_spinner("wm-feature", '⠙');
+        let working = tab_name_with_status("wm-feature", "🤖");
         let waiting = tab_name_with_status(&working, "💬");
 
         assert_eq!(tab_name_without_status(&waiting), Some("wm-feature"));
         assert!(waiting.contains("💬"));
-        assert!(!waiting.contains('⠙'));
+        assert!(!waiting.contains("🤖"));
     }
 
     #[test]
     fn status_tab_name_is_hidden_from_canonical_identity() {
-        let status_name = tab_name_with_spinner("wm-feature", '⠙');
+        let status_name = tab_name_with_status("wm-feature", "🤖");
 
         assert_eq!(canonical_tab_name(&status_name), "wm-feature");
         assert_eq!(canonical_tab_name("wm-feature ✅"), "wm-feature ✅");

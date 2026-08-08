@@ -13,7 +13,6 @@ pub mod types;
 pub mod util;
 pub mod wezterm;
 pub mod zellij;
-pub(crate) mod zellij_status;
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
