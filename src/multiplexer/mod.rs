@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod conversation;
 pub mod handle;
+pub mod fut;
 pub mod handshake;
 pub mod kitty;
 pub mod tmux;
@@ -828,7 +829,7 @@ pub fn detect_backend() -> BackendType {
             Ok(bt) => return bt,
             Err(_) => {
                 eprintln!(
-                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|fut|wezterm|kitty|zellij"
                 );
             }
         }
@@ -869,6 +870,7 @@ fn resolve_backend(tmux: bool, wezterm: bool, zellij: bool, kitty: bool) -> Back
 pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
     match backend_type {
         BackendType::Tmux => Arc::new(TmuxBackend::new()),
+        BackendType::Fut => Arc::new(fut::FutBackend::new()),
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
