@@ -130,6 +130,7 @@ export default defineConfig({
       {
         text: "Alternative backends",
         items: [
+          { text: "herdr", link: "/guide/herdr" },
           { text: "kitty", link: "/guide/kitty" },
           { text: "WezTerm", link: "/guide/wezterm" },
           { text: "Zellij", link: "/guide/zellij" },

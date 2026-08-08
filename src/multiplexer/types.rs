@@ -181,6 +181,8 @@ pub enum BackendType {
     /// tmux backend (default)
     #[default]
     Tmux,
+    /// herdr backend
+    Herdr,
     /// WezTerm backend
     WezTerm,
     /// Kitty backend
@@ -193,6 +195,7 @@ impl std::fmt::Display for BackendType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BackendType::Tmux => write!(f, "tmux"),
+            BackendType::Herdr => write!(f, "herdr"),
             BackendType::WezTerm => write!(f, "wezterm"),
             BackendType::Kitty => write!(f, "kitty"),
             BackendType::Zellij => write!(f, "zellij"),
@@ -206,6 +209,7 @@ impl std::str::FromStr for BackendType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "tmux" => Ok(BackendType::Tmux),
+            "herdr" => Ok(BackendType::Herdr),
             "wezterm" => Ok(BackendType::WezTerm),
             "kitty" => Ok(BackendType::Kitty),
             "zellij" => Ok(BackendType::Zellij),
