@@ -103,6 +103,10 @@ pub struct DashboardConfig {
     /// Default: "priority"
     #[serde(default)]
     pub sort_mode: Option<String>,
+
+    /// Close the dashboard after jumping to an agent or worktree.
+    /// Default: true.
+    pub close_on_jump: Option<bool>,
 }
 
 /// A configurable column of the dashboard agents table.
@@ -183,6 +187,12 @@ impl DashboardConfig {
     /// Default: false
     pub fn show_check_counts(&self) -> bool {
         self.show_check_counts.unwrap_or(false)
+    }
+
+    /// Whether the dashboard closes after jumping to an agent or worktree.
+    /// Default: true.
+    pub fn close_on_jump(&self) -> bool {
+        self.close_on_jump.unwrap_or(true)
     }
 }
 
@@ -2727,6 +2737,10 @@ impl Config {
                 .clone()
                 .or_else(|| self.dashboard.agent_columns.clone()),
             sort_mode: project.dashboard.sort_mode.or(self.dashboard.sort_mode),
+            close_on_jump: project
+                .dashboard
+                .close_on_jump
+                .or(self.dashboard.close_on_jump),
         };
 
         // Sidebar config: per-field override
@@ -3213,6 +3227,7 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   preview_size: 60
 #   agent_columns: [number, project, worktree, git, pr, status, time, title]
 #   sort_mode: priority
+#   close_on_jump: true
 
 #-------------------------------------------------------------------------------
 # Sidebar
@@ -3390,6 +3405,34 @@ mod tests {
     };
     use crate::test_support;
     use tempfile::TempDir;
+
+    #[test]
+    fn dashboard_closes_on_jump_by_default() {
+        assert!(Config::default().dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_can_be_disabled() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  close_on_jump: false\n").expect("config parses");
+        assert!(!config.dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_project_value_overrides_global() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: false\n")
+            .expect("global config parses");
+        let project: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: true\n")
+            .expect("project config parses");
+        assert!(global.merge(project).dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_inherits_global_value() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: false\n")
+            .expect("global config parses");
+        assert!(!global.merge(Config::default()).dashboard.close_on_jump());
+    }
 
     #[test]
     fn agent_columns_default_when_unset() {

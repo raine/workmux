@@ -26,6 +26,10 @@ pub(crate) struct PaneTarget {
     pub window_name: String,
 }
 
+fn should_close_after_jump(mux_exits_on_jump: bool, close_on_jump: bool) -> bool {
+    mux_exits_on_jump && close_on_jump
+}
+
 impl App {
     /// Apply name and stale filters to the cached agent list, sort, and restore selection.
     /// This is fast (in-memory only) and safe to call on every filter keystroke.
@@ -268,8 +272,7 @@ impl App {
             return;
         }
 
-        // Exit dashboard after jump (or keep open, depending on multiplexer)
-        if self.mux.should_exit_on_jump() {
+        if self.should_close_after_jump() {
             self.should_jump = true;
         }
 
@@ -277,6 +280,13 @@ impl App {
             self.last_pane_id = Some(current.to_string());
             save_last_pane_id(current);
         }
+    }
+
+    pub(crate) fn should_close_after_jump(&self) -> bool {
+        should_close_after_jump(
+            self.mux.should_exit_on_jump(),
+            self.config.dashboard.close_on_jump(),
+        )
     }
 
     pub fn jump_to_selected(&mut self) {
@@ -604,5 +614,18 @@ impl App {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_close_after_jump;
+
+    #[test]
+    fn jump_closes_only_when_config_and_multiplexer_allow_it() {
+        assert!(should_close_after_jump(true, true));
+        assert!(!should_close_after_jump(true, false));
+        assert!(!should_close_after_jump(false, true));
+        assert!(!should_close_after_jump(false, false));
     }
 }

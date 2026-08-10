@@ -11,6 +11,7 @@ dashboard:
   merge: "!workmux merge"
   preview_size: 60
   agent_columns: [number, project, worktree, git, pr, status, time, title]
+  close_on_jump: true
 ```
 
 The `commit` and `merge` values are text sent to the agent's pane. Use the `!` prefix to run shell commands (supported by Claude, Gemini, and other agents).
@@ -23,6 +24,18 @@ The `commit` and `merge` values are text sent to the agent's pane. Use the `!` p
 | `merge`         | `!workmux merge`                                            | Shell command via agent                   |
 | `preview_size`  | `60`                                                        | Preview pane height as percentage (10-90) |
 | `agent_columns` | `[number, project, worktree, git, pr, status, time, title]` | Agents table columns, in display order    |
+| `close_on_jump` | `true`                                                      | Close the dashboard after a jump          |
+
+## Staying open after a jump
+
+Jumping to an agent or worktree closes the dashboard. This includes `Enter`, `1`-`9`, `Bksp`, command-palette jumps, and double-clicking a row. Set `close_on_jump: false` to keep the dashboard open while moving between agents and worktrees:
+
+```yaml
+dashboard:
+  close_on_jump: false
+```
+
+The jump still updates the pane history used by `Bksp`. The `p` peek action always keeps the dashboard open and does not update pane history. Multiplexers such as Zellij that keep the dashboard open after jumps retain that behavior regardless of this setting.
 
 ## Columns
 

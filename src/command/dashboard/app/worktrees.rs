@@ -902,8 +902,7 @@ impl App {
         self.trigger_worktree_refetch();
     }
 
-    /// Open a tmux window/session for the selected worktree via workflow::open,
-    /// then close the dashboard.
+    /// Open a multiplexer window or session for the selected worktree.
     pub fn open_selected_worktree(&mut self) {
         let Some(selected) = self.worktree_table_state.selected() else {
             return;
@@ -921,7 +920,9 @@ impl App {
 
         let mut options = workflow::types::SetupOptions::new(false, false, true);
         options.mode = self.config.mode();
-        if workflow::open(&handle, &ctx, options, false, None, None, None).is_ok() {
+        if workflow::open(&handle, &ctx, options, false, None, None, None).is_ok()
+            && self.should_close_after_jump()
+        {
             self.should_jump = true;
         }
     }
