@@ -29,7 +29,7 @@ const LIVE_PANE_RECORD_SEPARATOR: char = '\x1e';
 const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
 const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
 const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
-const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
+const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}";
 const WINDOW_OWNERSHIP_FORMAT: &str = "\x1e#{window_id}\x1f#{window_name}\x1f#{session_name}\x1f#{@workmux_token}\x1f#{pane_current_path}";
 macro_rules! server_boot_format {
     () => {
@@ -106,6 +106,7 @@ fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
                 .get(8)
                 .map(|value| value.to_string())
                 .filter(|value| !value.is_empty()),
+            window_index: parts.get(9).and_then(|value| value.parse().ok()),
         },
     ))
 }
@@ -202,6 +203,7 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
                 window: Some(fields[5].to_string()),
                 session_id: None,
                 window_id: nonempty(fields[6]),
+                window_index: Some(window_index),
             },
         );
         snapshot.window_statuses.insert(pane_id.clone(), status);
@@ -267,7 +269,7 @@ fn parse_window_ownership_records(output: &str) -> Result<Vec<WindowOwnershipRec
 
 fn parse_live_pane_line_strict(line: &str) -> Result<(String, LivePaneInfo)> {
     let parts = live_pane_fields(line);
-    if parts.len() != 9 || parts[0].is_empty() {
+    if parts.len() != 10 || parts[0].is_empty() {
         return Err(anyhow!(
             "tmux returned malformed pane information: {line:?}"
         ));
@@ -1628,7 +1630,7 @@ fn inject_status_format(format: &str) -> String {
 mod tests {
     use super::*;
 
-    const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+    const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2\t4";
 
     #[test]
     fn run_shell_preserves_literal_tmux_formats() {
@@ -1810,18 +1812,28 @@ mod tests {
 
     #[test]
     fn live_pane_snapshot_accepts_octal_escaped_separators() {
-        let output = "\\036%7\\03712345\\037node\\037/repo/a\\037Working\\037main\\037work\\037$1\\037@2\n\\036%8\\03712346\\037bash\\037/repo/b\\037Shell\\037main\\037shell\\037$1\\037@3\n";
+        let output = "\\036%7\\03712345\\037node\\037/repo/a\\037Working\\037main\\037work\\037$1\\037@2\\0373\n\\036%8\\03712346\\037bash\\037/repo/b\\037Shell\\037main\\037shell\\037$1\\037@3\\0374\n";
 
         let panes = parse_live_pane_snapshot(output).unwrap();
 
         assert_eq!(panes["%7"].working_dir, PathBuf::from("/repo/a"));
         assert_eq!(panes["%8"].window_id.as_deref(), Some("@3"));
+        assert_eq!(panes["%8"].window_index, Some(4));
+    }
+
+    #[test]
+    fn live_pane_snapshot_rejects_missing_or_extra_fields() {
+        let missing = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+        let extra = format!("{LIVE_PANE_LINE}\textra");
+
+        assert!(parse_live_pane_snapshot(missing).is_err());
+        assert!(parse_live_pane_snapshot(&extra).is_err());
     }
 
     #[test]
     fn live_pane_snapshot_preserves_newlines_inside_records() {
         let output =
-            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\nb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\n";
+            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\nb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\x1f3\n";
 
         let panes = parse_live_pane_snapshot(output).unwrap();
 
@@ -1831,7 +1843,7 @@ mod tests {
     #[test]
     fn live_pane_snapshot_preserves_tabs_inside_fields() {
         let output =
-            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\tb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\n";
+            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\tb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\x1f3\n";
 
         let panes = parse_live_pane_snapshot(output).unwrap();
 
@@ -1841,7 +1853,7 @@ mod tests {
     #[test]
     fn live_pane_snapshot_rejects_invalid_pid() {
         let error =
-            parse_live_pane_snapshot("%7\tnot-a-pid\tnode\t/repo\tWorking\tmain\twork\t$1\t@2")
+            parse_live_pane_snapshot("%7\tnot-a-pid\tnode\t/repo\tWorking\tmain\twork\t$1\t@2\t3")
                 .unwrap_err();
 
         assert!(error.to_string().contains("malformed pane PID"));

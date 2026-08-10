@@ -166,6 +166,8 @@ pub enum AgentColumn {
     /// Pull request and check status. Rendered only while at least one agent
     /// has GitHub status to show.
     Pr,
+    /// Multiplexer window index, as shown in the tmux status bar.
+    Window,
     /// Agent status (icons).
     Status,
     /// Time elapsed in the current status.
@@ -3646,7 +3648,7 @@ mod tests {
     #[test]
     fn agent_columns_follow_configured_order() {
         let config: Config = serde_yaml::from_str(
-            "dashboard:\n  agent_columns: [title, status, number, worktree, git, pr, project, time]\n",
+            "dashboard:\n  agent_columns: [title, status, number, worktree, git, pr, window, project, time]\n",
         )
         .expect("config parses");
         assert_eq!(
@@ -3658,6 +3660,7 @@ mod tests {
                 AgentColumn::Worktree,
                 AgentColumn::Git,
                 AgentColumn::Pr,
+                AgentColumn::Window,
                 AgentColumn::Project,
                 AgentColumn::Time
             ]

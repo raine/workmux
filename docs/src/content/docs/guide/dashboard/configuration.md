@@ -10,7 +10,8 @@ dashboard:
   commit: "Commit staged changes with a descriptive message"
   merge: "!workmux merge"
   preview_size: 60
-  agent_columns: [number, project, worktree, git, pr, status, time, title]
+  agent_columns:
+    [number, project, worktree, git, pr, window, status, time, title]
   worktree_columns: [number, project, worktree, git, pr, mux, age, agent]
   close_on_jump: true
 ```
@@ -45,7 +46,8 @@ The jump still updates the pane history used by `Bksp`. The `p` peek action alwa
 
 ```yaml
 dashboard:
-  agent_columns: [number, status, title, project, worktree, git, pr, time]
+  agent_columns:
+    [number, window, status, title, project, worktree, git, pr, time]
 ```
 
 | Column     | Content                                          |
@@ -55,13 +57,14 @@ dashboard:
 | `worktree` | Worktree name, with a pane number when it splits |
 | `git`      | Branch state, staged and unstaged changes        |
 | `pr`       | Pull request number and check status             |
+| `window`   | Multiplexer window index                         |
 | `status`   | Agent status icons                               |
 | `time`     | Time since the last status change                |
 | `title`    | Agent session title                              |
 
 A column left out of the list is not rendered, so `agent_columns: [worktree, status, title]` gives a table of just those three. Repeating a column has no effect, and an empty list falls back to the default order.
 
-Dropping `number` hides the jump key, and `1`-`9` still jump to the first nine rows. The `pr` column appears only while at least one agent has a pull request or checks to report, wherever it is placed in the list. A trailing `title` takes the width left over by the other columns; anywhere else it sizes to its content, and the leftover width sits at the right edge of the table.
+Dropping `number` hides the jump key, and `1`-`9` still jump to the first nine rows. The `pr` column appears only while at least one agent has a pull request or checks to report, wherever it is placed in the list. The opt-in `window` column shows the tmux window index used by `prefix + <n>`; backends without window indexes leave the cell blank. A trailing `title` takes the width left over by the other columns; anywhere else it sizes to its content, and the leftover width sits at the right edge of the table.
 
 ### Worktree columns
 

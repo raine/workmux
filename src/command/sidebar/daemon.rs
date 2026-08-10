@@ -3706,6 +3706,7 @@ mod tests {
             window: Some("window".into()),
             session_id: Some("$1".into()),
             window_id: Some("@1".into()),
+            window_index: None,
         };
 
         tracker.reconcile_identities(
@@ -3750,6 +3751,7 @@ mod tests {
                 window: Some("window".into()),
                 session_id: Some("$1".into()),
                 window_id: Some("@1".into()),
+                window_index: None,
             },
         )]);
 

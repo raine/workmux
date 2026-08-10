@@ -162,6 +162,7 @@ struct AgentRowData {
     is_current: bool,
     git_spans: Vec<(String, Style)>,
     pr_spans: Option<Vec<(String, Style)>>,
+    window_index_label: String,
     status_spans: Vec<(String, Style)>,
     duration_line: Line<'static>,
     title: String,
@@ -220,6 +221,9 @@ fn agent_cell(column: AgentColumn, row: &AgentRowData, palette: &ThemePalette) -
         AgentColumn::Pr => Cell::from(format::spans_to_line(
             row.pr_spans.clone().unwrap_or_default(),
         )),
+        AgentColumn::Window => {
+            Cell::from(row.window_index_label.clone()).style(Style::default().fg(palette.dimmed))
+        }
         AgentColumn::Status => Cell::from(format::spans_to_line(row.status_spans.clone())),
         AgentColumn::Time => Cell::from(row.duration_line.clone()),
         AgentColumn::Title => Cell::from(row.title.clone()),
@@ -245,6 +249,7 @@ fn build_agent_table(
             AgentColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
             AgentColumn::Git => format::ResourceHeaderCell::Git,
             AgentColumn::Pr => format::ResourceHeaderCell::Pr,
+            AgentColumn::Window => format::ResourceHeaderCell::Plain("Win"),
             AgentColumn::Status => format::ResourceHeaderCell::Plain("Status"),
             AgentColumn::Time => format::ResourceHeaderCell::Plain("Time"),
             AgentColumn::Title => format::ResourceHeaderCell::Plain("Title"),
@@ -279,6 +284,7 @@ fn build_agent_table(
             AgentColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
             AgentColumn::Git => Constraint::Length(widths.git), // auto-sized
             AgentColumn::Pr => Constraint::Length(widths.pr), // auto-sized
+            AgentColumn::Window => Constraint::Length(4), // window index
             AgentColumn::Status => Constraint::Length(8), // fixed (icons)
             AgentColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
             // A Fill column absorbs slack at its own position, which would
@@ -414,6 +420,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 is_current,
                 git_spans,
                 pr_spans,
+                window_index_label: agent
+                    .window_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_default(),
                 status_spans,
                 duration_line,
                 title,
@@ -799,6 +809,7 @@ mod tests {
             is_current: false,
             git_spans: vec![("+1".to_string(), Style::default())],
             pr_spans: Some(vec![("#7".to_string(), Style::default())]),
+            window_index_label: "3".to_string(),
             status_spans: vec![("work".to_string(), Style::default())],
             duration_line: format::elapsed_time_line("00:42".to_string(), Some(42), palette),
             title: "the title".to_string(),
@@ -878,6 +889,18 @@ mod tests {
         assert_eq!(
             render_line(&[AgentColumn::Worktree, AgentColumn::Title], 1),
             "wt        the title"
+        );
+    }
+
+    #[test]
+    fn agents_table_renders_window_index_column() {
+        assert_eq!(
+            render_line(&[AgentColumn::Window, AgentColumn::Worktree], 0),
+            "Win  Worktree"
+        );
+        assert_eq!(
+            render_line(&[AgentColumn::Window, AgentColumn::Worktree], 1),
+            "3    wt"
         );
     }
 

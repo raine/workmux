@@ -1471,6 +1471,12 @@ impl StateStore {
                     if live.title.is_some() {
                         agent_pane.pane_title = live.title.clone();
                     }
+                    // Window index is a live property: a stored one goes stale as
+                    // soon as windows are moved or renumbered
+                    agent_pane.window_index = live.window_index;
+                    if let Some(window_id) = live.window_id.clone() {
+                        agent_pane.window_id = window_id;
+                    }
                     // Only the tmux backend can reliably distinguish auto-renamed
                     // window names from sticky user-set ones via pane_current_command.
                     if backend == "tmux" {
@@ -2042,6 +2048,7 @@ mod tests {
                 window: Some("node".to_string()),
                 session_id: None,
                 window_id: None,
+                window_index: None,
             },
         );
         live_panes.insert(
@@ -2055,6 +2062,7 @@ mod tests {
                 window: Some("node".to_string()),
                 session_id: None,
                 window_id: None,
+                window_index: None,
             },
         );
         live_panes.insert(
@@ -2068,6 +2076,7 @@ mod tests {
                 window: Some("user-name".to_string()),
                 session_id: None,
                 window_id: None,
+                window_index: None,
             },
         );
 

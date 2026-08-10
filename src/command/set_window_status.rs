@@ -429,6 +429,7 @@ mod tests {
             window: Some("wm-test".to_string()),
             session_id: Some("$1".to_string()),
             window_id: Some("@1".to_string()),
+            window_index: Some(1),
         }
     }
 
