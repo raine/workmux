@@ -11,6 +11,7 @@ use ratatui::{
 use std::collections::{BTreeMap, HashSet};
 
 use crate::agent_display::strip_oc_title_prefix;
+use crate::config::DashboardColumn;
 
 use super::super::app::{App, DashboardTab};
 use super::format;
@@ -152,6 +153,9 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
+    // Header cells, row cells and width constraints are all derived from this
+    // one list, so a reordered config can never desynchronise them.
+    let trailing_columns = app.config.dashboard.columns();
 
     let header = format::resource_table_header(
         format::ResourceHeaderState {
@@ -163,7 +167,14 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
             pr_fetching: app.is_pr_fetching(),
         },
         show_pr_column,
-        &["Status", "Time", "Title"],
+        &trailing_columns
+            .iter()
+            .map(|column| match column {
+                DashboardColumn::Status => "Status",
+                DashboardColumn::Time => "Time",
+                DashboardColumn::Title => "Title",
+            })
+            .collect::<Vec<_>>(),
     );
 
     // Group agents by (session, window_name) to detect multi-pane windows
@@ -367,11 +378,30 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 }
 
                 let status_line = format::spans_to_line(status_spans);
-                cells.extend(vec![
-                    Cell::from(status_line),
-                    Cell::from(duration_line),
-                    Cell::from(title),
-                ]);
+                let mut status_cell = Some(status_line);
+                let mut duration_cell = Some(duration_line);
+                let mut title_cell = Some(title);
+                for column in &trailing_columns {
+                    // take() so each column is moved out once: columns() already
+                    // dropped duplicates, this keeps the compiler happy about it
+                    match column {
+                        DashboardColumn::Status => {
+                            if let Some(line) = status_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                        DashboardColumn::Time => {
+                            if let Some(line) = duration_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                        DashboardColumn::Title => {
+                            if let Some(line) = title_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                    }
+                }
 
                 let row = Row::new(cells);
                 // Subtle background for the active worktree row
@@ -396,11 +426,11 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         constraints.push(Constraint::Length(max_pr_width as u16)); // PR: auto-sized
     }
 
-    constraints.extend(vec![
-        Constraint::Length(8),  // Status: fixed (icons)
-        Constraint::Length(10), // Time: HH:MM:SS + padding
-        Constraint::Fill(1),    // Title: takes remaining space
-    ]);
+    constraints.extend(trailing_columns.iter().map(|column| match column {
+        DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
+        DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
+        DashboardColumn::Title => Constraint::Fill(1),    // takes remaining space
+    }));
 
     let highlight_symbol = Text::from(Line::from(Span::styled(
         "▌ ",
