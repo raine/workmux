@@ -10,7 +10,7 @@ dashboard:
   commit: "Commit staged changes with a descriptive message"
   merge: "!workmux merge"
   preview_size: 60
-  columns: [status, time, title]
+  columns: [window, status, time, title]
 ```
 
 The `commit` and `merge` values are text sent to the agent's pane. Use the `!` prefix to run shell commands (supported by Claude, Gemini, and other agents).
@@ -33,7 +33,9 @@ dashboard:
   columns: [status, title, time]
 ```
 
-Any of `status`, `time` and `title` may be listed, in any order. A column left out of the list is not rendered, so `columns: [status, title]` drops the elapsed time entirely. Repeating a column has no effect, and an empty list falls back to the default order.
+Any of `window`, `status`, `time` and `title` may be listed, in any order. `window` is not shown by default and prints the multiplexer window index, the same number `prefix + <n>` uses in tmux, which makes the table line up with the status bar. Backends that do not number their windows leave the cell blank.
+
+Any of them A column left out of the list is not rendered, so `columns: [status, title]` drops the elapsed time entirely. Repeating a column has no effect, and an empty list falls back to the default order.
 
 ## Preview size
 

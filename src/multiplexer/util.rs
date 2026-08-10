@@ -64,6 +64,7 @@ pub fn build_live_pane_info(
         window: Some(window),
         session_id: None,
         window_id: None,
+        window_index: None,
     }
 }
 

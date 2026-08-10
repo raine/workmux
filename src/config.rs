@@ -102,6 +102,8 @@ pub struct DashboardConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DashboardColumn {
+    /// Multiplexer window index, as shown in the tmux status bar.
+    Window,
     /// Agent status (icons).
     Status,
     /// Time elapsed in the current status.
