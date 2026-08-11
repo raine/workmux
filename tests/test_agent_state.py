@@ -281,6 +281,134 @@ def test_set_window_status_accepts_explicit_tmux_target(
     assert state["status"] == "working"
 
 
+@pytest.mark.tmux_only
+def test_set_window_status_from_attached_claude_job(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-status-claude-job"
+    window_name = get_window_name(branch_name)
+
+    fake_claude = env.tmp_path / "fake_claude.py"
+    fake_claude.write_text(
+        "import sys\n"
+        "import time\n"
+        'sys.stdout.write("\\033]0;Claude Code test\\007")\n'
+        "sys.stdout.flush()\n"
+        "time.sleep(30)\n"
+    )
+    write_workmux_config(
+        mux_repo_path,
+        panes=[
+            {
+                "command": f"exec python3 {shlex.quote(str(fake_claude))}",
+                "focus": True,
+            },
+        ],
+    )
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    def find_fake_claude_pane() -> str | None:
+        lines = env.tmux(
+            [
+                "list-panes",
+                "-t",
+                window_name,
+                "-F",
+                "#{pane_id}|#{pane_current_command}|#{pane_title}",
+            ]
+        ).stdout.splitlines()
+        matches = [
+            line
+            for line in lines
+            if line.split("|", 2)[1] in {"python3", "Python"}
+            and "Claude Code" in line.split("|", 2)[2]
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    assert poll_until(lambda: find_fake_claude_pane() is not None, timeout=5.0)
+    fake_claude_pane = find_fake_claude_pane()
+    assert fake_claude_pane is not None
+    pane_id = fake_claude_pane.split("|", 1)[0]
+
+    target_env = env.env.copy()
+    target_env.update(
+        {
+            "WORKMUX_STATUS_BACKEND": "tmux",
+            "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+            "WORKMUX_STATUS_PANE_ID": pane_id,
+        }
+    )
+    seed = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "working"],
+        env=target_env,
+        input="{}",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert seed.returncode == 0, seed.stderr
+    assert len(list_agent_state_files(env)) == 1
+
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None, "tmux binary not found"
+    tmux_wrapper = env.fake_bin_dir / "tmux"
+    tmux_wrapper.write_text(
+        "#!/bin/sh\n"
+        f'exec {shlex.quote(real_tmux)} -S {shlex.quote(str(env.socket_path))} "$@"\n'
+    )
+    tmux_wrapper.chmod(0o755)
+
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    claude_dir = env.home_path / ".claude"
+    session_id = "deadbeef-0000-4000-8000-000000000000"
+    hook_cwd = claude_dir / "jobs" / "deadbeef" / "tmp" / "checkout"
+    hook_cwd.mkdir(parents=True)
+    (claude_dir / "jobs" / "deadbeef" / "state.json").write_text(
+        json.dumps({"cwd": str(worktree_path), "sessionId": session_id})
+    )
+
+    host_env = env.env.copy()
+    host_env.pop("TMUX", None)
+    host_env.pop("TMUX_PANE", None)
+    host_env["WORKMUX_BACKEND"] = "tmux"
+    result = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "done"],
+        cwd=hook_cwd,
+        env=host_env,
+        input=json.dumps({"session_id": session_id}),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    state = read_agent_state(list_agent_state_files(env)[0])
+    assert state["pane_key"]["pane_id"] == pane_id
+    assert state["status"] == "done"
+    assert state["agent_kind"] == "claude"
+    assert state["agent_session_id"] == session_id
+
+    other_session_id = "cafebabe-0000-4000-8000-000000000000"
+    other_hook_cwd = claude_dir / "jobs" / "cafebabe" / "tmp" / "checkout"
+    other_hook_cwd.mkdir(parents=True)
+    (claude_dir / "jobs" / "cafebabe" / "state.json").write_text(
+        json.dumps({"cwd": str(worktree_path), "sessionId": other_session_id})
+    )
+    detached = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "working"],
+        cwd=other_hook_cwd,
+        env=host_env,
+        input=json.dumps({"session_id": other_session_id}),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert detached.returncode == 0, detached.stderr
+    assert read_agent_state(list_agent_state_files(env)[0])["status"] == "done"
+
+
 def test_state_file_has_correct_fields(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

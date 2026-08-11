@@ -22,7 +22,7 @@ fn claude_dir_from_config(home: PathBuf, config_dir: Option<std::ffi::OsString>)
         .unwrap_or_else(|| home.join(".claude"))
 }
 
-fn claude_dir() -> Option<PathBuf> {
+pub(crate) fn claude_dir() -> Option<PathBuf> {
     home::home_dir().map(|home| claude_dir_from_config(home, std::env::var_os("CLAUDE_CONFIG_DIR")))
 }
 

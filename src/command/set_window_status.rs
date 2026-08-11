@@ -3,6 +3,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::config::Config;
@@ -128,9 +129,9 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
         }
     }
 
-    // A status update requires identity tied to a live pane. Hooks can lose
-    // multiplexer variables, so tmux additionally accepts process ancestry or
-    // an exact agent session binding recorded by an earlier hook.
+    // A status update requires identity tied to a live pane. Tmux can recover
+    // pane-less hooks through process ancestry, a session binding, or one live
+    // registered agent that matches the hook context. Raw cwd never selects a pane.
     for backend in status_backend_candidates() {
         let mux = create_backend(backend);
         if let Some(pane_id) = resolve_status_pane_id(&*mux, agent_session_id.as_deref()) {
@@ -262,6 +263,94 @@ fn parse_hook_session_id(input: &str) -> Option<String> {
         .filter(|session_id| !session_id.is_empty())
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeJobState {
+    cwd: PathBuf,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClaudeJobCwd {
+    NotClaudeJob,
+    InvalidClaudeJob,
+    Remapped { cwd: PathBuf, session_id: String },
+}
+
+const MAX_CLAUDE_JOB_STATE_SIZE: u64 = 64 * 1024;
+
+fn read_claude_job_state(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CLAUDE_JOB_STATE_SIZE {
+        return None;
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut contents = String::new();
+    file.take(MAX_CLAUDE_JOB_STATE_SIZE + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    (contents.len() as u64 <= MAX_CLAUDE_JOB_STATE_SIZE).then_some(contents)
+}
+
+fn valid_claude_job_session_id(session_id: &str, short_id: &str) -> bool {
+    if session_id.len() != 36 || session_id.get(..8) != Some(short_id) {
+        return false;
+    }
+
+    session_id.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        }
+    })
+}
+
+fn classify_claude_job_cwd(hook_cwd: &Path, claude_dir: &Path) -> ClaudeJobCwd {
+    let jobs_dir = normalized_path(&claude_dir.join("jobs"));
+    let hook_cwd = normalized_path(hook_cwd);
+    let Ok(relative_job_path) = hook_cwd.strip_prefix(&jobs_dir) else {
+        return ClaudeJobCwd::NotClaudeJob;
+    };
+    let Some(short_id) = relative_job_path.components().next() else {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    };
+    let Some(short_id) = short_id.as_os_str().to_str() else {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    };
+    if short_id.len() != 8
+        || !short_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    }
+
+    let state_path = jobs_dir.join(short_id).join("state.json");
+    let Some(state) = read_claude_job_state(&state_path) else {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    };
+    let Ok(state) = serde_json::from_str::<ClaudeJobState>(&state) else {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    };
+    if !state.cwd.is_absolute()
+        || !state.cwd.is_dir()
+        || !valid_claude_job_session_id(&state.session_id, short_id)
+    {
+        return ClaudeJobCwd::InvalidClaudeJob;
+    }
+
+    ClaudeJobCwd::Remapped {
+        cwd: state.cwd,
+        session_id: state.session_id,
+    }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn resolve_status_pane_id(mux: &dyn Multiplexer, agent_session_id: Option<&str>) -> Option<String> {
     if let Some(pane_id) = mux.current_pane_id().filter(|pane_id| !pane_id.is_empty()) {
         return Some(pane_id);
@@ -282,13 +371,42 @@ fn resolve_status_pane_id(mux: &dyn Multiplexer, agent_session_id: Option<&str>)
     let agent_session_id = agent_session_id?;
     let agents = StateStore::new().ok()?.list_all_agents().ok()?;
     let server_boot_id = mux.server_boot_id().ok().flatten();
-    select_pane_for_agent_session(
+    let instance = mux.instance_id();
+    if let Some(pane_id) = select_pane_for_agent_session(
         &agents,
         &live_panes,
         mux.name(),
-        &mux.instance_id(),
+        &instance,
         agent_session_id,
         server_boot_id.as_deref(),
+    ) {
+        return Some(pane_id);
+    }
+
+    let hook_cwd = std::env::current_dir().ok()?;
+    let (status_cwd, required_agent_kind) = match crate::agent_setup::claude::claude_dir()
+        .map(|claude_dir| classify_claude_job_cwd(&hook_cwd, &claude_dir))
+        .unwrap_or(ClaudeJobCwd::NotClaudeJob)
+    {
+        ClaudeJobCwd::NotClaudeJob => (hook_cwd, None),
+        ClaudeJobCwd::InvalidClaudeJob => return None,
+        ClaudeJobCwd::Remapped { cwd, session_id } if session_id == agent_session_id => {
+            (cwd, Some("claude"))
+        }
+        ClaudeJobCwd::Remapped { .. } => return None,
+    };
+
+    select_registered_pane_for_cwd(
+        &agents,
+        &live_panes,
+        &RegisteredPaneQuery {
+            backend: mux.name(),
+            instance: &instance,
+            cwd: &status_cwd,
+            required_agent_kind,
+            agent_session_id,
+            server_boot_id: server_boot_id.as_deref(),
+        },
     )
 }
 
@@ -338,6 +456,69 @@ fn select_pane_for_process_ancestry(
         pid = *parents.get(&pid)?;
     }
     None
+}
+
+struct RegisteredPaneQuery<'a> {
+    backend: &'a str,
+    instance: &'a str,
+    cwd: &'a Path,
+    required_agent_kind: Option<&'a str>,
+    agent_session_id: &'a str,
+    server_boot_id: Option<&'a str>,
+}
+
+fn select_registered_pane_for_cwd(
+    agents: &[AgentState],
+    live_panes: &HashMap<String, LivePaneInfo>,
+    query: &RegisteredPaneQuery<'_>,
+) -> Option<String> {
+    let cwd = normalized_path(query.cwd);
+    let mut best_score = 0;
+    let mut candidates = Vec::new();
+
+    for agent in agents {
+        let Some(agent_kind) = agent.agent_kind.as_deref() else {
+            continue;
+        };
+        if agent.pane_key.backend != query.backend
+            || agent.pane_key.instance != query.instance
+            || query
+                .required_agent_kind
+                .is_some_and(|kind| agent_kind != kind)
+            || agent
+                .agent_session_id
+                .as_deref()
+                .is_some_and(|session_id| session_id != query.agent_session_id)
+            || query
+                .server_boot_id
+                .is_none_or(|live| agent.boot_id.as_deref() != Some(live))
+            || !live_panes.get(&agent.pane_key.pane_id).is_some_and(|pane| {
+                agent.pane_pid != 0
+                    && pane.pid == Some(agent.pane_pid)
+                    && pane.current_command.as_deref() == Some(agent.command.as_str())
+            })
+        {
+            continue;
+        }
+
+        let workdir = normalized_path(&agent.workdir);
+        if !cwd.starts_with(&workdir) {
+            continue;
+        }
+
+        let score = workdir.components().count();
+        match score.cmp(&best_score) {
+            std::cmp::Ordering::Greater => {
+                best_score = score;
+                candidates.clear();
+                candidates.push(agent.pane_key.pane_id.clone());
+            }
+            std::cmp::Ordering::Equal => candidates.push(agent.pane_key.pane_id.clone()),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+
+    (candidates.len() == 1).then(|| candidates.remove(0))
 }
 
 fn select_pane_for_agent_session(
@@ -394,11 +575,15 @@ mod tests {
     use super::*;
 
     fn live_pane(pid: u32, command: &str) -> LivePaneInfo {
+        live_pane_at(pid, command, "/repo", None)
+    }
+
+    fn live_pane_at(pid: u32, command: &str, path: &str, title: Option<&str>) -> LivePaneInfo {
         LivePaneInfo {
             pid: Some(pid),
             current_command: Some(command.to_string()),
-            working_dir: std::path::PathBuf::from("/repo"),
-            title: None,
+            working_dir: std::path::PathBuf::from(path),
+            title: title.map(str::to_string),
             session: Some("test".to_string()),
             window: Some("wm-test".to_string()),
             session_id: Some("$1".to_string()),
@@ -430,6 +615,162 @@ mod tests {
 
     fn no_backend_signals() -> StatusBackendSignals {
         StatusBackendSignals::default()
+    }
+
+    fn claude_job_fixture(state: Option<&str>) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let job_dir = claude_dir.join("jobs/deadbeef");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        if let Some(state) = state {
+            std::fs::write(job_dir.join("state.json"), state).unwrap();
+        }
+        (temp, claude_dir, job_dir, worktree)
+    }
+
+    fn valid_claude_job_state(cwd: &Path) -> String {
+        serde_json::json!({
+            "cwd": cwd,
+            "sessionId": "deadbeef-0000-4000-8000-000000000000"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn classify_claude_job_cwd_remaps_job_root_and_nested_directory() {
+        let (_temp, claude_dir, job_dir, worktree) = claude_job_fixture(None);
+        std::fs::write(
+            job_dir.join("state.json"),
+            valid_claude_job_state(&worktree),
+        )
+        .unwrap();
+        let nested = job_dir.join("tmp/checkout");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        for hook_cwd in [&job_dir, &nested] {
+            assert_eq!(
+                classify_claude_job_cwd(hook_cwd, &claude_dir),
+                ClaudeJobCwd::Remapped {
+                    cwd: worktree.clone(),
+                    session_id: "deadbeef-0000-4000-8000-000000000000".to_string(),
+                }
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_claude_job_cwd_resolves_symlinked_config_root() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, claude_dir, job_dir, worktree) = claude_job_fixture(None);
+        std::fs::write(
+            job_dir.join("state.json"),
+            valid_claude_job_state(&worktree),
+        )
+        .unwrap();
+        let hook_cwd = job_dir.join("tmp/checkout");
+        std::fs::create_dir_all(&hook_cwd).unwrap();
+        let claude_dir_link = temp.path().join("claude-config-link");
+        symlink(&claude_dir, &claude_dir_link).unwrap();
+
+        assert!(matches!(
+            classify_claude_job_cwd(&hook_cwd, &claude_dir_link),
+            ClaudeJobCwd::Remapped { cwd, .. } if cwd == worktree
+        ));
+    }
+
+    #[test]
+    fn classify_claude_job_cwd_rejects_invalid_state() {
+        let invalid_states = [
+            None,
+            Some("not json"),
+            Some(r#"{"sessionId":"deadbeef-session"}"#),
+            Some(r#"{"cwd":"/"}"#),
+            Some(r#"{"cwd":"relative/path","sessionId":"deadbeef-session"}"#),
+            Some(r#"{"cwd":"/","sessionId":"cafebabe-0000-4000-8000-000000000000"}"#),
+            Some(r#"{"cwd":"/","sessionId":"deadbeef-not-a-valid-session-id"}"#),
+        ];
+        for state in invalid_states {
+            let (_temp, claude_dir, job_dir, _worktree) = claude_job_fixture(state);
+            assert_eq!(
+                classify_claude_job_cwd(&job_dir, &claude_dir),
+                ClaudeJobCwd::InvalidClaudeJob
+            );
+        }
+    }
+
+    #[test]
+    fn classify_claude_job_cwd_rejects_oversized_state() {
+        let (_temp, claude_dir, job_dir, _worktree) = claude_job_fixture(None);
+        std::fs::write(
+            job_dir.join("state.json"),
+            vec![b' '; MAX_CLAUDE_JOB_STATE_SIZE as usize + 1],
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_claude_job_cwd(&job_dir, &claude_dir),
+            ClaudeJobCwd::InvalidClaudeJob
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_claude_job_cwd_rejects_symlinked_state() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, claude_dir, job_dir, worktree) = claude_job_fixture(None);
+        let state_target = temp.path().join("state-target.json");
+        std::fs::write(&state_target, valid_claude_job_state(&worktree)).unwrap();
+        symlink(state_target, job_dir.join("state.json")).unwrap();
+
+        assert_eq!(
+            classify_claude_job_cwd(&job_dir, &claude_dir),
+            ClaudeJobCwd::InvalidClaudeJob
+        );
+    }
+
+    #[test]
+    fn registered_cwd_fallback_requires_one_live_matching_agent() {
+        let unbound_agent = |pane_id, pane_pid| {
+            let mut agent = agent_state(pane_id, pane_pid, "unused-session");
+            agent.agent_session_id = None;
+            agent
+        };
+        let query = RegisteredPaneQuery {
+            backend: "tmux",
+            instance: "default",
+            cwd: Path::new("/repo/subdir"),
+            required_agent_kind: Some("claude"),
+            agent_session_id: "session-1",
+            server_boot_id: Some("boot-1"),
+        };
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane(100, "claude")),
+            ("%2".to_string(), live_pane(200, "claude")),
+        ]);
+
+        assert_eq!(
+            select_registered_pane_for_cwd(&[unbound_agent("%1", 100)], &panes, &query),
+            Some("%1".to_string())
+        );
+        assert_eq!(
+            select_registered_pane_for_cwd(
+                &[unbound_agent("%1", 100), unbound_agent("%2", 200)],
+                &panes,
+                &query,
+            ),
+            None
+        );
+
+        let conflicting = agent_state("%1", 100, "different-session");
+        assert_eq!(
+            select_registered_pane_for_cwd(&[conflicting], &panes, &query),
+            None
+        );
     }
 
     #[test]
