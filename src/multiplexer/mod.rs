@@ -1022,3 +1022,147 @@ mod tests {
         assert_eq!(resolve_backend(true, true, true, true), BackendType::Tmux);
     }
 }
+
+/// Jump to an agent whose state was synced from a remote machine.
+///
+/// Remote agents carry a namespaced pane id `ssh:<host>/<pane_id>` (see the
+/// remote branch in `StateStore::reconcile_agents_for_context`).
+///
+/// Local-first for perceived latency: switch the local view to the attach
+/// pane and record the highlight immediately (a few ms), then flip the
+/// remote group's windows via a detached ssh - its round trip only delays
+/// what the nested view shows, not the user's screen.
+pub fn remote_pane_jump(namespaced_pane_id: &str) -> Result<()> {
+    use anyhow::anyhow;
+
+    let rest = namespaced_pane_id
+        .strip_prefix("ssh:")
+        .ok_or_else(|| anyhow!("not a remote pane id: {namespaced_pane_id}"))?;
+    let (host, pane_id) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow!("malformed remote pane id: {namespaced_pane_id}"))?;
+
+    // Local focus: bring the pane hosting the ssh/autossh client for this
+    // host on screen. Several attaches to the same host are equivalent views
+    // (grouped sessions all follow the flip), so prefer the most recently
+    // used one. No match -> leave local focus alone (e.g. the remote view
+    // lives in a kitty tab, unreachable from tmux).
+    if let Ok(out) = crate::cmd::Cmd::new("tmux")
+        .args(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_tty}\t#{pane_current_command}\t#{window_activity}",
+        ])
+        .run_and_capture_stdout()
+    {
+        let mut best: Option<(u64, String)> = None;
+        for line in out.lines() {
+            let mut parts = line.trim().split('\t');
+            let (Some(id), Some(tty), Some(cmd)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !matches!(cmd, "ssh" | "autossh") {
+                continue;
+            }
+            let activity: u64 = parts.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+            let Ok(ps) = crate::cmd::Cmd::new("ps")
+                .args(&["-o", "args=", "-t", tty])
+                .run_and_capture_stdout()
+            else {
+                continue;
+            };
+            let is_client_for_host = ps.lines().any(|args| {
+                let mut toks = args.split_whitespace();
+                let head_is_ssh = toks
+                    .next()
+                    .and_then(|head| head.rsplit('/').next())
+                    .is_some_and(|head| head == "ssh" || head == "autossh");
+                head_is_ssh && args.split_whitespace().any(|t| t == host)
+            });
+            if is_client_for_host && best.as_ref().is_none_or(|(a, _)| activity > *a) {
+                best = Some((activity, id.to_string()));
+            }
+        }
+        if let Some((_, pane)) = best {
+            let _ = crate::cmd::Cmd::new("tmux")
+                .args(&["switch-client", "-t", &pane])
+                .run();
+        }
+    }
+
+    // Record the jump so sidebars highlight this agent as active until the
+    // user switches to a different local window. Runs after the local switch
+    // so the recorded window is the destination (the attach pane's window).
+    if let Ok(wid) = crate::cmd::Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{window_id}"])
+        .run_and_capture_stdout()
+    {
+        let value = format!("{}|{}", namespaced_pane_id, wid.trim());
+        let _ = crate::cmd::Cmd::new("tmux")
+            .args(&["set-option", "-g", "@workmux_remote_active", &value])
+            .run();
+    }
+
+    // Grouped sessions share windows but each session keeps its own
+    // current-window pointer, so a bare select-window only moves one clone.
+    // Resolve the pane's window, then point every attached session at it
+    // (plus the bare fallback for the nothing-attached case).
+    let remote_cmd = format!(
+        concat!(
+            "w=$(tmux display-message -p -t '{p}' '#{{window_id}}') && ",
+            "tmux select-window -t \"$w\" 2>/dev/null; ",
+            "for s in $(tmux list-clients -F '#{{client_session}}' | sort -u); do ",
+            "tmux select-window -t \"$s:$w\" 2>/dev/null; done; ",
+            "tmux select-pane -t '{p}' 2>/dev/null"
+        ),
+        p = pane_id
+    );
+    // Detached: ride the workmux-s-sync ControlMaster when warm (~100ms),
+    // fall back to a direct connection otherwise. A reaper thread collects
+    // the child and logs failures instead of leaving zombies.
+    let control_path = format!(
+        "ControlPath={}/workmux-sync-%C",
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string())
+    );
+    let mut ssh = std::process::Command::new("ssh");
+    ssh.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        &control_path,
+        host,
+        &remote_cmd,
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+    match ssh.spawn() {
+        Ok(mut child) => {
+            let target = namespaced_pane_id.to_string();
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) if !status.success() => {
+                    tracing::warn!(%target, %status, "remote jump ssh failed");
+                }
+                Err(e) => tracing::warn!(%target, error = %e, "remote jump ssh wait failed"),
+                _ => {}
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to spawn remote jump ssh"),
+    }
+    Ok(())
+}
+
+/// Host part of a namespaced remote pane id (`ssh:<host>/<pane>`), if any.
+/// Used by the sidebar `{remote}` template token to tag mirrored agents.
+pub fn remote_host(pane_id: &str) -> Option<&str> {
+    pane_id
+        .strip_prefix("ssh:")?
+        .split_once('/')
+        .map(|(host, _)| host)
+}

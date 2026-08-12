@@ -273,6 +273,29 @@ fn read_sleeping_panes() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Remote-agent highlight override recorded by `remote_pane_jump` as
+/// "<namespaced_pane_id>|<window_id>". Stays valid while the recorded window
+/// is still active somewhere; cleared once the user moves to another window.
+fn read_remote_active(state: &TmuxState) -> Option<String> {
+    let raw = Cmd::new("tmux")
+        .args(&["show-option", "-gqv", "@workmux_remote_active"])
+        .run_and_capture_stdout()
+        .ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (rid, wid) = raw.split_once('|')?;
+    if state.active_windows.iter().any(|(_, w)| w == wid) {
+        Some(rid.to_string())
+    } else {
+        let _ = Cmd::new("tmux")
+            .args(&["set-option", "-gu", "@workmux_remote_active"])
+            .run();
+        None
+    }
+}
+
 /// Shared git status cache, updated by a background worker thread.
 type GitCache = Arc<Mutex<HashMap<PathBuf, GitStatus>>>;
 
@@ -1661,6 +1684,7 @@ pub fn run() -> Result<()> {
             };
             let filter_mode = read_sidebar_filter_mode();
             let sleeping_pane_ids = read_sleeping_panes();
+            let remote_active_pane_id = read_remote_active(&tmux_state);
             let git_statuses = git_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let pr_statuses = pr_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let check_statuses = check_cache
@@ -1692,6 +1716,7 @@ pub fn run() -> Result<()> {
                     pr_statuses,
                     check_statuses,
                     sleeping_pane_ids,
+                    remote_active_pane_id,
                 },
                 &mut inactivity_tracker,
                 &last_interrupted,
@@ -1862,6 +1887,7 @@ struct TickInput {
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     check_statuses: HashMap<PathBuf, CheckPathEntry>,
     sleeping_pane_ids: HashSet<String>,
+    remote_active_pane_id: Option<String>,
 }
 
 /// A state-file write to apply after computing the tick.
@@ -1908,6 +1934,7 @@ fn compute_tick(
         pr_statuses,
         check_statuses,
         sleeping_pane_ids,
+        remote_active_pane_id,
     } = input;
 
     // Phase 1: Inactivity detection
@@ -1948,6 +1975,7 @@ fn compute_tick(
         &sleeping_pane_ids,
     );
     snapshot.interrupted_pane_ids = interrupted.clone();
+    snapshot.remote_active_pane_id = remote_active_pane_id;
 
     // Phase 4: Determine runtime write side effect
     let runtime_write = if interrupted != *last_interrupted || heartbeat_due {
@@ -2005,6 +2033,7 @@ fn gather_captures(
     agents
         .iter()
         .filter(|a| a.status == Some(crate::multiplexer::AgentStatus::Working))
+        .filter(|a| !a.pane_id.starts_with("ssh:"))
         .filter(|a| !tracker.is_confirmed(&a.pane_id, a.updated_ts.unwrap_or(0)))
         .filter_map(|a| {
             mux.capture_pane(&a.pane_id, 5)
@@ -2572,6 +2601,7 @@ mod tests {
                         window_pane_counts: HashMap::new(),
                     },
                     captured_panes: captures,
+                    remote_active_pane_id: None,
                     sort: crate::config::SidebarSort::default(),
                     now,
                     now_ts,

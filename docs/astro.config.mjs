@@ -120,6 +120,7 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "guide/sidebar" },
             { label: "Customization", slug: "guide/sidebar/customization" },
+            { label: "Remote agents", slug: "guide/sidebar/remote-agents" },
           ],
         },
         {

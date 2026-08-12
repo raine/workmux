@@ -527,6 +527,32 @@ impl StateStore {
         let mut valid_agents = Vec::new();
 
         for state in all_agents {
+            // Remote agents synced from another machine (instance "ssh:<host>"):
+            // no local pane exists to check against, so expose them under a
+            // namespaced pane id ("ssh:<host>/%N") that switch_to_pane routes
+            // back over ssh.
+            //
+            // These files are a mirror, not the state of record - keeping it
+            // honest is the syncer's job. Remote state files outlive their
+            // panes (nothing prunes them unless a workmux daemon runs over
+            // there), so a sync that copies the directory wholesale pins dead
+            // agents to the sidebar forever; the contract is that a mirrored
+            // file exists only while its pane is live on the remote. Checking
+            // any of that against the *local* server would only ever be wrong.
+            if state.pane_key.backend == backend
+                && state.pane_key.instance != instance
+                && state.pane_key.instance.starts_with("ssh:")
+            {
+                let mut agent_pane = state.to_agent_pane(
+                    state.session_name.clone().unwrap_or_default(),
+                    state.window_name.clone().unwrap_or_default(),
+                );
+                agent_pane.pane_id =
+                    format!("{}/{}", state.pane_key.instance, state.pane_key.pane_id);
+                agent_pane.window_cmd = Some(state.command.clone());
+                valid_agents.push(agent_pane);
+                continue;
+            }
             // Skip agents from other backends/instances
             if state.pane_key.backend != backend || state.pane_key.instance != instance {
                 continue;

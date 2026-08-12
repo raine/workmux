@@ -128,6 +128,9 @@ impl<'a> RowContext<'a> {
     pub fn resolve(&self, token: TokenId) -> String {
         match token {
             TokenId::Primary => self.primary.clone(),
+            TokenId::Remote => crate::multiplexer::remote_host(&self.agent.pane_id)
+                .map(|h| format!("@{h}"))
+                .unwrap_or_default(),
             TokenId::Secondary => self.secondary.clone(),
             TokenId::Worktree => self.worktree_name(),
             TokenId::Project => self.project_name(),

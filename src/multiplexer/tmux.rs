@@ -983,6 +983,9 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
+        if pane_id.starts_with("ssh:") {
+            return super::remote_pane_jump(pane_id);
+        }
         self.tmux_cmd(&["switch-client", "-t", pane_id])
     }
 
