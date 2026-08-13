@@ -70,13 +70,16 @@ impl<'a> RowContext<'a> {
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
         let is_interrupted = app.interrupted_pane_ids.contains(&agent.pane_id);
-        let is_stale = is_agent_stale(
-            agent.status_ts,
-            agent.status,
-            now_secs,
-            app.stale_threshold_secs,
-            is_sleeping,
-            is_interrupted,
+        let is_stale = should_dim_agent(
+            app.dim_stale,
+            is_agent_stale(
+                agent.status_ts,
+                agent.status,
+                now_secs,
+                app.stale_threshold_secs,
+                is_sleeping,
+                is_interrupted,
+            ),
         );
         let is_active = app.host_agent_idx == Some(idx);
         let is_selected = selected_idx == Some(idx);
@@ -436,6 +439,10 @@ fn is_agent_stale(
         .unwrap_or(true)
 }
 
+fn should_dim_agent(dim_stale: bool, is_stale: bool) -> bool {
+    dim_stale && is_stale
+}
+
 fn display_width(s: &str) -> usize {
     s.chars()
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
@@ -483,6 +490,13 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn stale_rendering_can_be_disabled() {
+        assert!(should_dim_agent(true, true));
+        assert!(!should_dim_agent(false, true));
+        assert!(!should_dim_agent(true, false));
     }
 
     #[test]
@@ -566,6 +580,7 @@ mod tests {
         );
     }
 
+    use crate::command::sidebar::app::TemplateError;
     use crate::config::{ThemeMode, ThemeScheme};
     use crate::github::{CheckState, PrSummary};
     use crate::multiplexer::AgentPane;
@@ -594,6 +609,24 @@ mod tests {
             agent_command: None,
             agent_kind: None,
         }
+    }
+
+    #[test]
+    fn row_context_keeps_stale_done_agent_colored_when_dimming_is_disabled() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = false;
+
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Done);
+        agent.status_ts = Some(1);
+        let pane_suffixes = vec![String::new()];
+        let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 7200, None);
+
+        assert!(!ctx.is_stale);
+        assert_eq!(ctx.status_color, app.palette.success);
     }
 
     fn make_context<'a>(

@@ -224,6 +224,16 @@ pub struct SidebarConfig {
 
     /// Row ordering: "recency" (default) or "window".
     pub sort: Option<SidebarSort>,
+
+    /// Dim agents whose status has not changed for the stale threshold.
+    /// Default: true.
+    pub dim_stale: Option<bool>,
+}
+
+impl SidebarConfig {
+    pub fn dim_stale(&self) -> bool {
+        self.dim_stale.unwrap_or(true)
+    }
 }
 
 /// Sidebar row ordering.
@@ -2548,6 +2558,7 @@ impl Config {
                 (g, p) => p.or(g),
             },
             sort: project.sidebar.sort.or(self.sidebar.sort),
+            dim_stale: project.sidebar.dim_stale.or(self.sidebar.dim_stale),
         };
 
         // Sandbox config: per-field override with nested struct merging
@@ -3016,6 +3027,9 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Default: "tiles". Can be toggled at runtime with 'v' key.
 #   layout: tiles
 #
+#   # Dim agents whose status has not changed for one hour. Default: true.
+#   dim_stale: true
+#
 #   horizontal:
 #     item_width: 24  # horizontal chip width in columns, clamped 12-80
 #
@@ -3482,6 +3496,25 @@ sidebar:
         assert_eq!(merged.sidebar.width, Some(SidebarWidth::Absolute(40)));
         assert_eq!(merged.sidebar.height, Some(SidebarHeight::Absolute(4)));
         assert_eq!(merged.sidebar.horizontal.item_width, Some(36));
+    }
+
+    #[test]
+    fn sidebar_dim_stale_defaults_true_and_merges_per_field() {
+        let default_config = Config::default();
+        assert!(default_config.sidebar.dim_stale());
+
+        let global: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  dim_stale: false
+"#,
+        )
+        .unwrap();
+        let project: Config = serde_yaml::from_str("sidebar: {}\n").unwrap();
+        let merged = global.merge(project);
+
+        assert_eq!(merged.sidebar.dim_stale, Some(false));
+        assert!(!merged.sidebar.dim_stale());
     }
 
     #[test]

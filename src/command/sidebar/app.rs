@@ -223,6 +223,8 @@ pub struct SidebarApp {
     pub status_icons: StatusIcons,
     pub spinner_frame: u8,
     pub stale_threshold_secs: u64,
+    /// Whether stale agents use the dimmed visual treatment.
+    pub dim_stale: bool,
     pub position: SidebarPosition,
     pub layout_mode: SidebarLayoutMode,
     /// Area where the list was last rendered (for mouse hit testing)
@@ -308,6 +310,7 @@ impl SidebarApp {
             status_icons: StatusIcons::default(),
             spinner_frame: 0,
             stale_threshold_secs: 3600,
+            dim_stale: true,
             position: SidebarPosition::Left,
             layout_mode: SidebarLayoutMode::Compact,
             list_area: Rect::default(),
@@ -390,6 +393,7 @@ impl SidebarApp {
             status_icons,
             spinner_frame: 0,
             stale_threshold_secs: 60 * 60, // 60 minutes
+            dim_stale: config.sidebar.dim_stale(),
             position,
             layout_mode: SidebarLayoutMode::default(),
             list_area: Rect::default(),
@@ -561,6 +565,7 @@ impl SidebarApp {
         self.agent_icons = ResolvedAgentIcons::from_config(cfg.sidebar.agent_icons.as_ref());
         self.horizontal_item_width = cfg.sidebar.horizontal.item_width();
         self.current_width = cfg.sidebar.width.clone();
+        self.dim_stale = cfg.sidebar.dim_stale();
     }
 
     pub(super) fn host_identity(&self) -> Option<&HostIdentity> {
