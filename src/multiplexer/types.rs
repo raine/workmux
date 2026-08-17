@@ -243,4 +243,8 @@ pub struct LivePaneInfo {
 
     /// Stable window ID for backends that expose one.
     pub window_id: Option<String>,
+
+    /// Window index as shown in the tmux status bar. None for backends that
+    /// do not number their windows.
+    pub window_index: Option<u32>,
 }

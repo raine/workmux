@@ -116,9 +116,13 @@ released when the dashboard exits.
 - **Project**: Project name (from `__worktrees` path or directory name)
 - **Agent**: Worktree/window name
 - **Git**: Diff stats showing branch changes (dim) and uncommitted changes (bright)
+- **Win**: Window index in the multiplexer, matching the tmux status bar (opt-in via `columns`)
 - **Status**: Agent status icon (🤖 working, 💬 waiting, ✅ done, or "stale")
 - **Time**: Time since last status change
 - **Title**: Claude Code session title (auto-generated summary)
+
+The **Win**, **Status**, **Time** and **Title** columns can be reordered, or left out, with
+the [`columns`](/guide/dashboard/configuration#columns) option.
 
 ## Live preview
 

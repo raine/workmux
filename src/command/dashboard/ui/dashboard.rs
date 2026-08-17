@@ -11,6 +11,7 @@ use ratatui::{
 use std::collections::{BTreeMap, HashSet};
 
 use crate::agent_display::strip_oc_title_prefix;
+use crate::config::DashboardColumn;
 
 use super::super::app::{App, DashboardTab};
 use super::format;
@@ -152,6 +153,9 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
+    // Header cells, row cells and width constraints are all derived from this
+    // one list, so a reordered config can never desynchronise them.
+    let trailing_columns = app.config.dashboard.columns();
 
     let header = format::resource_table_header(
         format::ResourceHeaderState {
@@ -163,7 +167,15 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
             pr_fetching: app.is_pr_fetching(),
         },
         show_pr_column,
-        &["Status", "Time", "Title"],
+        &trailing_columns
+            .iter()
+            .map(|column| match column {
+                DashboardColumn::Window => "Win",
+                DashboardColumn::Status => "Status",
+                DashboardColumn::Time => "Time",
+                DashboardColumn::Title => "Title",
+            })
+            .collect::<Vec<_>>(),
     );
 
     // Group agents by (session, window_name) to detect multi-pane windows
@@ -236,6 +248,12 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 })
                 .unwrap_or_default();
             let status_spans = app.get_status_display(agent);
+            // Blank rather than a placeholder when the backend does not number
+            // its windows, so the column stays quiet on wezterm/zellij/kitty
+            let window_index_label = agent
+                .window_index
+                .map(|index| index.to_string())
+                .unwrap_or_default();
             let elapsed = app.get_elapsed(agent);
             let duration = elapsed
                 .map(|d| app.format_duration(d))
@@ -274,6 +292,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 status_spans,
                 duration_line,
                 title,
+                window_index_label,
             )
         })
         .collect();
@@ -291,7 +310,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Use chars().count() instead of len() because Nerd Font icons are multi-byte
     let max_git_width = row_data
         .iter()
-        .map(|(_, _, _, _, _, _, _, git_spans, _, _, _, _)| {
+        .map(|(_, _, _, _, _, _, _, git_spans, _, _, _, _, _)| {
             git_spans
                 .iter()
                 .map(|(text, _)| text.chars().count())
@@ -306,7 +325,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     let max_pr_width = if show_pr_column {
         row_data
             .iter()
-            .filter_map(|(_, _, _, _, _, _, _, _, pr_spans, _, _, _)| pr_spans.as_ref())
+            .filter_map(|(_, _, _, _, _, _, _, _, pr_spans, _, _, _, _)| pr_spans.as_ref())
             .map(|spans| {
                 spans
                     .iter()
@@ -337,6 +356,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 status_spans,
                 duration_line,
                 title,
+                window_index_label,
             )| {
                 let worktree_style = format::make_row_style(is_current, is_main, &app.palette);
 
@@ -367,11 +387,39 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 }
 
                 let status_line = format::spans_to_line(status_spans);
-                cells.extend(vec![
-                    Cell::from(status_line),
-                    Cell::from(duration_line),
-                    Cell::from(title),
-                ]);
+                let mut window_cell = Some(window_index_label);
+                let mut status_cell = Some(status_line);
+                let mut duration_cell = Some(duration_line);
+                let mut title_cell = Some(title);
+                for column in &trailing_columns {
+                    // take() so each column is moved out once: columns() already
+                    // dropped duplicates, this keeps the compiler happy about it
+                    match column {
+                        DashboardColumn::Window => {
+                            if let Some(label) = window_cell.take() {
+                                cells.push(
+                                    Cell::from(label)
+                                        .style(Style::default().fg(app.palette.dimmed)),
+                                );
+                            }
+                        }
+                        DashboardColumn::Status => {
+                            if let Some(line) = status_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                        DashboardColumn::Time => {
+                            if let Some(line) = duration_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                        DashboardColumn::Title => {
+                            if let Some(line) = title_cell.take() {
+                                cells.push(Cell::from(line));
+                            }
+                        }
+                    }
+                }
 
                 let row = Row::new(cells);
                 // Subtle background for the active worktree row
@@ -396,11 +444,12 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         constraints.push(Constraint::Length(max_pr_width as u16)); // PR: auto-sized
     }
 
-    constraints.extend(vec![
-        Constraint::Length(8),  // Status: fixed (icons)
-        Constraint::Length(10), // Time: HH:MM:SS + padding
-        Constraint::Fill(1),    // Title: takes remaining space
-    ]);
+    constraints.extend(trailing_columns.iter().map(|column| match column {
+        DashboardColumn::Window => Constraint::Length(4), // window index
+        DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
+        DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
+        DashboardColumn::Title => Constraint::Fill(1),    // takes remaining space
+    }));
 
     let highlight_symbol = Text::from(Line::from(Span::styled(
         "▌ ",

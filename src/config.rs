@@ -91,7 +91,33 @@ pub struct DashboardConfig {
     /// Show check pass/total counts alongside check icon (default: false)
     #[serde(default)]
     pub show_check_counts: Option<bool>,
+
+    /// Order of the trailing columns in the agents table, after the fixed
+    /// `#`, `Project`, `Worktree`, `Git` and optional `PR` columns.
+    /// Default: status, time, title.
+    pub columns: Option<Vec<DashboardColumn>>,
 }
+
+/// A configurable column of the dashboard agents table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DashboardColumn {
+    /// Multiplexer window index, as shown in the tmux status bar.
+    Window,
+    /// Agent status (icons).
+    Status,
+    /// Time elapsed in the current status.
+    Time,
+    /// Agent pane title.
+    Title,
+}
+
+/// Trailing columns used when the config does not set `dashboard.columns`.
+pub const DEFAULT_DASHBOARD_COLUMNS: [DashboardColumn; 3] = [
+    DashboardColumn::Status,
+    DashboardColumn::Time,
+    DashboardColumn::Title,
+];
 
 impl DashboardConfig {
     pub fn commit(&self) -> &str {
@@ -108,6 +134,28 @@ impl DashboardConfig {
     /// Default: 60
     pub fn preview_size(&self) -> u8 {
         self.preview_size.unwrap_or(60).clamp(10, 90)
+    }
+
+    /// Trailing columns of the agents table, in display order.
+    /// Duplicates are dropped so a column is never rendered twice, and an
+    /// empty or absent list falls back to the default order.
+    pub fn columns(&self) -> Vec<DashboardColumn> {
+        let Some(configured) = self.columns.as_ref() else {
+            return DEFAULT_DASHBOARD_COLUMNS.to_vec();
+        };
+
+        let mut seen = Vec::new();
+        for column in configured {
+            if !seen.contains(column) {
+                seen.push(*column);
+            }
+        }
+
+        if seen.is_empty() {
+            DEFAULT_DASHBOARD_COLUMNS.to_vec()
+        } else {
+            seen
+        }
     }
 
     /// Whether to show check pass/total counts alongside check icons.
@@ -2527,6 +2575,11 @@ impl Config {
                 .dashboard
                 .show_check_counts
                 .or(self.dashboard.show_check_counts),
+            columns: project
+                .dashboard
+                .columns
+                .clone()
+                .or_else(|| self.dashboard.columns.clone()),
         };
 
         // Sidebar config: per-field override
@@ -3174,14 +3227,59 @@ mod tests {
 
     use super::{
         AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails, AllowedDomainEntry,
-        Config, ContainerConfig, ContainerDevice, ExtraMount, FileConfig, LayoutConfig, LimaConfig,
-        NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
-        SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
-        WindowPlacement, is_agent_command, validate_domain, validate_group_add_entry,
-        validate_layouts_config,
+        Config, ContainerConfig, ContainerDevice, DashboardColumn, ExtraMount, FileConfig,
+        LayoutConfig, LimaConfig, NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig,
+        SandboxRuntime, SandboxTarget, SidebarHeight, SidebarPosition, SidebarWidth,
+        SplitDirection, ToolchainMode, WindowPlacement, is_agent_command, validate_domain,
+        validate_group_add_entry, validate_layouts_config,
     };
     use crate::test_support;
     use tempfile::TempDir;
+
+    #[test]
+    fn dashboard_columns_default_when_unset() {
+        let config = Config::default();
+        assert_eq!(
+            config.dashboard.columns(),
+            vec![
+                DashboardColumn::Status,
+                DashboardColumn::Time,
+                DashboardColumn::Title
+            ]
+        );
+    }
+
+    #[test]
+    fn dashboard_columns_follow_configured_order() {
+        let config: Config = serde_yaml::from_str("dashboard:\n  columns: [status, title, time]\n")
+            .expect("config parses");
+        assert_eq!(
+            config.dashboard.columns(),
+            vec![
+                DashboardColumn::Status,
+                DashboardColumn::Title,
+                DashboardColumn::Time
+            ]
+        );
+    }
+
+    #[test]
+    fn dashboard_columns_drop_duplicates_and_allow_omitting() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  columns: [title, title, status]\n")
+                .expect("config parses");
+        assert_eq!(
+            config.dashboard.columns(),
+            vec![DashboardColumn::Title, DashboardColumn::Status]
+        );
+    }
+
+    #[test]
+    fn dashboard_columns_empty_list_falls_back_to_default() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  columns: []\n").expect("config parses");
+        assert_eq!(config.dashboard.columns().len(), 3);
+    }
 
     fn cfg(edit: impl FnOnce(&mut Config)) -> Config {
         let mut config = Config::default();

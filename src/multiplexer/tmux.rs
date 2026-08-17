@@ -27,7 +27,7 @@ const LIVE_PANE_RECORD_SEPARATOR: char = '\x1e';
 const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
 const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
 const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
-const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
+const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}";
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
     if line.contains(LIVE_PANE_FIELD_SEPARATOR) {
@@ -38,6 +38,9 @@ fn live_pane_fields(line: &str) -> Vec<&str> {
         line.split('\t').collect()
     }
 }
+
+/// Fields LIVE_PANE_FORMAT has always produced; later ones are optional.
+const LIVE_PANE_REQUIRED_FIELDS: usize = 9;
 
 fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
     let line = line
@@ -70,6 +73,7 @@ fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
                 .get(8)
                 .map(|value| value.to_string())
                 .filter(|value| !value.is_empty()),
+            window_index: parts.get(9).and_then(|value| value.parse().ok()),
         },
     ))
 }
@@ -101,7 +105,10 @@ fn parse_live_pane_snapshot_lossy(output: &str) -> HashMap<String, LivePaneInfo>
 
 fn parse_live_pane_line_strict(line: &str) -> Result<(String, LivePaneInfo)> {
     let parts = live_pane_fields(line);
-    if parts.len() != 9 || parts[0].is_empty() {
+    // LIVE_PANE_FORMAT has grown over time and the trailing fields are read with
+    // get(), so accept anything from the required prefix upwards rather than an
+    // exact count that has to be bumped with every new field
+    if parts.len() < LIVE_PANE_REQUIRED_FIELDS || parts[0].is_empty() {
         return Err(anyhow!(
             "tmux returned malformed pane information: {line:?}"
         ));
@@ -1240,6 +1247,31 @@ mod tests {
 
         assert_eq!(panes["%7"].working_dir, PathBuf::from("/repo/a"));
         assert_eq!(panes["%8"].window_id.as_deref(), Some("@3"));
+    }
+
+    #[test]
+    fn parse_live_pane_line_strict_accepts_fields_beyond_the_required_prefix() {
+        // guards against the exact-count check that rejected live output as soon
+        // as LIVE_PANE_FORMAT gained a field
+        let line = "%7\x1f12345\x1fnode\x1f/repo\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\x1f4";
+        let (pane_id, info) = parse_live_pane_line_strict(line).expect("line parses");
+        assert_eq!(pane_id, "%7");
+        assert_eq!(info.window_index, Some(4));
+    }
+
+    #[test]
+    fn parse_live_pane_line_reads_window_index() {
+        let line = "\x1e%7\x1f12345\x1fnode\x1f/repo/a\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\x1f3";
+        let (pane_id, info) = parse_live_pane_line(line).expect("line parses");
+        assert_eq!(pane_id, "%7");
+        assert_eq!(info.window_index, Some(3));
+    }
+
+    #[test]
+    fn parse_live_pane_line_without_window_index_is_none() {
+        let line = "\x1e%7\x1f12345\x1fnode\x1f/repo/a\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2";
+        let (_, info) = parse_live_pane_line(line).expect("line parses");
+        assert_eq!(info.window_index, None);
     }
 
     #[test]

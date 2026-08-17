@@ -438,6 +438,7 @@ impl ZellijBackend {
             window: Some(canonical_tab_name(&pane.tab_name).to_string()).filter(|t| !t.is_empty()),
             session_id: None,
             window_id: None,
+            window_index: None,
         }
     }
 
