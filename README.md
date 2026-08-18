@@ -28,6 +28,7 @@ parallel without conflict.
 windowing, git for worktrees, your agent for coding - workmux ties them together.
 
 <sup><sub>\* Also supports
+<a href="https://workmux.raine.dev/guide/herdr">herdr</a>,
 <a href="https://workmux.raine.dev/guide/kitty">kitty</a>,
 <a href="https://workmux.raine.dev/guide/wezterm">WezTerm</a>, and
 <a href="https://workmux.raine.dev/guide/zellij">Zellij</a> as alternative
@@ -163,6 +164,7 @@ For manual installation, see
 > [!NOTE]
 > workmux requires a terminal multiplexer. Make sure you have
 > [tmux](https://github.com/tmux/tmux) (or
+> [herdr](https://raine.github.io/workmux/guide/herdr) /
 > [WezTerm](https://raine.github.io/workmux/guide/wezterm) /
 > [Kitty](https://raine.github.io/workmux/guide/kitty) /
 > [Zellij](https://raine.github.io/workmux/guide/zellij)) installed and running
@@ -2735,6 +2737,10 @@ workmux completions fish | source
 While tmux is the primary and recommended backend, workmux also supports
 alternative terminal multiplexers:
 
+- **[herdr](https://workmux.raine.dev/guide/herdr)** (experimental) - For users
+  who prefer herdr. Detected automatically via `$HERDR_PANE_ID`. herdr manages
+  git worktrees itself, so `add` and `remove` delegate to it instead of running
+  git directly.
 - **[WezTerm](https://workmux.raine.dev/guide/wezterm)** (experimental) - For
   users who prefer WezTerm's features. Thanks to
   [@JeremyBYU](https://github.com/JeremyBYU) for contributing this backend.
@@ -2745,9 +2751,10 @@ alternative terminal multiplexers:
   users who prefer Zellij. Detected automatically via `$ZELLIJ`.
 
 workmux auto-detects the backend from environment variables (`$TMUX`,
-`$WEZTERM_PANE`, `$KITTY_WINDOW_ID`, or `$ZELLIJ`). Session-specific variables
-are checked first, so running tmux inside kitty correctly selects the tmux
-backend. Set `$WORKMUX_BACKEND` to override detection.
+`$WEZTERM_PANE`, `$KITTY_WINDOW_ID`, `$ZELLIJ`, or `$HERDR_PANE_ID`).
+Session-specific variables are checked first, so running tmux inside kitty or
+inside herdr correctly selects the tmux backend. Set `$WORKMUX_BACKEND` to
+override detection.
 
 ## Inspiration and related tools
 
