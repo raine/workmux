@@ -133,6 +133,8 @@ pub struct ResolvedCommand {
     pub prompt_injected: bool,
     /// Selected agent metadata for agent panes.
     pub selected_agent: Option<SelectedAgent>,
+    /// Command before prompt injection, so `render_command` stays idempotent.
+    base_command: String,
     prompt_argument: Option<String>,
     posix_shell: bool,
     use_agent_command: bool,
@@ -163,21 +165,21 @@ impl ResolvedCommand {
         self.selected_agent
             .as_ref()
             .map(SelectedAgent::shell_command)
-            .unwrap_or_else(|| self.command.clone())
+            .unwrap_or_else(|| self.base_command.clone())
     }
 
     fn render_raw_command(&self) -> String {
         let Some(agent) = &self.selected_agent else {
-            return self.command.clone();
+            return self.base_command.clone();
         };
         if !self.apply_agent_prefix {
-            return self.command.clone();
+            return self.base_command.clone();
         }
         let mut prefix = agent.command.shell_string();
-        if prefix == self.command || !self.command.starts_with(&agent.command.program) {
-            return self.command.clone();
+        if prefix == self.base_command || !self.base_command.starts_with(&agent.command.program) {
+            return self.base_command.clone();
         }
-        prefix.push_str(&self.command[agent.command.program.len()..]);
+        prefix.push_str(&self.base_command[agent.command.program.len()..]);
         prefix
     }
 }
@@ -260,7 +262,8 @@ pub fn resolve_pane_command_with_config(
     }
 
     let mut resolved = ResolvedCommand {
-        command,
+        command: command.clone(),
+        base_command: command,
         prompt_injected,
         selected_agent,
         prompt_argument,
@@ -588,6 +591,25 @@ mod tests {
             " env ANTHROPIC_BASE_URL=http://localhost:18765 /bin/claude wrapper --verbose -- \"$(cat PROMPT.md)\""
         );
         assert!(resolved.prompt_injected);
+    }
+
+    #[test]
+    fn resolve_structured_pane_command_injects_prompt_once_for_literal_agent_name() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let config = config_with_agent("claude");
+        let resolved = resolve_pane_command_with_config(
+            Some("claude"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+        assert_eq!(resolved.command, " claude -- \"$(cat PROMPT.md)\"");
+        assert_eq!(resolved.render_command(), resolved.command);
     }
 
     #[test]
