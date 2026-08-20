@@ -466,21 +466,33 @@ pub fn resolve_pane_configuration(
 
     let mut panes = original_panes.to_vec();
 
-    if let Some(focused) = panes.iter_mut().find(|pane| pane.focus) {
-        focused.command = Some(injected_agent.clone());
+    // Inject the agent only into a pane that has no explicit command (a plain
+    // shell), preferring the focused one. Never overwrite an explicit command
+    // such as `nvim` or a dev server: those panes are deliberately configured
+    // and must not be replaced with a second agent.
+    if let Some(focused) = panes
+        .iter_mut()
+        .find(|pane| pane.focus && pane.command.is_none())
+    {
+        focused.command = Some(injected_agent);
+        return panes;
+    }
+    if let Some(first) = panes.iter_mut().find(|pane| pane.command.is_none()) {
+        first.command = Some(injected_agent);
         return panes;
     }
 
-    if let Some(first) = panes.get_mut(0) {
-        first.command = Some(injected_agent.clone());
-        return panes;
+    // With no panes at all (default layout), create a fresh agent pane.
+    if panes.is_empty() {
+        return vec![config::PaneConfig {
+            command: Some(injected_agent),
+            focus: true,
+            ..Default::default()
+        }];
     }
 
-    vec![config::PaneConfig {
-        command: Some(injected_agent),
-        focus: true,
-        ..Default::default()
-    }]
+    // Every pane has an explicit command: leave the layout untouched.
+    panes
 }
 
 /// Write a prompt file for agent consumption.
@@ -659,10 +671,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_pane_configuration_agent_sets_focused_pane() {
+    fn resolve_pane_configuration_preserves_explicit_commands() {
         let original_panes = vec![
             config::PaneConfig {
-                command: Some("vim".to_string()),
+                command: Some("nvim".to_string()),
                 ..Default::default()
             },
             config::PaneConfig {
@@ -677,23 +689,65 @@ mod tests {
             &make_config_with_agent(Some("claude")),
             Some("claude"),
         );
-        assert_eq!(result[0].command, Some("vim".to_string()));
-        assert_eq!(result[1].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("npm run dev".to_string()));
     }
 
     #[test]
-    fn resolve_pane_configuration_agent_sets_first_pane_when_no_focus() {
+    fn resolve_pane_configuration_preserves_single_explicit_command() {
         let original_panes = vec![config::PaneConfig {
-            command: Some("vim".to_string()),
+            command: Some("nvim".to_string()),
             ..Default::default()
         }];
+
+        let result = resolve_pane_configuration(
+            &original_panes,
+            &make_config_with_agent(Some("pi")),
+            Some("pi"),
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+    }
+
+    #[test]
+    fn resolve_pane_configuration_agent_sets_focused_plain_shell_pane() {
+        let original_panes = vec![
+            config::PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            config::PaneConfig {
+                focus: true,
+                ..Default::default()
+            },
+        ];
 
         let result = resolve_pane_configuration(
             &original_panes,
             &make_config_with_agent(Some("claude")),
             Some("claude"),
         );
-        assert_eq!(result[0].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("<agent>".to_string()));
+    }
+
+    #[test]
+    fn resolve_pane_configuration_agent_sets_first_plain_shell_pane_when_no_focus() {
+        let original_panes = vec![
+            config::PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            config::PaneConfig::default(),
+        ];
+
+        let result = resolve_pane_configuration(
+            &original_panes,
+            &make_config_with_agent(Some("pi")),
+            Some("pi"),
+        );
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("<agent>".to_string()));
     }
 
     #[test]
@@ -711,7 +765,7 @@ mod tests {
     #[test]
     fn resolve_pane_configuration_preserves_named_profile_selector() {
         let original_panes = vec![config::PaneConfig {
-            command: Some("vim".to_string()),
+            command: Some("nvim".to_string()),
             focus: true,
             ..Default::default()
         }];
@@ -727,7 +781,7 @@ mod tests {
         );
 
         let result = resolve_pane_configuration(&original_panes, &config, Some("cc-work"));
-        assert_eq!(result[0].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
     }
 
     // --- validate_prompt_consumption tests ---
