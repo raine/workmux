@@ -142,7 +142,12 @@ Press `s` to cycle through sort modes:
 - **Recency**: Most recently updated first
 - **Natural**: Original tmux order (by pane creation)
 
-Your sort preference persists in the tmux session.
+Your sort preference persists across dashboard sessions. To change the default used when no preference has been persisted yet, set `dashboard.sort_mode` in your config:
+
+```yaml
+dashboard:
+  sort_mode: recency # priority (default), project, recency, natural
+```
 
 ## Session filter
 

@@ -97,6 +97,12 @@ pub struct DashboardConfig {
     /// list are not rendered.
     /// Default: number, project, worktree, git, pr, status, time, title.
     pub agent_columns: Option<Vec<AgentColumn>>,
+
+    /// Default sort mode for the agent list: "priority", "project", "recency", "natural".
+    /// Used when the dashboard has no persisted sort preference.
+    /// Default: "priority"
+    #[serde(default)]
+    pub sort_mode: Option<String>,
 }
 
 /// A configurable column of the dashboard agents table.
@@ -558,8 +564,8 @@ pub struct Config {
     pub theme: ThemeConfig,
 
     /// Mode for tmux operations: window (default) or session
-    /// None means "use default" (Window), Some means explicitly set
     #[serde(default)]
+    /// None means "use default" (Window), Some means explicitly set
     pub mode: Option<MuxMode>,
 
     /// Placement for new tmux windows in window mode.
@@ -2651,6 +2657,7 @@ impl Config {
                 .agent_columns
                 .clone()
                 .or_else(|| self.dashboard.agent_columns.clone()),
+            sort_mode: project.dashboard.sort_mode.or(self.dashboard.sort_mode),
         };
 
         // Sidebar config: per-field override
@@ -3128,11 +3135,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Preview size (10-90): larger = more preview, less table. Use +/- keys to adjust.
 # Columns of the agents table, in display order. Omit a column to hide it:
 # number, project, worktree, git, pr, status, time, title.
+# Default sort mode for the agent list: priority (default), project, recency, natural.
+# Used only when no sort preference has been persisted in the dashboard.
 # dashboard:
 #   commit: "Commit staged changes with a descriptive message"
 #   merge: "!workmux merge"
 #   preview_size: 60
 #   agent_columns: [number, project, worktree, git, pr, status, time, title]
+#   sort_mode: priority
 
 #-------------------------------------------------------------------------------
 # Sidebar
@@ -4482,6 +4492,33 @@ agents:
             merged.sandbox.container.excluded_files,
             Some(vec![".env".into()])
         );
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_project_overrides_global() {
+        let global = cfg(|config| {
+            config.dashboard.sort_mode = Some("priority".into());
+        });
+        let project = cfg(|config| {
+            config.dashboard.sort_mode = Some("recency".into());
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.dashboard.sort_mode.as_deref(), Some("recency"));
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_project_only_inherited() {
+        let global = Config::default();
+        let project = cfg(|config| {
+            config.dashboard.sort_mode = Some("recency".into());
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.dashboard.sort_mode.as_deref(), Some("recency"));
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_defaults_none() {
+        assert_eq!(Config::default().dashboard.sort_mode, None);
     }
 
     #[test]

@@ -198,7 +198,15 @@ impl App {
         let scheme = config.theme.scheme;
         let palette = ThemePalette::from_config(&config.theme, theme_mode);
         let config_path = crate::config::global_config_path();
-        let sort_mode = SortMode::load();
+        // Sort mode: persisted preference > config.yaml default > priority
+        let sort_mode = SortMode::load_with_default(
+            config
+                .dashboard
+                .sort_mode
+                .as_deref()
+                .map(SortMode::parse)
+                .unwrap_or_default(),
+        );
         let scope_mode = if cli_session_filter {
             ScopeMode::Session
         } else {
