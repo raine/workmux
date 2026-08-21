@@ -262,7 +262,7 @@ impl AgentProfile for GrokProfile {
     }
 
     fn prompt_argument(&self, prompt_path: &str) -> String {
-        format!("--prompt-file {}", prompt_path)
+        format!("\"$(cat {})\"", prompt_path)
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -766,10 +766,7 @@ mod tests {
         assert_eq!(profile.name(), "grok");
         assert!(!profile.needs_bang_delay());
         assert!(profile.needs_auto_status());
-        assert_eq!(
-            profile.prompt_argument("PROMPT.md"),
-            "--prompt-file PROMPT.md"
-        );
+        assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
         assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
         assert_eq!(profile.auto_name_command(), None);
         assert_eq!(profile.continue_flag(), Some("--continue"));
