@@ -173,6 +173,24 @@ struct AgentColumnWidths {
     worktree: u16,
     git: u16,
     pr: u16,
+    title: u16,
+}
+
+/// Columns to render, given the configured order. The PR column carries content
+/// only once an agent has GitHub status, so it drops out until then, unless it
+/// is the only thing left to show and dropping it would blank the table.
+fn visible_columns(configured: &[DashboardColumn], show_pr_column: bool) -> Vec<DashboardColumn> {
+    let visible: Vec<DashboardColumn> = configured
+        .iter()
+        .copied()
+        .filter(|column| *column != DashboardColumn::Pr || show_pr_column)
+        .collect();
+
+    if visible.is_empty() {
+        configured.to_vec()
+    } else {
+        visible
+    }
 }
 
 /// Build the cell of one configured column for one agent row.
@@ -255,9 +273,11 @@ fn build_agent_table(
         })
         .collect();
 
+    let last_column = columns.len().saturating_sub(1);
     let constraints: Vec<Constraint> = columns
         .iter()
-        .map(|column| match column {
+        .enumerate()
+        .map(|(index, column)| match column {
             DashboardColumn::Number => Constraint::Length(2), // jump key
             DashboardColumn::Project => Constraint::Length(widths.project), // auto-sized
             DashboardColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
@@ -265,7 +285,12 @@ fn build_agent_table(
             DashboardColumn::Pr => Constraint::Length(widths.pr), // auto-sized
             DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
             DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
-            DashboardColumn::Title => Constraint::Fill(1),    // remaining space
+            // A Fill column absorbs slack at its own position, which would
+            // strand every column after it against the right edge. Only the
+            // trailing title takes the remaining width; elsewhere it sizes to
+            // its content like any other column, leaving the slack at the end.
+            DashboardColumn::Title if index == last_column => Constraint::Fill(1),
+            DashboardColumn::Title => Constraint::Length(widths.title),
         })
         .collect();
 
@@ -286,14 +311,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
-    // The PR column only carries content once an agent has GitHub status
-    let columns: Vec<DashboardColumn> = app
-        .config
-        .dashboard
-        .columns()
-        .into_iter()
-        .filter(|column| *column != DashboardColumn::Pr || show_pr_column)
-        .collect();
+    let columns = visible_columns(&app.config.dashboard.columns(), show_pr_column);
 
     // Group agents by (session, window_name) to detect multi-pane windows
     let mut window_groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
@@ -449,6 +467,11 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         .clamp(4, 20) // Accommodate check icons + counts + inline timer
         + 1;
 
+    // Title width, used when the title is not the trailing column and so has to
+    // size to its content. Capped to leave room for the columns after it.
+    let titles: Vec<String> = row_data.iter().map(|r| r.title.clone()).collect();
+    let max_title_width = format::calc_column_width(&titles, 5, 60, 1);
+
     let table = build_agent_table(
         &columns,
         row_data,
@@ -457,6 +480,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
             worktree: max_worktree_width,
             git: max_git_width as u16,
             pr: max_pr_width as u16,
+            title: max_title_width,
         },
         format::ResourceHeaderState {
             palette: &app.palette,
@@ -796,6 +820,7 @@ mod tests {
                 worktree: 9,
                 git: 6,
                 pr: 5,
+                title: 12,
             },
             format::ResourceHeaderState {
                 palette: &palette,
@@ -835,7 +860,7 @@ mod tests {
         );
         assert_eq!(
             render_line(&REORDERED, 0),
-            "Title                                                       Status   #  Project"
+            "Title        Status   #  Project"
         );
     }
 
@@ -845,10 +870,7 @@ mod tests {
             render_line(&crate::config::DEFAULT_DASHBOARD_COLUMNS, 1),
             "1  proj     wt        +1     #7    work     00:42      the title"
         );
-        assert_eq!(
-            render_line(&REORDERED, 1),
-            "the title                                                   work     1  proj"
-        );
+        assert_eq!(render_line(&REORDERED, 1), "the title    work     1  proj");
     }
 
     #[test]
@@ -860,6 +882,39 @@ mod tests {
         assert_eq!(
             render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 1),
             "wt        the title"
+        );
+    }
+
+    #[test]
+    fn agents_table_keeps_columns_after_a_title_contiguous() {
+        // A Fill title would push Status and Project to the right edge
+        assert_eq!(
+            render_line(&[DashboardColumn::Title, DashboardColumn::Status], 0),
+            "Title        Status"
+        );
+        assert_eq!(
+            render_line(&[DashboardColumn::Title, DashboardColumn::Status], 1),
+            "the title    work"
+        );
+    }
+
+    #[test]
+    fn pr_column_hidden_until_an_agent_has_github_status() {
+        assert_eq!(
+            visible_columns(&[DashboardColumn::Worktree, DashboardColumn::Pr], false),
+            vec![DashboardColumn::Worktree]
+        );
+        assert_eq!(
+            visible_columns(&[DashboardColumn::Worktree, DashboardColumn::Pr], true),
+            vec![DashboardColumn::Worktree, DashboardColumn::Pr]
+        );
+    }
+
+    #[test]
+    fn hiding_the_pr_column_never_empties_the_table() {
+        assert_eq!(
+            visible_columns(&[DashboardColumn::Pr], false),
+            vec![DashboardColumn::Pr]
         );
     }
 }

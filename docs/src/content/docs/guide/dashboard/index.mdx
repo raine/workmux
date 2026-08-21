@@ -112,16 +112,18 @@ released when the dashboard exits.
 
 ## Columns
 
-- **#**: Quick jump key (1-9)
-- **Project**: Project name (from `__worktrees` path or directory name)
-- **Agent**: Worktree/window name
-- **Git**: Diff stats showing branch changes (dim) and uncommitted changes (bright)
-- **Status**: Agent status icon (🤖 working, 💬 waiting, ✅ done, or "stale")
-- **Time**: Time since last status change
-- **Title**: Claude Code session title (auto-generated summary)
+- **#** (`number`): Quick jump key (1-9)
+- **Project** (`project`): Project name (from `__worktrees` path or directory name)
+- **Worktree** (`worktree`): Worktree/window name
+- **Git** (`git`): Diff stats showing branch changes (dim) and uncommitted changes (bright)
+- **PR** (`pr`): Pull request number and check status, shown once an agent has one
+- **Status** (`status`): Agent status icon (🤖 working, 💬 waiting, ✅ done, or "stale")
+- **Time** (`time`): Time since last status change
+- **Title** (`title`): Claude Code session title (auto-generated summary)
 
-Every column can be reordered, or left out, with the
-[`columns`](/guide/dashboard/configuration#columns) option.
+Every column of the agents table can be reordered, or left out, with the
+[`columns`](/guide/dashboard/configuration#columns) option, using the names in
+parentheses above.
 
 ## Live preview
 
