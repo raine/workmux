@@ -11,7 +11,7 @@ use ratatui::{
 use std::collections::{BTreeMap, HashSet};
 
 use crate::agent_display::strip_oc_title_prefix;
-use crate::config::DashboardColumn;
+use crate::config::AgentColumn;
 
 use super::super::app::{App, DashboardTab};
 use super::format;
@@ -179,11 +179,11 @@ struct AgentColumnWidths {
 /// Columns to render, given the configured order. The PR column carries content
 /// only once an agent has GitHub status, so it drops out until then, unless it
 /// is the only thing left to show and dropping it would blank the table.
-fn visible_columns(configured: &[DashboardColumn], show_pr_column: bool) -> Vec<DashboardColumn> {
-    let visible: Vec<DashboardColumn> = configured
+fn visible_columns(configured: &[AgentColumn], show_pr_column: bool) -> Vec<AgentColumn> {
+    let visible: Vec<AgentColumn> = configured
         .iter()
         .copied()
-        .filter(|column| *column != DashboardColumn::Pr || show_pr_column)
+        .filter(|column| *column != AgentColumn::Pr || show_pr_column)
         .collect();
 
     if visible.is_empty() {
@@ -194,17 +194,13 @@ fn visible_columns(configured: &[DashboardColumn], show_pr_column: bool) -> Vec<
 }
 
 /// Build the cell of one configured column for one agent row.
-fn agent_cell(
-    column: DashboardColumn,
-    row: &AgentRowData,
-    palette: &ThemePalette,
-) -> Cell<'static> {
+fn agent_cell(column: AgentColumn, row: &AgentRowData, palette: &ThemePalette) -> Cell<'static> {
     match column {
-        DashboardColumn::Number => {
+        AgentColumn::Number => {
             Cell::from(row.jump_key.clone()).style(Style::default().fg(palette.keycap))
         }
-        DashboardColumn::Project => Cell::from(row.project.clone()),
-        DashboardColumn::Worktree => {
+        AgentColumn::Project => Cell::from(row.project.clone()),
+        AgentColumn::Worktree => {
             let worktree_style = format::make_row_style(row.is_current, row.is_main, palette);
             // Worktree name with dimmed pane suffix
             let worktree_line = if row.worktree_suffix.is_empty() {
@@ -220,13 +216,13 @@ fn agent_cell(
             };
             Cell::from(worktree_line)
         }
-        DashboardColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
-        DashboardColumn::Pr => Cell::from(format::spans_to_line(
+        AgentColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
+        AgentColumn::Pr => Cell::from(format::spans_to_line(
             row.pr_spans.clone().unwrap_or_default(),
         )),
-        DashboardColumn::Status => Cell::from(format::spans_to_line(row.status_spans.clone())),
-        DashboardColumn::Time => Cell::from(row.duration_line.clone()),
-        DashboardColumn::Title => Cell::from(row.title.clone()),
+        AgentColumn::Status => Cell::from(format::spans_to_line(row.status_spans.clone())),
+        AgentColumn::Time => Cell::from(row.duration_line.clone()),
+        AgentColumn::Title => Cell::from(row.title.clone()),
     }
 }
 
@@ -234,7 +230,7 @@ fn agent_cell(
 /// all derived from `columns`, so a reordered config can never desynchronise
 /// them.
 fn build_agent_table(
-    columns: &[DashboardColumn],
+    columns: &[AgentColumn],
     row_data: Vec<AgentRowData>,
     widths: AgentColumnWidths,
     header_state: format::ResourceHeaderState<'_>,
@@ -244,14 +240,14 @@ fn build_agent_table(
     let header_cells: Vec<format::ResourceHeaderCell> = columns
         .iter()
         .map(|column| match column {
-            DashboardColumn::Number => format::ResourceHeaderCell::Plain("#"),
-            DashboardColumn::Project => format::ResourceHeaderCell::Plain("Project"),
-            DashboardColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
-            DashboardColumn::Git => format::ResourceHeaderCell::Git,
-            DashboardColumn::Pr => format::ResourceHeaderCell::Pr,
-            DashboardColumn::Status => format::ResourceHeaderCell::Plain("Status"),
-            DashboardColumn::Time => format::ResourceHeaderCell::Plain("Time"),
-            DashboardColumn::Title => format::ResourceHeaderCell::Plain("Title"),
+            AgentColumn::Number => format::ResourceHeaderCell::Plain("#"),
+            AgentColumn::Project => format::ResourceHeaderCell::Plain("Project"),
+            AgentColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
+            AgentColumn::Git => format::ResourceHeaderCell::Git,
+            AgentColumn::Pr => format::ResourceHeaderCell::Pr,
+            AgentColumn::Status => format::ResourceHeaderCell::Plain("Status"),
+            AgentColumn::Time => format::ResourceHeaderCell::Plain("Time"),
+            AgentColumn::Title => format::ResourceHeaderCell::Plain("Title"),
         })
         .collect();
 
@@ -278,19 +274,19 @@ fn build_agent_table(
         .iter()
         .enumerate()
         .map(|(index, column)| match column {
-            DashboardColumn::Number => Constraint::Length(2), // jump key
-            DashboardColumn::Project => Constraint::Length(widths.project), // auto-sized
-            DashboardColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
-            DashboardColumn::Git => Constraint::Length(widths.git), // auto-sized
-            DashboardColumn::Pr => Constraint::Length(widths.pr), // auto-sized
-            DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
-            DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
+            AgentColumn::Number => Constraint::Length(2), // jump key
+            AgentColumn::Project => Constraint::Length(widths.project), // auto-sized
+            AgentColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
+            AgentColumn::Git => Constraint::Length(widths.git), // auto-sized
+            AgentColumn::Pr => Constraint::Length(widths.pr), // auto-sized
+            AgentColumn::Status => Constraint::Length(8), // fixed (icons)
+            AgentColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
             // A Fill column absorbs slack at its own position, which would
             // strand every column after it against the right edge. Only the
             // trailing title takes the remaining width; elsewhere it sizes to
             // its content like any other column, leaving the slack at the end.
-            DashboardColumn::Title if index == last_column => Constraint::Fill(1),
-            DashboardColumn::Title => Constraint::Length(widths.title),
+            AgentColumn::Title if index == last_column => Constraint::Fill(1),
+            AgentColumn::Title => Constraint::Length(widths.title),
         })
         .collect();
 
@@ -311,7 +307,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
-    let columns = visible_columns(&app.config.dashboard.columns(), show_pr_column);
+    let columns = visible_columns(&app.config.dashboard.agent_columns(), show_pr_column);
 
     // Group agents by (session, window_name) to detect multi-pane windows
     let mut window_groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
@@ -810,7 +806,7 @@ mod tests {
     }
 
     /// Render the agents table and return one line of the output buffer.
-    fn render_line(columns: &[DashboardColumn], line: u16) -> String {
+    fn render_line(columns: &[AgentColumn], line: u16) -> String {
         let palette = palette();
         let table = build_agent_table(
             columns,
@@ -845,17 +841,17 @@ mod tests {
     }
 
     /// Reordered list, including the `#` jump key away from its usual place.
-    const REORDERED: [DashboardColumn; 4] = [
-        DashboardColumn::Title,
-        DashboardColumn::Status,
-        DashboardColumn::Number,
-        DashboardColumn::Project,
+    const REORDERED: [AgentColumn; 4] = [
+        AgentColumn::Title,
+        AgentColumn::Status,
+        AgentColumn::Number,
+        AgentColumn::Project,
     ];
 
     #[test]
     fn agents_table_header_follows_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_DASHBOARD_COLUMNS, 0),
+            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 0),
             "#  Project  Worktree  Git    PR    Status   Time       Title"
         );
         assert_eq!(
@@ -867,7 +863,7 @@ mod tests {
     #[test]
     fn agents_table_rows_follow_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_DASHBOARD_COLUMNS, 1),
+            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 1),
             "1  proj     wt        +1     #7    work     00:42      the title"
         );
         assert_eq!(render_line(&REORDERED, 1), "the title    work     1  proj");
@@ -876,11 +872,11 @@ mod tests {
     #[test]
     fn agents_table_omits_unlisted_columns() {
         assert_eq!(
-            render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 0),
+            render_line(&[AgentColumn::Worktree, AgentColumn::Title], 0),
             "Worktree  Title"
         );
         assert_eq!(
-            render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 1),
+            render_line(&[AgentColumn::Worktree, AgentColumn::Title], 1),
             "wt        the title"
         );
     }
@@ -889,11 +885,11 @@ mod tests {
     fn agents_table_keeps_columns_after_a_title_contiguous() {
         // A Fill title would push Status and Project to the right edge
         assert_eq!(
-            render_line(&[DashboardColumn::Title, DashboardColumn::Status], 0),
+            render_line(&[AgentColumn::Title, AgentColumn::Status], 0),
             "Title        Status"
         );
         assert_eq!(
-            render_line(&[DashboardColumn::Title, DashboardColumn::Status], 1),
+            render_line(&[AgentColumn::Title, AgentColumn::Status], 1),
             "the title    work"
         );
     }
@@ -901,20 +897,20 @@ mod tests {
     #[test]
     fn pr_column_hidden_until_an_agent_has_github_status() {
         assert_eq!(
-            visible_columns(&[DashboardColumn::Worktree, DashboardColumn::Pr], false),
-            vec![DashboardColumn::Worktree]
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], false),
+            vec![AgentColumn::Worktree]
         );
         assert_eq!(
-            visible_columns(&[DashboardColumn::Worktree, DashboardColumn::Pr], true),
-            vec![DashboardColumn::Worktree, DashboardColumn::Pr]
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], true),
+            vec![AgentColumn::Worktree, AgentColumn::Pr]
         );
     }
 
     #[test]
     fn hiding_the_pr_column_never_empties_the_table() {
         assert_eq!(
-            visible_columns(&[DashboardColumn::Pr], false),
-            vec![DashboardColumn::Pr]
+            visible_columns(&[AgentColumn::Pr], false),
+            vec![AgentColumn::Pr]
         );
     }
 }

@@ -10,32 +10,32 @@ dashboard:
   commit: "Commit staged changes with a descriptive message"
   merge: "!workmux merge"
   preview_size: 60
-  columns: [number, project, worktree, git, pr, status, time, title]
+  agent_columns: [number, project, worktree, git, pr, status, time, title]
 ```
 
 The `commit` and `merge` values are text sent to the agent's pane. Use the `!` prefix to run shell commands (supported by Claude, Gemini, and other agents).
 
 ## Defaults
 
-| Option         | Default value                                               | Description                               |
-| -------------- | ----------------------------------------------------------- | ----------------------------------------- |
-| `commit`       | `Commit staged changes with a descriptive message`          | Natural language prompt                   |
-| `merge`        | `!workmux merge`                                            | Shell command via agent                   |
-| `preview_size` | `60`                                                        | Preview pane height as percentage (10-90) |
-| `columns`      | `[number, project, worktree, git, pr, status, time, title]` | Agents table columns, in display order    |
+| Option          | Default value                                               | Description                               |
+| --------------- | ----------------------------------------------------------- | ----------------------------------------- |
+| `commit`        | `Commit staged changes with a descriptive message`          | Natural language prompt                   |
+| `merge`         | `!workmux merge`                                            | Shell command via agent                   |
+| `preview_size`  | `60`                                                        | Preview pane height as percentage (10-90) |
+| `agent_columns` | `[number, project, worktree, git, pr, status, time, title]` | Agents table columns, in display order    |
 
 ## Columns
 
-`columns` sets which columns the agents table shows and in what order. For example, to read the title first and keep the elapsed time out of the way:
+`agent_columns` sets which columns the agents table shows and in what order. For example, to read the title first and keep the elapsed time out of the way:
 
 ```yaml
 dashboard:
-  columns: [number, status, title, project, worktree, git, pr, time]
+  agent_columns: [number, status, title, project, worktree, git, pr, time]
 ```
 
 | Column     | Content                                          |
 | ---------- | ------------------------------------------------ |
-| `number`   | Jump key of the row, shown under the `#` header   |
+| `number`   | Jump key of the row, shown under the `#` header  |
 | `project`  | Project name                                     |
 | `worktree` | Worktree name, with a pane number when it splits |
 | `git`      | Branch state, staged and unstaged changes        |
@@ -44,7 +44,7 @@ dashboard:
 | `time`     | Time since the last status change                |
 | `title`    | Agent session title                              |
 
-A column left out of the list is not rendered, so `columns: [worktree, status, title]` gives a table of just those three. Repeating a column has no effect, and an empty list falls back to the default order.
+A column left out of the list is not rendered, so `agent_columns: [worktree, status, title]` gives a table of just those three. Repeating a column has no effect, and an empty list falls back to the default order.
 
 Dropping `number` hides the jump key, and `1`-`9` still jump to the first nine rows. The `pr` column appears only while at least one agent has a pull request or checks to report, wherever it is placed in the list. A trailing `title` takes the width left over by the other columns; anywhere else it sizes to its content, and the leftover width sits at the right edge of the table.
 
