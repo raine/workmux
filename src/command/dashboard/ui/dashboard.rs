@@ -16,6 +16,7 @@ use crate::config::DashboardColumn;
 use super::super::app::{App, DashboardTab};
 use super::format;
 use super::format::{format_git_status, format_pr_status, truncate};
+use super::theme::ThemePalette;
 use super::worktree::{render_worktree_preview, render_worktree_table};
 
 /// Render the tab header line showing Agents | Worktrees with active tab highlighted.
@@ -149,33 +150,145 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Per-agent cell content, assembled before the configured column order is
+/// applied so every column reads from the same row.
+struct AgentRowData {
+    jump_key: String,
+    project: String,
+    worktree_display: String,
+    worktree_base: String,
+    worktree_suffix: String,
+    is_main: bool,
+    is_current: bool,
+    git_spans: Vec<(String, Style)>,
+    pr_spans: Option<Vec<(String, Style)>>,
+    status_spans: Vec<(String, Style)>,
+    duration_line: Line<'static>,
+    title: String,
+}
+
+/// Auto-sized widths of the agents table columns that size to their content.
+struct AgentColumnWidths {
+    project: u16,
+    worktree: u16,
+    git: u16,
+    pr: u16,
+}
+
+/// Build the cell of one configured column for one agent row.
+fn agent_cell(
+    column: DashboardColumn,
+    row: &AgentRowData,
+    palette: &ThemePalette,
+) -> Cell<'static> {
+    match column {
+        DashboardColumn::Project => Cell::from(row.project.clone()),
+        DashboardColumn::Worktree => {
+            let worktree_style = format::make_row_style(row.is_current, row.is_main, palette);
+            // Worktree name with dimmed pane suffix
+            let worktree_line = if row.worktree_suffix.is_empty() {
+                Line::from(Span::styled(row.worktree_base.clone(), worktree_style))
+            } else {
+                Line::from(vec![
+                    Span::styled(row.worktree_base.clone(), worktree_style),
+                    Span::styled(
+                        row.worktree_suffix.clone(),
+                        Style::default().fg(palette.dimmed),
+                    ),
+                ])
+            };
+            Cell::from(worktree_line)
+        }
+        DashboardColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
+        DashboardColumn::Pr => Cell::from(format::spans_to_line(
+            row.pr_spans.clone().unwrap_or_default(),
+        )),
+        DashboardColumn::Status => Cell::from(format::spans_to_line(row.status_spans.clone())),
+        DashboardColumn::Time => Cell::from(row.duration_line.clone()),
+        DashboardColumn::Title => Cell::from(row.title.clone()),
+    }
+}
+
+/// Assemble the agents table. Header cells, row cells and width constraints are
+/// all derived from `columns`, so a reordered config can never desynchronise
+/// them. The `#` jump key column is not part of the list and always comes first.
+fn build_agent_table(
+    columns: &[DashboardColumn],
+    row_data: Vec<AgentRowData>,
+    widths: AgentColumnWidths,
+    header_state: format::ResourceHeaderState<'_>,
+) -> Table<'static> {
+    let palette = header_state.palette;
+
+    let mut header_cells = vec![format::ResourceHeaderCell::Plain("#")];
+    header_cells.extend(columns.iter().map(|column| match column {
+        DashboardColumn::Project => format::ResourceHeaderCell::Plain("Project"),
+        DashboardColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
+        DashboardColumn::Git => format::ResourceHeaderCell::Git,
+        DashboardColumn::Pr => format::ResourceHeaderCell::Pr,
+        DashboardColumn::Status => format::ResourceHeaderCell::Plain("Status"),
+        DashboardColumn::Time => format::ResourceHeaderCell::Plain("Time"),
+        DashboardColumn::Title => format::ResourceHeaderCell::Plain("Title"),
+    }));
+
+    let rows: Vec<Row> = row_data
+        .into_iter()
+        .map(|row_data| {
+            let mut cells = vec![
+                Cell::from(row_data.jump_key.clone()).style(Style::default().fg(palette.keycap)),
+            ];
+            cells.extend(
+                columns
+                    .iter()
+                    .map(|column| agent_cell(*column, &row_data, palette)),
+            );
+
+            let row = Row::new(cells);
+            // Subtle background for the active worktree row
+            if row_data.is_current {
+                row.style(Style::default().bg(palette.current_row_bg))
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let mut constraints = vec![Constraint::Length(2)]; // #: jump key
+    constraints.extend(columns.iter().map(|column| match column {
+        DashboardColumn::Project => Constraint::Length(widths.project), // auto-sized
+        DashboardColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
+        DashboardColumn::Git => Constraint::Length(widths.git),         // auto-sized
+        DashboardColumn::Pr => Constraint::Length(widths.pr),           // auto-sized
+        DashboardColumn::Status => Constraint::Length(8),               // fixed (icons)
+        DashboardColumn::Time => Constraint::Length(10),                // HH:MM:SS + padding
+        DashboardColumn::Title => Constraint::Fill(1),                  // remaining space
+    }));
+
+    let highlight_symbol = Text::from(Line::from(Span::styled(
+        "▌ ",
+        Style::default().fg(palette.info),
+    )));
+    let row_highlight_style = Style::default().bg(palette.highlight_row_bg);
+
+    Table::new(rows, constraints)
+        .header(format::resource_table_header(header_state, &header_cells))
+        .block(Block::default())
+        .row_highlight_style(row_highlight_style)
+        .highlight_symbol(highlight_symbol)
+}
+
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
-    // Header cells, row cells and width constraints are all derived from this
-    // one list, so a reordered config can never desynchronise them.
-    let trailing_columns = app.config.dashboard.columns();
-
-    let header = format::resource_table_header(
-        format::ResourceHeaderState {
-            palette: &app.palette,
-            spinner_frame: app.spinner_frame,
-            git_fetching: app
-                .is_git_fetching
-                .load(std::sync::atomic::Ordering::Relaxed),
-            pr_fetching: app.is_pr_fetching(),
-        },
-        show_pr_column,
-        &trailing_columns
-            .iter()
-            .map(|column| match column {
-                DashboardColumn::Status => "Status",
-                DashboardColumn::Time => "Time",
-                DashboardColumn::Title => "Title",
-            })
-            .collect::<Vec<_>>(),
-    );
+    // The PR column only carries content once an agent has GitHub status
+    let columns: Vec<DashboardColumn> = app
+        .config
+        .dashboard
+        .columns()
+        .into_iter()
+        .filter(|column| *column != DashboardColumn::Pr || show_pr_column)
+        .collect();
 
     // Group agents by (session, window_name) to detect multi-pane windows
     let mut window_groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
@@ -272,7 +385,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 None
             };
 
-            (
+            AgentRowData {
                 jump_key,
                 project,
                 worktree_display,
@@ -285,25 +398,28 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 status_spans,
                 duration_line,
                 title,
-            )
+            }
         })
         .collect();
 
     // Calculate max project name width (with padding, capped)
-    let project_names: Vec<String> = row_data.iter().map(|r| r.1.clone()).collect();
+    let project_names: Vec<String> = row_data.iter().map(|r| r.project.clone()).collect();
     let max_project_width = format::calc_column_width(&project_names, 5, 20, 2);
 
     // Calculate max worktree name width (with padding, capped)
     // Use at least 8 to fit the "Worktree" header, at most 25 to keep layout compact
-    let worktree_names: Vec<String> = row_data.iter().map(|r| r.2.clone()).collect();
+    let worktree_names: Vec<String> = row_data
+        .iter()
+        .map(|r| r.worktree_display.clone())
+        .collect();
     let max_worktree_width = format::calc_column_width(&worktree_names, 8, 25, 1);
 
     // Calculate max git status width (sum of all span character counts)
     // Use chars().count() instead of len() because Nerd Font icons are multi-byte
     let max_git_width = row_data
         .iter()
-        .map(|(_, _, _, _, _, _, _, git_spans, _, _, _, _)| {
-            git_spans
+        .map(|r| {
+            r.git_spans
                 .iter()
                 .map(|(text, _)| text.chars().count())
                 .sum::<usize>()
@@ -314,133 +430,38 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         + 1; // padding
 
     // Calculate max PR status width (only if showing PR column)
-    let max_pr_width = if show_pr_column {
-        row_data
-            .iter()
-            .filter_map(|(_, _, _, _, _, _, _, _, pr_spans, _, _, _)| pr_spans.as_ref())
-            .map(|spans| {
-                spans
-                    .iter()
-                    .map(|(text, _)| text.chars().count())
-                    .sum::<usize>()
-            })
-            .max()
-            .unwrap_or(4)
-            .clamp(4, 20) // Accommodate check icons + counts + inline timer
-            + 1
-    } else {
-        0
-    };
+    let max_pr_width = row_data
+        .iter()
+        .filter_map(|r| r.pr_spans.as_ref())
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 20) // Accommodate check icons + counts + inline timer
+        + 1;
 
-    let rows: Vec<Row> = row_data
-        .into_iter()
-        .map(
-            |(
-                jump_key,
-                project,
-                _worktree_display,
-                worktree_base,
-                worktree_suffix,
-                is_main,
-                is_current,
-                git_spans,
-                pr_spans,
-                status_spans,
-                duration_line,
-                title,
-            )| {
-                let worktree_style = format::make_row_style(is_current, is_main, &app.palette);
-
-                // Worktree name with dimmed pane suffix
-                let worktree_line = if worktree_suffix.is_empty() {
-                    Line::from(Span::styled(worktree_base, worktree_style))
-                } else {
-                    Line::from(vec![
-                        Span::styled(worktree_base, worktree_style),
-                        Span::styled(worktree_suffix, Style::default().fg(app.palette.dimmed)),
-                    ])
-                };
-
-                // Convert git spans to a Line
-                let git_line = format::spans_to_line(git_spans);
-
-                let mut cells = vec![
-                    Cell::from(jump_key).style(Style::default().fg(app.palette.keycap)),
-                    Cell::from(project),
-                    Cell::from(worktree_line),
-                    Cell::from(git_line),
-                ];
-
-                // Add PR cell if column is shown
-                if let Some(pr_spans) = pr_spans {
-                    let pr_line = format::spans_to_line(pr_spans);
-                    cells.push(Cell::from(pr_line));
-                }
-
-                let status_line = format::spans_to_line(status_spans);
-                let mut status_cell = Some(status_line);
-                let mut duration_cell = Some(duration_line);
-                let mut title_cell = Some(title);
-                for column in &trailing_columns {
-                    // take() so each column is moved out once: columns() already
-                    // dropped duplicates, this keeps the compiler happy about it
-                    match column {
-                        DashboardColumn::Status => {
-                            if let Some(line) = status_cell.take() {
-                                cells.push(Cell::from(line));
-                            }
-                        }
-                        DashboardColumn::Time => {
-                            if let Some(line) = duration_cell.take() {
-                                cells.push(Cell::from(line));
-                            }
-                        }
-                        DashboardColumn::Title => {
-                            if let Some(line) = title_cell.take() {
-                                cells.push(Cell::from(line));
-                            }
-                        }
-                    }
-                }
-
-                let row = Row::new(cells);
-                // Subtle background for the active worktree row
-                if is_current {
-                    row.style(Style::default().bg(app.palette.current_row_bg))
-                } else {
-                    row
-                }
-            },
-        )
-        .collect();
-
-    // Build column constraints conditionally based on whether PR column is shown
-    let mut constraints = vec![
-        Constraint::Length(2),                    // #: jump key
-        Constraint::Length(max_project_width),    // Project: auto-sized
-        Constraint::Length(max_worktree_width),   // Worktree: auto-sized
-        Constraint::Length(max_git_width as u16), // Git: auto-sized
-    ];
-
-    if show_pr_column {
-        constraints.push(Constraint::Length(max_pr_width as u16)); // PR: auto-sized
-    }
-
-    constraints.extend(trailing_columns.iter().map(|column| match column {
-        DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
-        DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
-        DashboardColumn::Title => Constraint::Fill(1),    // takes remaining space
-    }));
-
-    let highlight_symbol = Text::from(Line::from(Span::styled(
-        "▌ ",
-        Style::default().fg(app.palette.info),
-    )));
-    let table = Table::new(rows, constraints)
-        .header(header)
-        .block(Block::default())
-        .row_highlight_style(Style::default().bg(app.palette.highlight_row_bg))
-        .highlight_symbol(highlight_symbol);
+    let table = build_agent_table(
+        &columns,
+        row_data,
+        AgentColumnWidths {
+            project: max_project_width,
+            worktree: max_worktree_width,
+            git: max_git_width as u16,
+            pr: max_pr_width as u16,
+        },
+        format::ResourceHeaderState {
+            palette: &app.palette,
+            spinner_frame: app.spinner_frame,
+            git_fetching: app
+                .is_git_fetching
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pr_fetching: app.is_pr_fetching(),
+        },
+    );
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
@@ -727,4 +748,119 @@ fn render_worktree_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     items.push(footer_cmd("q", "Quit", dimmed, bold_text));
 
     render_pinned_footer(f, area, &items, dimmed, bold_text, pipe_style);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::TableState;
+
+    use super::*;
+    use crate::config::{ThemeConfig, ThemeMode};
+
+    fn palette() -> ThemePalette {
+        ThemePalette::from_config(&ThemeConfig::default(), ThemeMode::Dark)
+    }
+
+    fn row(palette: &ThemePalette) -> AgentRowData {
+        AgentRowData {
+            jump_key: "1".to_string(),
+            project: "proj".to_string(),
+            worktree_display: "wt".to_string(),
+            worktree_base: "wt".to_string(),
+            worktree_suffix: String::new(),
+            is_main: false,
+            is_current: false,
+            git_spans: vec![("+1".to_string(), Style::default())],
+            pr_spans: Some(vec![("#7".to_string(), Style::default())]),
+            status_spans: vec![("work".to_string(), Style::default())],
+            duration_line: format::elapsed_time_line("00:42".to_string(), Some(42), palette),
+            title: "the title".to_string(),
+        }
+    }
+
+    /// Render the agents table and return one line of the output buffer.
+    fn render_line(columns: &[DashboardColumn], line: u16) -> String {
+        let palette = palette();
+        let table = build_agent_table(
+            columns,
+            vec![row(&palette)],
+            AgentColumnWidths {
+                project: 8,
+                worktree: 9,
+                git: 6,
+                pr: 5,
+            },
+            format::ResourceHeaderState {
+                palette: &palette,
+                spinner_frame: 0,
+                git_fetching: false,
+                pr_fetching: false,
+            },
+        );
+
+        let width = 80u16;
+        let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
+        terminal
+            .draw(|f| f.render_stateful_widget(table, f.area(), &mut TableState::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, line)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn agents_table_header_follows_column_order() {
+        assert_eq!(
+            render_line(&crate::config::DEFAULT_DASHBOARD_COLUMNS, 0),
+            "#  Project  Worktree  Git    PR    Status   Time       Title"
+        );
+        assert_eq!(
+            render_line(
+                &[
+                    DashboardColumn::Title,
+                    DashboardColumn::Status,
+                    DashboardColumn::Project,
+                ],
+                0
+            ),
+            "#  Title                                                       Status   Project"
+        );
+    }
+
+    #[test]
+    fn agents_table_rows_follow_column_order() {
+        assert_eq!(
+            render_line(&crate::config::DEFAULT_DASHBOARD_COLUMNS, 1),
+            "1  proj     wt        +1     #7    work     00:42      the title"
+        );
+        assert_eq!(
+            render_line(
+                &[
+                    DashboardColumn::Title,
+                    DashboardColumn::Status,
+                    DashboardColumn::Project,
+                ],
+                1
+            ),
+            "1  the title                                                   work     proj"
+        );
+    }
+
+    #[test]
+    fn agents_table_omits_unlisted_columns() {
+        assert_eq!(
+            render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 0),
+            "#  Worktree  Title"
+        );
+        assert_eq!(
+            render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 1),
+            "1  wt        the title"
+        );
+    }
 }

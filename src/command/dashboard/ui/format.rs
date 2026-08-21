@@ -320,37 +320,39 @@ pub(crate) struct ResourceHeaderState<'a> {
     pub pr_fetching: bool,
 }
 
-/// Build the shared prefix columns for agent and worktree resource tables.
+/// A header cell of an agent or worktree resource table.
+pub(crate) enum ResourceHeaderCell {
+    /// Plain label with no fetch state.
+    Plain(&'static str),
+    /// `Git` label, spinning while git data is being fetched.
+    Git,
+    /// `PR` label, spinning while GitHub data is being fetched.
+    Pr,
+}
+
+/// Build the header row for agent and worktree resource tables.
 pub(crate) fn resource_table_header(
     state: ResourceHeaderState<'_>,
-    show_pr_column: bool,
-    trailing_columns: &[&'static str],
+    columns: &[ResourceHeaderCell],
 ) -> Row<'static> {
-    let git_header = build_column_header(
-        "Git",
-        state.git_fetching,
-        state.spinner_frame,
-        state.palette,
-    );
     let header_style = Style::default().fg(state.palette.header).bold();
-    let mut header_cells = vec![
-        Cell::from("#").style(header_style),
-        Cell::from("Project").style(header_style),
-        Cell::from("Worktree").style(header_style),
-        Cell::from(git_header),
-    ];
+    let header_cells = columns.iter().map(|column| match column {
+        ResourceHeaderCell::Plain(label) => Cell::from(*label).style(header_style),
+        ResourceHeaderCell::Git => Cell::from(build_column_header(
+            "Git",
+            state.git_fetching,
+            state.spinner_frame,
+            state.palette,
+        )),
+        ResourceHeaderCell::Pr => Cell::from(build_column_header(
+            "PR",
+            state.pr_fetching,
+            state.spinner_frame,
+            state.palette,
+        )),
+    });
 
-    if show_pr_column {
-        let pr_header =
-            build_column_header("PR", state.pr_fetching, state.spinner_frame, state.palette);
-        header_cells.push(Cell::from(pr_header));
-    }
-
-    for column in trailing_columns {
-        header_cells.push(Cell::from(*column).style(header_style));
-    }
-
-    Row::new(header_cells).height(1)
+    Row::new(header_cells.collect::<Vec<_>>()).height(1)
 }
 
 /// Bordered panel block with dashboard header styling.

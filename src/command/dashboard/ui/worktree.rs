@@ -12,7 +12,8 @@ use super::super::agent;
 use super::super::app::App;
 use super::format;
 use super::format::{
-    AgentStatusFormat, format_agent_status_summary, format_git_status, format_pr_status, truncate,
+    AgentStatusFormat, ResourceHeaderCell, format_agent_status_summary, format_git_status,
+    format_pr_status, truncate,
 };
 
 /// Render the worktree table in the given area.
@@ -30,6 +31,21 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
         worktree.pr_info.is_some() || app.get_checks_for_worktree(worktree).is_some()
     });
 
+    let mut header_cells = vec![
+        ResourceHeaderCell::Plain("#"),
+        ResourceHeaderCell::Plain("Project"),
+        ResourceHeaderCell::Plain("Worktree"),
+        ResourceHeaderCell::Git,
+    ];
+    if show_pr_column {
+        header_cells.push(ResourceHeaderCell::Pr);
+    }
+    header_cells.extend([
+        ResourceHeaderCell::Plain("Mux"),
+        ResourceHeaderCell::Plain("Age"),
+        ResourceHeaderCell::Plain("Agent"),
+    ]);
+
     let header = format::resource_table_header(
         format::ResourceHeaderState {
             palette: &app.palette,
@@ -39,8 +55,7 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
                 .load(std::sync::atomic::Ordering::Relaxed),
             pr_fetching: app.is_pr_fetching(),
         },
-        show_pr_column,
-        &["Mux", "Age", "Agent"],
+        &header_cells,
     );
 
     // Pre-compute row data
