@@ -798,7 +798,7 @@ impl Multiplexer for TmuxBackend {
                     let id = id.trim();
                     (!id.is_empty()).then(|| id.to_string())
                 })
-                .last()),
+                .next_back()),
             Err(_) => Ok(None),
         }
     }

@@ -140,7 +140,7 @@ fn apply_status_update(
     pane_id: &str,
 ) -> Result<()> {
     match cmd {
-        SetWindowStatusCommand::Clear => mux.clear_status(&pane_id)?,
+        SetWindowStatusCommand::Clear => mux.clear_status(pane_id)?,
         SetWindowStatusCommand::Working
         | SetWindowStatusCommand::Waiting
         | SetWindowStatusCommand::Done => {
@@ -159,14 +159,14 @@ fn apply_status_update(
 
             // Ensure the status format is applied so the icon actually shows up
             if config.status_format.unwrap_or(true) {
-                let _ = mux.ensure_status_format(&pane_id);
+                let _ = mux.ensure_status_format(pane_id);
             }
 
             // Update backend UI (status bar icon)
-            mux.set_status(&pane_id, icon, auto_clear)?;
+            mux.set_status(pane_id, icon, auto_clear)?;
 
             // Persist to state store so the dashboard sees this agent
-            crate::state::persist_agent_update(&*mux, &pane_id, Some(status), None);
+            crate::state::persist_agent_update(mux, pane_id, Some(status), None);
         }
     }
 
