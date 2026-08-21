@@ -92,9 +92,9 @@ pub struct DashboardConfig {
     #[serde(default)]
     pub show_check_counts: Option<bool>,
 
-    /// Columns of the agents table, in display order, following the `#` jump
-    /// key column. Columns left out of the list are not rendered.
-    /// Default: project, worktree, git, pr, status, time, title.
+    /// Columns of the agents table, in display order. Columns left out of the
+    /// list are not rendered.
+    /// Default: number, project, worktree, git, pr, status, time, title.
     pub columns: Option<Vec<DashboardColumn>>,
 }
 
@@ -102,6 +102,8 @@ pub struct DashboardConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DashboardColumn {
+    /// Jump key of the row, shown under the `#` header.
+    Number,
     /// Project name.
     Project,
     /// Worktree name, with a pane suffix for multi-pane windows.
@@ -120,7 +122,8 @@ pub enum DashboardColumn {
 }
 
 /// Columns used when the config does not set `dashboard.columns`.
-pub const DEFAULT_DASHBOARD_COLUMNS: [DashboardColumn; 7] = [
+pub const DEFAULT_DASHBOARD_COLUMNS: [DashboardColumn; 8] = [
+    DashboardColumn::Number,
     DashboardColumn::Project,
     DashboardColumn::Worktree,
     DashboardColumn::Git,
@@ -147,9 +150,9 @@ impl DashboardConfig {
         self.preview_size.unwrap_or(60).clamp(10, 90)
     }
 
-    /// Columns of the agents table, in display order, following the `#` jump
-    /// key column. Duplicates are dropped so a column is never rendered twice,
-    /// and an empty or absent list falls back to the default order.
+    /// Columns of the agents table, in display order. Duplicates are dropped so
+    /// a column is never rendered twice, and an empty or absent list falls back
+    /// to the default order.
     pub fn columns(&self) -> Vec<DashboardColumn> {
         let Some(configured) = self.columns.as_ref() else {
             return DEFAULT_DASHBOARD_COLUMNS.to_vec();
@@ -3054,13 +3057,13 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Actions for dashboard keybindings (c = commit, m = merge).
 # Values are sent to the agent's pane. Use ! prefix for shell commands.
 # Preview size (10-90): larger = more preview, less table. Use +/- keys to adjust.
-# Columns of the agents table, in display order, after the fixed # jump key.
-# Omit a column to hide it: project, worktree, git, pr, status, time, title.
+# Columns of the agents table, in display order. Omit a column to hide it:
+# number, project, worktree, git, pr, status, time, title.
 # dashboard:
 #   commit: "Commit staged changes with a descriptive message"
 #   merge: "!workmux merge"
 #   preview_size: 60
-#   columns: [project, worktree, git, pr, status, time, title]
+#   columns: [number, project, worktree, git, pr, status, time, title]
 
 #-------------------------------------------------------------------------------
 # Sidebar
@@ -3242,6 +3245,7 @@ mod tests {
         assert_eq!(
             config.dashboard.columns(),
             vec![
+                DashboardColumn::Number,
                 DashboardColumn::Project,
                 DashboardColumn::Worktree,
                 DashboardColumn::Git,
@@ -3256,7 +3260,7 @@ mod tests {
     #[test]
     fn dashboard_columns_follow_configured_order() {
         let config: Config = serde_yaml::from_str(
-            "dashboard:\n  columns: [title, status, worktree, git, pr, project, time]\n",
+            "dashboard:\n  columns: [title, status, number, worktree, git, pr, project, time]\n",
         )
         .expect("config parses");
         assert_eq!(
@@ -3264,6 +3268,7 @@ mod tests {
             vec![
                 DashboardColumn::Title,
                 DashboardColumn::Status,
+                DashboardColumn::Number,
                 DashboardColumn::Worktree,
                 DashboardColumn::Git,
                 DashboardColumn::Pr,

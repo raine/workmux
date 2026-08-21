@@ -182,6 +182,9 @@ fn agent_cell(
     palette: &ThemePalette,
 ) -> Cell<'static> {
     match column {
+        DashboardColumn::Number => {
+            Cell::from(row.jump_key.clone()).style(Style::default().fg(palette.keycap))
+        }
         DashboardColumn::Project => Cell::from(row.project.clone()),
         DashboardColumn::Worktree => {
             let worktree_style = format::make_row_style(row.is_current, row.is_main, palette);
@@ -211,7 +214,7 @@ fn agent_cell(
 
 /// Assemble the agents table. Header cells, row cells and width constraints are
 /// all derived from `columns`, so a reordered config can never desynchronise
-/// them. The `#` jump key column is not part of the list and always comes first.
+/// them.
 fn build_agent_table(
     columns: &[DashboardColumn],
     row_data: Vec<AgentRowData>,
@@ -220,28 +223,27 @@ fn build_agent_table(
 ) -> Table<'static> {
     let palette = header_state.palette;
 
-    let mut header_cells = vec![format::ResourceHeaderCell::Plain("#")];
-    header_cells.extend(columns.iter().map(|column| match column {
-        DashboardColumn::Project => format::ResourceHeaderCell::Plain("Project"),
-        DashboardColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
-        DashboardColumn::Git => format::ResourceHeaderCell::Git,
-        DashboardColumn::Pr => format::ResourceHeaderCell::Pr,
-        DashboardColumn::Status => format::ResourceHeaderCell::Plain("Status"),
-        DashboardColumn::Time => format::ResourceHeaderCell::Plain("Time"),
-        DashboardColumn::Title => format::ResourceHeaderCell::Plain("Title"),
-    }));
+    let header_cells: Vec<format::ResourceHeaderCell> = columns
+        .iter()
+        .map(|column| match column {
+            DashboardColumn::Number => format::ResourceHeaderCell::Plain("#"),
+            DashboardColumn::Project => format::ResourceHeaderCell::Plain("Project"),
+            DashboardColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
+            DashboardColumn::Git => format::ResourceHeaderCell::Git,
+            DashboardColumn::Pr => format::ResourceHeaderCell::Pr,
+            DashboardColumn::Status => format::ResourceHeaderCell::Plain("Status"),
+            DashboardColumn::Time => format::ResourceHeaderCell::Plain("Time"),
+            DashboardColumn::Title => format::ResourceHeaderCell::Plain("Title"),
+        })
+        .collect();
 
     let rows: Vec<Row> = row_data
         .into_iter()
         .map(|row_data| {
-            let mut cells = vec![
-                Cell::from(row_data.jump_key.clone()).style(Style::default().fg(palette.keycap)),
-            ];
-            cells.extend(
-                columns
-                    .iter()
-                    .map(|column| agent_cell(*column, &row_data, palette)),
-            );
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|column| agent_cell(*column, &row_data, palette))
+                .collect();
 
             let row = Row::new(cells);
             // Subtle background for the active worktree row
@@ -253,16 +255,19 @@ fn build_agent_table(
         })
         .collect();
 
-    let mut constraints = vec![Constraint::Length(2)]; // #: jump key
-    constraints.extend(columns.iter().map(|column| match column {
-        DashboardColumn::Project => Constraint::Length(widths.project), // auto-sized
-        DashboardColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
-        DashboardColumn::Git => Constraint::Length(widths.git),         // auto-sized
-        DashboardColumn::Pr => Constraint::Length(widths.pr),           // auto-sized
-        DashboardColumn::Status => Constraint::Length(8),               // fixed (icons)
-        DashboardColumn::Time => Constraint::Length(10),                // HH:MM:SS + padding
-        DashboardColumn::Title => Constraint::Fill(1),                  // remaining space
-    }));
+    let constraints: Vec<Constraint> = columns
+        .iter()
+        .map(|column| match column {
+            DashboardColumn::Number => Constraint::Length(2), // jump key
+            DashboardColumn::Project => Constraint::Length(widths.project), // auto-sized
+            DashboardColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
+            DashboardColumn::Git => Constraint::Length(widths.git), // auto-sized
+            DashboardColumn::Pr => Constraint::Length(widths.pr), // auto-sized
+            DashboardColumn::Status => Constraint::Length(8), // fixed (icons)
+            DashboardColumn::Time => Constraint::Length(10),  // HH:MM:SS + padding
+            DashboardColumn::Title => Constraint::Fill(1),    // remaining space
+        })
+        .collect();
 
     let highlight_symbol = Text::from(Line::from(Span::styled(
         "▌ ",
@@ -814,6 +819,14 @@ mod tests {
             .to_string()
     }
 
+    /// Reordered list, including the `#` jump key away from its usual place.
+    const REORDERED: [DashboardColumn; 4] = [
+        DashboardColumn::Title,
+        DashboardColumn::Status,
+        DashboardColumn::Number,
+        DashboardColumn::Project,
+    ];
+
     #[test]
     fn agents_table_header_follows_column_order() {
         assert_eq!(
@@ -821,15 +834,8 @@ mod tests {
             "#  Project  Worktree  Git    PR    Status   Time       Title"
         );
         assert_eq!(
-            render_line(
-                &[
-                    DashboardColumn::Title,
-                    DashboardColumn::Status,
-                    DashboardColumn::Project,
-                ],
-                0
-            ),
-            "#  Title                                                       Status   Project"
+            render_line(&REORDERED, 0),
+            "Title                                                       Status   #  Project"
         );
     }
 
@@ -840,15 +846,8 @@ mod tests {
             "1  proj     wt        +1     #7    work     00:42      the title"
         );
         assert_eq!(
-            render_line(
-                &[
-                    DashboardColumn::Title,
-                    DashboardColumn::Status,
-                    DashboardColumn::Project,
-                ],
-                1
-            ),
-            "1  the title                                                   work     proj"
+            render_line(&REORDERED, 1),
+            "the title                                                   work     1  proj"
         );
     }
 
@@ -856,11 +855,11 @@ mod tests {
     fn agents_table_omits_unlisted_columns() {
         assert_eq!(
             render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 0),
-            "#  Worktree  Title"
+            "Worktree  Title"
         );
         assert_eq!(
             render_line(&[DashboardColumn::Worktree, DashboardColumn::Title], 1),
-            "1  wt        the title"
+            "wt        the title"
         );
     }
 }
