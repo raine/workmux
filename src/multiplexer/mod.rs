@@ -1024,6 +1024,7 @@ pub fn create_backend_for_instance(
     instance: &str,
 ) -> Arc<dyn Multiplexer> {
     match backend_type {
+        BackendType::Tmux => Arc::new(TmuxBackend::for_socket(instance)),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::for_session(instance)),
         _ => create_backend(backend_type),
     }

@@ -16,6 +16,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -115,10 +116,10 @@ def test_set_window_status_disabled_by_env(
 
 
 @pytest.mark.tmux_only
-def test_set_window_status_without_tmux_env_uses_cwd(
+def test_set_window_status_without_tmux_env_uses_process_ancestry(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
-    """Codex hooks strip TMUX/TMUX_PANE, so status must resolve the pane by cwd."""
+    """A hook descending from a pane can recover its exact pane without tmux env."""
     env = mux_server
     branch_name = "feature-status-no-tmux-env"
     window_name = get_window_name(branch_name)
@@ -143,12 +144,17 @@ def test_set_window_status_without_tmux_env_uses_cwd(
     tmux_wrapper.chmod(0o755)
 
     marker_path = env.tmp_path / "status-no-tmux-env-finished"
+    release_fifo = env.tmp_path / "status-no-tmux-env-release"
+    os.mkfifo(release_fifo)
     worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    hook_input = json.dumps({"session_id": "session-without-tmux-env"})
     command = (
         "unset TMUX TMUX_PANE; "
         f"cd {shlex.quote(str(worktree_path))} && "
+        f"printf %s {shlex.quote(hook_input)} | "
         f"{shlex.quote(str(workmux_exe_path))} set-window-status working; "
-        f"touch {shlex.quote(str(marker_path))}"
+        f"touch {shlex.quote(str(marker_path))}; "
+        f"read _ < {shlex.quote(str(release_fifo))}"
     )
     status_cmd = make_env_script(
         env,
@@ -171,6 +177,107 @@ def test_set_window_status_without_tmux_env_uses_cwd(
     assert state["pane_key"]["backend"] == "tmux"
     assert state["pane_key"]["instance"] == str(env.socket_path)
     assert state["workdir"] == str(worktree_path)
+    assert state["status"] == "working"
+    assert state["agent_session_id"] == "session-without-tmux-env"
+
+    host_env = env.env.copy()
+    host_env.pop("TMUX", None)
+    host_env.pop("TMUX_PANE", None)
+    host_env["WORKMUX_BACKEND"] = "tmux"
+    result = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "done"],
+        cwd=worktree_path,
+        env=host_env,
+        input=hook_input,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert read_agent_state(list_agent_state_files(env)[0])["status"] == "done"
+    release_fifo.write_text("release\n")
+
+
+@pytest.mark.tmux_only
+def test_set_window_status_without_pane_identity_refuses_cwd_match(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-status-refuse-cwd"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None, "tmux binary not found"
+    tmux_wrapper = env.fake_bin_dir / "tmux"
+    tmux_wrapper.write_text(
+        "#!/bin/sh\n"
+        f'exec {shlex.quote(real_tmux)} -S {shlex.quote(str(env.socket_path))} "$@"\n'
+    )
+    tmux_wrapper.chmod(0o755)
+
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    host_env = env.env.copy()
+    host_env.pop("TMUX", None)
+    host_env.pop("TMUX_PANE", None)
+    host_env["WORKMUX_BACKEND"] = "tmux"
+    result = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "working"],
+        cwd=worktree_path,
+        env=host_env,
+        input=json.dumps({"session_id": "unbound-session"}),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list_agent_state_files(env) == []
+
+
+@pytest.mark.tmux_only
+def test_set_window_status_accepts_explicit_tmux_target(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-status-explicit-target"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    pane_id = env.tmux(
+        ["list-panes", "-t", window_name, "-F", "#{pane_id}"]
+    ).stdout.strip()
+    target_env = env.env.copy()
+    target_env.pop("TMUX", None)
+    target_env.pop("TMUX_PANE", None)
+    target_env.update(
+        {
+            "WORKMUX_STATUS_BACKEND": "tmux",
+            "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+            "WORKMUX_STATUS_PANE_ID": pane_id,
+        }
+    )
+    result = subprocess.run(
+        [str(workmux_exe_path), "set-window-status", "working"],
+        cwd=get_worktree_path(mux_repo_path, branch_name),
+        env=target_env,
+        input="{}",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = read_agent_state(list_agent_state_files(env)[0])
+    assert state["pane_key"] == {
+        "backend": "tmux",
+        "instance": str(env.socket_path),
+        "pane_id": pane_id,
+    }
     assert state["status"] == "working"
 
 

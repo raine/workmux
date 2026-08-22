@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::ValueEnum;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::io::{IsTerminal, Read};
 use tracing::warn;
 
 use crate::config::Config;
@@ -10,7 +11,7 @@ use crate::multiplexer::{
     STATUS_TARGET_INSTANCE_ENV, STATUS_TARGET_PANE_ENV, create_backend,
     create_backend_for_instance, detect_backend,
 };
-use crate::state::StateStore;
+use crate::state::{AgentState, StateStore};
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum SetWindowStatusCommand {
@@ -53,7 +54,7 @@ impl StatusTarget {
             .ok_or_else(|| anyhow::anyhow!("{} is missing", STATUS_TARGET_BACKEND_ENV))?
             .parse::<BackendType>()
             .map_err(anyhow::Error::msg)?;
-        if backend != BackendType::Zellij {
+        if !matches!(backend, BackendType::Tmux | BackendType::Zellij) {
             return Err(anyhow::anyhow!(
                 "status targets do not support the {} backend",
                 backend
@@ -85,13 +86,20 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     let config = Config::load(None)?;
+    let agent_session_id = read_hook_session_id();
 
     match StatusTarget::from_env() {
         Ok(Some(target)) => {
             let mux = create_backend_for_instance(target.backend, &target.instance);
             match mux.get_live_pane_info(&target.pane_id) {
                 Ok(Some(_)) => {
-                    return apply_status_update(&cmd, &config, &*mux, &target.pane_id);
+                    return apply_status_update(
+                        &cmd,
+                        &config,
+                        &*mux,
+                        &target.pane_id,
+                        agent_session_id.as_deref(),
+                    );
                 }
                 Ok(None) => {
                     warn!(
@@ -120,13 +128,19 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
         }
     }
 
-    // Fail silently if not in a multiplexer session. Some agents, including
-    // Codex, strip multiplexer env vars from hook command environments; in that
-    // case fall back to matching the hook cwd to a live pane cwd.
+    // A status update requires identity tied to a live pane. Hooks can lose
+    // multiplexer variables, so tmux additionally accepts process ancestry or
+    // an exact agent session binding recorded by an earlier hook.
     for backend in status_backend_candidates() {
         let mux = create_backend(backend);
-        if let Some(pane_id) = resolve_status_pane_id(&*mux) {
-            return apply_status_update(&cmd, &config, &*mux, &pane_id);
+        if let Some(pane_id) = resolve_status_pane_id(&*mux, agent_session_id.as_deref()) {
+            return apply_status_update(
+                &cmd,
+                &config,
+                &*mux,
+                &pane_id,
+                agent_session_id.as_deref(),
+            );
         }
     }
 
@@ -138,6 +152,7 @@ fn apply_status_update(
     config: &Config,
     mux: &dyn Multiplexer,
     pane_id: &str,
+    agent_session_id: Option<&str>,
 ) -> Result<()> {
     match cmd {
         SetWindowStatusCommand::Clear => mux.clear_status(pane_id)?,
@@ -166,7 +181,13 @@ fn apply_status_update(
             mux.set_status(pane_id, icon, auto_clear)?;
 
             // Persist to state store so the dashboard sees this agent
-            crate::state::persist_agent_update(mux, pane_id, Some(status), None);
+            crate::state::persist_agent_update(
+                mux,
+                pane_id,
+                Some(status),
+                None,
+                agent_session_id.map(str::to_string),
+            );
         }
     }
 
@@ -218,71 +239,128 @@ fn status_backend_candidates_for(
     backends
 }
 
-fn resolve_status_pane_id(mux: &dyn Multiplexer) -> Option<String> {
-    mux.current_pane_id()
-        .or_else(|| resolve_status_pane_id_from_cwd(mux).ok().flatten())
+#[derive(Deserialize)]
+struct HookInput {
+    session_id: Option<String>,
 }
 
-fn resolve_status_pane_id_from_cwd(mux: &dyn Multiplexer) -> Result<Option<String>> {
-    let cwd = std::env::current_dir()?;
-    let live_panes = mux.get_all_live_pane_info()?;
-    let backend = mux.name();
-    let instance = mux.instance_id();
-    let registered_panes = StateStore::new()
-        .and_then(|store| store.list_all_agents())
-        .map(|agents| {
-            agents
-                .into_iter()
-                .filter(|agent| {
-                    agent.pane_key.backend == backend && agent.pane_key.instance == instance
-                })
-                .map(|agent| agent.pane_key.pane_id)
-                .collect()
+fn read_hook_session_id() -> Option<String> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+
+    let mut input = String::new();
+    stdin.lock().read_to_string(&mut input).ok()?;
+    parse_hook_session_id(&input)
+}
+
+fn parse_hook_session_id(input: &str) -> Option<String> {
+    serde_json::from_str::<HookInput>(input)
+        .ok()?
+        .session_id
+        .filter(|session_id| !session_id.is_empty())
+}
+
+fn resolve_status_pane_id(mux: &dyn Multiplexer, agent_session_id: Option<&str>) -> Option<String> {
+    if let Some(pane_id) = mux.current_pane_id().filter(|pane_id| !pane_id.is_empty()) {
+        return Some(pane_id);
+    }
+
+    if mux.name() != "tmux" {
+        return None;
+    }
+
+    let live_panes = mux.get_all_live_pane_info().ok()?;
+    if let Ok(parents) = process_parent_snapshot()
+        && let Some(pane_id) =
+            select_pane_for_process_ancestry(&live_panes, &parents, std::process::id())
+    {
+        return Some(pane_id);
+    }
+
+    let agent_session_id = agent_session_id?;
+    let agents = StateStore::new().ok()?.list_all_agents().ok()?;
+    let server_boot_id = mux.server_boot_id().ok().flatten();
+    select_pane_for_agent_session(
+        &agents,
+        &live_panes,
+        mux.name(),
+        &mux.instance_id(),
+        agent_session_id,
+        server_boot_id.as_deref(),
+    )
+}
+
+fn process_parent_snapshot() -> Result<HashMap<u32, u32>> {
+    let output = crate::cmd::Cmd::new("ps")
+        .args(&["-axo", "pid=,ppid="])
+        .run_and_capture_stdout()?;
+    Ok(parse_process_parents(&output))
+}
+
+fn parse_process_parents(output: &str) -> HashMap<u32, u32> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent = fields.next()?.parse().ok()?;
+            Some((pid, parent))
         })
-        .unwrap_or_default();
-    Ok(select_pane_for_cwd(&live_panes, &cwd, &registered_panes))
+        .collect()
 }
 
-fn select_pane_for_cwd(
+fn select_pane_for_process_ancestry(
     live_panes: &HashMap<String, LivePaneInfo>,
-    cwd: &Path,
-    registered_panes: &HashSet<String>,
+    parents: &HashMap<u32, u32>,
+    start_pid: u32,
 ) -> Option<String> {
-    let cwd = normalized_path(cwd);
-    let mut best_score = 0;
-    let mut candidates = Vec::new();
-
-    for (pane_id, pane) in live_panes {
-        let pane_cwd = normalized_path(&pane.working_dir);
-        if !cwd.starts_with(&pane_cwd) {
-            continue;
-        }
-
-        let score = pane_cwd.components().count();
-        match score.cmp(&best_score) {
-            std::cmp::Ordering::Greater => {
-                best_score = score;
-                candidates.clear();
-                candidates.push(pane_id);
+    let panes_by_pid = live_panes.iter().fold(
+        HashMap::<u32, Vec<&String>>::new(),
+        |mut panes_by_pid, (pane_id, pane)| {
+            if let Some(pid) = pane.pid {
+                panes_by_pid.entry(pid).or_default().push(pane_id);
             }
-            std::cmp::Ordering::Equal => candidates.push(pane_id),
-            std::cmp::Ordering::Less => {}
+            panes_by_pid
+        },
+    );
+
+    let mut seen = HashSet::new();
+    let mut pid = start_pid;
+    for _ in 0..64 {
+        if pid <= 1 || !seen.insert(pid) {
+            break;
         }
+        if let Some(panes) = panes_by_pid.get(&pid) {
+            return (panes.len() == 1).then(|| panes[0].to_string());
+        }
+        pid = *parents.get(&pid)?;
     }
-
-    if candidates.len() == 1 {
-        return candidates.first().map(|pane_id| (*pane_id).clone());
-    }
-
-    let mut registered = candidates
-        .into_iter()
-        .filter(|pane_id| registered_panes.contains(*pane_id));
-    let pane_id = registered.next()?;
-    registered.next().is_none().then(|| pane_id.clone())
+    None
 }
 
-fn normalized_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+fn select_pane_for_agent_session(
+    agents: &[AgentState],
+    live_panes: &HashMap<String, LivePaneInfo>,
+    backend: &str,
+    instance: &str,
+    agent_session_id: &str,
+    server_boot_id: Option<&str>,
+) -> Option<String> {
+    let mut candidates = agents.iter().filter(|agent| {
+        agent.pane_key.backend == backend
+            && agent.pane_key.instance == instance
+            && agent.agent_session_id.as_deref() == Some(agent_session_id)
+            && server_boot_id.is_some_and(|live| agent.boot_id.as_deref() == Some(live))
+            && live_panes.get(&agent.pane_key.pane_id).is_some_and(|pane| {
+                agent.pane_pid != 0
+                    && pane.pid == Some(agent.pane_pid)
+                    && pane.current_command.as_deref() == Some(agent.command.as_str())
+            })
+    });
+    let pane_id = candidates.next()?.pane_key.pane_id.clone();
+    candidates.next().is_none().then_some(pane_id)
 }
 
 /// Send a status update via RPC when running inside a sandbox guest.
@@ -315,16 +393,38 @@ fn run_via_rpc(cmd: SetWindowStatusCommand) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn live_pane(path: &str) -> LivePaneInfo {
+    fn live_pane(pid: u32, command: &str) -> LivePaneInfo {
         LivePaneInfo {
-            pid: Some(1),
-            current_command: Some("codex".to_string()),
-            working_dir: PathBuf::from(path),
+            pid: Some(pid),
+            current_command: Some(command.to_string()),
+            working_dir: std::path::PathBuf::from("/repo"),
             title: None,
             session: Some("test".to_string()),
             window: Some("wm-test".to_string()),
             session_id: Some("$1".to_string()),
             window_id: Some("@1".to_string()),
+        }
+    }
+
+    fn agent_state(pane_id: &str, pane_pid: u32, agent_session_id: &str) -> AgentState {
+        AgentState {
+            pane_key: crate::state::PaneKey {
+                backend: "tmux".to_string(),
+                instance: "default".to_string(),
+                pane_id: pane_id.to_string(),
+            },
+            workdir: std::path::PathBuf::from("/repo"),
+            status: Some(AgentStatus::Working),
+            status_ts: Some(1),
+            pane_title: None,
+            pane_pid,
+            command: "claude".to_string(),
+            updated_ts: 1,
+            window_name: Some("wm-test".to_string()),
+            session_name: Some("test".to_string()),
+            boot_id: Some("boot-1".to_string()),
+            agent_kind: Some("claude".to_string()),
+            agent_session_id: Some(agent_session_id.to_string()),
         }
     }
 
@@ -350,6 +450,23 @@ mod tests {
     }
 
     #[test]
+    fn status_target_accepts_tmux_identity() {
+        assert_eq!(
+            StatusTarget::from_values(
+                Some("tmux".to_string()),
+                Some("/tmp/tmux.sock".to_string()),
+                Some("%7".to_string()),
+            )
+            .unwrap(),
+            Some(StatusTarget {
+                backend: BackendType::Tmux,
+                instance: "/tmp/tmux.sock".to_string(),
+                pane_id: "%7".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn status_target_rejects_partial_identity() {
         assert!(
             StatusTarget::from_values(Some("zellij".to_string()), Some("dev".to_string()), None,)
@@ -363,64 +480,138 @@ mod tests {
     }
 
     #[test]
-    fn select_pane_for_cwd_prefers_exact_match() {
-        let mut panes = HashMap::new();
-        panes.insert("%1".to_string(), live_pane("/repo"));
-        panes.insert("%2".to_string(), live_pane("/repo/subdir"));
+    fn parses_hook_session_identity() {
+        assert_eq!(
+            parse_hook_session_id(r#"{"session_id":"session-1","cwd":"/repo"}"#),
+            Some("session-1".to_string())
+        );
+        assert_eq!(parse_hook_session_id(r#"{"session_id":""}"#), None);
+        assert_eq!(parse_hook_session_id("not json"), None);
+    }
+
+    #[test]
+    fn parse_process_snapshot_ignores_malformed_rows() {
+        assert_eq!(
+            parse_process_parents("  10  7\nmalformed\n  7  1\n"),
+            HashMap::from([(10, 7), (7, 1)])
+        );
+    }
+
+    #[test]
+    fn process_ancestry_resolves_exact_pane() {
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane(100, "claude")),
+            ("%2".to_string(), live_pane(200, "zsh")),
+        ]);
+        let parents = HashMap::from([(900, 800), (800, 700), (700, 100), (100, 1)]);
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo/subdir"), &HashSet::new()),
+            select_pane_for_process_ancestry(&panes, &parents, 900),
+            Some("%1".to_string())
+        );
+    }
+
+    #[test]
+    fn process_ancestry_prefers_nearest_pane_root() {
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane(100, "claude")),
+            ("%2".to_string(), live_pane(700, "claude")),
+        ]);
+        let parents = HashMap::from([(900, 700), (700, 100), (100, 1)]);
+
+        assert_eq!(
+            select_pane_for_process_ancestry(&panes, &parents, 900),
             Some("%2".to_string())
         );
     }
 
     #[test]
-    fn select_pane_for_cwd_accepts_closest_ancestor() {
-        let mut panes = HashMap::new();
-        panes.insert("%1".to_string(), live_pane("/repo"));
-        panes.insert("%2".to_string(), live_pane("/other"));
+    fn process_ancestry_refuses_unrelated_process() {
+        let panes = HashMap::from([("%1".to_string(), live_pane(100, "claude"))]);
+        let parents = HashMap::from([(900, 800), (800, 1)]);
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo/nested/package"), &HashSet::new()),
-            Some("%1".to_string())
-        );
-    }
-
-    #[test]
-    fn select_pane_for_cwd_rejects_ambiguous_matches() {
-        let mut panes = HashMap::new();
-        panes.insert("%1".to_string(), live_pane("/repo"));
-        panes.insert("%2".to_string(), live_pane("/repo"));
-
-        assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo"), &HashSet::new()),
+            select_pane_for_process_ancestry(&panes, &parents, 900),
             None
         );
     }
 
     #[test]
-    fn select_pane_for_cwd_prefers_registered_agent_when_shell_panes_match() {
-        let mut panes = HashMap::new();
-        panes.insert("%1".to_string(), live_pane("/repo"));
-        panes.insert("%2".to_string(), live_pane("/repo"));
-        panes.insert("%3".to_string(), live_pane("/repo"));
-        let registered = HashSet::from(["%1".to_string()]);
+    fn agent_session_resolves_same_live_process() {
+        let agents = vec![agent_state("%1", 100, "session-1")];
+        let panes = HashMap::from([("%1".to_string(), live_pane(100, "claude"))]);
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo"), &registered),
+            select_pane_for_agent_session(
+                &agents,
+                &panes,
+                "tmux",
+                "default",
+                "session-1",
+                Some("boot-1"),
+            ),
             Some("%1".to_string())
         );
     }
 
     #[test]
-    fn select_pane_for_cwd_rejects_multiple_registered_agents() {
-        let mut panes = HashMap::new();
-        panes.insert("%1".to_string(), live_pane("/repo"));
-        panes.insert("%2".to_string(), live_pane("/repo"));
-        let registered = HashSet::from(["%1".to_string(), "%2".to_string()]);
+    fn agent_session_refuses_reused_or_ambiguous_pane() {
+        let agents = vec![
+            agent_state("%1", 100, "session-1"),
+            agent_state("%2", 200, "session-1"),
+        ];
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane(100, "claude")),
+            ("%2".to_string(), live_pane(200, "claude")),
+        ]);
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo"), &registered),
+            select_pane_for_agent_session(
+                &agents,
+                &panes,
+                "tmux",
+                "default",
+                "session-1",
+                Some("boot-1"),
+            ),
+            None
+        );
+
+        let changed_pid = HashMap::from([("%1".to_string(), live_pane(999, "claude"))]);
+        assert_eq!(
+            select_pane_for_agent_session(
+                &agents[..1],
+                &changed_pid,
+                "tmux",
+                "default",
+                "session-1",
+                Some("boot-1"),
+            ),
+            None
+        );
+
+        let changed_command = HashMap::from([("%1".to_string(), live_pane(100, "zsh"))]);
+        assert_eq!(
+            select_pane_for_agent_session(
+                &agents[..1],
+                &changed_command,
+                "tmux",
+                "default",
+                "session-1",
+                Some("boot-1"),
+            ),
+            None
+        );
+
+        assert_eq!(
+            select_pane_for_agent_session(
+                &agents[..1],
+                &panes,
+                "tmux",
+                "default",
+                "session-1",
+                None,
+            ),
             None
         );
     }

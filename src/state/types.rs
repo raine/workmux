@@ -126,6 +126,13 @@ pub struct AgentState {
     /// over time, so we lock in the first definitive answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<String>,
+
+    /// Stable session identity reported by the agent's hook protocol.
+    ///
+    /// This binds pane-less hook events to a pane that an earlier event
+    /// identified directly or through process ancestry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
 }
 
 impl AgentState {

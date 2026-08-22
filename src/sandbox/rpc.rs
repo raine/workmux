@@ -482,6 +482,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
                     &ctx.pane_id,
                     Some(agent_status),
                     None,
+                    None,
                 );
             }
             RpcResponse::Ok
@@ -507,6 +508,7 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
                 &ctx.pane_id,
                 None,
                 Some(title.to_string()),
+                None,
             );
             RpcResponse::Ok
         }

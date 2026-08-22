@@ -726,6 +726,7 @@ mod tests {
             session_name: Some("main".to_string()),
             boot_id: None,
             agent_kind: None,
+            agent_session_id: None,
         }
     }
 
