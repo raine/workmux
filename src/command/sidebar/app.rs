@@ -99,6 +99,11 @@ fn host_agent_index(
     })
 }
 
+/// Index of the remote agent recorded as active by a jump, if it is present.
+fn remote_active_index(remote_active: Option<&str>, agents: &[AgentPane]) -> Option<usize> {
+    remote_active.and_then(|rid| agents.iter().position(|a| a.pane_id == rid))
+}
+
 /// Whether the sidebar auto-follows its host window or the user is navigating manually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionMode {
@@ -162,14 +167,15 @@ impl ResolvedAgentIcons {
     }
 }
 
-const DEFAULT_COMPACT_TEMPLATE: &str = "{status_icon} {primary} {pane_suffix} {fill} {elapsed}";
+const DEFAULT_COMPACT_TEMPLATE: &str =
+    "{status_icon} {primary}#[dim]{remote}#[default] {pane_suffix} {fill} {elapsed}";
 const DEFAULT_TILE_TEMPLATES: &[&str] = &[
-    "{primary} {pane_suffix} {fill} {elapsed}",
+    "{primary}#[dim]{remote}#[default] {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
     "{pane_title} {fill} {pr_checks}",
 ];
 const DEFAULT_HORIZONTAL_TEMPLATES: &[&str] = &[
-    "{status_icon} {primary} {pane_suffix} {fill} {elapsed}",
+    "{status_icon} {primary}#[dim]{remote}#[default] {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
     "{pane_title} {fill} {pr_checks}",
 ];
@@ -239,6 +245,7 @@ pub struct SidebarApp {
     host_identity: Option<HostIdentity>,
     /// Index of the agent in the sidebar's host window (updated each snapshot)
     pub host_agent_idx: Option<usize>,
+    pub remote_active_pane_id: Option<String>,
     /// Whether this sidebar's host window is the active window in the session
     host_window_active: bool,
     selection_mode: SelectionMode,
@@ -326,6 +333,7 @@ impl SidebarApp {
             window_prefix: "wm-".to_string(),
             host_identity: None,
             host_agent_idx: None,
+            remote_active_pane_id: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
             git_statuses: HashMap::new(),
@@ -407,6 +415,7 @@ impl SidebarApp {
             window_prefix,
             host_identity,
             host_agent_idx: None,
+            remote_active_pane_id: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
             git_statuses: HashMap::new(),
@@ -443,11 +452,17 @@ impl SidebarApp {
         // Compute host agent index from the new snapshot first so that a
         // config_version bump anchors the reload to the *current* host path,
         // not whatever was selected from the previous snapshot.
-        self.host_agent_idx = host_agent_index(
-            &snapshot.agents,
-            self.host_window_id(),
-            &snapshot.active_pane_ids,
-        );
+        self.remote_active_pane_id = snapshot.remote_active_pane_id.clone();
+        self.host_agent_idx =
+            remote_active_index(self.remote_active_pane_id.as_deref(), &snapshot.agents).or_else(
+                || {
+                    host_agent_index(
+                        &snapshot.agents,
+                        self.host_window_id(),
+                        &snapshot.active_pane_ids,
+                    )
+                },
+            );
 
         if snapshot.config_version != self.last_config_version {
             self.last_config_version = snapshot.config_version;
@@ -497,11 +512,16 @@ impl SidebarApp {
         {
             self.agents.retain(|a| a.session == host_session);
             // Recompute host_agent_idx after filtering
-            self.host_agent_idx = host_agent_index(
-                &self.agents,
-                self.host_window_id(),
-                &snapshot.active_pane_ids,
-            );
+            self.host_agent_idx =
+                remote_active_index(self.remote_active_pane_id.as_deref(), &self.agents).or_else(
+                    || {
+                        host_agent_index(
+                            &self.agents,
+                            self.host_window_id(),
+                            &snapshot.active_pane_ids,
+                        )
+                    },
+                );
         }
 
         // Restore selection

@@ -46,6 +46,7 @@ sidebars without a restart.
 | `{window_index}` | Tmux window number as shown in the status bar (e.g. `3` for `3:wm-fix-auth`), usable with `prefix+N`. Empty on backends without window indexes. |
 | `{pane_title}`   | Sanitized agent task title from the pane title.                                                                                                 |
 | `{pane_suffix}`  | Disambiguator like `(1)`, `(2)` when multiple agents share a window. Empty otherwise.                                                           |
+| `{remote}`       | Dimmed `@<host>` tag for agents mirrored from another machine (see [Remote agents](/guide/sidebar/remote-agents/)). Empty for local agents.      |
 | `{status_icon}`  | Status indicator (working spinner, waiting, done, sleeping, etc.).                                                                              |
 | `{agent_icon}`   | Per-agent icon based on the running agent's profile (see [Agent identity](#agent-identity)).                                                    |
 | `{agent_label}`  | Capitalized agent name (e.g. `Claude`, `Codex`).                                                                                                |
