@@ -40,7 +40,8 @@ doing.
 
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
-- **Antigravity CLI (`agy`)**: No 💬 waiting state
+- **Codex**: Registration occurs when the first turn begins because its session hook is turn-bound
+- **Antigravity CLI (`agy`)**: No 💬 waiting state; registration occurs when agent execution begins
 - **Kiro**: Hooks support is messy: requires a custom agent since the default can't be edited
 
 ## Status icons
@@ -57,7 +58,7 @@ Run `workmux setup` to automatically detect your agent CLIs and install status t
 workmux setup
 ```
 
-This detects Claude Code, Antigravity CLI, Copilot CLI, OpenCode, Pi, Oh My Pi, and Grok by checking for their executable or configuration directories, then offers to install the appropriate hooks. For Claude Code, `CLAUDE_CONFIG_DIR` is respected when locating `settings.json`. Workmux will also prompt you on first run if it detects an agent without status tracking configured.
+This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
 
 Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
 
@@ -102,8 +103,6 @@ If you prefer manual setup, download the workmux status plugin to your global Op
 
 ```bash
 mkdir -p ~/.config/opencode/plugins
-curl -o ~/.config/opencode/package.json \
-  https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/package.json
 curl -o ~/.config/opencode/plugins/workmux-status.ts \
   https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/plugins/workmux-status.ts
 ```
@@ -115,7 +114,7 @@ Restart OpenCode for the plugin to take effect.
 If you prefer manual setup, first ensure hooks are enabled in your Codex config:
 
 ```toml
-# ~/.codex/config.toml
+# ${CODEX_HOME:-$HOME/.codex}/config.toml
 [features]
 hooks = true
 ```
@@ -123,11 +122,13 @@ hooks = true
 Then download the hooks configuration:
 
 ```bash
-curl -o ~/.codex/hooks.json \
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$codex_home"
+curl -o "$codex_home/hooks.json" \
   https://raw.githubusercontent.com/raine/workmux/main/resources/codex/hooks/workmux-status.json
 ```
 
-If you already have a `~/.codex/hooks.json`, merge the hook entries from the downloaded file into your existing configuration.
+If you already have a `hooks.json` in your Codex home, merge the hook entries from the downloaded file into your existing configuration.
 
 Codex permission prompts use the 💬 waiting state.
 
@@ -136,16 +137,18 @@ Codex permission prompts use the 💬 waiting state.
 If you prefer manual setup, download the hooks configuration and merge it into your Gemini settings:
 
 ```bash
+gemini_dir="${GEMINI_CLI_HOME:-$HOME}/.gemini"
 curl -s https://raw.githubusercontent.com/raine/workmux/main/resources/gemini/settings.json \
-  | jq -s '.[0] * .[1]' ~/.gemini/settings.json - > /tmp/gemini-settings.json \
-  && mv /tmp/gemini-settings.json ~/.gemini/settings.json
+  | jq -s '.[0] * .[1]' "$gemini_dir/settings.json" - > /tmp/gemini-settings.json \
+  && mv /tmp/gemini-settings.json "$gemini_dir/settings.json"
 ```
 
-If you don't have an existing `~/.gemini/settings.json`, you can download the hooks configuration directly:
+If you don't have an existing Gemini settings file, you can download the hooks configuration directly:
 
 ```bash
-mkdir -p ~/.gemini
-curl -o ~/.gemini/settings.json \
+gemini_dir="${GEMINI_CLI_HOME:-$HOME}/.gemini"
+mkdir -p "$gemini_dir"
+curl -o "$gemini_dir/settings.json" \
   https://raw.githubusercontent.com/raine/workmux/main/resources/gemini/settings.json
 ```
 
@@ -166,7 +169,7 @@ curl -o "$grok_home/hooks/workmux-status.json" \
 
 ## Antigravity CLI (`agy`) setup
 
-`workmux setup` installs Antigravity lifecycle hooks in `~/.gemini/config/hooks.json`. `PreInvocation` and `PreToolUse` mark the pane working, and the terminal `Stop` event marks it done.
+`workmux setup` installs Antigravity lifecycle hooks in `~/.gemini/config/hooks.json`. The first `PreInvocation` handler registers the pane when agent execution begins, subsequent invocation and tool handlers mark it working, and the terminal `Stop` event marks it done.
 
 Antigravity loads hook configuration when a session starts, so restart existing `agy` sessions after setup.
 
@@ -176,6 +179,10 @@ For manual setup, merge this named hook group into `~/.gemini/config/hooks.json`
 {
   "workmux-status": {
     "PreInvocation": [
+      {
+        "type": "command",
+        "command": "workmux register-agent >/dev/null 2>&1 || true; printf '{}\\n'"
+      },
       {
         "type": "command",
         "command": "workmux set-window-status working >/dev/null 2>&1 || true; printf '{}\\n'"
@@ -204,11 +211,12 @@ For manual setup, merge this named hook group into `~/.gemini/config/hooks.json`
 
 ## Copilot CLI setup
 
-Copilot CLI 0.0.422 or later supports personal hooks. If you prefer manual setup, install the workmux hook under `~/.copilot/hooks/`:
+Copilot CLI 0.0.422 or later supports personal hooks. If you prefer manual setup, install the workmux hook under `$COPILOT_HOME/hooks/`, or `~/.copilot/hooks/` when `COPILOT_HOME` is unset:
 
 ```bash
-mkdir -p ~/.copilot/hooks
-curl -o ~/.copilot/hooks/workmux-status.json \
+copilot_home="${COPILOT_HOME:-$HOME/.copilot}"
+mkdir -p "$copilot_home/hooks"
+curl -o "$copilot_home/hooks/workmux-status.json" \
   https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 

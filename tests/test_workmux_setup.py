@@ -84,10 +84,17 @@ class TestSetupNoPrompt:
         workmux_exe_path: Path,
         repo_path: Path,
     ):
-        """OpenCode with plugin file shows all-configured message."""
-        plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugin"
+        """OpenCode with the bundled plugin shows all-configured message."""
+        plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
         plugin_dir.mkdir(parents=True)
-        (plugin_dir / "workmux-status.ts").write_text("// plugin")
+        bundled_plugin = (
+            Path(__file__).parent.parent
+            / "resources"
+            / "opencode"
+            / "plugins"
+            / "workmux-status.ts"
+        )
+        (plugin_dir / "workmux-status.ts").write_text(bundled_plugin.read_text())
 
         result = run_workmux_command(
             mux_server, workmux_exe_path, repo_path, "setup --hooks"
@@ -125,9 +132,16 @@ class TestSetupNoPrompt:
     ):
         """Both agents configured shows all-configured message."""
         write_claude_manual_status_hook(mux_server.home_path / ".claude")
-        plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugin"
+        plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
         plugin_dir.mkdir(parents=True)
-        (plugin_dir / "workmux-status.ts").write_text("// plugin")
+        bundled_plugin = (
+            Path(__file__).parent.parent
+            / "resources"
+            / "opencode"
+            / "plugins"
+            / "workmux-status.ts"
+        )
+        (plugin_dir / "workmux-status.ts").write_text(bundled_plugin.read_text())
 
         result = run_workmux_command(
             mux_server, workmux_exe_path, repo_path, "setup --hooks"
@@ -223,6 +237,41 @@ class TestSetupInstall:
             expected_output=("workmux register-agent",),
         )
 
+    def test_outdated_opencode_plugin_explains_update_prompt(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+    ):
+        plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
+        plugin_dir.mkdir(parents=True)
+        bundled_plugin = (
+            Path(__file__).parent.parent
+            / "resources"
+            / "opencode"
+            / "plugins"
+            / "workmux-status.ts"
+        ).read_text()
+        registration = """  try {
+    await $`workmux register-agent`.quiet();
+  } catch {
+    // Status tracking remains available when registration cannot reach workmux.
+  }
+
+"""
+        (plugin_dir / "workmux-status.ts").write_text(
+            bundled_plugin.replace(registration, "")
+        )
+
+        run_setup_with_answers(
+            mux_server,
+            workmux_exe_path,
+            expected_output=("workmux register-agent",),
+        )
+
+        assert (
+            "workmux register-agent" in (plugin_dir / "workmux-status.ts").read_text()
+        )
+
     def test_claude_install_accept(
         self,
         mux_server: MuxEnvironment,
@@ -282,18 +331,17 @@ class TestSetupInstall:
         workmux_exe_path: Path,
         repo_path: Path,
     ):
-        """Accepting installs OpenCode package and plugin files."""
+        """Accepting installs the OpenCode plugin file."""
         opencode_dir = mux_server.home_path / ".config" / "opencode"
         opencode_dir.mkdir(parents=True)
 
         run_setup_with_answers(mux_server, workmux_exe_path, hooks_answer="y")
 
-        package_json_path = opencode_dir / "package.json"
         plugin_path = opencode_dir / "plugins" / "workmux-status.ts"
-        assert package_json_path.exists()
-        assert len(package_json_path.read_text()) > 0
         assert plugin_path.exists()
-        assert len(plugin_path.read_text()) > 0
+        assert not (opencode_dir / "package.json").exists()
+        plugin_text = plugin_path.read_text()
+        assert "workmux register-agent" in plugin_text
 
     def test_omp_install_accept(
         self,
@@ -312,6 +360,8 @@ class TestSetupInstall:
         extension_text = extension_path.read_text()
         assert "@oh-my-pi/pi-coding-agent" in extension_text
         assert 'workmux", ["set-window-status' in extension_text
+        assert 'pi.on("session_start"' in extension_text
+        assert '["register-agent"]' in extension_text
         assert 'pi.on("message_end"' in extension_text
         assert '"role" in event.message' in extension_text
         assert 'event.message.role === "assistant"' in extension_text
@@ -339,10 +389,9 @@ class TestSetupInstall:
         assert "SessionStart" in settings["hooks"]
         assert "Stop" in settings["hooks"]
 
-        package_json_path = opencode_dir / "package.json"
         plugin_path = opencode_dir / "plugins" / "workmux-status.ts"
-        assert package_json_path.exists()
         assert plugin_path.exists()
+        assert not (opencode_dir / "package.json").exists()
 
     def test_claude_preserves_existing_settings(
         self,

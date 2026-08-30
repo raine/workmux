@@ -4,28 +4,43 @@
 //! personal hook under `~/.copilot/hooks/`.
 
 use anyhow::{Context, Result};
+use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
 
 /// Hooks configuration embedded at compile time.
 const HOOKS_JSON: &str = include_str!("../../resources/copilot/hooks/workmux-status/hooks.json");
 const HOOKS_FILE_NAME: &str = "workmux-status.json";
 
 fn copilot_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("COPILOT_CONFIG_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    home::home_dir().map(|h| h.join(".copilot"))
+    copilot_dir_from_env(
+        home::home_dir(),
+        std::env::var_os("COPILOT_HOME"),
+        std::env::var_os("COPILOT_CONFIG_DIR"),
+    )
+}
+
+fn copilot_dir_from_env(
+    home: Option<PathBuf>,
+    copilot_home: Option<OsString>,
+    legacy_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    copilot_home
+        .filter(|dir| !dir.is_empty())
+        .or_else(|| legacy_config_dir.filter(|dir| !dir.is_empty()))
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".copilot")))
 }
 
 fn hooks_file() -> Option<PathBuf> {
-    home::home_dir().map(|home| hooks_file_at(&home))
+    copilot_dir().map(|root| hooks_file_at(&root))
 }
 
-fn hooks_file_at(home: &Path) -> PathBuf {
-    home.join(".copilot/hooks").join(HOOKS_FILE_NAME)
+fn hooks_file_at(root: &Path) -> PathBuf {
+    root.join("hooks").join(HOOKS_FILE_NAME)
 }
 
 /// Detect Copilot CLI through its configuration directory.
@@ -51,11 +66,62 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
 
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read Copilot hooks from {}", path.display()))?;
-    if content.contains("workmux set-window-status") {
+    let config: Value = serde_json::from_str(&content)
+        .with_context(|| format!("Copilot hooks file is not valid JSON: {}", path.display()))?;
+
+    let required = [
+        ("sessionStart", "workmux register-agent"),
+        ("userPromptSubmitted", "workmux set-window-status working"),
+        ("postToolUse", "workmux set-window-status working"),
+        ("agentStop", "workmux set-window-status done"),
+    ];
+    if config.get("version").and_then(Value::as_u64) == Some(1)
+        && required
+            .iter()
+            .all(|(event, command)| has_command_hook(&config, event, command))
+    {
         Ok(StatusCheck::Installed)
+    } else if has_workmux_hook(&config) {
+        Ok(StatusCheck::UpdateAvailable)
     } else {
         Ok(StatusCheck::NotInstalled)
     }
+}
+
+fn has_command_hook(config: &Value, event: &str, expected: &str) -> bool {
+    config["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|hook| {
+            hook.get("type").and_then(Value::as_str) == Some("command")
+                && hook.get("bash").and_then(Value::as_str) == Some(expected)
+        })
+}
+
+fn has_workmux_hook(config: &Value) -> bool {
+    config["hooks"]
+        .as_object()
+        .into_iter()
+        .flat_map(|hooks| hooks.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|hook| hook.get("bash").and_then(Value::as_str))
+        .any(|command| {
+            command.contains("workmux set-window-status")
+                || command.contains("workmux register-agent")
+        })
+}
+
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = hooks_file().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: fs::read_to_string(&path)?,
+        bundled: HOOKS_JSON.to_string(),
+    }))
 }
 
 /// Install the workmux personal hook for Copilot CLI.
@@ -113,23 +179,47 @@ mod tests {
             serde_json::from_str(HOOKS_JSON).expect("embedded hooks.json is valid JSON");
         assert_eq!(parsed.get("version").and_then(|v| v.as_u64()), Some(1));
         let hooks = parsed.get("hooks").unwrap().as_object().unwrap();
+        assert!(hooks.contains_key("sessionStart"));
         assert!(hooks.contains_key("userPromptSubmitted"));
         assert!(hooks.contains_key("postToolUse"));
         assert!(hooks.contains_key("agentStop"));
     }
 
     #[test]
-    fn test_hooks_json_contains_workmux_command() {
+    fn test_hooks_json_contains_workmux_commands() {
+        assert!(HOOKS_JSON.contains("workmux register-agent"));
         assert!(HOOKS_JSON.contains("workmux set-window-status"));
     }
 
     #[test]
-    fn personal_hooks_path_is_under_home() {
-        let home = Path::new("/home/tester");
+    fn copilot_root_prefers_non_empty_current_then_legacy_env() {
+        let home = Some(PathBuf::from("/home/tester"));
         assert_eq!(
-            hooks_file_at(home),
-            home.join(".copilot/hooks/workmux-status.json")
+            copilot_dir_from_env(
+                home.clone(),
+                Some(OsString::from("/current")),
+                Some(OsString::from("/legacy")),
+            ),
+            Some(PathBuf::from("/current"))
         );
+        assert_eq!(
+            copilot_dir_from_env(
+                home.clone(),
+                Some(OsString::new()),
+                Some(OsString::from("/legacy")),
+            ),
+            Some(PathBuf::from("/legacy"))
+        );
+        assert_eq!(
+            copilot_dir_from_env(home, Some(OsString::new()), Some(OsString::new())),
+            Some(PathBuf::from("/home/tester/.copilot"))
+        );
+    }
+
+    #[test]
+    fn personal_hooks_path_is_under_resolved_root() {
+        let root = Path::new("/custom/copilot");
+        assert_eq!(hooks_file_at(root), root.join("hooks/workmux-status.json"));
     }
 
     #[test]
@@ -141,7 +231,7 @@ mod tests {
         fs::create_dir_all(repository_hook.parent().unwrap()).unwrap();
         fs::write(&repository_hook, HOOKS_JSON).unwrap();
 
-        let personal_hook = hooks_file_at(tmp.path());
+        let personal_hook = hooks_file_at(&tmp.path().join(".copilot"));
         assert!(matches!(
             check_at(&personal_hook).unwrap(),
             StatusCheck::NotInstalled
@@ -158,6 +248,61 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), HOOKS_JSON);
         assert!(matches!(check_at(&path).unwrap(), StatusCheck::Installed));
+    }
+
+    #[test]
+    fn status_only_hook_needs_registration_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sessionStart");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn missing_or_unknown_schema_version_needs_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config.as_object_mut().unwrap().remove("version");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+
+        config["version"] = Value::from(2);
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn check_requires_exact_bundled_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]["sessionStart"][0]["bash"] =
+            Value::String("bash -c 'workmux register-agent'".to_string());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
     }
 
     #[test]
@@ -195,6 +340,6 @@ mod tests {
 
         assert!(!path.exists());
         assert!(!path.parent().unwrap().exists());
-        assert!(tmp.path().join(".copilot").exists());
+        assert!(tmp.path().exists());
     }
 }

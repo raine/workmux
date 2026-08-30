@@ -106,9 +106,15 @@ pub(crate) struct UpdatePreview {
 
 pub(crate) fn print_update_diff(agent: Agent) {
     let preview = match agent {
+        Agent::Antigravity => antigravity::update_preview(),
         Agent::Claude => claude::update_preview(),
+        Agent::Codex => codex::update_preview(),
+        Agent::Copilot => copilot::update_preview(),
+        Agent::Gemini => gemini::update_preview(),
+        Agent::Grok => grok::update_preview(),
+        Agent::OpenCode => opencode::update_preview(),
         Agent::Pi => pi::update_preview(),
-        _ => Ok(None),
+        Agent::Omp => omp::update_preview(),
     };
     let Ok(Some(preview)) = preview else {
         return;

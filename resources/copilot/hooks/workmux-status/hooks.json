@@ -1,6 +1,12 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "workmux register-agent"
+      }
+    ],
     "userPromptSubmitted": [
       {
         "type": "command",

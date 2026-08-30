@@ -2472,6 +2472,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.1",
 ]
 
@@ -2483,6 +2484,12 @@ checksum = "2334f11ee363607eb04df9b8fc8a13ca1715a72ba8662a26ac285c98aabb4011"
 dependencies = [
  "winnow 1.0.1",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -3294,6 +3301,7 @@ dependencies = [
  "terminal-light",
  "textwrap",
  "thiserror 2.0.18",
+ "toml_edit",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

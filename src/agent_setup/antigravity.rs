@@ -9,9 +9,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
 
 const WORKMUX_GROUP: &str = "workmux-status";
+const REGISTER_COMMAND: &str = "workmux register-agent >/dev/null 2>&1 || true; printf '{}\\n'";
 const WORKING_COMMAND: &str =
     "workmux set-window-status working >/dev/null 2>&1 || true; printf '{}\\n'";
 const STOP_COMMAND: &str = "workmux set-window-status done >/dev/null 2>&1 || true; printf '{}\\n'";
@@ -67,6 +68,8 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
     let config = read_json(path)?;
     if has_workmux_hooks(&config) {
         Ok(StatusCheck::Installed)
+    } else if config.get(WORKMUX_GROUP).is_some() {
+        Ok(StatusCheck::UpdateAvailable)
     } else {
         Ok(StatusCheck::NotInstalled)
     }
@@ -99,10 +102,34 @@ fn uninstall_at(path: &Path) -> Result<String> {
         .map_or_else(|| Ok("No Antigravity workmux hooks found".to_string()), Ok)
 }
 
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = hooks_path().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let installed = read_json(&path)?;
+    let mut bundled = installed.clone();
+    let bundled_object = bundled
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} root is not an object", path.display()))?;
+    bundled_object.insert(
+        WORKMUX_GROUP.to_string(),
+        workmux_hooks()[WORKMUX_GROUP].clone(),
+    );
+
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: serde_json::to_string_pretty(&installed)? + "\n",
+        bundled: serde_json::to_string_pretty(&bundled)? + "\n",
+    }))
+}
+
 fn workmux_hooks() -> Value {
     serde_json::json!({
         WORKMUX_GROUP: {
             "PreInvocation": [{
+                "type": "command",
+                "command": REGISTER_COMMAND
+            }, {
                 "type": "command",
                 "command": WORKING_COMMAND
             }],
@@ -126,7 +153,8 @@ fn has_workmux_hooks(config: &Value) -> bool {
         return false;
     };
 
-    plain_event_has_command(group, "PreInvocation", WORKING_COMMAND)
+    plain_event_has_command(group, "PreInvocation", REGISTER_COMMAND)
+        && plain_event_has_command(group, "PreInvocation", WORKING_COMMAND)
         && matcher_event_has_command(group, "PreToolUse", WORKING_COMMAND)
         && plain_event_has_command(group, "Stop", STOP_COMMAND)
 }
@@ -245,7 +273,14 @@ mod tests {
         let group = &hooks[WORKMUX_GROUP];
 
         assert_eq!(
-            group["PreInvocation"][0]["command"],
+            group["PreInvocation"][0],
+            json!({
+                "type": "command",
+                "command": REGISTER_COMMAND
+            })
+        );
+        assert_eq!(
+            group["PreInvocation"][1]["command"],
             Value::String(WORKING_COMMAND.to_string())
         );
         assert!(group["PreInvocation"][0].get("hooks").is_none());
@@ -260,6 +295,25 @@ mod tests {
         assert!(group.get("PostToolUse").is_none());
         assert!(group.get("PostInvocation").is_none());
         assert!(has_workmux_hooks(&hooks));
+    }
+
+    #[test]
+    fn hook_schema_uses_only_supported_events() {
+        let hooks = workmux_hooks();
+        let group = hooks[WORKMUX_GROUP].as_object().unwrap();
+        let supported = [
+            "PreToolUse",
+            "PostToolUse",
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        ];
+
+        assert!(
+            group
+                .keys()
+                .all(|event| supported.contains(&event.as_str()))
+        );
     }
 
     #[test]
@@ -288,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn check_requires_all_hooks() {
+    fn check_status_only_hooks_need_registration_update() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("hooks.json");
         write_json(
@@ -298,6 +352,17 @@ mod tests {
                     "PreInvocation": [{
                         "type": "command",
                         "command": WORKING_COMMAND
+                    }],
+                    "PreToolUse": [{
+                        "matcher": ".*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": WORKING_COMMAND
+                        }]
+                    }],
+                    "Stop": [{
+                        "type": "command",
+                        "command": STOP_COMMAND
                     }]
                 }
             }),
@@ -306,7 +371,7 @@ mod tests {
 
         assert!(matches!(
             check_at(&path).unwrap(),
-            StatusCheck::NotInstalled
+            StatusCheck::UpdateAvailable
         ));
     }
 

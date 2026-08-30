@@ -10,7 +10,8 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
+use crate::agent_setup::hooks;
 use crate::agent_setup::json_config::{
     self, EmptyJsonRoot, JsonHookInstallSpec, JsonHookUninstallSpec,
 };
@@ -57,34 +58,13 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
     let config: Value =
         serde_json::from_str(&content).context("grok hooks file is not valid JSON")?;
 
-    let required = [
-        ("UserPromptSubmit", "working"),
-        ("Notification", "waiting"),
-        ("PostToolUse", "working"),
-        ("Stop", "done"),
-        ("SessionEnd", "done"),
-    ];
-
-    if required
-        .iter()
-        .all(|(event, status)| has_status_hook(&config, event, status))
-    {
+    if hooks::has_required_hook_commands(&config, &load_hooks()?) {
         Ok(StatusCheck::Installed)
+    } else if hooks::has_workmux_hooks(&config) {
+        Ok(StatusCheck::UpdateAvailable)
     } else {
         Ok(StatusCheck::NotInstalled)
     }
-}
-
-fn has_status_hook(config: &Value, event: &str, status: &str) -> bool {
-    let expected = format!("workmux set-window-status {status}");
-    config["hooks"][event]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .any(|command| command.contains(&expected))
 }
 
 pub fn uninstall() -> Result<String> {
@@ -116,6 +96,23 @@ fn load_hooks() -> Result<Value> {
     json_config::hooks_from_embedded(HOOKS_JSON, "hooks config missing hooks key")
 }
 
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = hooks_path().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let content = fs::read_to_string(&path).context("Failed to read grok hooks file")?;
+    let installed: Value =
+        serde_json::from_str(&content).context("grok hooks file is not valid JSON")?;
+    let mut bundled = installed.clone();
+    hooks::merge_missing_hook_commands(&mut bundled, &load_hooks()?)?;
+
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: serde_json::to_string_pretty(&installed)? + "\n",
+        bundled: serde_json::to_string_pretty(&bundled)? + "\n",
+    }))
+}
+
 fn install_hooks_at(path: &Path) -> Result<()> {
     json_config::json_hook_install(
         path,
@@ -135,7 +132,7 @@ pub fn install() -> Result<String> {
 
     install_hooks_at(&path)?;
 
-    Ok("Installed hooks to ~/.grok/hooks/workmux-status.json".to_string())
+    Ok(format!("Installed hooks to {}", path.display()))
 }
 
 #[cfg(test)]
@@ -147,6 +144,7 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(HOOKS_JSON).expect("embedded hooks config is valid JSON");
         let hooks = parsed.get("hooks").unwrap().as_object().unwrap();
+        assert!(hooks.contains_key("SessionStart"));
         assert!(hooks.contains_key("UserPromptSubmit"));
         assert!(hooks.contains_key("Notification"));
         assert!(hooks.contains_key("PostToolUse"));
@@ -156,6 +154,7 @@ mod tests {
 
     #[test]
     fn test_hooks_json_contains_workmux_commands() {
+        assert!(HOOKS_JSON.contains("workmux register-agent"));
         assert!(HOOKS_JSON.contains("workmux set-window-status working"));
         assert!(HOOKS_JSON.contains("workmux set-window-status waiting"));
         assert!(HOOKS_JSON.contains("workmux set-window-status done"));
@@ -165,6 +164,7 @@ mod tests {
     fn test_load_hooks() {
         let hooks = load_hooks().unwrap();
         let obj = hooks.as_object().unwrap();
+        assert!(obj.contains_key("SessionStart"));
         assert!(obj.contains_key("UserPromptSubmit"));
         assert!(obj.contains_key("Notification"));
         assert!(obj.contains_key("PostToolUse"));
@@ -185,7 +185,7 @@ mod tests {
 
         assert!(matches!(
             check_at(&path).unwrap(),
-            StatusCheck::NotInstalled
+            StatusCheck::UpdateAvailable
         ));
 
         install_hooks_at(&path).unwrap();
@@ -194,14 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn test_install_upgrades_legacy_hooks_idempotently() {
+    fn test_install_upgrades_status_only_hooks_idempotently() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("workmux-status.json");
         let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
         config["hooks"]
             .as_object_mut()
             .unwrap()
-            .remove("Notification");
+            .remove("SessionStart");
         config["hooks"]["Stop"]
             .as_array_mut()
             .unwrap()
@@ -217,9 +217,12 @@ mod tests {
         install_hooks_at(&path).unwrap();
 
         let installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(has_status_hook(&installed, "Notification", "waiting"));
-        let notification_groups = installed["hooks"]["Notification"].as_array().unwrap();
-        assert_eq!(notification_groups.len(), 1);
+        assert!(hooks::has_required_hook_commands(
+            &installed,
+            &load_hooks().unwrap()
+        ));
+        let registration_groups = installed["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(registration_groups.len(), 1);
         assert!(
             installed["hooks"]["Stop"]
                 .as_array()
@@ -244,7 +247,7 @@ mod tests {
         let hooks_path = tmp.path().join("workmux-status.json");
         std::fs::write(
             &hooks_path,
-            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"workmux set-window-status done"}]},{"hooks":[{"type":"command","command":"python3 my-hook.py"}]}]}}"#,
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"workmux register-agent"},{"type":"command","command":"python3 session-hook.py"}]}],"Stop":[{"hooks":[{"type":"command","command":"workmux set-window-status done"}]},{"hooks":[{"type":"command","command":"python3 my-hook.py"}]}]}}"#,
         )
         .unwrap();
         let result = uninstall_at(hooks_path.clone()).unwrap();
@@ -259,6 +262,10 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("my-hook")
+        );
+        assert_eq!(
+            config["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "python3 session-hook.py"
         );
     }
 

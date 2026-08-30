@@ -27,6 +27,10 @@ export default function (pi: ExtensionAPI) {
     return statusQueue;
   }
 
+  pi.on("session_start", async () => {
+    await pi.exec("workmux", ["register-agent"]).catch(() => {});
+  });
+
   pi.on("agent_start", async () => {
     await setStatus("working");
   });

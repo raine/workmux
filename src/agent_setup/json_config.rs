@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
-use super::StatusCheck;
 use crate::agent_setup::hooks;
 
 /// Root value seeded when a hook config file does not exist yet.
@@ -47,26 +46,6 @@ pub fn hooks_from_embedded(source: &str, missing_hooks_message: &str) -> Result<
         .get("hooks")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("{missing_hooks_message}"))
-}
-
-/// Check whether a JSON hook config file contains workmux hooks.
-pub fn check_hook_file(
-    path: &Path,
-    read_context: &str,
-    parse_context: &str,
-) -> Result<StatusCheck> {
-    if !path.exists() {
-        return Ok(StatusCheck::NotInstalled);
-    }
-
-    let content = fs::read_to_string(path).context(read_context.to_string())?;
-    let config: Value = serde_json::from_str(&content).context(parse_context.to_string())?;
-
-    if hooks::has_workmux_hooks(&config) {
-        Ok(StatusCheck::Installed)
-    } else {
-        Ok(StatusCheck::NotInstalled)
-    }
 }
 
 fn empty_root_value(empty_root: EmptyJsonRoot) -> Value {

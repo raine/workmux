@@ -28,6 +28,7 @@ clap_complete = "4.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+toml_edit = "0.25"
 anyhow = "1.0.103"
 thiserror = "2.0"
 glob = "0.3"

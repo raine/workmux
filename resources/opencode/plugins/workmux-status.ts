@@ -1,6 +1,12 @@
 import type { Plugin } from '@opencode-ai/plugin';
 
 export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
+  try {
+    await $`workmux register-agent`.quiet();
+  } catch {
+    // Status tracking remains available when registration cannot reach workmux.
+  }
+
   // OpenCode can emit repeated `session.status busy` events for a single turn,
   // and can even emit a stale trailing `busy` after `idle` at the end. Track
   // every parent and child session so one idle session cannot mark the whole
@@ -9,6 +15,19 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
   const acceptBusyBySession = new Map<string, boolean>();
   const deletedSessions = new Set<string>();
   let reportedStatus: string | undefined;
+  let statusQueue = Promise.resolve();
+
+  function writeStatus(status: string) {
+    return $`workmux set-window-status ${status}`.quiet().then(() => {}, () => {});
+  }
+
+  function queueStatus(status: string) {
+    statusQueue = statusQueue.then(
+      () => writeStatus(status),
+      () => writeStatus(status),
+    );
+    return statusQueue;
+  }
 
   async function reportAggregateStatus() {
     const statuses = [...statusBySession.values()];
@@ -25,7 +44,7 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
     }
 
     reportedStatus = status;
-    await $`workmux set-window-status ${status}`.quiet();
+    await queueStatus(status);
   }
 
   async function setStatus(
