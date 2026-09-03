@@ -374,7 +374,7 @@ fn serialize_config(entries: &[(String, Option<String>)]) -> String {
                 Some(subsection) => rendered.push_str(&format!(
                     "[{} \"{}\"]\n",
                     group.0,
-                    escape_quoted(subsection)
+                    escape_subsection(subsection)
                 )),
                 None => rendered.push_str(&format!("[{}]\n", group.0)),
             }
@@ -399,6 +399,10 @@ fn split_key(key: &str) -> Option<(&str, Option<&str>, &str)> {
         Some((subsection, name)) => Some((section, Some(subsection), name)),
         None => Some((section, None, rest)),
     }
+}
+
+fn escape_subsection(subsection: &str) -> String {
+    subsection.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn escape_quoted(value: &str) -> String {
@@ -867,6 +871,7 @@ mod tests {
             ("workmux.spaces", "  padded  "),
             ("workmux.empty", ""),
             ("submodule.deps/vendor \"x\".path", "deps/vendor"),
+            ("branch.topic\tname.remote", "origin"),
         ];
         std::fs::write(&source, b"").unwrap();
         for (key, value) in values {
