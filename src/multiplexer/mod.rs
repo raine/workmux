@@ -508,15 +508,30 @@ pub trait Multiplexer: Send + Sync {
         false
     }
 
-    /// Send keys to an agent pane, with special handling for Claude's ! prefix
+    /// Send keys to an agent pane, with agent-specific input handling.
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()> {
-        if agent::resolve_profile(agent).needs_bang_delay() && command.starts_with('!') {
+        let profile = agent::resolve_profile(agent);
+        if profile.needs_bang_delay() && command.starts_with('!') {
             self.send_text_fragment(pane_id, "!")?;
             thread::sleep(Duration::from_millis(50));
             self.send_text_fragment(pane_id, &command[1..])?;
             self.send_enter(pane_id)
+        } else if profile.uses_bracketed_paste_for_input() {
+            self.paste_and_submit(pane_id, command)
         } else {
             self.send_keys(pane_id, command)
+        }
+    }
+
+    /// Deliver a prompt using the target agent's input protocol.
+    fn send_prompt_to_agent(&self, pane_id: &str, prompt: &str, agent: Option<&str>) -> Result<()> {
+        let profile = agent::resolve_profile(agent);
+        if profile.uses_bracketed_paste_for_input() {
+            self.paste_and_submit(pane_id, prompt)
+        } else if prompt.contains('\n') {
+            self.paste_multiline(pane_id, prompt)
+        } else {
+            self.send_keys_to_agent(pane_id, prompt, agent)
         }
     }
 
@@ -525,6 +540,12 @@ pub trait Multiplexer: Send + Sync {
 
     /// Paste text to a pane.
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()>;
+
+    /// Paste text and submit it without a timing delay.
+    fn paste_and_submit(&self, pane_id: &str, content: &str) -> Result<()> {
+        self.paste_text(pane_id, content)?;
+        self.send_enter(pane_id)
+    }
 
     /// Paste multiline content to a pane (using bracketed paste)
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()> {

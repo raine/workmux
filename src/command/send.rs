@@ -35,13 +35,12 @@ pub fn run(name: &str, text: Option<&str>, file: Option<&str>) -> Result<()> {
         return Err(anyhow!("No content to send"));
     }
 
-    // Single-line: use send_keys_to_agent (handles Claude's ! prefix delay)
-    // Multi-line: use paste_multiline (already sends Enter in both backends)
-    if content.contains('\n') {
-        mux.paste_multiline(&agent.pane_id, content)?;
-    } else {
-        mux.send_keys_to_agent(&agent.pane_id, content, cfg.agent.as_deref())?;
-    }
+    let agent_identity = agent
+        .agent_kind
+        .as_deref()
+        .or(cfg.agent.as_deref())
+        .or(agent.agent_command.as_deref());
+    mux.send_prompt_to_agent(&agent.pane_id, content, agent_identity)?;
 
     Ok(())
 }

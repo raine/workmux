@@ -22,6 +22,11 @@ pub trait AgentProfile: Send + Sync {
         false
     }
 
+    /// Whether prompts should be delivered as bracketed paste.
+    fn uses_bracketed_paste_for_input(&self) -> bool {
+        false
+    }
+
     /// Whether this agent needs auto-status when launched with a prompt file.
     ///
     /// Agents with hooks that would normally set status need auto-status as a
@@ -187,6 +192,10 @@ pub struct CodexProfile;
 impl AgentProfile for CodexProfile {
     fn name(&self) -> &'static str {
         "codex"
+    }
+
+    fn uses_bracketed_paste_for_input(&self) -> bool {
+        true
     }
 
     fn skip_permissions_flag(&self) -> Option<&'static str> {
@@ -716,6 +725,7 @@ mod tests {
         let profile = CodexProfile;
         assert_eq!(profile.name(), "codex");
         assert!(!profile.needs_bang_delay());
+        assert!(profile.uses_bracketed_paste_for_input());
         assert!(!profile.needs_auto_status());
         assert_eq!(
             profile.prompt_argument("PROMPT.md"),

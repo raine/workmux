@@ -380,6 +380,35 @@ impl TmuxBackend {
         Ok(())
     }
 
+    fn load_buffer(&self, content: &str) -> Result<()> {
+        use std::io::Write;
+
+        let mut command = std::process::Command::new("tmux");
+        if let Some(socket_path) = self.socket_path.as_deref() {
+            command.args(["-S", socket_path]);
+        }
+        let mut child = command
+            .args(["load-buffer", "-"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn tmux load-buffer")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(content.as_bytes())
+                .context("Failed to write to tmux buffer")?;
+        }
+
+        let status = child
+            .wait()
+            .context("Failed to wait for tmux load-buffer")?;
+        if !status.success() {
+            return Err(anyhow!("tmux load-buffer failed"));
+        }
+
+        Ok(())
+    }
+
     /// Run a tmux command and capture stdout.
     fn tmux_query(&self, args: &[&str]) -> Result<String> {
         self.tmux_command()
@@ -1216,32 +1245,24 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()> {
-        use std::io::Write;
-
-        let mut command = std::process::Command::new("tmux");
-        if let Some(socket_path) = self.socket_path.as_deref() {
-            command.args(["-S", socket_path]);
-        }
-        let mut child = command
-            .args(["load-buffer", "-"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .context("Failed to spawn tmux load-buffer")?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(content.as_bytes())
-                .context("Failed to write to tmux buffer")?;
-        }
-
-        let status = child
-            .wait()
-            .context("Failed to wait for tmux load-buffer")?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("tmux load-buffer failed"));
-        }
-
+        self.load_buffer(content)?;
         self.tmux_cmd(&["paste-buffer", "-t", pane_id, "-p", "-d"])
+    }
+
+    fn paste_and_submit(&self, pane_id: &str, content: &str) -> Result<()> {
+        self.load_buffer(content)?;
+        self.tmux_cmd(&[
+            "paste-buffer",
+            "-t",
+            pane_id,
+            "-p",
+            "-d",
+            ";",
+            "send-keys",
+            "-t",
+            pane_id,
+            "Enter",
+        ])
     }
 
     // === Shell ===
