@@ -332,38 +332,87 @@ pub fn snapshot_local_config(source: &Path, destination: &Path) -> Result<()> {
     if !output.status.success() {
         bail!("Failed to read Git config at {}", source.display());
     }
+    let mut entries = Vec::new();
     for entry in output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
-        let Some(separator) = entry.iter().position(|byte| *byte == b'\n') else {
-            continue;
+        let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
+            Some(separator) => (
+                String::from_utf8_lossy(&entry[..separator]),
+                Some(String::from_utf8_lossy(&entry[separator + 1..]).into_owned()),
+            ),
+            None => (String::from_utf8_lossy(entry), None),
         };
-        let key = String::from_utf8_lossy(&entry[..separator]);
         if key.eq_ignore_ascii_case("include.path")
             || key.to_ascii_lowercase().starts_with("includeif.")
             || key.eq_ignore_ascii_case("core.worktree")
         {
             continue;
         }
-        let value = String::from_utf8_lossy(&entry[separator + 1..]);
-        let status = unattended_git(None)?
-            .args([
-                "config",
-                "--file",
-                temp.to_string_lossy().as_ref(),
-                "--add",
-                key.as_ref(),
-                value.as_ref(),
-            ])
-            .status()?;
-        if !status.success() {
-            bail!("Failed to write private Git config");
-        }
+        entries.push((key.into_owned(), value));
     }
+
+    std::fs::write(&temp, serialize_config(&entries))?;
     std::fs::rename(temp, destination)?;
     Ok(())
+}
+
+/// Render `git config --list` entries back into config file syntax, quoting every value so that
+/// whitespace, comment characters, quotes, backslashes, newlines, and tabs survive a round trip.
+fn serialize_config(entries: &[(String, Option<String>)]) -> String {
+    let mut rendered = String::new();
+    let mut current: Option<(String, Option<String>)> = None;
+    for (key, value) in entries {
+        let Some((section, subsection, name)) = split_key(key) else {
+            continue;
+        };
+        let group = (section.to_string(), subsection.map(str::to_string));
+        if current.as_ref() != Some(&group) {
+            match &group.1 {
+                Some(subsection) => rendered.push_str(&format!(
+                    "[{} \"{}\"]\n",
+                    group.0,
+                    escape_quoted(subsection)
+                )),
+                None => rendered.push_str(&format!("[{}]\n", group.0)),
+            }
+            current = Some(group);
+        }
+        match value {
+            Some(value) => {
+                rendered.push_str(&format!("\t{} = \"{}\"\n", name, escape_quoted(value)))
+            }
+            None => rendered.push_str(&format!("\t{}\n", name)),
+        }
+    }
+    rendered
+}
+
+fn split_key(key: &str) -> Option<(&str, Option<&str>, &str)> {
+    let (section, rest) = key.split_once('.')?;
+    if section.is_empty() {
+        return None;
+    }
+    match rest.rsplit_once('.') {
+        Some((subsection, name)) => Some((section, Some(subsection), name)),
+        None => Some((section, None, rest)),
+    }
+}
+
+fn escape_quoted(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -754,5 +803,109 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn config_snapshot_round_trips_entries_and_drops_includes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("config");
+        std::fs::write(
+            &source,
+            concat!(
+                "[core]\n",
+                "\tbare = false\n",
+                "\tworktree = ../elsewhere\n",
+                "[remote \"origin\"]\n",
+                "\turl = https://example.com/repo.git\n",
+                "\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+                "\tfetch = +refs/tags/*:refs/tags/*\n",
+                "[branch \"feat/foo.bar\"]\n",
+                "\tmerge = refs/heads/feat/foo.bar\n",
+                "\tdescription = \"leading and trailing \"\n",
+                "[alias]\n",
+                "\tlg = log --format=\"# %h\"\n",
+                "\tquiet\n",
+                "[includeIf \"gitdir:/somewhere/\"]\n",
+                "\tpath = ../other-config\n",
+                "[include]\n",
+                "\tpath = ../another-config\n",
+            ),
+        )
+        .unwrap();
+
+        let snapshot = temp.path().join("nested/snapshot");
+        snapshot_local_config(&source, &snapshot).unwrap();
+
+        let expected: Vec<String> = list_config(&source)
+            .into_iter()
+            .filter(|entry| {
+                !entry.starts_with("includeif.")
+                    && !entry.starts_with("include.path")
+                    && !entry.starts_with("core.worktree")
+            })
+            .collect();
+        assert_eq!(list_config(&snapshot), expected);
+        assert!(expected.iter().any(|entry| entry == "alias.quiet"));
+        assert!(
+            expected
+                .iter()
+                .any(|entry| entry == "branch.feat/foo.bar.description=leading and trailing ")
+        );
+    }
+
+    #[test]
+    fn config_snapshot_round_trips_awkward_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("config");
+        let values = [
+            ("workmux.hash", "# not a comment"),
+            ("workmux.semicolon", "; also not a comment"),
+            ("workmux.quote", "say \"hi\""),
+            ("workmux.backslash", "C:\\path\\to"),
+            ("workmux.newline", "first\nsecond"),
+            ("workmux.tab", "left\tright"),
+            ("workmux.spaces", "  padded  "),
+            ("workmux.empty", ""),
+            ("submodule.deps/vendor \"x\".path", "deps/vendor"),
+        ];
+        std::fs::write(&source, b"").unwrap();
+        for (key, value) in values {
+            let status = Command::new("git")
+                .args([
+                    "config",
+                    "--file",
+                    source.to_string_lossy().as_ref(),
+                    "--add",
+                    key,
+                    value,
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let snapshot = temp.path().join("snapshot");
+        snapshot_local_config(&source, &snapshot).unwrap();
+        assert_eq!(list_config(&snapshot), list_config(&source));
+    }
+
+    fn list_config(path: &Path) -> Vec<String> {
+        let output = Command::new("git")
+            .args([
+                "config",
+                "--file",
+                path.to_string_lossy().as_ref(),
+                "--null",
+                "--list",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf8_lossy(entry).replace('\n', "="))
+            .collect()
     }
 }
