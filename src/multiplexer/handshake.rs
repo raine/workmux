@@ -34,10 +34,80 @@ pub trait PaneHandshake: Send {
 
     /// Waits for the handshake signal, consuming the handshake object.
     fn wait(self: Box<Self>) -> Result<()>;
+
+    /// Waits for the handshake and any backend-specific shell readiness check.
+    ///
+    /// Backends without a post-exec readiness mechanism retain the original
+    /// handshake behavior.
+    fn wait_for_shell(self: Box<Self>, _pane_id: &str) -> Result<()> {
+        self.wait()
+    }
 }
 
 /// Timeout for waiting for pane readiness (seconds)
 const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+const PANE_READY_POLL_INTERVAL_MS: u64 = 50;
+
+#[derive(Default)]
+struct PaneContentStability {
+    previous: Option<String>,
+}
+
+impl PaneContentStability {
+    fn reset(&mut self) {
+        self.previous = None;
+    }
+
+    fn observe(&mut self, content: String) -> bool {
+        if content.is_empty() {
+            self.reset();
+            return false;
+        }
+
+        if self.previous.as_ref() == Some(&content) {
+            return true;
+        }
+
+        self.previous = Some(content);
+        false
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PaneReadiness {
+    Ready(Duration),
+    TimedOut { last_error: Option<String> },
+}
+
+fn poll_until_stable_pane(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut capture: impl FnMut() -> Result<String>,
+) -> PaneReadiness {
+    let start = Instant::now();
+    let mut stability = PaneContentStability::default();
+
+    loop {
+        let last_error = match capture() {
+            Ok(content) => {
+                if stability.observe(content) {
+                    return PaneReadiness::Ready(start.elapsed());
+                }
+                None
+            }
+            Err(error) => {
+                stability.reset();
+                Some(error.to_string())
+            }
+        };
+
+        if start.elapsed() >= timeout {
+            return PaneReadiness::TimedOut { last_error };
+        }
+
+        thread::sleep(poll_interval);
+    }
+}
 
 /// Manages the tmux wait-for handshake protocol for pane synchronization.
 ///
@@ -75,6 +145,42 @@ impl TmuxHandshake {
             .context("Failed to initialize wait channel")?;
 
         Ok(Self { channel })
+    }
+
+    /// Wait until the pane has rendered non-empty, stable content.
+    ///
+    /// The initial wait-for signal is emitted before the shell is exec'd. Polling
+    /// the pane afterwards keeps input out of the PTY while interactive shell
+    /// initialization (including async prompt setup) is still in progress.
+    fn wait_for_stable_pane(pane_id: &str) {
+        let timeout = Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
+        let poll_interval = Duration::from_millis(PANE_READY_POLL_INTERVAL_MS);
+        let readiness = poll_until_stable_pane(timeout, poll_interval, || {
+            Cmd::new("tmux")
+                .args(&["capture-pane", "-p", "-t", pane_id])
+                .run_and_capture_stdout()
+                .inspect_err(|error| {
+                    trace!(pane_id, error = %error, "tmux:handshake pane capture failed");
+                })
+        });
+
+        match readiness {
+            PaneReadiness::Ready(elapsed) => {
+                debug!(
+                    pane_id,
+                    elapsed_ms = elapsed.as_millis(),
+                    "tmux:handshake pane ready"
+                );
+            }
+            PaneReadiness::TimedOut { last_error } => {
+                warn!(
+                    pane_id,
+                    timeout_secs = HANDSHAKE_TIMEOUT_SECS,
+                    last_error = ?last_error,
+                    "tmux:handshake pane readiness timeout; sending command anyway"
+                );
+            }
+        }
     }
 }
 
@@ -181,6 +287,12 @@ impl PaneHandshake for TmuxHandshake {
                 }
             }
         }
+    }
+
+    fn wait_for_shell(self: Box<Self>, pane_id: &str) -> Result<()> {
+        self.wait()?;
+        Self::wait_for_stable_pane(pane_id);
+        Ok(())
     }
 }
 
@@ -295,5 +407,66 @@ impl Drop for UnixPipeHandshake {
     fn drop(&mut self) {
         // Clean up the pipe file if it still exists
         let _ = std::fs::remove_file(&self.pipe_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PaneContentStability, PaneReadiness, poll_until_stable_pane};
+    use anyhow::anyhow;
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    #[test]
+    fn pane_content_must_be_non_empty_and_stable() {
+        let mut stability = PaneContentStability::default();
+
+        assert!(!stability.observe(String::new()));
+        assert!(!stability.observe("loading".to_string()));
+        assert!(!stability.observe("prompt".to_string()));
+        assert!(stability.observe("prompt".to_string()));
+    }
+
+    #[test]
+    fn empty_pane_content_resets_stability() {
+        let mut stability = PaneContentStability::default();
+
+        assert!(!stability.observe("prompt".to_string()));
+        assert!(!stability.observe(String::new()));
+        assert!(!stability.observe("prompt".to_string()));
+        assert!(stability.observe("prompt".to_string()));
+    }
+
+    #[test]
+    fn stable_pane_poll_requires_consecutive_matching_captures() {
+        let mut captures = VecDeque::from([
+            Ok(String::new()),
+            Ok("loading".to_string()),
+            Err(anyhow!("capture failed")),
+            Ok("loading".to_string()),
+            Ok("prompt".to_string()),
+            Ok("prompt".to_string()),
+        ]);
+
+        let readiness = poll_until_stable_pane(Duration::from_secs(1), Duration::ZERO, || {
+            captures.pop_front().expect("capture sequence exhausted")
+        });
+
+        assert!(matches!(readiness, PaneReadiness::Ready(_)));
+        assert!(captures.is_empty());
+    }
+
+    #[test]
+    fn stable_pane_poll_times_out_after_capture_error() {
+        let readiness = poll_until_stable_pane(Duration::ZERO, Duration::ZERO, || {
+            Err(anyhow!("pane exited"))
+        });
+
+        assert_eq!(
+            readiness,
+            PaneReadiness::TimedOut {
+                last_error: Some("pane exited".to_string()),
+            }
+        );
     }
 }

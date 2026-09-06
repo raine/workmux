@@ -683,7 +683,7 @@ pub trait Multiplexer: Send + Sync {
                     )?
                 };
 
-                handshake.wait()?;
+                handshake.wait_for_shell(&spawned_id)?;
 
                 // Inject resume/continue arguments for agent panes when requested
                 if let Some(selected_agent) = resolved.selected_agent.as_mut() {
