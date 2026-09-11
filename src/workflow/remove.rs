@@ -6,7 +6,7 @@ use crate::git;
 use crate::sandbox;
 use tracing::{debug, info};
 
-use super::cleanup::{self, get_worktree_mode};
+use super::cleanup;
 use super::context::WorkflowContext;
 use super::types::RemoveResult;
 
@@ -65,7 +65,8 @@ fn remove_with_hook_output(
 
     // Get worktree path and branch - this also validates that the worktree exists
     // Smart resolution: try handle first, then branch name
-    let (worktree_path, branch_name) = match git::find_worktree(handle) {
+    let workdir = Some(context.execution_dir.as_path());
+    let (worktree_path, branch_name) = match git::find_worktree_in(handle, workdir) {
         Ok(worktree) => worktree,
         Err(e) => {
             if let Some(path) = fallback_worktree_path(handle, context)? {
@@ -95,8 +96,9 @@ fn remove_with_hook_output(
     debug!(handle = actual_handle, branch = branch_name, path = %worktree_path.display(), "remove:worktree resolved");
 
     // Capture metadata before cleanup removes it.
-    let mode = get_worktree_mode(actual_handle);
-    let attachment = git::get_worktree_attachment_in(actual_handle, Some(&context.execution_dir));
+    let mode = git::get_worktree_mode_opt_in(actual_handle, workdir)
+        .unwrap_or(crate::config::MuxMode::Window);
+    let attachment = git::get_worktree_attachment_in(actual_handle, workdir);
 
     // Safety Check: Prevent deleting the main worktree itself, regardless of branch.
     if context.is_main_worktree(&worktree_path) {
@@ -189,4 +191,80 @@ fn remove_with_hook_output(
         branch_removed: branch_name.to_string(),
         cleanup_scheduled,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::multiplexer::{BackendType, create_backend};
+    use crate::test_support;
+
+    #[test]
+    fn remove_uses_context_repository_not_process_cwd() {
+        const TEST_NAME: &str =
+            "workflow::remove::tests::remove_uses_context_repository_not_process_cwd";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo_a = temp.path().join("repo-a");
+            let repo_b = temp.path().join("repo-b");
+            let worktree_a = temp.path().join("worktree-a");
+            let worktree_b = temp.path().join("worktree-b");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::create_dir_all(&repo_b).unwrap();
+            test_support::init_repo(&repo_a);
+            test_support::init_repo(&repo_b);
+
+            for (repo, worktree) in [(&repo_a, &worktree_a), (&repo_b, &worktree_b)] {
+                test_support::run_git(
+                    repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "shared",
+                        worktree.to_str().unwrap(),
+                    ],
+                );
+                test_support::run_git(
+                    repo,
+                    &[
+                        "config",
+                        "--local",
+                        "workmux.worktree.shared.attachment",
+                        "headless",
+                    ],
+                );
+            }
+
+            test_support::run_isolated_test(
+                TEST_NAME,
+                &repo_a,
+                &[
+                    ("WM_TEST_TEMP", temp.path()),
+                    ("XDG_STATE_HOME", temp.path()),
+                ],
+            );
+            return;
+        }
+
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        let repo_a = temp.join("repo-a");
+        let repo_b = temp.join("repo-b");
+        let ctx = WorkflowContext::new_in(
+            &repo_b,
+            Config::default(),
+            create_backend(BackendType::Tmux),
+            None,
+        )
+        .unwrap();
+
+        remove("shared", true, false, &ctx).unwrap();
+
+        assert!(temp.join("worktree-a").exists());
+        assert!(!temp.join("worktree-b").exists());
+        assert!(git::branch_exists_in("shared", Some(&repo_a)).unwrap());
+        assert!(!git::branch_exists_in("shared", Some(&repo_b)).unwrap());
+    }
 }

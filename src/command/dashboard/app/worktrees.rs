@@ -161,6 +161,17 @@ fn run_add_worktree_job(
     }
 }
 
+fn remove_worktree(
+    handle: &str,
+    path: &Path,
+    keep_branch: bool,
+    mux: Arc<dyn Multiplexer>,
+) -> anyhow::Result<workflow::types::RemoveResult> {
+    let (config, config_location) = crate::config::Config::load_with_location_from(path, None)?;
+    let ctx = workflow::WorkflowContext::new_in(path, config, mux, config_location)?;
+    workflow::remove_quiet(handle, true, keep_branch, &ctx)
+}
+
 fn spawn_add_worktree_job(
     job: AddWorktreeJob,
     repo_path: PathBuf,
@@ -434,13 +445,8 @@ impl App {
             .unwrap_or_default()
             .to_string();
 
-        let Ok(ctx) = workflow::WorkflowContext::new(self.config.clone(), self.mux.clone(), None)
-        else {
-            return;
-        };
-
         // force=true because user confirmed via modal
-        match workflow::remove_quiet(&handle, true, keep_branch, &ctx) {
+        match remove_worktree(&handle, path, keep_branch, self.mux.clone()) {
             Ok(result) if result.cleanup_scheduled => {
                 self.status_message = Some((
                     format!("Removal scheduled for '{handle}'"),
@@ -635,7 +641,6 @@ impl App {
         }
 
         let total = paths_to_remove.len();
-        let config = self.config.clone();
         let mux = self.mux.clone();
         let tx = self.event_tx.clone();
 
@@ -646,22 +651,15 @@ impl App {
         });
 
         std::thread::spawn(move || {
-            let Ok(ctx) = workflow::WorkflowContext::new(config, mux, None) else {
-                let _ = tx.send(AppEvent::SweepComplete(Err(
-                    "Failed to create workflow context".to_string(),
-                )));
-                return;
-            };
-
             let mut outcome = SweepOutcome {
                 completed: 0,
                 scheduled: 0,
             };
             let mut failures = 0;
-            for (i, (handle, _path)) in paths_to_remove.iter().enumerate() {
+            for (i, (handle, path)) in paths_to_remove.iter().enumerate() {
                 let _ = tx.send(AppEvent::SweepProgressUpdate(i + 1, total, handle.clone()));
 
-                match workflow::remove_quiet(handle, true, false, &ctx) {
+                match remove_worktree(handle, path, false, mux.clone()) {
                     Ok(result) if result.cleanup_scheduled => outcome.scheduled += 1,
                     Ok(_) => outcome.completed += 1,
                     Err(_) => failures += 1,

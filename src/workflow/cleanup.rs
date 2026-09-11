@@ -528,22 +528,23 @@ fn cleanup_impl(
     }
 
     // Determine if this worktree was created as a session or window
-    let mode = get_worktree_mode(handle);
+    let workdir = Some(context.execution_dir.as_path());
+    let mode = git::get_worktree_mode_opt_in(handle, workdir).unwrap_or(MuxMode::Window);
     let target_name = if mode == MuxMode::Session {
-        git::get_worktree_target_session(handle).unwrap_or_else(|| handle.to_string())
+        git::get_worktree_target_session_in(handle, workdir).unwrap_or_else(|| handle.to_string())
     } else {
-        git::get_worktree_target_window(handle).unwrap_or_else(|| handle.to_string())
+        git::get_worktree_target_window_in(handle, workdir).unwrap_or_else(|| handle.to_string())
     };
     let is_session_mode = mode == MuxMode::Session;
     let parent_session = if is_session_mode {
         None
     } else {
-        git::get_worktree_window_session(handle)
+        git::get_worktree_window_session_in(handle, workdir)
     };
     let window_token = if is_session_mode || !context.mux.supports_window_ownership() {
         None
     } else {
-        git::get_worktree_window_token(handle)
+        git::get_worktree_window_token_in(handle, workdir)
     };
     let kind = crate::multiplexer::handle::mode_label(mode);
 
