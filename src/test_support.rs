@@ -61,7 +61,8 @@ pub fn run_git(repo: &Path, args: &[&str]) {
 /// Run a `jj` command in `repo`, asserting success. Mirrors [`run_git`] for
 /// jj fixtures that need more setup than [`init_jj_repo`]/
 /// [`init_colocated_repo`] provide (an initial commit, a bookmark, ...).
-pub fn run_jj(repo: &Path, args: &[&str]) {
+/// Run a `jj` command in `repo`, asserting success, and return its stdout.
+pub fn run_jj(repo: &Path, args: &[&str]) -> String {
     let mut command = Command::new("jj");
     clear_local_jj_env(&mut command);
     let output = command
@@ -75,6 +76,7 @@ pub fn run_jj(repo: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 pub fn init_repo(dir: &Path) {

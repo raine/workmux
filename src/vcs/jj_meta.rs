@@ -6,12 +6,26 @@
 //! alongside the `.git` directory workmux resolves for a given workdir. jj
 //! has no equivalent "local config" concept scoped the same way, so
 //! `JjMetaStore` instead keeps a single TOML file at
-//! `<jj-common-store-dir>/workmux/metadata.toml`, where `<jj-common-store-dir>`
-//! is the directory containing the *primary* workspace's `.jj/repo` (resolved
-//! via [`JjRepositoryIdentity`], not assumed from a fixed relative path) —
-//! this is the one location shared by every workspace of the same repository,
+//! `<jj-common-store-dir>/.jj/workmux/metadata.toml`, where
+//! `<jj-common-store-dir>` is the *primary* workspace root — the directory
+//! containing the primary workspace's `.jj/repo` (resolved via
+//! [`JjRepositoryIdentity`], not assumed from a fixed relative path). That
+//! root is the one location shared by every workspace of the same repository,
 //! mirroring how git config on the main worktree is shared by every linked
-//! worktree.
+//! worktree, and it is exactly what
+//! [`crate::vcs::jj_backend::JjBackend::get_common_dir_in`] returns — so
+//! `remove_all_at`'s explicit-`common_dir` resolution and the workdir-based
+//! resolution used by `get`/`set` always agree.
+//!
+//! The file lives *inside* `.jj/` rather than at the workspace root, because
+//! jj snapshots the working copy into `@` on nearly every command: a file at
+//! `<root>/workmux/metadata.toml` would be committed into the user's own
+//! history, would make the primary workspace permanently non-empty (so
+//! `is_dirty` would always be true for it), and would show up as untracked in
+//! `git status` for a colocated repo. `.jj/` is jj's own control directory:
+//! it is invisible to jj's working-copy tracking and is gitignored by
+//! `jj git init --colocate`, so nothing workmux writes there is ever picked
+//! up by a snapshot.
 //!
 //! Reads and writes go through `toml_edit` so the file stays hand-editable
 //! and round-trips comments/formatting; writes are guarded by
@@ -56,9 +70,17 @@ fn common_store_dir(identity: &JjRepositoryIdentity) -> Result<PathBuf> {
     Ok(primary_root.to_path_buf())
 }
 
-/// The metadata file path for a given jj common-store directory.
+/// The metadata file path for a given jj common-store directory (the primary
+/// workspace root, i.e. whatever
+/// [`crate::vcs::jj_backend::JjBackend::get_common_dir_in`] returns).
+///
+/// The `.jj` component is what keeps the file out of jj's working-copy
+/// snapshot; see the module docs.
 fn metadata_file_in(common_store_dir: &Path) -> PathBuf {
-    common_store_dir.join("workmux").join("metadata.toml")
+    common_store_dir
+        .join(".jj")
+        .join("workmux")
+        .join("metadata.toml")
 }
 
 /// Resolve the metadata file path for `workdir` (or the current directory)
@@ -284,7 +306,11 @@ mod tests {
         store
             .set("feature", "attachment", "headless", Some(temp.path()))
             .unwrap();
-        let expected = temp.path().join("workmux").join("metadata.toml");
+        let expected = temp
+            .path()
+            .join(".jj")
+            .join("workmux")
+            .join("metadata.toml");
         assert!(
             expected.is_file(),
             "expected {} to exist",
@@ -295,6 +321,65 @@ mod tests {
         assert!(
             content.contains("[worktree.feature]") || content.contains("[worktree.\"feature\"]")
         );
+        // Nothing may be written at the workspace root itself - that is the
+        // tree jj snapshots into `@`.
+        assert!(
+            !temp.path().join("workmux").exists(),
+            "metadata must not land in the snapshotted working tree"
+        );
+    }
+
+    /// The regression this file's location exists to prevent: jj snapshots the
+    /// working copy into `@` on nearly every command, so metadata written at
+    /// the workspace root would be committed into the user's own history and
+    /// would make the primary workspace permanently non-empty.
+    ///
+    /// Asserted with the real `jj` binary, since the whole point is what jj's
+    /// snapshotter does with the file - not where workmux believes it put it.
+    fn metadata_writes_are_invisible_to_jj_snapshot(init_fixture: fn(&Path)) {
+        let temp = tempfile::tempdir().unwrap();
+        init_fixture(temp.path());
+        let store = store();
+        store
+            .set("feature", "attachment", "headless", Some(temp.path()))
+            .unwrap();
+        store
+            .set_branch_base("feature", "main", Some(temp.path()))
+            .unwrap();
+
+        // `jj status`/`jj diff` snapshot the working copy first, so this is
+        // the authoritative check.
+        let diff = crate::test_support::run_jj(temp.path(), &["diff", "-r", "@", "--stat"]);
+        assert!(
+            diff.contains("0 files changed"),
+            "jj snapshotted workmux's metadata into @: {diff}"
+        );
+        let empty = crate::test_support::run_jj(
+            temp.path(),
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                r#"if(empty, "yes", "no")"#,
+            ],
+        );
+        assert_eq!(
+            empty.trim(),
+            "yes",
+            "the primary workspace's @ must stay empty after a metadata write"
+        );
+    }
+
+    #[test]
+    fn metadata_writes_are_invisible_to_jj_snapshot_jj_only() {
+        metadata_writes_are_invisible_to_jj_snapshot(init_jj_repo);
+    }
+
+    #[test]
+    fn metadata_writes_are_invisible_to_jj_snapshot_colocated() {
+        metadata_writes_are_invisible_to_jj_snapshot(init_colocated_repo);
     }
 
     #[test]
