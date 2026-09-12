@@ -405,6 +405,13 @@ impl VcsBackend for JjBackend {
         primary_workspace_root(workdir)
     }
 
+    /// The root of the workspace containing `workdir`, which may be a
+    /// secondary workspace — the jj analog of `git rev-parse --show-toplevel`.
+    fn get_repo_root_in(&self, workdir: Option<&Path>) -> Result<PathBuf> {
+        let dir = resolve_workdir(workdir)?;
+        Ok(JjRepositoryIdentity::discover(&dir)?.workspace_root)
+    }
+
     /// The jj analog of git's "common dir".
     ///
     /// git has a genuinely separate control directory (`.git`) that every

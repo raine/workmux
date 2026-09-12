@@ -45,6 +45,14 @@ pub trait VcsBackend: Send + Sync {
     /// Get the main worktree/workspace root directory (not a linked one).
     fn get_main_worktree_root_in(&self, workdir: Option<&Path>) -> Result<PathBuf>;
 
+    /// Get the root directory of the worktree/workspace *containing*
+    /// `workdir` (or the current directory) — which may be a linked
+    /// worktree/secondary workspace, unlike [`Self::get_main_worktree_root_in`].
+    ///
+    /// This is the VCS-neutral analog of `git rev-parse --show-toplevel`
+    /// (`GitBackend`) / `jj root` (`JjBackend`).
+    fn get_repo_root_in(&self, workdir: Option<&Path>) -> Result<PathBuf>;
+
     /// Get the common repository directory (shared across all worktrees/workspaces).
     fn get_common_dir_in(&self, workdir: Option<&Path>) -> Result<PathBuf>;
 

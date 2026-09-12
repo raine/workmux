@@ -91,11 +91,6 @@ pub fn has_commits_in(workdir: Option<&Path>) -> Result<bool> {
     cmd.run_as_check()
 }
 
-/// Get the root directory of the git repository
-pub fn get_repo_root() -> Result<PathBuf> {
-    get_repo_root_in(None)
-}
-
 /// Get the root directory of a git repository in a specific workdir
 pub fn get_repo_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
     let cmd = Cmd::new("git").args(&["rev-parse", "--show-toplevel"]);

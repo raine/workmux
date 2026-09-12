@@ -128,7 +128,8 @@ fn run_agent(command: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     // Validate git repo early -- sandbox needs git dirs for mounts
-    let worktree_root = crate::git::get_repo_root()
+    let worktree_root = crate::vcs::detect::detect_backend_in(&cwd)
+        .and_then(|backend| backend.get_repo_root_in(None))
         .context(
             "Not inside a git repository. workmux sandbox agent requires a git repo for mounting.",
         )?

@@ -157,11 +157,12 @@ fn stdin_has_data(_stdin: &std::io::Stdin) -> Result<bool> {
 /// Check preconditions for the add command (git repo and multiplexer session).
 /// Returns Ok(()) if all preconditions are met, or an error listing all failures.
 fn check_preconditions(headless: bool) -> Result<()> {
-    let is_git = git::is_git_repo()?;
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let is_repo = crate::vcs::detect::detect_repo_kind_in(&cwd) != crate::vcs::RepoKind::None;
     let mux = create_backend(detect_backend());
     let is_mux_running = headless || mux.is_running()?;
 
-    if is_git && is_mux_running {
+    if is_repo && is_mux_running {
         return Ok(());
     }
 
@@ -170,8 +171,8 @@ fn check_preconditions(headless: bool) -> Result<()> {
     if !is_mux_running {
         errors.push(format!("{} is not running.", mux.name()));
     }
-    if !is_git {
-        errors.push("Current directory is not a git repository.".to_string());
+    if !is_repo {
+        errors.push("Current directory is not a git or jj repository.".to_string());
     }
 
     // Add blank line before suggestions
@@ -180,8 +181,8 @@ fn check_preconditions(headless: bool) -> Result<()> {
     if !is_mux_running {
         errors.push(format!("Please start a {} session first.", mux.name()));
     }
-    if !is_git {
-        errors.push("Please run this command from within a git repository.".to_string());
+    if !is_repo {
+        errors.push("Please run this command from within a git or jj repository.".to_string());
     }
 
     Err(anyhow!(errors.join("\n")))
@@ -472,7 +473,8 @@ pub fn run(
             })?;
 
         // Use worktree root (not cwd) so subdirectory invocation works correctly
-        let source_path = git::get_repo_root()?;
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+        let source_path = crate::vcs::detect::detect_backend_in(&cwd)?.get_repo_root_in(None)?;
         let session = if fork_arg.is_empty() {
             // --fork without value: use most recent
             forker

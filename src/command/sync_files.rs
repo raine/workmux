@@ -58,8 +58,9 @@ pub fn run(all: bool) -> Result<()> {
         paths
     } else {
         // Resolve the worktree root (not CWD, which could be a subdirectory)
-        let worktree_root =
-            git::get_repo_root().context("Failed to determine current worktree root")?;
+        let worktree_root = crate::vcs::detect::detect_backend_in(&cwd)
+            .and_then(|backend| backend.get_repo_root_in(None))
+            .context("Failed to determine current worktree root")?;
 
         if worktree_root == repo_root {
             bail!(

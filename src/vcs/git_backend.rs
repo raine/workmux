@@ -27,6 +27,10 @@ impl VcsBackend for GitBackend {
         git::get_main_worktree_root_in(workdir)
     }
 
+    fn get_repo_root_in(&self, workdir: Option<&Path>) -> Result<std::path::PathBuf> {
+        git::get_repo_root_in(workdir)
+    }
+
     fn get_common_dir_in(&self, workdir: Option<&Path>) -> Result<std::path::PathBuf> {
         git::get_git_common_dir_in(workdir)
     }
