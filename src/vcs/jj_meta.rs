@@ -378,7 +378,12 @@ mod tests {
         // Pre-existing metadata at the destination handle, under keys that
         // are NOT present in the source handle's table.
         store
-            .set("new-handle", "window-token", "preexisting-token", Some(temp.path()))
+            .set(
+                "new-handle",
+                "window-token",
+                "preexisting-token",
+                Some(temp.path()),
+            )
             .unwrap();
         store
             .set("new-handle", "mode", "session", Some(temp.path()))
