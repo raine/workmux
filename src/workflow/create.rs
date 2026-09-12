@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 
 use crate::config::MuxMode;
@@ -534,6 +534,17 @@ fn create_impl(
             )?;
         }
         if options.mode == MuxMode::Window && context.mux.supports_window_ownership() {
+            if context.vcs.name() != "git" {
+                bail!(
+                    "workmux does not yet support window-token tracking for session-mode \
+                     attachment on '{}' repositories; this metadata write is git-specific \
+                     and would silently land in the wrong store on a colocated jj repo. \
+                     Use a git repository, or a mux mode that does not require window \
+                     ownership tracking, for '{}'.",
+                    context.vcs.name(),
+                    current_handle
+                );
+            }
             options.window_token = Some(git::ensure_worktree_window_token_in(
                 &current_handle,
                 Some(&context.execution_dir),
