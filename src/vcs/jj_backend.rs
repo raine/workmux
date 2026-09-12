@@ -189,12 +189,71 @@ fn split_remote_ref(name: &str) -> Option<(&str, &str)> {
 }
 
 /// Count the revisions matched by `revset`.
+///
+/// This deliberately does *not* pass `--limit`: its callers
+/// (`ahead`/`behind`) need the real count. Existence checks must use
+/// [`revset_is_nonempty`] instead, which stops after one revision.
 fn count_revs(workdir: Option<&Path>, revset: &str) -> Result<usize> {
     let output = query(
         workdir,
         &["log", "--no-graph", "-r", revset, "-T", COUNT_TEMPLATE],
     )?;
     Ok(output.lines().filter(|line| !line.is_empty()).count())
+}
+
+/// Whether `revset` matches at least one revision.
+///
+/// `jj log -n 1` (`--limit 1`) stops after the first match, so this is O(1)
+/// output for a question that would otherwise stream one line per commit in
+/// the repository — the analog of `git rev-parse --verify HEAD` rather than
+/// `git rev-list | wc -l`. (`--limit` is confirmed present in jj 0.44.0 and
+/// works with `-r 'all()'`.) Note that an *empty* template (`-T ''`) emits
+/// nothing at all even for a match, so [`COUNT_TEMPLATE`] is used and the
+/// test is "stdout is non-empty".
+fn revset_is_nonempty(workdir: Option<&Path>, revset: &str) -> Result<bool> {
+    let output = query(
+        workdir,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            revset,
+            "-T",
+            COUNT_TEMPLATE,
+            "--limit",
+            "1",
+        ],
+    )?;
+    Ok(output.lines().any(|line| !line.is_empty()))
+}
+
+/// The jj 0.44.0 error prefix for a workspace whose root path *is* recorded
+/// but cannot be resolved on disk — i.e. the directory was deleted or moved.
+const STALE_ROOT_ERROR: &str = "Cannot resolve absolute workspace path";
+
+/// Whether the workspace named `name` has a recorded root that no longer
+/// resolves on disk (deleted or moved), as opposed to no recorded root at
+/// all (a pre-0.38.0 workspace) — both of which render an empty `root` in
+/// `jj workspace list` templates.
+///
+/// `jj workspace root --name <name>` is the discriminator: it reports
+/// "Cannot resolve absolute workspace path: …" for the stale case and
+/// "Workspace has no recorded path: …" for the unrecorded case (both
+/// verified against jj 0.44.0). Anything else — success, an unknown
+/// workspace, or an unrecognised failure — is reported as *not* stale, so an
+/// unexpected jj message can never cause a workspace to be forgotten.
+fn workspace_root_is_stale(common_dir: &Path, name: &str) -> Result<bool> {
+    let mut command = jj(Some(common_dir))?;
+    command
+        .arg("--ignore-working-copy")
+        .args(["workspace", "root", "--name", name]);
+    let output = command
+        .output()
+        .with_context(|| format!("Failed to execute jj workspace root --name {name}"))?;
+    if output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stderr).contains(STALE_ROOT_ERROR))
 }
 
 /// Split template output into records and then fields, dropping the trailing
@@ -370,9 +429,12 @@ impl VcsBackend for JjBackend {
     /// empty, undescribed working-copy commit on top of it. The analog is
     /// therefore "some revision exists that is neither `root()` nor an
     /// empty, undescribed commit".
+    ///
+    /// The check is existence-only, so it runs with `--limit 1` rather than
+    /// enumerating (and printing a line for) every commit in the repository.
     fn has_commits_in(&self, workdir: Option<&Path>) -> Result<bool> {
         let revset = r#"(all() ~ root()) ~ (empty() & description(exact:""))"#;
-        Ok(count_revs(workdir, revset)? > 0)
+        revset_is_nonempty(workdir, revset)
     }
 
     /// Create a jj workspace at `opts.path`, named `opts.name_or_branch`.
@@ -546,17 +608,68 @@ impl VcsBackend for JjBackend {
         Ok(())
     }
 
-    /// No-op: jj has nothing to prune.
+    /// Forget workspace registrations whose recorded root no longer exists.
     ///
-    /// `git worktree prune` exists because git keeps per-worktree admin
-    /// directories under `$GIT_COMMON_DIR/worktrees/<name>` that outlive a
-    /// deleted worktree directory. jj keeps no such out-of-tree admin
-    /// directory — a workspace's entire `.jj` lives inside the workspace
-    /// itself, so deleting the directory leaves nothing behind on disk — and
-    /// jj 0.44.0 has no `jj workspace prune` subcommand (only `add`,
-    /// `forget`, `list`, `rename`, `root`, `update-stale`). Deregistration is
-    /// `jj workspace forget`, which `remove_workspace_at` already performs.
-    fn prune_workspaces_in(&self, _common_dir: &Path) -> Result<()> {
+    /// jj has no `jj workspace prune` subcommand (0.44.0 offers only `add`,
+    /// `forget`, `list`, `rename`, `root`, `update-stale`), but it *does*
+    /// have the state `git worktree prune` exists to clean. Nothing is left
+    /// behind on disk — a workspace's `.jj` lives inside the workspace
+    /// directory — but the **repo keeps the workspace registration**.
+    /// Verified against jj 0.44.0: after `rm -rf` of a secondary workspace
+    /// directory, `jj workspace list` still reports the workspace (with an
+    /// empty `root`, since `WorkspaceRef.root()` is `None` when the recorded
+    /// path cannot be resolved) and `jj workspace add <path> --name <ws>`
+    /// fails with `Workspace named '<ws>' already exists`. Combined with
+    /// [`JjBackend::list_workspaces_in`] skipping empty-root entries, workmux
+    /// would consider such a workspace gone while its name stayed
+    /// permanently unusable.
+    ///
+    /// Discriminator: an entry whose templated `root` is empty is *either*
+    /// stale *or* merely unrecorded (workspaces created before jj 0.38.0 did
+    /// not record root paths), and those must not be treated alike. jj
+    /// distinguishes them in `jj workspace root --name <ws>`, which fails
+    /// with `Cannot resolve absolute workspace path: …` for a recorded but
+    /// missing root and `Workspace has no recorded path: …` for an
+    /// unrecorded one. Only the former is pruned; an unrecorded root says
+    /// nothing about whether the directory still exists, so it is left
+    /// alone.
+    ///
+    /// As with `git worktree prune`, a *moved* workspace is also pruned:
+    /// jj records the root relative to `.jj/repo` and never re-records it
+    /// (see [`JjBackend::move_workspace`]), so a moved workspace is
+    /// indistinguishable from a deleted one and is already unusable.
+    /// Forgetting it abandons its working-copy commit, exactly as git
+    /// discards a moved worktree's admin dir.
+    ///
+    /// Entries whose root resolves are never touched, which is what keeps
+    /// the primary workspace (the directory containing the real `.jj/repo`,
+    /// and therefore always resolvable) out of scope.
+    fn prune_workspaces_in(&self, common_dir: &Path) -> Result<()> {
+        let output = query(
+            Some(common_dir),
+            &["workspace", "list", "-T", WORKSPACE_LIST_TEMPLATE],
+        )?;
+
+        for fields in records(&output) {
+            let Some(name) = fields.first() else { continue };
+            // A resolvable root means the workspace directory is still
+            // there: nothing to prune, and this is what protects the
+            // primary workspace.
+            if fields.get(1).is_some_and(|root| !root.is_empty()) {
+                continue;
+            }
+            if !workspace_root_is_stale(common_dir, name)? {
+                continue;
+            }
+
+            let mut command = jj(Some(common_dir))?;
+            command
+                .arg("--ignore-working-copy")
+                .args(["workspace", "forget", name]);
+            capture(command, &format!("jj workspace forget {name}"))
+                .with_context(|| format!("Failed to prune stale jj workspace '{name}'"))?;
+        }
+
         Ok(())
     }
 
@@ -1042,8 +1155,108 @@ mod tests {
                 .any(|entry| entry.name.as_deref() == Some("feature"))
         );
 
-        // Prune is a no-op but must not error.
+        // Prune must be a no-op (and must not error) when every remaining
+        // workspace's root resolves.
+        let before = backend.list_workspaces_in(Some(temp)).unwrap();
         backend.prune_workspaces_in(&common_dir).unwrap();
+        assert_eq!(backend.list_workspaces_in(Some(temp)).unwrap(), before);
+    }
+
+    /// The exact scenario `git worktree prune` exists for: a secondary
+    /// workspace's directory is deleted out from under jj, leaving a
+    /// registration that blocks reusing the name.
+    #[test]
+    fn prune_forgets_workspaces_whose_directory_was_deleted() {
+        let temp = jj_only_fixture();
+        let backend = JjBackend;
+        let workspace_path = temp.path().join("ws1");
+        let opts = CreateWorkspaceOptions {
+            path: workspace_path.clone(),
+            name_or_branch: "ws1".to_string(),
+            create_branch: false,
+            base: None,
+            track_upstream: false,
+        };
+        backend
+            .create_workspace_in(&opts, Some(temp.path()))
+            .unwrap();
+
+        // Delete the directory without telling jj: the registration survives.
+        std::fs::remove_dir_all(&workspace_path).unwrap();
+        let listed = jj_in(
+            temp.path(),
+            &[
+                "workspace",
+                "list",
+                "-T",
+                r#"name ++ "|" ++ if(root, root.absolute(), "<none>") ++ "\n""#,
+            ],
+        );
+        assert!(
+            listed.contains("ws1|<none>"),
+            "stale workspace should still be registered with an unresolvable root: {listed}"
+        );
+        // ...and `list_workspaces_in` therefore hides it, while the name is
+        // unusable.
+        assert!(
+            !backend
+                .list_workspaces_in(Some(temp.path()))
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name.as_deref() == Some("ws1"))
+        );
+        assert!(
+            backend
+                .create_workspace_in(&opts, Some(temp.path()))
+                .is_err(),
+            "re-adding at the same name should fail before pruning"
+        );
+
+        let common_dir = backend.get_common_dir_in(Some(temp.path())).unwrap();
+        backend.prune_workspaces_in(&common_dir).unwrap();
+
+        // The registration is gone, and the name is usable again.
+        let after = jj_in(temp.path(), &["workspace", "list", "-T", r#"name ++ "\n""#]);
+        assert!(
+            !after.lines().any(|line| line == "ws1"),
+            "stale workspace should have been forgotten: {after}"
+        );
+        backend
+            .create_workspace_in(&opts, Some(temp.path()))
+            .expect("workspace name should be reusable after pruning");
+        assert!(
+            backend
+                .list_workspaces_in(Some(temp.path()))
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name.as_deref() == Some("ws1"))
+        );
+    }
+
+    #[test]
+    fn prune_keeps_live_workspaces_and_the_primary_workspace() {
+        let temp = jj_only_fixture();
+        let backend = JjBackend;
+        backend
+            .create_workspace_in(
+                &CreateWorkspaceOptions {
+                    path: temp.path().join("keep"),
+                    name_or_branch: "keep".to_string(),
+                    create_branch: false,
+                    base: None,
+                    track_upstream: false,
+                },
+                Some(temp.path()),
+            )
+            .unwrap();
+
+        let common_dir = backend.get_common_dir_in(Some(temp.path())).unwrap();
+        backend.prune_workspaces_in(&common_dir).unwrap();
+
+        let names = jj_in(temp.path(), &["workspace", "list", "-T", r#"name ++ "\n""#]);
+        let mut names: Vec<&str> = names.lines().collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["default", "keep"]);
     }
 
     #[test]
