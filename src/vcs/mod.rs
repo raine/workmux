@@ -9,6 +9,8 @@
 
 pub mod detect;
 pub mod git_backend;
+pub mod jj_security;
+pub mod meta_lock;
 pub mod types;
 
 use anyhow::Result;
