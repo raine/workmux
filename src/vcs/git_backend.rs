@@ -180,6 +180,14 @@ impl VcsBackend for GitBackend {
         let _ = workdir;
         git::fetch_prune()
     }
+
+    fn get_unmerged_branches_in(
+        &self,
+        workdir: Option<&Path>,
+        base_commit: &str,
+    ) -> Result<Option<std::collections::HashSet<String>>> {
+        Ok(Some(git::get_unmerged_branches_in(workdir, base_commit)?))
+    }
 }
 
 /// [`WorkmuxMetaStore`] implementation backed by git config, via the

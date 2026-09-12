@@ -16,6 +16,7 @@ pub mod meta_lock;
 pub mod types;
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
@@ -134,6 +135,23 @@ pub trait VcsBackend: Send + Sync {
     /// No jj analog in v1 — default to no-op, overridden by `GitBackend`.
     fn fetch_prune_in(&self, _workdir: Option<&Path>) -> Result<()> {
         Ok(())
+    }
+
+    /// Get the set of local branches/bookmarks that have commits not
+    /// reachable from `base_commit`, used to warn before removing a branch
+    /// with unmerged work.
+    ///
+    /// Returns `Ok(None)` when this backend cannot determine unmerged
+    /// status — the default, and left as-is by `JjBackend` (no jj analog in
+    /// v1). Callers must treat `None` as "protection unavailable" and warn
+    /// the user explicitly rather than silently skipping the check.
+    /// `GitBackend` overrides this to return `Ok(Some(..))`.
+    fn get_unmerged_branches_in(
+        &self,
+        _workdir: Option<&Path>,
+        _base_commit: &str,
+    ) -> Result<Option<HashSet<String>>> {
+        Ok(None)
     }
 }
 

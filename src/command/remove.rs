@@ -134,6 +134,10 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
     let mut uncommitted: Vec<String> = Vec::new();
     let mut unmerged: Vec<(String, String, String)> = Vec::new(); // (handle, branch, base)
     let mut safe: Vec<String> = Vec::new();
+    // Tracks whether we've already warned that unmerged-commit protection
+    // is unavailable, so repeated candidates in this run don't each print
+    // the same line.
+    let mut warned_unmerged_unavailable = false;
 
     for (handle, path, branch) in candidates {
         // Check uncommitted (blocking).
@@ -161,7 +165,13 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
         }
 
         // Check unmerged (promptable), only if we're deleting the branch
-        if !keep_branch && let Some(base) = is_unmerged(context.vcs.as_ref(), &branch)? {
+        if !keep_branch
+            && let Some(base) = is_unmerged(
+                context.vcs.as_ref(),
+                &branch,
+                &mut warned_unmerged_unavailable,
+            )?
+        {
             unmerged.push((handle, branch, base));
             continue;
         }
@@ -216,7 +226,17 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 }
 
 /// Check if a branch has unmerged commits. Returns Some(base) if unmerged, None otherwise.
-fn is_unmerged(vcs: &dyn VcsBackend, branch: &str) -> Result<Option<String>> {
+///
+/// `warned_unmerged_unavailable` is set to `true` (and a warning printed)
+/// the first time the backend reports it cannot determine unmerged status
+/// (see [`VcsBackend::get_unmerged_branches_in`]); later calls in the same
+/// run with the flag already set skip the warning to avoid repeating it
+/// once per candidate.
+fn is_unmerged(
+    vcs: &dyn VcsBackend,
+    branch: &str,
+    warned_unmerged_unavailable: &mut bool,
+) -> Result<Option<String>> {
     let main_branch = vcs
         .get_default_branch_in(None)
         .unwrap_or_else(|_| "main".to_string());
@@ -239,23 +259,31 @@ fn is_unmerged(vcs: &dyn VcsBackend, branch: &str) -> Result<Option<String>> {
         }
     };
 
-    // `get_unmerged_branches` (computing which local branches have commits
-    // not reachable from `base_commit`) has no VcsBackend equivalent and no
-    // jj analog in v1. This is a read-only, advisory pre-removal
-    // confirmation (it only decides whether to show a "are you sure"
-    // prompt) rather than a write, and the actual branch/bookmark deletion
-    // goes through `VcsBackend::delete_branch_in` regardless of its result
-    // — so, unlike Task 6's jj-unsafe *writes*, skipping it for jj degrades
-    // to "no unmerged-commit warning" rather than silent data loss.
-    if vcs.name() != "git" {
-        return Ok(None);
-    }
-
-    let unmerged_branches = git::get_unmerged_branches(&base_commit)?;
-    if unmerged_branches.contains(branch) {
-        Ok(Some(base))
-    } else {
-        Ok(None)
+    // `get_unmerged_branches_in` (computing which local branches have
+    // commits not reachable from `base_commit`) routes through
+    // `VcsBackend::get_unmerged_branches_in`, whose default (used by
+    // `JjBackend`, no jj analog in v1) returns `Ok(None)` meaning "cannot
+    // determine". Callers must not treat that silently: emit an explicit
+    // warning and proceed, since the actual branch/bookmark deletion goes
+    // through `VcsBackend::delete_branch_in` regardless.
+    match vcs.get_unmerged_branches_in(None, &base_commit)? {
+        Some(unmerged_branches) => {
+            if unmerged_branches.contains(branch) {
+                Ok(Some(base))
+            } else {
+                Ok(None)
+            }
+        }
+        None => {
+            if !*warned_unmerged_unavailable {
+                eprintln!(
+                    "Unmerged-commit protection is unavailable for jj repositories; \
+                     proceeding without checking for unmerged commits."
+                );
+                *warned_unmerged_unavailable = true;
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -428,6 +456,10 @@ fn collect_bulk_removal_plan(
         to_remove: Vec::new(),
         skipped: Vec::new(),
     };
+    // Tracks whether we've already warned that unmerged-commit protection
+    // is unavailable, so repeated workspaces in this run don't each print
+    // the same line.
+    let mut warned_unmerged_unavailable = false;
 
     for entry in worktrees {
         let path = entry.path;
@@ -455,11 +487,14 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        // `get_unmerged_branches` has no VcsBackend equivalent / jj analog
-        // (see `is_unmerged`'s doc comment for the full reasoning): skip the
-        // unmerged-commit skip-check for non-git backends rather than
-        // computing a base/merge-base that would go unused.
-        if mode.allow_unmerged_skip() && !force && !keep_branch && vcs.name() == "git" {
+        // `get_unmerged_branches_in` routes through
+        // `VcsBackend::get_unmerged_branches_in` (see `is_unmerged`'s doc
+        // comment for the full reasoning); when the backend can't
+        // determine unmerged status (`Ok(None)`, the default `JjBackend`
+        // uses — no jj analog in v1) warn once and skip the unmerged-commit
+        // skip-check rather than computing a base/merge-base that would go
+        // unused.
+        if mode.allow_unmerged_skip() && !force && !keep_branch {
             let base = vcs
                 .meta()
                 .get_branch_base(&branch, None)
@@ -467,14 +502,28 @@ fn collect_bulk_removal_plan(
             let merge_base = vcs
                 .get_merge_base_in(None, &base)
                 .context("Cannot establish the merge base for bulk removal")?;
-            let unmerged_branches = git::get_unmerged_branches(&merge_base)
-                .context("Cannot establish merged branches for bulk removal")?;
-            if unmerged_branches.contains(&branch) {
-                plan.skipped.push(BulkSkippedWorktree {
-                    branch,
-                    reason: BulkSkipReason::Unmerged,
-                });
-                continue;
+            match vcs
+                .get_unmerged_branches_in(None, &merge_base)
+                .context("Cannot establish merged branches for bulk removal")?
+            {
+                Some(unmerged_branches) => {
+                    if unmerged_branches.contains(&branch) {
+                        plan.skipped.push(BulkSkippedWorktree {
+                            branch,
+                            reason: BulkSkipReason::Unmerged,
+                        });
+                        continue;
+                    }
+                }
+                None => {
+                    if !warned_unmerged_unavailable {
+                        eprintln!(
+                            "Unmerged-commit protection is unavailable for jj repositories; \
+                             proceeding without checking for unmerged commits."
+                        );
+                        warned_unmerged_unavailable = true;
+                    }
+                }
             }
         }
 
@@ -688,8 +737,7 @@ mod tests {
     /// `git::get_merge_base` / `git::get_unmerged_branches` calls) did.
     #[test]
     fn is_unmerged_matches_git_semantics_for_merged_and_unmerged_branches() {
-        const TEST_NAME: &str =
-            "command::remove::tests::is_unmerged_matches_git_semantics_for_merged_and_unmerged_branches";
+        const TEST_NAME: &str = "command::remove::tests::is_unmerged_matches_git_semantics_for_merged_and_unmerged_branches";
         if !test_support::is_isolated_child(TEST_NAME) {
             let temp = tempfile::tempdir().unwrap();
             let repo = temp.path().join("repo");
@@ -714,19 +762,194 @@ mod tests {
         println!("{}", test_support::ISOLATED_TEST_CANARY);
 
         let backend = GitBackend;
+        let mut warned = false;
 
         assert_eq!(
-            is_unmerged(&backend, "merged-branch").unwrap(),
+            is_unmerged(&backend, "merged-branch", &mut warned).unwrap(),
             None,
             "a branch with no commits ahead of its base must not be reported as unmerged"
         );
 
-        let unmerged = is_unmerged(&backend, "feature").unwrap();
+        let unmerged = is_unmerged(&backend, "feature", &mut warned).unwrap();
         assert_eq!(
             unmerged,
             Some("main".to_string()),
             "a branch with commits not reachable from its base must be reported unmerged, \
              with the base branch it was compared against"
         );
+        assert!(
+            !warned,
+            "GitBackend can determine unmerged status, so the unavailability warning must not fire"
+        );
+    }
+
+    /// A backend that cannot determine unmerged status (mirroring
+    /// `JjBackend`'s default no-op) must make `is_unmerged` return `None`
+    /// (never block/skip removal) and print the "unavailable" warning
+    /// exactly once, even when checked repeatedly in one run.
+    #[test]
+    fn is_unmerged_warns_once_when_backend_cannot_determine_unmerged_status() {
+        struct NoOpMetaStore;
+
+        impl crate::vcs::WorkmuxMetaStore for NoOpMetaStore {
+            fn get(
+                &self,
+                _handle: &str,
+                _key: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Option<String> {
+                None
+            }
+            fn set(
+                &self,
+                _handle: &str,
+                _key: &str,
+                _value: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn remove_all_at(&self, _handle: &str, _common_dir: &std::path::Path) -> Result<()> {
+                Ok(())
+            }
+            fn migrate(
+                &self,
+                _old_handle: &str,
+                _new_handle: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn get_branch_base(
+                &self,
+                _branch: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Option<String> {
+                None
+            }
+            fn set_branch_base(
+                &self,
+                _branch: &str,
+                _base: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        struct NoUnmergedSupport;
+
+        impl VcsBackend for NoUnmergedSupport {
+            fn name(&self) -> &'static str {
+                "no-unmerged-support"
+            }
+            fn is_repo_in(&self, _workdir: Option<&std::path::Path>) -> Result<bool> {
+                Ok(true)
+            }
+            fn get_main_worktree_root_in(
+                &self,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<PathBuf> {
+                unimplemented!()
+            }
+            fn get_repo_root_in(&self, _workdir: Option<&std::path::Path>) -> Result<PathBuf> {
+                unimplemented!()
+            }
+            fn get_common_dir_in(&self, _workdir: Option<&std::path::Path>) -> Result<PathBuf> {
+                unimplemented!()
+            }
+            fn has_commits_in(&self, _workdir: Option<&std::path::Path>) -> Result<bool> {
+                unimplemented!()
+            }
+            fn create_workspace_in(
+                &self,
+                _opts: &crate::vcs::CreateWorkspaceOptions,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_workspaces_in(
+                &self,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<Vec<crate::vcs::WorkspaceEntry>> {
+                unimplemented!()
+            }
+            fn move_workspace(
+                &self,
+                _old_path: &std::path::Path,
+                _new_path: &std::path::Path,
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn remove_workspace_at(
+                &self,
+                _handle_or_name: &str,
+                _common_dir: &std::path::Path,
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn prune_workspaces_in(&self, _common_dir: &std::path::Path) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_default_branch_in(&self, _workdir: Option<&std::path::Path>) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn branch_exists_in(
+                &self,
+                _name: &str,
+                _workdir: Option<&std::path::Path>,
+            ) -> Result<bool> {
+                unimplemented!()
+            }
+            fn get_current_branch_in(
+                &self,
+                _workdir: &std::path::Path,
+            ) -> Result<Option<String>> {
+                unimplemented!()
+            }
+            fn delete_branch_in(
+                &self,
+                _name: &str,
+                _force: bool,
+                _common_dir: &std::path::Path,
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_merge_base_in(
+                &self,
+                _workdir: Option<&std::path::Path>,
+                _base: &str,
+            ) -> Result<String> {
+                Ok("basecommit".to_string())
+            }
+            fn get_status(
+                &self,
+                _workspace_path: &std::path::Path,
+                _main_branch: Option<&str>,
+            ) -> Result<crate::vcs::VcsStatus> {
+                unimplemented!()
+            }
+            fn meta(&self) -> &dyn crate::vcs::WorkmuxMetaStore {
+                &NoOpMetaStore
+            }
+        }
+
+        let backend = NoUnmergedSupport;
+        let mut warned = false;
+
+        let first = is_unmerged(&backend, "feature", &mut warned).unwrap();
+        assert_eq!(
+            first, None,
+            "when unmerged status can't be determined, is_unmerged must not block removal"
+        );
+        assert!(
+            warned,
+            "the unavailability warning must fire the first time it's hit"
+        );
+
+        // A second check in the same run must not re-warn (the flag stays set).
+        let second = is_unmerged(&backend, "other", &mut warned).unwrap();
+        assert_eq!(second, None);
+        assert!(warned);
     }
 }
