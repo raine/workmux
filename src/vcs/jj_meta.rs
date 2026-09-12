@@ -177,9 +177,17 @@ impl WorkmuxMetaStore for JjMetaStore {
         let path = metadata_path_for_workdir(workdir)?;
         with_locked_document(&path, |doc| {
             if let Some(worktree) = doc.get_mut("worktree").and_then(Item::as_table_mut)
-                && let Some(old_table) = worktree.remove(old_handle)
+                && let Some(old_item) = worktree.remove(old_handle)
+                && let Ok(old_table) = old_item.into_table()
             {
-                worktree.insert(new_handle, old_table);
+                // Match git's `migrate_worktree_meta` semantics: copy/overwrite
+                // only the keys present in `old_handle` into `new_handle`,
+                // leaving any pre-existing `new_handle` keys not present in
+                // `old_handle` untouched (no wholesale table replacement).
+                let new_table = ensure_subtable(worktree, new_handle);
+                for (key, value) in old_table.iter() {
+                    new_table.insert(key, value.clone());
+                }
             }
             Ok(())
         })
@@ -277,10 +285,16 @@ mod tests {
             .set("feature", "attachment", "headless", Some(temp.path()))
             .unwrap();
         let expected = temp.path().join("workmux").join("metadata.toml");
-        assert!(expected.is_file(), "expected {} to exist", expected.display());
+        assert!(
+            expected.is_file(),
+            "expected {} to exist",
+            expected.display()
+        );
         let content = std::fs::read_to_string(&expected).unwrap();
         assert!(content.contains("schema_version"));
-        assert!(content.contains("[worktree.feature]") || content.contains("[worktree.\"feature\"]"));
+        assert!(
+            content.contains("[worktree.feature]") || content.contains("[worktree.\"feature\"]")
+        );
     }
 
     #[test]
@@ -299,7 +313,10 @@ mod tests {
         let common_dir = common_store_dir(&identity).unwrap();
         store.remove_all_at("feature-a", &common_dir).unwrap();
 
-        assert_eq!(store.get("feature-a", "attachment", Some(temp.path())), None);
+        assert_eq!(
+            store.get("feature-a", "attachment", Some(temp.path())),
+            None
+        );
         assert_eq!(
             store.get("feature-b", "attachment", Some(temp.path())),
             Some("multiplexer".to_string())
@@ -335,7 +352,10 @@ mod tests {
             .migrate("old-handle", "new-handle", Some(temp.path()))
             .unwrap();
 
-        assert_eq!(store.get("old-handle", "attachment", Some(temp.path())), None);
+        assert_eq!(
+            store.get("old-handle", "attachment", Some(temp.path())),
+            None
+        );
         assert_eq!(
             store.get("new-handle", "attachment", Some(temp.path())),
             Some("headless".to_string())
@@ -351,6 +371,56 @@ mod tests {
     }
 
     #[test]
+    fn migrate_merges_into_existing_new_handle_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        init_jj_repo(temp.path());
+        let store = store();
+        // Pre-existing metadata at the destination handle, under keys that
+        // are NOT present in the source handle's table.
+        store
+            .set("new-handle", "window-token", "preexisting-token", Some(temp.path()))
+            .unwrap();
+        store
+            .set("new-handle", "mode", "session", Some(temp.path()))
+            .unwrap();
+        // Source handle has an overlapping key ("mode") and a non-overlapping
+        // key ("attachment").
+        store
+            .set("old-handle", "attachment", "headless", Some(temp.path()))
+            .unwrap();
+        store
+            .set("old-handle", "mode", "detached", Some(temp.path()))
+            .unwrap();
+
+        store
+            .migrate("old-handle", "new-handle", Some(temp.path()))
+            .unwrap();
+
+        // old-handle is gone.
+        assert_eq!(
+            store.get("old-handle", "attachment", Some(temp.path())),
+            None
+        );
+        assert_eq!(store.get("old-handle", "mode", Some(temp.path())), None);
+
+        // new-handle has old-handle's keys, with "mode" overwritten by
+        // old-handle's value...
+        assert_eq!(
+            store.get("new-handle", "attachment", Some(temp.path())),
+            Some("headless".to_string())
+        );
+        assert_eq!(
+            store.get("new-handle", "mode", Some(temp.path())),
+            Some("detached".to_string())
+        );
+        // ...but the pre-existing new-handle-only key is untouched.
+        assert_eq!(
+            store.get("new-handle", "window-token", Some(temp.path())),
+            Some("preexisting-token".to_string())
+        );
+    }
+
+    #[test]
     fn migrate_same_handle_is_noop() {
         let temp = tempfile::tempdir().unwrap();
         init_jj_repo(temp.path());
@@ -358,7 +428,9 @@ mod tests {
         store
             .set("handle", "attachment", "headless", Some(temp.path()))
             .unwrap();
-        store.migrate("handle", "handle", Some(temp.path())).unwrap();
+        store
+            .migrate("handle", "handle", Some(temp.path()))
+            .unwrap();
         assert_eq!(
             store.get("handle", "attachment", Some(temp.path())),
             Some("headless".to_string())
