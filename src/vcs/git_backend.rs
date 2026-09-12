@@ -1,7 +1,7 @@
 //! `GitBackend`: a [`crate::vcs::VcsBackend`] implementation that delegates
 //! to the existing `crate::git::*` free functions.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 use crate::cmd::Cmd;
@@ -158,9 +158,8 @@ impl VcsBackend for GitBackend {
         // `.git/config.lock`, so the whole creation sequence has to be
         // serialized across processes or parallel `workmux add` runs fail
         // with "could not lock config file".
-        let lock = git::GitConfigLock::acquire(common_dir)
-            .context("Failed to acquire git config lock")?;
-        Ok(Box::new(lock))
+        // The caller adds the user-facing context, so don't duplicate it here.
+        Ok(Box::new(git::GitConfigLock::acquire(common_dir)?))
     }
 
     fn get_gone_branches_in(&self, common_dir: &Path) -> Result<Vec<String>> {
