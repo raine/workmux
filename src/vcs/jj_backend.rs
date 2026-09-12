@@ -474,6 +474,22 @@ impl VcsBackend for JjBackend {
             base_dir.join(&opts.path)
         };
 
+        // Unlike `git worktree add`, `jj workspace add <path>` does not create
+        // missing parent directories itself (verified against jj 0.44.0: it
+        // fails with "Cannot access <path>: No such file or directory" when
+        // the parent is missing) - workmux's default worktree layout
+        // (`<project>__worktrees/<handle>`) is a fresh sibling directory that
+        // never exists yet on a repo's first `add`, so this must be created
+        // explicitly to match git's behavior.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create parent directory '{}' for jj workspace",
+                    parent.display()
+                )
+            })?;
+        }
+
         let mut command = jj(Some(&base_dir))?;
         command
             .args(["workspace", "add", "--name", &opts.name_or_branch])

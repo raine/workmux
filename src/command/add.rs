@@ -188,6 +188,14 @@ fn check_preconditions(headless: bool) -> Result<()> {
     Err(anyhow!(errors.join("\n")))
 }
 
+/// Whether the process's current directory is inside a git-backed repo, as
+/// opposed to jj or no repo at all. Used to gate the remote-branch-detection
+/// call sites below, which have no jj analog yet.
+fn current_dir_is_git_backend() -> Result<bool> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    Ok(crate::vcs::detect::detect_backend_in(&cwd)?.name() == "git")
+}
+
 /// Resolve a named layout by replacing `config.panes` with the layout's panes.
 fn resolve_layout(config: &mut config::Config, layout_name: &str) -> Result<()> {
     let layouts = config.layouts.as_ref().ok_or_else(|| {
@@ -744,6 +752,16 @@ pub fn run(
     let (remote_branch, template_base_name) = if let Some(ref pr_remote) = remote_branch_for_pr {
         (Some(pr_remote.clone()), branch_name.to_string())
     } else if auto_name {
+        (None, branch_name.to_string())
+    } else if !current_dir_is_git_backend()? {
+        // `detect_remote_branch`/`detect_remote_branch_dry_run` both shell
+        // out to `git::list_remotes()` (implicit cwd) unconditionally, which
+        // errors outright in a jj-only repo (no `.git` at all, even
+        // colocated jj never puts one at a secondary workspace's root) -
+        // jj has no "remote/branch" bookmark-detection analog in v1, so
+        // treat every branch name as local here, matching --headless's
+        // existing "treats branch names as local" behavior for slash-free
+        // names (see `run_headless` above).
         (None, branch_name.to_string())
     } else if dry_run {
         detect_remote_branch_dry_run(branch_name, cli_base)?

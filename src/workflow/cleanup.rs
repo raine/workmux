@@ -18,6 +18,49 @@ use super::types::{CleanupResult, DeferredCleanup, SourceTarget, WorktreeCleanup
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
 const TARGET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Read a per-worktree metadata value through `context.vcs`, rather than the
+/// raw `git::get_worktree_meta_in` free function.
+///
+/// For `GitBackend`, `WorkmuxMetaStore::get` is a pure delegation to
+/// `git::get_worktree_meta_in` (see `src/vcs/git_backend.rs`), so this is
+/// byte-for-byte identical to the pre-existing git-only call sites this
+/// replaces. For `JjBackend`, it reads the same key from `JjMetaStore`'s TOML
+/// file that `workflow::create` already writes through
+/// `context.vcs.meta().set(...)`, which the raw git free functions (reading
+/// `.git/config`) can never see.
+pub(super) fn meta_via_vcs(context: &WorkflowContext, handle: &str, key: &str) -> Option<String> {
+    context
+        .vcs
+        .meta()
+        .get(handle, key, Some(&context.execution_dir))
+}
+
+/// Backend-generic equivalent of `git::get_worktree_attachment_in`, sourcing
+/// the raw value via [`meta_via_vcs`] instead of a direct `.git/config` read.
+/// Parsing mirrors `git::WorktreeAttachment`'s match arms exactly.
+pub(super) fn attachment_via_vcs(
+    context: &WorkflowContext,
+    handle: &str,
+) -> git::WorktreeAttachment {
+    match meta_via_vcs(context, handle, "attachment").as_deref() {
+        Some("headless") => git::WorktreeAttachment::Headless,
+        Some("multiplexer") => git::WorktreeAttachment::Multiplexer,
+        Some(_) => git::WorktreeAttachment::Unknown,
+        None => git::WorktreeAttachment::Legacy,
+    }
+}
+
+/// Backend-generic equivalent of `git::get_worktree_mode`, sourcing the raw
+/// value via [`meta_via_vcs`] instead of a direct `.git/config` read.
+/// Parsing mirrors `git::get_worktree_mode_opt_in`'s match arms exactly,
+/// including the "unknown/missing -> Window" fallback.
+pub(super) fn mode_via_vcs(context: &WorkflowContext, handle: &str) -> MuxMode {
+    match meta_via_vcs(context, handle, "mode").as_deref() {
+        Some("session") => MuxMode::Session,
+        _ => MuxMode::Window,
+    }
+}
 const TARGET_CLOSE_RETRIES: u32 = 20;
 const DEFERRED_TARGET_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -429,6 +472,95 @@ fn perform_destructive_cleanup(
     Ok(())
 }
 
+/// jj analog of [`perform_destructive_cleanup`].
+///
+/// jj has no linked-worktree admin state to unlock, no worktree-registration
+/// prune step, and (per [`JjBackend::move_workspace`]'s doc comment) no
+/// "recover a moved/renamed path" story worth quarantining for — so this
+/// intentionally skips the rename-then-verify dance the git path uses to
+/// defend against a worktree path being reused mid-operation. That dance
+/// exists to protect Git's own on-disk worktree registration; a jj workspace
+/// has no equivalent registration to corrupt, only the repo-level
+/// `jj workspace forget` call below, so the risk it defends against does not
+/// apply here in the same way.
+///
+/// Order: forget the workspace registration first (best-effort — a workspace
+/// that is already forgotten, or was never registered under this exact
+/// name, must not block removal of an otherwise-orphaned directory), then
+/// delete the on-disk directory (jj `forget` never touches it), then the
+/// bookmark, then workmux's own metadata. Metadata removal is last so a
+/// crash partway through cleanup leaves the metadata around as a trace of
+/// the incomplete removal, mirroring the git path's ordering.
+fn perform_jj_destructive_cleanup(
+    context: &WorkflowContext,
+    worktree_path: &Path,
+    branch_name: &str,
+    handle: &str,
+    keep_branch: bool,
+) -> Result<()> {
+    if let Err(error) = context
+        .vcs
+        .remove_workspace_at(handle, &context.git_common_dir)
+    {
+        debug!(
+            handle,
+            error = %error,
+            "cleanup:jj workspace already forgotten or not registered under this handle"
+        );
+    }
+
+    if worktree_path.exists() {
+        std::fs::remove_dir_all(worktree_path).with_context(|| {
+            format!(
+                "Failed to remove workspace directory '{}'",
+                worktree_path.display()
+            )
+        })?;
+    }
+
+    if !keep_branch && !branch_name.is_empty() {
+        context
+            .vcs
+            .delete_branch_in(branch_name, true, &context.git_common_dir)
+            .context("Failed to delete bookmark")?;
+    }
+
+    context
+        .vcs
+        .meta()
+        .remove_all_at(handle, &context.git_common_dir)
+        .context("Failed to remove Workmux metadata after jj cleanup")?;
+    Ok(())
+}
+
+/// Dispatches to [`perform_destructive_cleanup`] (git) or
+/// [`perform_jj_destructive_cleanup`] (every other backend) based on
+/// `context.vcs.name()`. `expected` (the git-specific quarantine identity)
+/// is ignored on the jj path since jj has nothing to quarantine.
+fn perform_destructive_cleanup_for_backend(
+    context: &WorkflowContext,
+    worktree_path: &Path,
+    expected: Option<QuarantineIdentity<'_>>,
+    branch_name: &str,
+    handle: &str,
+    keep_branch: bool,
+    force: bool,
+) -> Result<()> {
+    if context.vcs.name() == "git" {
+        perform_destructive_cleanup(
+            worktree_path,
+            expected,
+            branch_name,
+            handle,
+            keep_branch,
+            force,
+            &context.git_common_dir,
+        )
+    } else {
+        perform_jj_destructive_cleanup(context, worktree_path, branch_name, handle, keep_branch)
+    }
+}
+
 /// Centralized function to clean up tmux and git resources.
 /// `branch_name` is used for git operations (branch deletion).
 /// `handle` is used for tmux operations (window/session lookup/kill).
@@ -473,7 +605,13 @@ fn cleanup_impl(
             context.main_worktree_root.display()
         ));
     }
-    let (expected_identity, missing_admin_identity) =
+    // jj has no linked-worktree admin state (`.git` in a secondary worktree)
+    // to inspect, and `capture_worktree_identity` is specified entirely in
+    // terms of `git::RepositoryIdentity::discover`, which errors outside a
+    // git-managed worktree path. Skip it for non-git backends; jj's
+    // destructive-cleanup path (`perform_jj_destructive_cleanup`) doesn't use
+    // this identity for anything.
+    let (expected_identity, missing_admin_identity) = if context.vcs.name() == "git" {
         match capture_worktree_identity(worktree_path, &context.git_common_dir) {
             Ok(identity) => (identity, None),
             Err(error) if keep_branch => {
@@ -489,11 +627,12 @@ fn cleanup_impl(
                 (None, Some(directory_identity(&metadata)?))
             }
             Err(error) => return Err(error),
-        };
+        }
+    } else {
+        (None, None)
+    };
 
-    if force_headless
-        || !git::get_worktree_attachment_in(handle, Some(&context.execution_dir)).manages_mux()
-    {
+    if force_headless || !attachment_via_vcs(context, handle).manages_mux() {
         info!(branch = branch_name, handle, path = %worktree_path.display(), "cleanup:headless");
         context.chdir_to_main_worktree()?;
         if worktree_path.exists() && !no_hooks {
@@ -510,14 +649,14 @@ fn cleanup_impl(
             .as_ref()
             .map(QuarantineIdentity::repository)
             .or_else(|| missing_admin_identity.map(QuarantineIdentity::directory));
-        perform_destructive_cleanup(
+        perform_destructive_cleanup_for_backend(
+            context,
             worktree_path,
             quarantine_identity,
             branch_name,
             handle,
             keep_branch,
             force,
-            &context.git_common_dir,
         )?;
         return Ok(CleanupResult {
             tmux_window_killed: false,
@@ -528,22 +667,22 @@ fn cleanup_impl(
     }
 
     // Determine if this worktree was created as a session or window
-    let mode = get_worktree_mode(handle);
+    let mode = mode_via_vcs(context, handle);
     let target_name = if mode == MuxMode::Session {
-        git::get_worktree_target_session(handle).unwrap_or_else(|| handle.to_string())
+        meta_via_vcs(context, handle, "target-session").unwrap_or_else(|| handle.to_string())
     } else {
-        git::get_worktree_target_window(handle).unwrap_or_else(|| handle.to_string())
+        meta_via_vcs(context, handle, "target-window").unwrap_or_else(|| handle.to_string())
     };
     let is_session_mode = mode == MuxMode::Session;
     let parent_session = if is_session_mode {
         None
     } else {
-        git::get_worktree_window_session(handle)
+        meta_via_vcs(context, handle, "window-session")
     };
     let window_token = if is_session_mode || !context.mux.supports_window_ownership() {
         None
     } else {
-        git::get_worktree_window_token(handle)
+        meta_via_vcs(context, handle, "window-token")
     };
     let kind = crate::multiplexer::handle::mode_label(mode);
 
@@ -635,14 +774,14 @@ fn cleanup_impl(
             .as_ref()
             .map(QuarantineIdentity::repository)
             .or_else(|| missing_admin_identity.map(QuarantineIdentity::directory));
-        perform_destructive_cleanup(
+        perform_destructive_cleanup_for_backend(
+            context,
             worktree_path,
             quarantine_identity,
             branch_name,
             handle,
             keep_branch,
             force,
-            &context.git_common_dir,
         )?;
         Ok(())
     };
