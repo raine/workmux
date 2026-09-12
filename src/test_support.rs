@@ -78,6 +78,71 @@ pub fn init_repo(dir: &Path) {
     run_git(dir, &["commit", "-m", "initial"]);
 }
 
+/// Initialize a "jj-only" repository in `dir`: a jj repo backed by git for
+/// storage, but with the git repository hidden inside `.jj` (no `.git`
+/// directory visible at the workspace root). Verified against jj 0.44.0:
+/// `jj git init --no-colocate` is the invocation that satisfies this — the
+/// plain `jj git init` (colocation is jj's default) and `jj git init
+/// --colocate` both leave a `.git` directory at the workspace root, while
+/// `--no-colocate` places the git repository under `.jj/repo/store/git`
+/// instead. (`jj init` alone is not a valid subcommand in 0.44.0; jj always
+/// requires an explicit backend via `jj git init`.)
+pub fn init_jj_repo(dir: &Path) {
+    let mut command = Command::new("jj");
+    clear_local_jj_env(&mut command);
+    let output = command
+        .args(["git", "init", "--no-colocate"])
+        .current_dir(dir)
+        .output()
+        .expect("jj git init should run");
+    assert!(
+        output.status.success(),
+        "jj git init --no-colocate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Initialize a colocated jj+git repository in `dir`: both `.jj` and `.git`
+/// are visible at the workspace root, and ordinary `git` commands work
+/// alongside `jj` ones. Verified against jj 0.44.0: `jj git init --colocate`.
+pub fn init_colocated_repo(dir: &Path) {
+    let mut command = Command::new("jj");
+    clear_local_jj_env(&mut command);
+    let output = command
+        .args(["git", "init", "--colocate"])
+        .current_dir(dir)
+        .output()
+        .expect("jj git init --colocate should run");
+    assert!(
+        output.status.success(),
+        "jj git init --colocate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Clear jj's ambient environment variables, mirroring
+/// `clear_local_git_env`'s treatment of git's ambient env vars. Kept
+/// separate from `crate::vcs::jj_security::clear_ambient_jj_env` so
+/// `test_support` (used by both git and jj tests) does not need to depend on
+/// `vcs` module internals to stay a plain fixture helper.
+pub(crate) fn clear_local_jj_env(command: &mut Command) {
+    for key in [
+        "JJ_CONFIG",
+        "JJ_USER",
+        "JJ_EMAIL",
+        "JJ_OP_HOSTNAME",
+        "JJ_OP_USERNAME",
+        "JJ_EDITOR",
+        "JJ_DIFF_TOOL",
+        "JJ_MERGE_TOOL",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+    ] {
+        command.env_remove(key);
+    }
+}
+
 pub(crate) fn clear_local_git_env(command: &mut Command) {
     for key in [
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
