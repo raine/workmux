@@ -151,6 +151,7 @@ export default defineConfig({
               slug: "guide/git-worktree-caveats",
             },
             { label: "Nix", slug: "guide/nix" },
+            { label: "Jujutsu (jj)", slug: "guide/jujutsu" },
             { label: "Changelog", slug: "changelog" },
           ],
         },

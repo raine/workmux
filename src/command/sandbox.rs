@@ -128,8 +128,25 @@ fn run_agent(command: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     // Validate git repo early -- sandbox needs git dirs for mounts
-    let worktree_root = crate::vcs::detect::detect_backend_in(&cwd)
-        .and_then(|backend| backend.get_repo_root_in(None))
+    let backend = crate::vcs::detect::detect_backend_in(&cwd).context(
+        "Not inside a git repository. workmux sandbox agent requires a git repo for mounting.",
+    )?;
+    // The sandbox mounts the repository's *git* directories into the
+    // container; a jj-only repo has none, and for a colocated repo the mounts
+    // would present only the git view while `workmux add`/`remove` operate on
+    // the jj view. Rather than degrade silently, bail — jj support currently
+    // covers `workmux add` and `workmux remove` only (see
+    // docs/src/content/docs/guide/jujutsu.md).
+    if backend.name() != "git" {
+        anyhow::bail!(
+            "workmux sandbox agent does not support {} repositories yet: it mounts git \
+             directories into the container. jj support currently covers `workmux add` \
+             and `workmux remove` only.",
+            backend.name()
+        );
+    }
+    let worktree_root = backend
+        .get_repo_root_in(None)
         .context(
             "Not inside a git repository. workmux sandbox agent requires a git repo for mounting.",
         )?
