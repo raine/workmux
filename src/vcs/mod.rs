@@ -92,6 +92,28 @@ pub trait VcsBackend: Send + Sync {
     /// Access the per-workspace metadata store for this backend.
     fn meta(&self) -> &dyn WorkmuxMetaStore;
 
+    /// Acquire a lock that serializes a whole *sequence* of creation-time
+    /// operations (workspace creation plus the several metadata writes that
+    /// follow it) against other concurrent workmux processes.
+    ///
+    /// This exists for backends whose creation sequence touches a shared
+    /// file that the VCS itself locks non-cooperatively: `git worktree add`
+    /// and every `git config` write both take `.git/config.lock`, so two
+    /// parallel `workmux add` runs fail with "could not lock config file"
+    /// unless the whole sequence is serialized. `GitBackend` overrides this
+    /// to acquire [`crate::git::GitConfigLock`].
+    ///
+    /// The default is a no-op guard, which is correct for backends whose
+    /// metadata store already locks internally per write and whose workspace
+    /// creation shares no such file (jj: `JjMetaStore` takes its own
+    /// `FileLock` around each `set`).
+    ///
+    /// The returned guard releases the lock when dropped; callers should drop
+    /// it as soon as the creation sequence is done.
+    fn lock_creation_sequence(&self, _common_dir: &Path) -> Result<CreationLock> {
+        Ok(Box::new(()))
+    }
+
     /// Get branches whose upstream remote-tracking branch has been deleted.
     ///
     /// No jj analog in v1 — default to empty, overridden by `GitBackend`.
@@ -106,6 +128,12 @@ pub trait VcsBackend: Send + Sync {
         Ok(())
     }
 }
+
+/// Opaque RAII guard returned by [`VcsBackend::lock_creation_sequence`].
+///
+/// Dropping it releases whatever lock the backend acquired (nothing, for
+/// backends that need no sequence-level lock).
+pub type CreationLock = Box<dyn Send>;
 
 /// Per-workspace metadata storage, abstracted over the backend's native
 /// mechanism (git config for `GitBackend`).

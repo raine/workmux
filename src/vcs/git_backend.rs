@@ -1,12 +1,14 @@
 //! `GitBackend`: a [`crate::vcs::VcsBackend`] implementation that delegates
 //! to the existing `crate::git::*` free functions.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::cmd::Cmd;
 use crate::git;
-use crate::vcs::{CreateWorkspaceOptions, VcsBackend, VcsStatus, WorkmuxMetaStore, WorkspaceEntry};
+use crate::vcs::{
+    CreateWorkspaceOptions, CreationLock, VcsBackend, VcsStatus, WorkmuxMetaStore, WorkspaceEntry,
+};
 
 /// [`VcsBackend`] implementation backed by the system `git` binary, via the
 /// existing `crate::git::*` free functions.
@@ -149,6 +151,16 @@ impl VcsBackend for GitBackend {
     fn meta(&self) -> &dyn WorkmuxMetaStore {
         const INSTANCE: GitConfigMetaStore = GitConfigMetaStore;
         &INSTANCE
+    }
+
+    fn lock_creation_sequence(&self, common_dir: &Path) -> Result<CreationLock> {
+        // `git worktree add` and every `git config` write both take
+        // `.git/config.lock`, so the whole creation sequence has to be
+        // serialized across processes or parallel `workmux add` runs fail
+        // with "could not lock config file".
+        let lock = git::GitConfigLock::acquire(common_dir)
+            .context("Failed to acquire git config lock")?;
+        Ok(Box::new(lock))
     }
 
     fn get_gone_branches_in(&self, common_dir: &Path) -> Result<Vec<String>> {
@@ -366,6 +378,59 @@ mod tests {
             backend.meta().get("some-handle", "mode", Some(temp.path())),
             Some("window".to_string())
         );
+    }
+
+    #[test]
+    fn lock_creation_sequence_still_serializes_git_config_writes_across_processes() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        test_support::init_repo(temp.path());
+        let common_dir = git::get_git_common_dir_in(Some(temp.path())).unwrap();
+
+        let backend = GitBackend;
+        let guard = backend.lock_creation_sequence(&common_dir).unwrap();
+
+        // A competing acquisition (what a parallel `workmux add` process does)
+        // must block while the creation-sequence guard is held - this is the
+        // behavior that prevents git's "could not lock config file" race.
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let thread_dir = common_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let _second = git::GitConfigLock::acquire(&thread_dir).unwrap();
+            acquired_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "GitBackend::lock_creation_sequence did not hold an exclusive lock"
+        );
+
+        drop(guard);
+
+        acquired_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("lock was not released when the creation guard dropped");
+        release_tx.send(()).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn jj_backend_creation_sequence_lock_is_a_no_op() {
+        // jj's metadata store locks internally per write and its workspace
+        // creation shares no `.git/config`-style file, so the default
+        // (no-op) guard applies and must never block.
+        let temp = tempfile::tempdir().unwrap();
+        let backend = crate::vcs::JjBackend;
+        let first = backend.lock_creation_sequence(temp.path()).unwrap();
+        let second = backend.lock_creation_sequence(temp.path()).unwrap();
+        drop(first);
+        drop(second);
     }
 
     #[test]
