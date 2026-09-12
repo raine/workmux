@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::config::MuxMode;
 use crate::multiplexer::MuxHandle;
+use crate::vcs::CreateWorkspaceOptions;
 use crate::{git, spinner};
 use tracing::{debug, info, warn};
 
@@ -404,23 +405,30 @@ fn create_impl(
         "create:creating worktree"
     );
 
-    // Acquire an exclusive lock to serialize .git/config writes across parallel
-    // workmux processes. Without this, concurrent `workmux add` commands race on
-    // git's config.lock file and fail with "could not lock config file".
-    let _config_lock = git::GitConfigLock::acquire(&context.git_common_dir)
+    // Acquire an exclusive lock to serialize the whole creation sequence
+    // (workspace creation plus the metadata writes below) across parallel
+    // workmux processes. For git, without this, concurrent `workmux add`
+    // commands race on git's config.lock file and fail with "could not lock
+    // config file". Backends that don't share such a file (jj, whose metadata
+    // store locks internally per write) return a no-op guard.
+    let _config_lock = context
+        .vcs
+        .lock_creation_sequence(&context.git_common_dir)
         .context("Failed to acquire git config lock")?;
 
     // Store the base branch before checkout so observers that see the worktree
     // appear on disk also see complete branch metadata.
     if let Some(ref base) = base_branch_for_creation {
-        git::set_branch_base_in(branch_name, base, Some(&context.execution_dir)).with_context(
-            || {
+        context
+            .vcs
+            .meta()
+            .set_branch_base(branch_name, base, Some(&context.execution_dir))
+            .with_context(|| {
                 format!(
                     "Failed to store base branch '{}' for branch '{}'",
                     base, branch_name
                 )
-            },
-        )?;
+            })?;
         debug!(
             branch = branch_name,
             base = base,
@@ -428,22 +436,32 @@ fn create_impl(
         );
     }
 
-    git::create_worktree_in(
-        &worktree_path,
-        branch_name,
-        create_new,
-        base_branch_for_creation.as_deref(),
-        track_upstream,
-        Some(&context.execution_dir),
-    )
-    .context("Failed to create git worktree")?;
+    context
+        .vcs
+        .create_workspace_in(
+            &CreateWorkspaceOptions {
+                path: worktree_path.clone(),
+                name_or_branch: branch_name.to_string(),
+                create_branch: create_new,
+                base: base_branch_for_creation.clone(),
+                track_upstream,
+            },
+            Some(&context.execution_dir),
+        )
+        .context("Failed to create git worktree")?;
 
     if headless {
-        if let Err(error) = git::set_worktree_attachment_in(
-            &current_handle,
-            git::WorktreeAttachment::Headless,
-            Some(&context.execution_dir),
-        ) {
+        if let Err(error) = git::WorktreeAttachment::Headless
+            .as_meta_value()
+            .and_then(|value| {
+                context.vcs.meta().set(
+                    &current_handle,
+                    "attachment",
+                    value,
+                    Some(&context.execution_dir),
+                )
+            })
+        {
             drop(_config_lock);
             let rollback = cleanup::cleanup_headless(
                 context,
@@ -470,25 +488,29 @@ fn create_impl(
             MuxMode::Session => "session",
             MuxMode::Window => "window",
         };
-        git::set_worktree_meta_in(
-            &current_handle,
-            "mode",
-            mode_str,
-            Some(&context.execution_dir),
-        )
-        .with_context(|| {
-            format!(
-                "Failed to store tmux mode for worktree '{}'",
-                current_handle
+        context
+            .vcs
+            .meta()
+            .set(
+                &current_handle,
+                "mode",
+                mode_str,
+                Some(&context.execution_dir),
             )
-        })?;
-        git::set_worktree_attachment_in(
+            .with_context(|| {
+                format!(
+                    "Failed to store tmux mode for worktree '{}'",
+                    current_handle
+                )
+            })?;
+        context.vcs.meta().set(
             &current_handle,
-            git::WorktreeAttachment::Multiplexer,
+            "attachment",
+            git::WorktreeAttachment::Multiplexer.as_meta_value()?,
             Some(&context.execution_dir),
         )?;
         if let Some(target_window_name) = &options.target_window_name {
-            git::set_worktree_meta_in(
+            context.vcs.meta().set(
                 &current_handle,
                 "target-window",
                 target_window_name,
@@ -496,7 +518,7 @@ fn create_impl(
             )?;
         }
         if let Some(target_session_name) = &options.target_session_name {
-            git::set_worktree_meta_in(
+            context.vcs.meta().set(
                 &current_handle,
                 "target-session",
                 target_session_name,
@@ -504,7 +526,7 @@ fn create_impl(
             )?;
         }
         if let Some(window_session_name) = &options.window_session_name {
-            git::set_worktree_meta_in(
+            context.vcs.meta().set(
                 &current_handle,
                 "window-session",
                 window_session_name,
@@ -1202,5 +1224,154 @@ mod tests {
             Some("window")
         );
         assert!(!git::branch_exists_in("feature", Some(&repo_a)).unwrap());
+    }
+
+    /// Characterization test for the attached `create()` path after routing
+    /// creation through `context.vcs` instead of calling `git::*` directly.
+    ///
+    /// Every assertion below describes the git-level state the pre-migration
+    /// code produced: a registered worktree at the handle path, a new branch,
+    /// a `workmux.branch.<branch>.base` entry, and the full per-worktree
+    /// metadata block (mode / attachment / target-window / target-session /
+    /// window-session) in `.git/config`.
+    #[test]
+    fn attached_create_writes_identical_git_state_through_the_vcs_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&repo);
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        assert_eq!(ctx.vcs.name(), "git");
+
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+        options.mode = MuxMode::Window;
+        options.target_window_name = Some("my-window".to_string());
+        options.target_session_name = Some("my-session".to_string());
+        options.window_session_name = Some("parent-session".to_string());
+
+        let result = create(
+            &ctx,
+            CreateArgs {
+                branch_name: "feature",
+                handle: "feature",
+                base_branch: Some("main"),
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+        )
+        .unwrap();
+
+        // Worktree exists on disk and is registered with git.
+        assert!(result.worktree_path.exists());
+        assert!(is_registered_worktree(&result.worktree_path, &ctx).unwrap());
+        assert_eq!(
+            git::get_worktree_path_in("feature", Some(&repo))
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            result.worktree_path.canonicalize().unwrap()
+        );
+
+        // Branch was created and its base recorded.
+        assert!(git::branch_exists_in("feature", Some(&repo)).unwrap());
+        assert_eq!(
+            git::get_branch_base_in("feature", Some(&repo)).unwrap(),
+            "main"
+        );
+
+        // Full metadata block, still readable via the unchanged git readers.
+        assert_eq!(
+            git::get_worktree_meta_in("feature", "mode", Some(&repo)).as_deref(),
+            Some("window")
+        );
+        assert_eq!(
+            git::get_worktree_attachment_in("feature", Some(&repo)),
+            git::WorktreeAttachment::Multiplexer
+        );
+        assert_eq!(
+            git::get_worktree_meta_in("feature", "target-window", Some(&repo)).as_deref(),
+            Some("my-window")
+        );
+        assert_eq!(
+            git::get_worktree_meta_in("feature", "target-session", Some(&repo)).as_deref(),
+            Some("my-session")
+        );
+        assert_eq!(
+            git::get_worktree_meta_in("feature", "window-session", Some(&repo)).as_deref(),
+            Some("parent-session")
+        );
+        // TestMux does not claim window ownership, so no token is minted -
+        // unchanged from before the migration.
+        assert_eq!(
+            git::get_worktree_window_token_in("feature", Some(&repo)),
+            None
+        );
+    }
+
+    /// Same characterization, for the headless (`workmux add --headless`)
+    /// path, which shares `create_impl` with the attached path.
+    #[test]
+    fn headless_create_writes_identical_git_state_through_the_vcs_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&repo);
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+
+        let result = create_headless(
+            &ctx,
+            CreateArgs {
+                branch_name: "headless-feature",
+                handle: "headless-feature",
+                base_branch: Some("main"),
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(result.worktree_path.exists());
+        assert!(is_registered_worktree(&result.worktree_path, &ctx).unwrap());
+        assert!(git::branch_exists_in("headless-feature", Some(&repo)).unwrap());
+        assert_eq!(
+            git::get_branch_base_in("headless-feature", Some(&repo)).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            git::get_worktree_attachment_in("headless-feature", Some(&repo)),
+            git::WorktreeAttachment::Headless
+        );
+        // The headless path writes no multiplexer metadata.
+        assert_eq!(
+            git::get_worktree_meta_in("headless-feature", "mode", Some(&repo)),
+            None
+        );
+        assert_eq!(
+            git::get_worktree_meta_in("headless-feature", "target-window", Some(&repo)),
+            None
+        );
     }
 }

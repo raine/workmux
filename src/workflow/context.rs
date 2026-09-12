@@ -191,8 +191,8 @@ impl WorkflowContext {
 
 #[cfg(test)]
 mod tests {
-    use super::paths_identify_same_worktree;
     use super::WorkflowContext;
+    use super::paths_identify_same_worktree;
     use crate::config;
     use crate::git;
     use crate::multiplexer::types::{
