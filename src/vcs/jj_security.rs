@@ -254,7 +254,7 @@ pub fn protected_jj(workdir: Option<&Path>) -> Result<Command> {
     clear_ambient_jj_env(&mut command);
     command.arg("--no-pager").arg("--color=never");
     for (key, value) in JJ_CONFIG_OVERRIDES {
-        command.args(["--config", &format!("{key}={value}")]);
+        command.args(["--config", &format_config_override(key, value)]);
     }
 
     if let Some(path) = workdir {
@@ -266,6 +266,31 @@ pub fn protected_jj(workdir: Option<&Path>) -> Result<Command> {
     }
 
     Ok(command)
+}
+
+/// Format a `--config` override's value as a quoted TOML string literal.
+///
+/// jj parses `--config NAME=VALUE` by attempting to interpret `VALUE` as a
+/// TOML value first: an unquoted `true`/`false` is parsed as a TOML
+/// *boolean*, not the string `"true"`/`"false"`. All of
+/// `JJ_CONFIG_OVERRIDES`' values are meant to be TOML *strings* (e.g. the
+/// literal command name `"true"`, used as a no-op "run the `true`(1)
+/// program instead of an editor" placeholder, or the enum-like string
+/// `"never"`), so every value must be wrapped in quotes and have any
+/// embedded `"` or `\` escaped, or jj's TOML parser will either
+/// misinterpret it (as with `true`/`false`) or reject the `--config`
+/// argument outright.
+fn format_config_override(key: &str, value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('"');
+    format!("{key}={escaped}")
 }
 
 #[cfg(test)]
@@ -349,6 +374,137 @@ mod tests {
         for key in JJ_ENVIRONMENT {
             assert_eq!(environment.get(*key), Some(&None), "{key} was not cleared");
         }
+    }
+
+    #[test]
+    fn format_config_override_quotes_value_as_toml_string() {
+        assert_eq!(
+            format_config_override("ui.editor", "true"),
+            "ui.editor=\"true\""
+        );
+        assert_eq!(
+            format_config_override("ui.paginate", "never"),
+            "ui.paginate=\"never\""
+        );
+        assert_eq!(
+            format_config_override("a.b", "has\"quote\\and"),
+            "a.b=\"has\\\"quote\\\\and\""
+        );
+    }
+
+    /// End-to-end regression test for the `--config ui.editor=true` bug: an
+    /// unquoted `true` is parsed by jj as a TOML *boolean*, which jj then
+    /// rejects as an invalid `ui.editor` value ("data did not match any
+    /// variant of untagged enum CommandNameAndArgs"), a hard config error
+    /// rather than the intended silent no-op editor. This runs the actual
+    /// `Command` `protected_jj` builds (not just its argument strings)
+    /// against a real jj repo fixture, invoking a subcommand
+    /// (`describe`/`diffedit`) that only fails if jj is actually unable to
+    /// parse the `ui.editor`/`ui.diff-editor` config override, proving the
+    /// fix works end-to-end and not merely that the flag text looks right.
+    #[test]
+    fn protected_jj_editor_overrides_do_not_trigger_config_error() {
+        let temp = tempfile::tempdir().unwrap();
+        init_jj_repo(temp.path());
+
+        // `jj describe` without `-m` invokes `ui.editor`.
+        let mut describe = protected_jj(Some(temp.path())).unwrap();
+        let output = describe
+            .args(["describe", "-m", ""])
+            .output()
+            .expect("jj describe should run");
+        assert!(
+            output.status.success(),
+            "jj describe failed (ui.editor override likely mis-parsed): stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("Config error"),
+            "unexpected Config error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Modify the working copy so `jj diffedit` has something to diff,
+        // which invokes `ui.diff-editor`.
+        std::fs::write(temp.path().join("file.txt"), "content\n").unwrap();
+        let mut diffedit = protected_jj(Some(temp.path())).unwrap();
+        let output = diffedit
+            .arg("diffedit")
+            .output()
+            .expect("jj diffedit should run");
+        assert!(
+            output.status.success(),
+            "jj diffedit failed (ui.diff-editor override likely mis-parsed): stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("Config error"),
+            "unexpected Config error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Same regression as `protected_jj_editor_overrides_do_not_trigger_config_error`,
+    /// but for `ui.merge-editor`, which `jj resolve` invokes. jj still
+    /// rejects `true` as an actual merge tool once the config parses
+    /// correctly (it takes no `merge-args`), but that "unusable merge tool"
+    /// error is a distinct, expected failure from the "Config error:
+    /// Invalid type or value" this test guards against — asserting its
+    /// absence (rather than requiring overall success) is what
+    /// distinguishes the two.
+    #[test]
+    fn protected_jj_merge_editor_override_does_not_trigger_config_error() {
+        let temp = tempfile::tempdir().unwrap();
+        init_jj_repo(temp.path());
+        let run = |args: &[&str]| {
+            protected_jj(Some(temp.path()))
+                .unwrap()
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("jj {args:?} should run: {error}"))
+        };
+
+        std::fs::write(temp.path().join("f.txt"), "a\n").unwrap();
+        run(&["describe", "-m", "base"]);
+        let base = String::from_utf8_lossy(
+            &run(&["log", "--no-graph", "-T", "commit_id", "-r", "@"]).stdout,
+        )
+        .trim()
+        .to_string();
+        run(&["new", "-m", "branch1"]);
+        std::fs::write(temp.path().join("f.txt"), "b\n").unwrap();
+        let branch1 = String::from_utf8_lossy(
+            &run(&["log", "--no-graph", "-T", "commit_id", "-r", "@"]).stdout,
+        )
+        .trim()
+        .to_string();
+        run(&["new", &base, "-m", "branch2"]);
+        std::fs::write(temp.path().join("f.txt"), "c\n").unwrap();
+        let branch2 = String::from_utf8_lossy(
+            &run(&["log", "--no-graph", "-T", "commit_id", "-r", "@"]).stdout,
+        )
+        .trim()
+        .to_string();
+        let merge = run(&["new", &branch1, &branch2, "-m", "merge"]);
+        assert!(
+            merge.status.success(),
+            "merge creation failed: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
+
+        let output = run(&["resolve"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // jj reports this particular parse failure as "Invalid type or
+        // value for ui.merge-editor" (wrapped under "Failed to load tool
+        // configuration"), not literally "Config error" as it does for
+        // `ui.editor`/`ui.diff-editor` — check for the shared root-cause
+        // message rather than the exact wrapper text.
+        assert!(
+            !stderr.contains("Invalid type or value for ui.merge-editor"),
+            "unexpected config parse error (ui.merge-editor override likely mis-parsed): {stderr}"
+        );
     }
 
     #[test]
