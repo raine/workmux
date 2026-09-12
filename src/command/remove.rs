@@ -1,9 +1,47 @@
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::vcs::VcsBackend;
 use crate::workflow::WorkflowContext;
 use crate::{config, git, spinner, workflow};
 use anyhow::{Context, Result, anyhow};
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+/// Find a worktree/workspace by handle (directory name) or branch/bookmark
+/// name, mirroring `git::find_worktree`'s handle-then-branch matching but
+/// generically over any [`VcsBackend`].
+///
+/// A workspace with no branch/bookmark checked out (a detached git worktree,
+/// or an anonymous jj workspace) is reported with the same `"(detached)"`
+/// sentinel `git::list_worktrees` used, so callers that already special-case
+/// that literal (e.g. [`BulkRemovalMode`]'s main-branch skip) keep working
+/// unchanged.
+fn find_worktree(vcs: &dyn VcsBackend, name: &str) -> Result<(PathBuf, String)> {
+    let workspaces = vcs.list_workspaces_in(None)?;
+
+    // First: try to match by handle (directory name)
+    for entry in &workspaces {
+        if entry.name.as_deref() == Some(name) {
+            let branch = entry
+                .branch_or_bookmark
+                .clone()
+                .unwrap_or_else(|| "(detached)".to_string());
+            return Ok((entry.path.clone(), branch));
+        }
+    }
+
+    // Fallback: try to match by branch/bookmark name
+    for entry in workspaces {
+        if entry.branch_or_bookmark.as_deref() == Some(name) {
+            let branch = entry.branch_or_bookmark.unwrap_or_default();
+            return Ok((entry.path, branch));
+        }
+    }
+
+    Err(anyhow!(
+        "Worktree '{}' not found among the repository's worktrees/workspaces",
+        name
+    ))
+}
 
 pub fn run(
     names: Vec<String>,
@@ -42,7 +80,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
     // 2. Resolve all targets and validate they exist
     let mut candidates: Vec<(String, PathBuf, String)> = Vec::new();
     for name in resolved_names {
-        let (worktree_path, branch_name) = match git::find_worktree(&name) {
+        let (worktree_path, branch_name) = match find_worktree(context.vcs.as_ref(), &name) {
             Ok(worktree) => worktree,
             Err(e) => {
                 if let Some(path) = workflow::fallback_worktree_path(&name, &context)? {
@@ -98,10 +136,17 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
     let mut safe: Vec<String> = Vec::new();
 
     for (handle, path, branch) in candidates {
-        // Check uncommitted (blocking)
+        // Check uncommitted (blocking).
+        //
+        // `has_missing_admin_dir` has no VcsBackend equivalent, but it only
+        // ever returns true for a linked git worktree whose `.git` pointer
+        // file targets a missing admin dir (the broken-worktree case that
+        // `workflow::fallback_worktree_path` detects above). It reads a
+        // `.git` file that a jj workspace doesn't have, so it degrades to a
+        // harmless `false` for jj rather than needing a backend guard.
         if path.exists()
             && !git::has_missing_admin_dir(&path)
-            && git::has_uncommitted_changes(&path)?
+            && context.vcs.get_status(&path, None)?.is_dirty
         {
             uncommitted.push(handle);
             continue;
@@ -116,7 +161,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
         }
 
         // Check unmerged (promptable), only if we're deleting the branch
-        if !keep_branch && let Some(base) = is_unmerged(&branch)? {
+        if !keep_branch && let Some(base) = is_unmerged(context.vcs.as_ref(), &branch)? {
             unmerged.push((handle, branch, base));
             continue;
         }
@@ -171,18 +216,21 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 }
 
 /// Check if a branch has unmerged commits. Returns Some(base) if unmerged, None otherwise.
-fn is_unmerged(branch: &str) -> Result<Option<String>> {
-    let main_branch = git::get_default_branch().unwrap_or_else(|_| "main".to_string());
+fn is_unmerged(vcs: &dyn VcsBackend, branch: &str) -> Result<Option<String>> {
+    let main_branch = vcs
+        .get_default_branch_in(None)
+        .unwrap_or_else(|_| "main".to_string());
 
-    let base = git::get_branch_base(branch)
-        .ok()
+    let base = vcs
+        .meta()
+        .get_branch_base(branch, None)
         .unwrap_or_else(|| main_branch.clone());
 
-    let base_commit = match git::get_merge_base(&base) {
+    let base_commit = match vcs.get_merge_base_in(None, &base) {
         Ok(b) => b,
         Err(_) => {
             // If we can't determine base, try falling back to main
-            match git::get_merge_base(&main_branch) {
+            match vcs.get_merge_base_in(None, &main_branch) {
                 Ok(b) => b,
                 Err(error) => {
                     return Err(error.context("Cannot establish whether the branch is merged"));
@@ -190,6 +238,18 @@ fn is_unmerged(branch: &str) -> Result<Option<String>> {
             }
         }
     };
+
+    // `get_unmerged_branches` (computing which local branches have commits
+    // not reachable from `base_commit`) has no VcsBackend equivalent and no
+    // jj analog in v1. This is a read-only, advisory pre-removal
+    // confirmation (it only decides whether to show a "are you sure"
+    // prompt) rather than a write, and the actual branch/bookmark deletion
+    // goes through `VcsBackend::delete_branch_in` regardless of its result
+    // — so, unlike Task 6's jj-unsafe *writes*, skipping it for jj degrades
+    // to "no unmerged-commit warning" rather than silent data loss.
+    if vcs.name() != "git" {
+        return Ok(None);
+    }
 
     let unmerged_branches = git::get_unmerged_branches(&base_commit)?;
     if unmerged_branches.contains(branch) {
@@ -354,20 +414,27 @@ impl BulkRemovalMode {
 }
 
 fn collect_bulk_removal_plan(
+    context: &WorkflowContext,
     mode: &BulkRemovalMode,
     force: bool,
     keep_branch: bool,
 ) -> Result<BulkRemovalPlan> {
-    let worktrees = git::list_worktrees()?;
-    let main_branch = git::get_default_branch()?;
-    let main_worktree_root = git::get_main_worktree_root()?;
+    let vcs = context.vcs.as_ref();
+    let worktrees = vcs.list_workspaces_in(None)?;
+    let main_branch = vcs.get_default_branch_in(None)?;
+    let main_worktree_root = vcs.get_main_worktree_root_in(None)?;
 
     let mut plan = BulkRemovalPlan {
         to_remove: Vec::new(),
         skipped: Vec::new(),
     };
 
-    for (path, branch) in worktrees {
+    for entry in worktrees {
+        let path = entry.path;
+        let branch = entry
+            .branch_or_bookmark
+            .unwrap_or_else(|| "(detached)".to_string());
+
         if branch == main_branch || branch == "(detached)" {
             continue;
         }
@@ -380,7 +447,7 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        if !force && path.exists() && git::has_uncommitted_changes(&path)? {
+        if !force && path.exists() && vcs.get_status(&path, None)?.is_dirty {
             plan.skipped.push(BulkSkippedWorktree {
                 branch,
                 reason: BulkSkipReason::Uncommitted,
@@ -388,11 +455,17 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        if mode.allow_unmerged_skip() && !force && !keep_branch {
-            let base = git::get_branch_base(&branch)
-                .ok()
+        // `get_unmerged_branches` has no VcsBackend equivalent / jj analog
+        // (see `is_unmerged`'s doc comment for the full reasoning): skip the
+        // unmerged-commit skip-check for non-git backends rather than
+        // computing a base/merge-base that would go unused.
+        if mode.allow_unmerged_skip() && !force && !keep_branch && vcs.name() == "git" {
+            let base = vcs
+                .meta()
+                .get_branch_base(&branch, None)
                 .unwrap_or_else(|| main_branch.clone());
-            let merge_base = git::get_merge_base(&base)
+            let merge_base = vcs
+                .get_merge_base_in(None, &base)
                 .context("Cannot establish the merge base for bulk removal")?;
             let unmerged_branches = git::get_unmerged_branches(&merge_base)
                 .context("Cannot establish merged branches for bulk removal")?;
@@ -445,8 +518,13 @@ fn execute_bulk_removals(
     summary
 }
 
-fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Result<()> {
-    let plan = collect_bulk_removal_plan(&mode, force, keep_branch)?;
+fn run_bulk_removal(
+    context: &WorkflowContext,
+    mode: BulkRemovalMode,
+    force: bool,
+    keep_branch: bool,
+) -> Result<()> {
+    let plan = collect_bulk_removal_plan(context, &mode, force, keep_branch)?;
 
     let skipped_uncommitted = split_skipped_worktrees(&plan.skipped, BulkSkipReason::Uncommitted);
     let skipped_unmerged = split_skipped_worktrees(&plan.skipped, BulkSkipReason::Unmerged);
@@ -481,15 +559,35 @@ fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Re
 
 /// Remove all managed worktrees (except main)
 fn run_all(force: bool, keep_branch: bool) -> Result<()> {
-    run_bulk_removal(BulkRemovalMode::All, force, keep_branch)
+    let config = config::Config::load(None)?;
+    let mux = create_backend(detect_backend());
+    let context = WorkflowContext::new(config, mux, None)?;
+    run_bulk_removal(&context, BulkRemovalMode::All, force, keep_branch)
 }
 
 /// Remove worktrees whose upstream remote branch has been deleted
 fn run_gone(force: bool, keep_branch: bool) -> Result<()> {
-    // Fetch with prune to update remote-tracking refs
-    spinner::with_spinner("Fetching from remote", git::fetch_prune)?;
-    let gone_branches = git::get_gone_branches().unwrap_or_default();
-    run_bulk_removal(BulkRemovalMode::Gone(gone_branches), force, keep_branch)
+    let config = config::Config::load(None)?;
+    let mux = create_backend(detect_backend());
+    let context = WorkflowContext::new(config, mux, None)?;
+
+    // Fetch with prune to update remote-tracking refs. No jj analog in v1:
+    // `fetch_prune_in`/`get_gone_branches_in` no-op (empty/success) for
+    // non-git backends, so bulk "--gone" removal degrades to "nothing is
+    // gone" for jj rather than erroring.
+    spinner::with_spinner("Fetching from remote", || context.vcs.fetch_prune_in(None))?;
+    let gone_branches: std::collections::HashSet<String> = context
+        .vcs
+        .get_gone_branches_in(&context.git_common_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    run_bulk_removal(
+        &context,
+        BulkRemovalMode::Gone(gone_branches),
+        force,
+        keep_branch,
+    )
 }
 
 /// Execute the actual worktree removal
@@ -525,4 +623,110 @@ fn remove_worktree(
     super::sidebar::request_refresh_for(context.mux.as_ref());
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+    use crate::vcs::GitBackend;
+    use std::path::PathBuf;
+
+    /// Characterization test: the new `VcsBackend`-generic `find_worktree`
+    /// helper must resolve a git worktree by handle and by branch name
+    /// exactly like the pre-migration `git::find_worktree_in` free function
+    /// it replaces at this call site.
+    #[test]
+    fn find_worktree_matches_git_free_function_by_handle_and_branch() {
+        const TEST_NAME: &str =
+            "command::remove::tests::find_worktree_matches_git_free_function_by_handle_and_branch";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            test_support::init_repo(&repo);
+
+            let worktree_path = temp.path().join("feature-handle");
+            test_support::run_git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature",
+                    worktree_path.to_str().unwrap(),
+                ],
+            );
+
+            test_support::run_isolated_test(TEST_NAME, &repo, &[("WM_TEST_TEMP", temp.path())]);
+            return;
+        }
+
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        let worktree_path = temp.join("feature-handle");
+
+        let backend = GitBackend;
+
+        let expected_by_handle = git::find_worktree_in("feature-handle", None).unwrap();
+        let actual_by_handle = find_worktree(&backend, "feature-handle").unwrap();
+        assert_eq!(actual_by_handle, expected_by_handle);
+        assert_eq!(actual_by_handle.0, worktree_path.canonicalize().unwrap());
+        assert_eq!(actual_by_handle.1, "feature");
+
+        let expected_by_branch = git::find_worktree_in("feature", None).unwrap();
+        let actual_by_branch = find_worktree(&backend, "feature").unwrap();
+        assert_eq!(actual_by_branch, expected_by_branch);
+
+        let err = find_worktree(&backend, "does-not-exist").unwrap_err();
+        assert!(err.to_string().contains("does-not-exist"));
+    }
+
+    /// Characterization test: `is_unmerged` must classify an unmerged
+    /// feature branch and a fully-merged branch the same way the
+    /// pre-migration code (bare `git::get_branch_base` /
+    /// `git::get_merge_base` / `git::get_unmerged_branches` calls) did.
+    #[test]
+    fn is_unmerged_matches_git_semantics_for_merged_and_unmerged_branches() {
+        const TEST_NAME: &str =
+            "command::remove::tests::is_unmerged_matches_git_semantics_for_merged_and_unmerged_branches";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            test_support::init_repo(&repo);
+
+            // "merged-branch" points at the same commit as main: no
+            // unmerged commits.
+            test_support::run_git(&repo, &["branch", "merged-branch"]);
+
+            // "feature" has a commit on top of main that main doesn't have.
+            test_support::run_git(&repo, &["checkout", "-b", "feature"]);
+            std::fs::write(repo.join("feature.txt"), "feature work\n").unwrap();
+            test_support::run_git(&repo, &["add", "feature.txt"]);
+            test_support::run_git(&repo, &["commit", "-m", "feature work"]);
+            test_support::run_git(&repo, &["checkout", "main"]);
+
+            test_support::run_isolated_test(TEST_NAME, &repo, &[]);
+            return;
+        }
+
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
+
+        let backend = GitBackend;
+
+        assert_eq!(
+            is_unmerged(&backend, "merged-branch").unwrap(),
+            None,
+            "a branch with no commits ahead of its base must not be reported as unmerged"
+        );
+
+        let unmerged = is_unmerged(&backend, "feature").unwrap();
+        assert_eq!(
+            unmerged,
+            Some("main".to_string()),
+            "a branch with commits not reachable from its base must be reported unmerged, \
+             with the base branch it was compared against"
+        );
+    }
 }
