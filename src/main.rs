@@ -30,6 +30,10 @@ mod tips;
 mod tmux_style;
 mod ui;
 mod util;
+// Not yet wired to any call site (lands in a later task); allow dead_code so
+// this purely-additive module doesn't generate build warnings in the meantime.
+#[allow(dead_code)]
+mod vcs;
 mod workflow;
 mod xdg;
 
