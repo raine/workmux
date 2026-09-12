@@ -71,18 +71,38 @@ impl VcsBackend for GitBackend {
         git::move_worktree(old_path, new_path)
     }
 
+    // NOT a delegation, and NOT a substitute for `workflow::cleanup`'s removal flow.
+    //
+    // There is no dedicated `git::worktree` free function for `git worktree
+    // remove` today, so unlike every other `GitBackend` method this one is
+    // not delegating to an existing `git::*` free function — it is new
+    // git-invocation logic written directly against `Cmd`.
+    //
+    // Its semantics are also intentionally minimal and DO NOT match the real
+    // worktree-removal path in `src/workflow/cleanup.rs`. That flow:
+    //   - removes any linked-worktree `locked` file before touching the
+    //     worktree, so a lock doesn't block `git worktree prune`;
+    //   - quarantines (renames) the worktree directory before deleting it,
+    //     so a process that still has the old path as its CWD doesn't get
+    //     yanked out from under it mid-command;
+    //   - carefully orders branch/metadata cleanup around the prune step.
+    //
+    // This method does none of that: it shells out to `git worktree remove
+    // --force` synchronously, in place, with no lock handling and no
+    // quarantine-before-delete safety. Do not wire a real call site to
+    // `VcsBackend::remove_workspace_at` as a drop-in replacement for
+    // `workflow::cleanup`'s removal flow. A future task must either extend
+    // this method to match those semantics, or keep routing real worktree
+    // removal through `workflow::cleanup` instead of this trait method,
+    // until that work is done.
     fn remove_workspace_at(&self, handle_or_name: &str, common_dir: &Path) -> Result<()> {
-        // There is no dedicated `git::worktree` free function for `git
-        // worktree remove` (removal in the rest of the codebase goes through
-        // `workflow::remove`, which does bespoke directory cleanup + prune
-        // and isn't reachable from here). Resolve the registered worktree
-        // path via the existing `find_worktree_in` lookup and shell out to
-        // `git worktree remove --force` directly, matching the style used
-        // throughout `src/git/*.rs`.
         let (path, _branch) = git::find_worktree_in(handle_or_name, Some(common_dir))?;
         let path_str = path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid worktree path"))?;
+        // See the doc-comment above: this is a direct `git worktree remove
+        // --force` invocation, not a delegation, and it skips the
+        // lock-file/quarantine handling that `workflow::cleanup` performs.
         Cmd::new("git")
             .workdir(common_dir)
             .args(&["worktree", "remove", "--force", path_str])
