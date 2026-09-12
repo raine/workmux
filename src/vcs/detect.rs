@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{RepoKind, VcsBackend, git_backend::GitBackend};
+use super::{RepoKind, VcsBackend, git_backend::GitBackend, jj_backend::JjBackend};
 
 /// Walk upward from `path` toward the filesystem root, looking for `.jj`
 /// and `.git` marker directories at each level.
@@ -41,15 +41,14 @@ pub fn detect_repo_kind_in(path: &Path) -> RepoKind {
 
 /// Create a [`VcsBackend`] instance for the repository containing `path`.
 ///
-/// For now, `JjColocated`/`JjOnly` and `None` are not yet supported
-/// (`JjBackend` lands in a later task); this mirrors
+/// `JjColocated` and `JjOnly` both map to `JjBackend`: a colocated repo is
+/// still driven through `jj`, and `.jj` winning over `.git` in
+/// [`detect_repo_kind_in`] is what makes that so. This mirrors
 /// `multiplexer::detect_backend()`/`create_backend()`.
 pub fn detect_backend_in(path: &Path) -> Result<Arc<dyn VcsBackend>> {
     match detect_repo_kind_in(path) {
         RepoKind::Git => Ok(Arc::new(GitBackend)),
-        RepoKind::JjColocated | RepoKind::JjOnly => {
-            bail!("jj repos are not yet supported")
-        }
+        RepoKind::JjColocated | RepoKind::JjOnly => Ok(Arc::new(JjBackend)),
         RepoKind::None => bail!("Not in a git or jj repository"),
     }
 }
@@ -95,23 +94,28 @@ mod tests {
     }
 
     #[test]
-    fn detect_backend_in_bails_for_jj_only() {
+    fn detect_backend_in_returns_jj_backend_for_jj_only() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join(".jj")).unwrap();
-        match detect_backend_in(temp.path()) {
-            Ok(_) => panic!("expected jj repos to be unsupported"),
-            Err(e) => assert!(e.to_string().contains("jj repos are not yet supported")),
-        }
+        let backend = detect_backend_in(temp.path()).unwrap();
+        assert_eq!(backend.name(), "jj");
     }
 
     #[test]
-    fn detect_backend_in_bails_for_jj_colocated() {
+    fn detect_backend_in_returns_jj_backend_for_jj_colocated() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join(".jj")).unwrap();
         std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let backend = detect_backend_in(temp.path()).unwrap();
+        assert_eq!(backend.name(), "jj");
+    }
+
+    #[test]
+    fn detect_backend_in_bails_outside_any_repository() {
+        let temp = tempfile::tempdir().unwrap();
         match detect_backend_in(temp.path()) {
-            Ok(_) => panic!("expected jj repos to be unsupported"),
-            Err(e) => assert!(e.to_string().contains("jj repos are not yet supported")),
+            Ok(_) => panic!("expected no backend outside a repository"),
+            Err(e) => assert!(e.to_string().contains("Not in a git or jj repository")),
         }
     }
 }
