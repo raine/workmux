@@ -374,6 +374,37 @@ impl JjBackend {
         quote(base)
     }
 
+    /// The revset naming an *already existing* bookmark, for the
+    /// `create_branch: false` branch of [`Self::create_workspace_in`].
+    ///
+    /// An explicit `<name>@<remote>` resolves against that remote. A plain
+    /// name must resolve to a *local* bookmark: a name that exists only as a
+    /// remote bookmark is refused, because a workspace cannot usefully be
+    /// placed there — no local bookmark would be created (that is what
+    /// `create_branch: false` means), so the workspace would end up on a
+    /// bookmark-less revision that workmux could no longer associate with the
+    /// branch. Git behaves the same way: `git rev-parse --verify <name>` does
+    /// not DWIM a plain name to `refs/remotes/*/<name>`, so git's
+    /// `create_worktree_in` is never reached with a remote-only name — only
+    /// [`VcsBackend::branch_exists_in`]'s deliberately wider remote matching
+    /// (which mirrors git's acceptance of remote-tracking *spellings*) can
+    /// produce that state here.
+    fn existing_bookmark_revset(&self, name: &str, workdir: Option<&Path>) -> Result<String> {
+        if let Some((bookmark, remote)) = split_remote_ref(name) {
+            return Ok(remote_bookmark_revset(bookmark, remote));
+        }
+        if self.local_bookmark_exists(name, workdir)? {
+            return Ok(local_bookmark_revset(name));
+        }
+        if count_revs(workdir, &format!("remote_bookmarks(exact:{})", quote(name)))? > 0 {
+            bail!(
+                "Bookmark '{name}' exists only on a remote. Track it locally \
+                 (`jj bookmark track {name}@<remote>`), or pass an explicit base."
+            );
+        }
+        bail!("Bookmark '{name}' does not exist")
+    }
+
     /// Insertions/deletions for `revset`, or `(0, 0)` if the diff can't be
     /// computed (mirroring `git::status::get_diff_stats`, which also
     /// swallows diff failures rather than failing the whole status).
@@ -420,10 +451,12 @@ impl VcsBackend for JjBackend {
     /// `.jj/repo`. This MUST agree with
     /// [`crate::vcs::jj_meta::JjMetaStore`], whose `remove_all_at` treats
     /// the `common_dir` it is handed as the directory under which
-    /// `workmux/metadata.toml` lives. Returning some jj-internal path (e.g.
-    /// `.jj/repo` itself) here would make `meta()`'s workdir-based
-    /// resolution and `remove_all_at`'s explicit-path resolution disagree
-    /// about where the metadata file is.
+    /// `.jj/workmux/metadata.toml` lives. Returning some jj-internal path
+    /// (e.g. `.jj/repo`, or `.jj` itself) here would make `meta()`'s
+    /// workdir-based resolution and `remove_all_at`'s explicit-path
+    /// resolution disagree about where the metadata file is — the metadata
+    /// store joins the `.jj/workmux/…` suffix itself, so both sides must
+    /// speak in terms of the primary *workspace root*.
     fn get_common_dir_in(&self, workdir: Option<&Path>) -> Result<PathBuf> {
         primary_workspace_root(workdir)
     }
@@ -451,12 +484,21 @@ impl VcsBackend for JjBackend {
     /// `opts.create_branch` is set.
     ///
     /// `opts.base` maps to `jj workspace add -r <base>`, which makes the new
-    /// workspace's working-copy commit a child of `<base>`. With no base, the
-    /// flag is omitted so jj's default applies: the new working-copy commit
-    /// gets the *same parents* as the current workspace's `@`. That is the
-    /// closest analog of git's `git worktree add` defaulting to `HEAD` —
-    /// notably it does not inherit the source workspace's uncommitted
-    /// changes, which live in `@` itself.
+    /// workspace's working-copy commit a child of `<base>`.
+    ///
+    /// With no base and `opts.create_branch` set, the flag is omitted so jj's
+    /// default applies: the new working-copy commit gets the *same parents* as
+    /// the current workspace's `@`. That is the closest analog of git's
+    /// `git worktree add` defaulting to `HEAD` — notably it does not inherit
+    /// the source workspace's uncommitted changes, which live in `@` itself.
+    ///
+    /// With no base and `opts.create_branch` *clear* — `workmux add
+    /// <existing-branch>`, where the caller has already established that the
+    /// bookmark exists — `-r` is set to that bookmark's revision (see
+    /// [`Self::existing_bookmark_revset`]), mirroring git's
+    /// `git worktree add <path> <branch>`. Falling through to jj's default
+    /// there would put the workspace on an unrelated revision with no
+    /// bookmark and still report success.
     ///
     /// `opts.track_upstream` has no effect: in jj, tracking is a property of
     /// a *remote* bookmark (`jj bookmark track <name>@<remote>`), and a
@@ -490,12 +532,38 @@ impl VcsBackend for JjBackend {
             })?;
         }
 
+        // Which revision the new workspace's `@` becomes a child of:
+        //
+        // - an explicit base wins (this is `jj workspace add -r <base>`);
+        // - otherwise, `create_branch: false` means the caller already
+        //   verified the bookmark exists (`workmux add <existing-branch>`), so
+        //   that bookmark's revision is the base — omitting `-r` here would
+        //   silently place the workspace on the *current* workspace's parents
+        //   instead, with no bookmark created either, and report success;
+        // - otherwise (a brand new branch with no configured base) `-r` is
+        //   omitted so jj's default applies: the new working-copy commit gets
+        //   the same parents as the current workspace's `@`, the closest
+        //   analog of `git worktree add` defaulting to `HEAD`.
+        let revision = match opts.base.as_deref().filter(|base| !base.is_empty()) {
+            Some(base) => Some(base.to_string()),
+            None if !opts.create_branch => Some(
+                self.existing_bookmark_revset(&opts.name_or_branch, Some(&base_dir))
+                    .with_context(|| {
+                        format!(
+                            "Cannot create jj workspace '{}' on an existing bookmark",
+                            opts.name_or_branch
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+
         let mut command = jj(Some(&base_dir))?;
         command
             .args(["workspace", "add", "--name", &opts.name_or_branch])
             .arg(&path);
-        if let Some(base) = opts.base.as_deref().filter(|base| !base.is_empty()) {
-            command.args(["-r", base]);
+        if let Some(revision) = revision.as_deref() {
+            command.args(["-r", revision]);
         }
         capture(
             command,
@@ -1076,7 +1144,7 @@ mod tests {
                     path: secondary.clone(),
                     name_or_branch: "ws".to_string(),
                     create_branch: false,
-                    base: None,
+                    base: Some("main".to_string()),
                     track_upstream: false,
                 },
                 Some(temp.path()),
@@ -1197,7 +1265,7 @@ mod tests {
             path: workspace_path.clone(),
             name_or_branch: "ws1".to_string(),
             create_branch: false,
-            base: None,
+            base: Some("main".to_string()),
             track_upstream: false,
         };
         backend
@@ -1266,7 +1334,7 @@ mod tests {
                     path: temp.path().join("keep"),
                     name_or_branch: "keep".to_string(),
                     create_branch: false,
-                    base: None,
+                    base: Some("main".to_string()),
                     track_upstream: false,
                 },
                 Some(temp.path()),
@@ -1305,7 +1373,7 @@ mod tests {
                     path: workspace_path.clone(),
                     name_or_branch: "ws-name".to_string(),
                     create_branch: false,
-                    base: None,
+                    base: Some("main".to_string()),
                     track_upstream: false,
                 },
                 Some(temp.path()),
@@ -1341,7 +1409,7 @@ mod tests {
                     path: workspace_path.clone(),
                     name_or_branch: "plain".to_string(),
                     create_branch: false,
-                    base: None,
+                    base: Some("main".to_string()),
                     track_upstream: false,
                 },
                 Some(temp.path()),
@@ -1356,6 +1424,90 @@ mod tests {
             backend.get_current_branch_in(&workspace_path).unwrap(),
             None
         );
+    }
+
+    /// `workmux add <existing-bookmark>`: `create_impl` sets
+    /// `create_branch: false` and leaves `base` unset, and the new workspace
+    /// must land on that bookmark's revision rather than on whatever the
+    /// current workspace's `@` happens to be parented to.
+    #[test]
+    fn create_workspace_on_existing_bookmark_checks_out_that_revision() {
+        let temp = jj_only_fixture();
+        let backend = JjBackend;
+
+        // A bookmark on a commit that is *not* an ancestor of the source
+        // workspace's `@`, so inheriting `@`'s parents would be observably
+        // wrong. `@`'s parent is `main`; `existing` is a sibling of `main`.
+        let root = jj_in(
+            temp.path(),
+            &["log", "--no-graph", "-r", "root()", "-T", "commit_id"],
+        )
+        .trim()
+        .to_string();
+        jj_in(temp.path(), &["new", &root, "-m", "sibling"]);
+        std::fs::write(temp.path().join("sibling.txt"), "s\n").unwrap();
+        jj_in(temp.path(), &["bookmark", "create", "existing", "-r", "@"]);
+        let existing_commit = jj_in(
+            temp.path(),
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                "bookmarks(exact:\"existing\")",
+                "-T",
+                "commit_id",
+            ],
+        )
+        .trim()
+        .to_string();
+        // Move `@` back onto a child of `main`, so the "inherit the current
+        // workspace's parents" default would give `main`, not `existing`.
+        jj_in(temp.path(), &["new", "main"]);
+
+        let workspace_path = temp.path().join("existing-wt");
+        backend
+            .create_workspace_in(
+                &CreateWorkspaceOptions {
+                    path: workspace_path.clone(),
+                    name_or_branch: "existing".to_string(),
+                    create_branch: false,
+                    base: None,
+                    track_upstream: false,
+                },
+                Some(temp.path()),
+            )
+            .unwrap();
+
+        let parent = jj_in(
+            &workspace_path,
+            &["log", "--no-graph", "-r", "@-", "-T", "commit_id"],
+        );
+        assert_eq!(
+            parent.trim(),
+            existing_commit,
+            "new workspace's @ should be a child of the existing bookmark"
+        );
+        // ...and the bookmark's own content is actually checked out.
+        assert!(workspace_path.join("sibling.txt").exists());
+    }
+
+    #[test]
+    fn create_workspace_without_create_branch_rejects_unknown_bookmark() {
+        let temp = jj_only_fixture();
+        let error = JjBackend
+            .create_workspace_in(
+                &CreateWorkspaceOptions {
+                    path: temp.path().join("nope-wt"),
+                    name_or_branch: "no-such-bookmark".to_string(),
+                    create_branch: false,
+                    base: None,
+                    track_upstream: false,
+                },
+                Some(temp.path()),
+            )
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("does not exist"), "{message}");
     }
 
     #[test]
