@@ -2,8 +2,9 @@ use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::config;
 use crate::multiplexer::Multiplexer;
-use crate::{config, git};
+use crate::vcs::VcsBackend;
 use tracing::debug;
 
 const AUTO_BASE_BRANCH: &str = "auto";
@@ -26,19 +27,26 @@ pub struct WorkflowContext {
     /// Absolute path to the directory where config was found.
     /// Used as source for file operations (copy/symlink).
     pub config_source_dir: PathBuf,
+    pub vcs: Arc<dyn VcsBackend>,
 }
 
-fn resolve_main_branch(config: &config::Config, repo_path: &Path) -> Result<String> {
+fn resolve_main_branch(
+    config: &config::Config,
+    repo_path: &Path,
+    vcs: &dyn VcsBackend,
+) -> Result<String> {
     if let Some(ref branch) = config.main_branch {
         Ok(branch.clone())
     } else {
-        git::get_default_branch_in(Some(repo_path)).context("Failed to determine the main branch")
+        vcs.get_default_branch_in(Some(repo_path))
+            .context("Failed to determine the main branch")
     }
 }
 
 pub fn resolve_configured_base_branch(
     config: &config::Config,
     repo_path: &Path,
+    vcs: &dyn VcsBackend,
 ) -> Result<Option<String>> {
     let Some(base) = config
         .base_branch
@@ -49,7 +57,7 @@ pub fn resolve_configured_base_branch(
     };
 
     if base == AUTO_BASE_BRANCH {
-        resolve_main_branch(config, repo_path).map(Some)
+        resolve_main_branch(config, repo_path, vcs).map(Some)
     } else {
         Ok(Some(base.to_string()))
     }
@@ -91,17 +99,17 @@ impl WorkflowContext {
             )
         })?;
 
-        if !git::is_git_repo_in(Some(&execution_dir))? {
-            return Err(anyhow!("Not in a git repository"));
-        }
+        let vcs = crate::vcs::detect::detect_backend_in(&execution_dir)?;
 
-        let main_worktree_root = git::get_main_worktree_root_in(Some(&execution_dir))
-            .context("Could not find the main git worktree")?;
+        let main_worktree_root = vcs
+            .get_main_worktree_root_in(Some(&execution_dir))
+            .context("Could not find the main worktree")?;
 
-        let git_common_dir = git::get_git_common_dir_in(Some(&execution_dir))
-            .context("Could not find the git common directory")?;
+        let git_common_dir = vcs
+            .get_common_dir_in(Some(&execution_dir))
+            .context("Could not find the repository's common directory")?;
 
-        let main_branch = resolve_main_branch(&config, &execution_dir)?;
+        let main_branch = resolve_main_branch(&config, &execution_dir, vcs.as_ref())?;
 
         let prefix = config.window_prefix().to_string();
 
@@ -132,6 +140,7 @@ impl WorkflowContext {
             mux,
             config_rel_dir,
             config_source_dir,
+            vcs,
         })
     }
 
@@ -183,7 +192,273 @@ impl WorkflowContext {
 #[cfg(test)]
 mod tests {
     use super::paths_identify_same_worktree;
+    use super::WorkflowContext;
+    use crate::config;
+    use crate::git;
+    use crate::multiplexer::types::{
+        CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, LivePaneInfo,
+        PaneSetupOptions, PaneSetupResult,
+    };
+    use crate::multiplexer::{Multiplexer, PaneHandshake};
+    use anyhow::Result;
+    use std::collections::{HashMap, HashSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    struct TestMux;
+
+    impl Multiplexer for TestMux {
+        fn name(&self) -> &'static str {
+            "tmux"
+        }
+
+        fn is_running(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn current_pane_id(&self) -> Option<String> {
+            None
+        }
+
+        fn active_pane_id(&self) -> Option<String> {
+            None
+        }
+
+        fn get_client_active_pane_path(&self) -> Result<PathBuf> {
+            Ok(PathBuf::new())
+        }
+
+        fn create_window(&self, _params: CreateWindowParams) -> Result<String> {
+            Ok("pane-1".to_string())
+        }
+
+        fn create_session(&self, _params: CreateSessionParams) -> Result<String> {
+            Ok("pane-1".to_string())
+        }
+
+        fn create_window_in_session(&self, _params: CreateWindowInSessionParams) -> Result<String> {
+            Ok("pane-1".to_string())
+        }
+
+        fn switch_to_session(&self, _prefix: &str, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn session_exists(&self, _full_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn kill_session(&self, _full_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn kill_window(&self, _full_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn schedule_window_close(&self, _full_name: &str, _delay: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        fn schedule_session_close(&self, _full_name: &str, _delay: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        fn run_deferred_script(&self, _script: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn shell_select_window_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_kill_window_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_switch_session_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_kill_session_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn select_window(&self, _prefix: &str, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn window_exists(&self, _prefix: &str, _name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn window_exists_by_full_name(&self, _full_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn current_window_name(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn get_all_window_names(&self) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
+        fn get_all_session_names(&self) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
+        fn filter_active_windows(&self, _windows: &[String]) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn wait_until_windows_closed(&self, _full_window_names: &[String]) -> Result<()> {
+            Ok(())
+        }
+
+        fn wait_until_session_closed(&self, _full_session_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn select_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn switch_to_pane(&self, _pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+
+        fn kill_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn respawn_pane(&self, pane_id: &str, _cwd: &Path, _cmd: Option<&str>) -> Result<String> {
+            Ok(pane_id.to_string())
+        }
+
+        fn capture_pane(&self, _pane_id: &str, _lines: u16) -> Option<String> {
+            None
+        }
+
+        fn send_text_fragment(&self, _pane_id: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_enter(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_key(&self, _pane_id: &str, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn paste_text(&self, _pane_id: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_default_shell(&self) -> Result<String> {
+            Ok("/bin/sh".to_string())
+        }
+
+        fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
+            Err(anyhow::anyhow!("not used"))
+        }
+
+        fn set_status(
+            &self,
+            _pane_id: &str,
+            _icon: &str,
+            _auto_clear_on_focus: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_status(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn ensure_status_format(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn split_pane(
+            &self,
+            _target_pane_id: &str,
+            _direction: &crate::config::SplitDirection,
+            _cwd: &Path,
+            _size: Option<u16>,
+            _percentage: Option<u8>,
+            _command: Option<&str>,
+        ) -> Result<String> {
+            Ok("pane-2".to_string())
+        }
+
+        fn setup_panes(
+            &self,
+            initial_pane_id: &str,
+            _panes: &[crate::config::PaneConfig],
+            _working_dir: &Path,
+            _options: PaneSetupOptions<'_>,
+            _config: &config::Config,
+            _task_agent: Option<&str>,
+        ) -> Result<PaneSetupResult> {
+            Ok(PaneSetupResult {
+                focus_pane_id: initial_pane_id.to_string(),
+                zoom_pane_id: None,
+            })
+        }
+
+        fn instance_id(&self) -> String {
+            "test".to_string()
+        }
+
+        fn get_live_pane_info(&self, _pane_id: &str) -> Result<Option<LivePaneInfo>> {
+            Ok(None)
+        }
+
+        fn get_all_live_pane_info(&self) -> Result<HashMap<String, LivePaneInfo>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    /// Regression test: for an existing git repo, wiring `WorkflowContext`
+    /// through `crate::vcs::detect::detect_backend_in` /
+    /// `GitBackend` must be behaviorally invisible. `GitBackend`'s methods
+    /// are pure delegations to the same `git::*` free functions this file
+    /// called directly before this change, so the values `WorkflowContext`
+    /// exposes must be identical to calling those free functions straight
+    /// against the fixture.
+    #[test]
+    fn new_in_matches_git_free_functions_for_git_repo() {
+        let temp = tempdir().unwrap();
+        crate::test_support::init_repo(temp.path());
+
+        let context = WorkflowContext::new_in(
+            temp.path(),
+            config::Config::default(),
+            Arc::new(TestMux),
+            None,
+        )
+        .unwrap();
+
+        let execution_dir = temp.path().canonicalize().unwrap();
+
+        assert_eq!(
+            context.main_worktree_root,
+            git::get_main_worktree_root_in(Some(&execution_dir)).unwrap()
+        );
+        assert_eq!(
+            context.git_common_dir,
+            git::get_git_common_dir_in(Some(&execution_dir)).unwrap()
+        );
+        assert_eq!(
+            context.main_branch,
+            git::get_default_branch_in(Some(&execution_dir)).unwrap()
+        );
+        assert_eq!(context.vcs.name(), "git");
+    }
 
     #[test]
     fn main_worktree_path_comparison_handles_existing_and_missing_paths() {
