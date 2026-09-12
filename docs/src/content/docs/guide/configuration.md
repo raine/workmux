@@ -86,6 +86,7 @@ Most options have sensible defaults. You only need to configure what you want to
 | `merge_keep`       | Keep resources after `workmux merge` by default                                      | `false`                     |
 | `theme`            | Dashboard color scheme (see [themes](#themes))                                       | `default` (auto dark/light) |
 | `mode`             | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode/).         | `window`                    |
+| `default_session`  | Session to return to when a workmux session closes (session mode)                    | Previous session            |
 
 Set `base_branch: auto` to create new branches from the effective main branch,
 regardless of the currently checked-out branch. Workmux uses configured

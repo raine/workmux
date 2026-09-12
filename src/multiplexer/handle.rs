@@ -99,9 +99,12 @@ impl<'a> MuxHandle<'a> {
         mode: MuxMode,
         full_name: &str,
         delay: Duration,
+        session_destination: Option<&str>,
     ) -> Result<()> {
         match mode {
-            MuxMode::Session => mux.schedule_session_close(full_name, delay),
+            MuxMode::Session => {
+                mux.schedule_session_close_to(full_name, session_destination, delay)
+            }
             MuxMode::Window => mux.schedule_window_close(full_name, delay),
         }
     }

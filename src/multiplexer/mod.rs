@@ -323,6 +323,19 @@ pub trait Multiplexer: Send + Sync {
     /// Schedule a session to close after a delay
     fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()>;
 
+    /// Schedule a session to close after a delay, preferring `destination` for
+    /// clients that must be relocated. Backends whose session closure does not
+    /// move clients ignore the preference.
+    fn schedule_session_close_to(
+        &self,
+        full_name: &str,
+        destination: Option<&str>,
+        delay: Duration,
+    ) -> Result<()> {
+        let _ = destination;
+        self.schedule_session_close(full_name, delay)
+    }
+
     /// Run a deferred script in the background (for cleanup operations).
     /// For tmux, this uses `run-shell`. For other backends, may use different mechanisms.
     fn run_deferred_script(&self, script: &str) -> Result<()>;
