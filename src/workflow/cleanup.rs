@@ -472,6 +472,41 @@ fn perform_destructive_cleanup(
     Ok(())
 }
 
+/// Whether a jj workspace registration matching `handle` is still present.
+///
+/// Used to decide whether a [`VcsBackend::remove_workspace_at`] failure was
+/// the benign "it was already gone" case or a real failure that must abort
+/// cleanup. The match mirrors `JjBackend::remove_workspace_at`'s own lookup
+/// order (workspace name, then workspace directory basename, then the
+/// bookmark on the workspace's `@`) so the two cannot disagree about which
+/// registrations count as "this handle".
+///
+/// If the listing itself fails we cannot prove the registration is gone, so
+/// this reports `true` (still registered) — the conservative answer, which
+/// makes the caller propagate the original error rather than proceed with a
+/// destructive step it can no longer undo.
+fn jj_workspace_registration_exists(
+    vcs: &dyn crate::vcs::VcsBackend,
+    common_dir: &Path,
+    handle: &str,
+) -> bool {
+    match vcs.list_workspaces_in(Some(common_dir)) {
+        Ok(entries) => entries.iter().any(|entry| {
+            entry.name.as_deref() == Some(handle)
+                || entry.path.file_name().and_then(|n| n.to_str()) == Some(handle)
+                || entry.branch_or_bookmark.as_deref() == Some(handle)
+        }),
+        Err(error) => {
+            debug!(
+                handle,
+                error = %error,
+                "cleanup:jj could not list workspaces to confirm the registration is gone"
+            );
+            true
+        }
+    }
+}
+
 /// jj analog of [`perform_destructive_cleanup`].
 ///
 /// jj has no linked-worktree admin state to unlock, no worktree-registration
@@ -484,13 +519,49 @@ fn perform_destructive_cleanup(
 /// `jj workspace forget` call below, so the risk it defends against does not
 /// apply here in the same way.
 ///
-/// Order: forget the workspace registration first (best-effort — a workspace
-/// that is already forgotten, or was never registered under this exact
-/// name, must not block removal of an otherwise-orphaned directory), then
-/// delete the on-disk directory (jj `forget` never touches it), then the
-/// bookmark, then workmux's own metadata. Metadata removal is last so a
-/// crash partway through cleanup leaves the metadata around as a trace of
-/// the incomplete removal, mirroring the git path's ordering.
+/// Order: forget the workspace registration first (tolerating only the
+/// genuinely-already-gone case — a workspace that is already forgotten, or
+/// was never registered under this exact name, must not block removal of an
+/// otherwise-orphaned directory, but any *other* forget failure is fatal;
+/// see below), then delete the on-disk directory (jj `forget` never touches
+/// it), then the bookmark, then workmux's own metadata. Metadata removal is
+/// last so a crash partway through cleanup leaves the metadata around as a
+/// trace of the incomplete removal, mirroring the git path's ordering.
+///
+/// # Defenses this path deliberately does not have (relative to git)
+///
+/// Three of git's cleanup defenses are dropped here. A future reader
+/// hardening the jj path should treat all three as open gaps, not as
+/// oversights:
+///
+/// 1. **Quarantine / repository-identity verification.** The git path
+///    renames the worktree directory away before pruning and re-verifies
+///    repository identity at each step, defending against a worktree path
+///    being reused mid-operation. Per [`JjBackend::move_workspace`]'s doc
+///    comment there is no "recover a moved/renamed path" story worth
+///    quarantining for, and a jj workspace has no on-disk linked-worktree
+///    registration to corrupt — only the repo-level `jj workspace forget`
+///    below — so the risk that dance defends against does not apply here in
+///    the same way.
+/// 2. **The durable pending-cleanup record and its retry loop**
+///    ([`crate::workflow::cleanup_retry`]). The git path's quarantine step
+///    writes a pending-cleanup record so a transient failure (a locked or
+///    busy directory, a transient I/O error) is retried later. This path
+///    writes no such record, so a transient `remove_dir_all` failure below
+///    leaves a half-deleted workspace directory with nothing queued to
+///    finish the job — the user must retry `workmux remove` by hand. (The
+///    `remove_workspace_at` ordering is chosen so that such a failure leaves
+///    a *recoverable* state: see the not-found narrowing below, which keeps
+///    the workspace registration intact whenever forgetting it did not
+///    genuinely succeed.)
+/// 3. **git's non-forced merge guard.** The git path threads `force` into
+///    [`crate::git::delete_branch_in`], so a plain `git branch -d` refuses
+///    to delete an unmerged branch. [`JjBackend::delete_branch_in`]
+///    explicitly discards its `force` parameter (`let _ = force;`), and the
+///    jj unmerged check returns `None` (accepted separately in Task 7), so a
+///    non-forced `workmux remove` on a jj repo deletes the bookmark with no
+///    merge check and no prompt — i.e. there is currently no jj equivalent
+///    of "refuse to throw away unmerged work".
 fn perform_jj_destructive_cleanup(
     context: &WorkflowContext,
     worktree_path: &Path,
@@ -502,6 +573,18 @@ fn perform_jj_destructive_cleanup(
         .vcs
         .remove_workspace_at(handle, &context.git_common_dir)
     {
+        // Only a genuinely-absent registration is benign. Anything else (lock
+        // contention, a concurrent jj operation, an I/O failure) must halt
+        // cleanup: continuing would delete the directory, after which
+        // `list_workspaces_in` drops the record (jj reports an empty root for
+        // a missing directory), making the orphaned registration invisible to
+        // `workmux list`/`find_worktree` and leaving the user no way to
+        // finish the removal short of a manual `jj workspace forget`. The git
+        // path propagates prune failure for the same reason.
+        if jj_workspace_registration_exists(context.vcs.as_ref(), &context.git_common_dir, handle) {
+            return Err(error)
+                .with_context(|| format!("Failed to forget jj workspace for worktree '{handle}'"));
+        }
         debug!(
             handle,
             error = %error,
@@ -1232,4 +1315,81 @@ pub fn navigate_to_target_and_close(
         "cleanup:scheduled navigation and source close"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jj_workspace_registration_exists;
+    use crate::test_support;
+    use crate::vcs::{JjBackend, VcsBackend};
+    use std::path::Path;
+
+    fn seed_jj_fixture(repo: &Path) {
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        test_support::run_jj(repo, &["describe", "-m", "initial"]);
+        test_support::run_jj(repo, &["bookmark", "create", "main", "-r", "@"]);
+        test_support::run_jj(repo, &["new"]);
+    }
+
+    /// The narrowing that keeps `perform_jj_destructive_cleanup` from
+    /// swallowing a real `remove_workspace_at` failure: only a registration
+    /// that is genuinely gone may be treated as benign. Exercised against a
+    /// real jj repo through the same `VcsBackend` method the production path
+    /// consults.
+    #[test]
+    fn jj_workspace_registration_lookup_distinguishes_present_from_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_jj_repo(&repo);
+        seed_jj_fixture(&repo);
+
+        let workspace = temp.path().join("ws").join("feature-ws");
+        std::fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+        test_support::run_jj(
+            &repo,
+            &[
+                "workspace",
+                "add",
+                workspace.to_str().unwrap(),
+                "-r",
+                "main",
+            ],
+        );
+
+        let vcs = JjBackend;
+
+        // Matched by jj workspace name (jj names the workspace after the
+        // directory basename here) and, equivalently, by directory basename.
+        assert!(jj_workspace_registration_exists(&vcs, &repo, "feature-ws"));
+        // A handle that was never registered is genuinely gone.
+        assert!(!jj_workspace_registration_exists(
+            &vcs,
+            &repo,
+            "never-registered"
+        ));
+
+        // After a successful forget the registration is gone, so a
+        // subsequent forget failure would be correctly treated as benign.
+        vcs.remove_workspace_at("feature-ws", &repo).unwrap();
+        assert!(!jj_workspace_registration_exists(&vcs, &repo, "feature-ws"));
+    }
+
+    /// The listing-failed case must report "still registered" (the
+    /// conservative answer), so the caller propagates the original error
+    /// rather than proceeding with an irreversible destructive step.
+    #[test]
+    fn jj_workspace_registration_lookup_is_conservative_when_listing_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let not_a_repo = temp.path().join("plain-dir");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+
+        let vcs = JjBackend;
+        assert!(vcs.list_workspaces_in(Some(&not_a_repo)).is_err());
+        assert!(jj_workspace_registration_exists(
+            &vcs,
+            &not_a_repo,
+            "anything"
+        ));
+    }
 }

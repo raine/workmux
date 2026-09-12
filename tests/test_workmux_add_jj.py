@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import (
+from .conftest import (
     MuxEnvironment,
     assert_session_exists,
     assert_session_not_exists,
@@ -26,7 +26,7 @@ from ..conftest import (
     run_workmux_command,
     write_workmux_config,
 )
-from ..support.jj_repo import (
+from .support.jj_repo import (
     assert_jj_bookmark_exists,
     assert_jj_bookmark_removed,
     assert_jj_workspace_exists,
