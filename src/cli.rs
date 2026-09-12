@@ -31,11 +31,12 @@ macro_rules! impl_passthrough_typed_value_parser {
     };
 }
 
-fn try_list_worktrees() -> Option<Vec<(PathBuf, String)>> {
-    if !git::is_git_repo().unwrap_or(false) {
-        return None;
-    }
-    git::list_worktrees().ok()
+fn try_list_worktrees() -> Option<Vec<crate::vcs::WorkspaceEntry>> {
+    let cwd = std::env::current_dir().ok()?;
+    crate::vcs::detect::detect_backend_in(&cwd)
+        .ok()?
+        .list_workspaces_in(None)
+        .ok()
 }
 
 #[derive(Clone, Debug)]
@@ -51,15 +52,19 @@ impl WorktreeBranchParser {
             return Vec::new();
         };
 
-        let main_branch = git::get_default_branch().ok();
+        let main_branch = std::env::current_dir().ok().and_then(|cwd| {
+            crate::vcs::detect::detect_backend_in(&cwd)
+                .ok()?
+                .get_default_branch_in(None)
+                .ok()
+        });
 
         worktrees
             .into_iter()
-            .map(|(_, branch)| branch)
+            // Filter out detached HEAD / bookmark-less states.
+            .filter_map(|w| w.branch_or_bookmark)
             // Filter out the main branch, as it's not a candidate for merging/removing.
             .filter(|branch| main_branch.as_deref() != Some(branch.as_str()))
-            // Filter out detached HEAD states.
-            .filter(|branch| branch != "(detached)")
             .collect()
     }
 }
@@ -80,18 +85,22 @@ impl WorktreeHandleParser {
             return Vec::new();
         };
 
-        let main_worktree_root = git::get_main_worktree_root().ok();
+        let main_worktree_root = std::env::current_dir().ok().and_then(|cwd| {
+            crate::vcs::detect::detect_backend_in(&cwd)
+                .ok()?
+                .get_main_worktree_root_in(None)
+                .ok()
+        });
 
         worktrees
             .into_iter()
-            .filter_map(|(path, _)| {
+            .filter_map(|w| {
                 // Filter out the main worktree
-                if main_worktree_root.as_ref() == Some(&path) {
+                if main_worktree_root.as_ref() == Some(&w.path) {
                     return None;
                 }
                 // Extract directory name as the handle
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
+                w.name
             })
             .collect()
     }
@@ -116,9 +125,12 @@ impl AgentTargetParser {
         let mut targets = WorktreeHandleParser::get_handles();
 
         // Also include the main worktree handle (agents can run there too)
-        if git::is_git_repo().unwrap_or(false)
-            && let Ok(main_root) = git::get_main_worktree_root()
-            && let Some(name) = main_root.file_name()
+        if let Some(main_root) = std::env::current_dir().ok().and_then(|cwd| {
+            crate::vcs::detect::detect_backend_in(&cwd)
+                .ok()?
+                .get_main_worktree_root_in(None)
+                .ok()
+        }) && let Some(name) = main_root.file_name()
         {
             let handle = name.to_string_lossy().to_string();
             if !targets.contains(&handle) {
@@ -170,8 +182,12 @@ impl GitBranchParser {
     }
 
     fn get_branches() -> Vec<String> {
-        // Don't attempt completions if not in a git repo.
-        if !git::is_git_repo().unwrap_or(false) {
+        // Don't attempt completions if not in a git or jj repository.
+        let in_repo = std::env::current_dir()
+            .ok()
+            .map(|cwd| crate::vcs::detect::detect_backend_in(&cwd).is_ok())
+            .unwrap_or(false);
+        if !in_repo {
             return Vec::new();
         }
 
