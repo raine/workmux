@@ -335,19 +335,46 @@ fn create_impl(
             // Use the explicitly provided base branch/commit/tag
             Some(base.to_string())
         } else {
-            // Default to the current branch when no explicit base was provided
-            let current_branch = git::get_current_branch_in(&context.execution_dir)
-                .context("Failed to determine the current branch to use as the base")?;
-            let current_branch = current_branch.trim().to_string();
+            // Default to the current branch when no explicit base was
+            // provided. This goes through the VCS backend rather than
+            // `git::get_current_branch_in`: `git branch --show-current` fails
+            // outright inside a jj-only repository, and in a colocated one jj
+            // keeps git's HEAD detached, so it exits 0 with empty output.
+            //
+            // `VcsBackend::get_current_branch_in` returns `Option<String>`,
+            // and the meaning of `None` differs per backend:
+            //
+            // - git: HEAD really is detached. That has always been a hard
+            //   error here, and still is — silently substituting the default
+            //   branch would change long-standing git behavior.
+            // - jj: `@` simply carries no bookmark, which is the *ordinary*
+            //   state of a jj working-copy commit rather than an anomaly.
+            //   There is no "current branch" concept to report, so fall back
+            //   to the repository's default bookmark (jj's `trunk()`, then
+            //   `main`/`master`) — the same answer `workmux` would use for a
+            //   repo whose base is unconfigured.
+            let current_branch = context
+                .vcs
+                .get_current_branch_in(&context.execution_dir)
+                .context("Failed to determine the current branch to use as the base")?
+                .map(|branch| branch.trim().to_string())
+                .filter(|branch| !branch.is_empty());
 
-            if current_branch.is_empty() {
-                return Err(anyhow!(
-                    "Cannot determine current branch (detached HEAD). \
-                     Use --base to explicitly specify the starting point."
-                ));
+            match current_branch {
+                Some(branch) => Some(branch),
+                None if context.vcs.name() == "git" => {
+                    return Err(anyhow!(
+                        "Cannot determine current branch (detached HEAD). \
+                         Use --base to explicitly specify the starting point."
+                    ));
+                }
+                None => Some(
+                    context
+                        .vcs
+                        .get_default_branch_in(Some(&context.execution_dir))
+                        .context("Failed to determine the current branch to use as the base")?,
+                ),
             }
-
-            Some(current_branch)
         }
     } else {
         None
@@ -1492,6 +1519,176 @@ mod tests {
         );
         // The headless path writes no multiplexer metadata, same as the git case.
         assert_eq!(ctx.vcs.meta().get("jj-feature", "mode", Some(&repo)), None);
+    }
+
+    /// The *default* base path: no `--base`, no `base_branch:` in
+    /// `.workmux.yaml`. Every other jj test in this module supplies
+    /// `base_branch: Some("main")`, so this is the path that `git branch
+    /// --show-current` used to break — it fails outright in a jj-only repo and
+    /// reports an empty (detached) branch in a colocated one, because jj keeps
+    /// git's HEAD detached. With no bookmark on `@`, the jj backend has no
+    /// "current branch" to report at all, so the base must fall back to the
+    /// repository's default bookmark.
+    fn jj_create_with_no_configured_base_uses_default_bookmark(init_fixture: fn(&Path)) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_fixture(&repo);
+        // `seed_jj_fixture` leaves `@` as a fresh bookmark-less child of
+        // `main` - jj's ordinary state, and the one that has no current
+        // branch.
+        seed_jj_fixture(&repo);
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        assert_eq!(ctx.vcs.name(), "jj");
+        assert_eq!(ctx.vcs.get_current_branch_in(&repo).unwrap(), None);
+
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+
+        let result = create_headless(
+            &ctx,
+            CreateArgs {
+                branch_name: "jj-default-base",
+                handle: "jj-default-base",
+                base_branch: None,
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(result.worktree_path.exists());
+        // The base fell back to the default bookmark, and was recorded as such.
+        assert_eq!(
+            ctx.vcs
+                .meta()
+                .get_branch_base("jj-default-base", Some(&repo)),
+            Some("main".to_string())
+        );
+        // ...and the new workspace really is parented on `main`, with the
+        // base's content checked out.
+        assert!(result.worktree_path.join("README.md").exists());
+        let parent_bookmarks = test_support::run_jj(
+            &result.worktree_path,
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                "@-",
+                "-T",
+                r#"local_bookmarks.map(|b| b.name()).join(",")"#,
+            ],
+        );
+        assert_eq!(parent_bookmarks.trim(), "main");
+        assert!(
+            ctx.vcs
+                .branch_exists_in("jj-default-base", Some(&repo))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn jj_create_with_no_configured_base_uses_default_bookmark_jj_only() {
+        jj_create_with_no_configured_base_uses_default_bookmark(test_support::init_jj_repo);
+    }
+
+    #[test]
+    fn jj_create_with_no_configured_base_uses_default_bookmark_colocated() {
+        jj_create_with_no_configured_base_uses_default_bookmark(test_support::init_colocated_repo);
+    }
+
+    /// Characterization: for a git repo the default base path is unchanged -
+    /// the current branch is used verbatim, with no default-branch fallback.
+    #[test]
+    fn git_create_with_no_configured_base_uses_the_current_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&repo);
+        // A non-default current branch, so "current branch" and "default
+        // branch" are distinguishable.
+        test_support::run_git(&repo, &["checkout", "-b", "side"]);
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+
+        create_headless(
+            &ctx,
+            CreateArgs {
+                branch_name: "git-default-base",
+                handle: "git-default-base",
+                base_branch: None,
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git::get_branch_base_in("git-default-base", Some(&repo)).unwrap(),
+            "side"
+        );
+    }
+
+    /// Characterization: a git repo with a genuinely detached HEAD still
+    /// errors rather than silently falling back to the default branch. Only
+    /// jj's bookmark-less `@` - a backend with no current-branch concept -
+    /// gets the fallback treatment.
+    #[test]
+    fn git_create_with_detached_head_and_no_base_still_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&repo);
+        test_support::run_git(&repo, &["checkout", "--detach", "HEAD"]);
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+
+        let error = create_headless(
+            &ctx,
+            CreateArgs {
+                branch_name: "git-detached",
+                handle: "git-detached",
+                base_branch: None,
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+            false,
+        )
+        .map(|_| ())
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("detached HEAD"), "{message}");
     }
 
     #[test]
