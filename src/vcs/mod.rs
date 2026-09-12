@@ -9,6 +9,7 @@
 
 pub mod detect;
 pub mod git_backend;
+pub mod jj_meta;
 pub mod jj_security;
 pub mod meta_lock;
 pub mod types;
@@ -18,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
 pub use git_backend::{GitBackend, GitConfigMetaStore};
+#[allow(unused_imports)]
+pub use jj_meta::JjMetaStore;
 pub use types::{CreateWorkspaceOptions, RepoKind, WorkspaceEntry};
 
 /// Re-export of the existing git status struct, unchanged, under a
