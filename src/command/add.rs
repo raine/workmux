@@ -294,7 +294,11 @@ fn run_headless(
     }
     let handle = crate::naming::derive_handle(branch_name, name, &context.config)?;
     let configured_base = if base.is_none() {
-        workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
+        workflow::resolve_configured_base_branch(
+            &context.config,
+            &context.execution_dir,
+            context.vcs.as_ref(),
+        )?
     } else {
         None
     };
@@ -1078,7 +1082,11 @@ impl<'a> CreationPlan<'a> {
             // Create a WorkflowContext for this spec's config (reuse shared mux)
             let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
             let configured_base = if self.resolved_base.is_none() && self.remote_branch.is_none() {
-                workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
+                workflow::resolve_configured_base_branch(
+                    &context.config,
+                    &context.execution_dir,
+                    context.vcs.as_ref(),
+                )?
             } else {
                 None
             };

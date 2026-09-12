@@ -34,7 +34,8 @@ fn default_add_worktree_base(repo_path: &Path) -> String {
     crate::config::Config::load_with_location_from(repo_path, None)
         .ok()
         .and_then(|(config, _)| {
-            workflow::resolve_configured_base_branch(&config, repo_path)
+            let vcs = crate::vcs::detect::detect_backend_in(repo_path).ok()?;
+            workflow::resolve_configured_base_branch(&config, repo_path, vcs.as_ref())
                 .ok()
                 .flatten()
         })
