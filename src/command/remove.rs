@@ -901,10 +901,7 @@ mod tests {
             ) -> Result<bool> {
                 unimplemented!()
             }
-            fn get_current_branch_in(
-                &self,
-                _workdir: &std::path::Path,
-            ) -> Result<Option<String>> {
+            fn get_current_branch_in(&self, _workdir: &std::path::Path) -> Result<Option<String>> {
                 unimplemented!()
             }
             fn delete_branch_in(
