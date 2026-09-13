@@ -208,10 +208,12 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let repo_a = temp.path().join("repo-a");
             let repo_b = temp.path().join("repo-b");
-            let worktree_a = temp.path().join("worktree-a");
-            let worktree_b = temp.path().join("worktree-b");
+            let worktree_a = temp.path().join("repo-a__worktrees/shared");
+            let worktree_b = temp.path().join("repo-b__worktrees/shared");
             std::fs::create_dir_all(&repo_a).unwrap();
             std::fs::create_dir_all(&repo_b).unwrap();
+            std::fs::create_dir_all(worktree_a.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(worktree_b.parent().unwrap()).unwrap();
             test_support::init_repo(&repo_a);
             test_support::init_repo(&repo_b);
 
@@ -226,15 +228,12 @@ mod tests {
                         worktree.to_str().unwrap(),
                     ],
                 );
-                test_support::run_git(
-                    repo,
-                    &[
-                        "config",
-                        "--local",
-                        "workmux.worktree.shared.attachment",
-                        "headless",
-                    ],
-                );
+                git::set_worktree_attachment_in(
+                    "shared",
+                    git::WorktreeAttachment::Headless,
+                    Some(repo),
+                )
+                .unwrap();
             }
 
             test_support::run_isolated_test(
@@ -262,8 +261,8 @@ mod tests {
 
         remove("shared", true, false, &ctx).unwrap();
 
-        assert!(temp.join("worktree-a").exists());
-        assert!(!temp.join("worktree-b").exists());
+        assert!(temp.join("repo-a__worktrees/shared").exists());
+        assert!(!temp.join("repo-b__worktrees/shared").exists());
         assert!(git::branch_exists_in("shared", Some(&repo_a)).unwrap());
         assert!(!git::branch_exists_in("shared", Some(&repo_b)).unwrap());
     }
