@@ -35,7 +35,21 @@ workmux open feature-branch --mode window
 ## How it works
 
 - **Persistence**: The mode is stored per-worktree in git config. Once a worktree is created with session mode, `open`, `close`, `remove`, and `merge` automatically use the correct mode.
-- **Navigation**: `workmux add` switches your client to the new session. When a session closes, clients still viewing it return to their previous sessions. For an in-session `merge`, the merge target's managed session takes precedence when available; for `remove`, the main branch's managed session takes precedence. Clients already viewing other sessions stay put. If preferred navigation is unavailable or cannot be safely targeted, tmux chooses another session. Closing the last session detaches its clients.
+- **Navigation**: `workmux add` switches your client to the new session. When a session closes, clients still viewing it return to their previous sessions. For an in-session `merge`, the merge target's managed session takes precedence when available; for `remove`, the main branch's managed session takes precedence. A configured [`default_session`](#returning-to-a-default-session) is used when no managed session is available. Clients already viewing other sessions stay put. If preferred navigation is unavailable or cannot be safely targeted, tmux chooses another session. Closing the last session detaches its clients.
+
+## Returning to a default session
+
+By default a client viewing a closing session returns to whichever session it was in previously. Set `default_session` to name a session to prefer instead:
+
+```yaml
+# .workmux.yaml
+mode: session
+default_session: main
+```
+
+`close`, `remove` and `merge` then send clients to the `main` session rather than to whatever each was viewing before. A managed session for the destination branch still wins, so this only applies where tmux would otherwise fall back to the previous session.
+
+The value is a literal tmux session name, so `window_prefix` is not applied and it can name a session workmux does not manage. If no session matches it exactly, clients fall back to their previous sessions as before.
 
 ## Multiple windows per session
 

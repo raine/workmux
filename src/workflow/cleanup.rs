@@ -967,6 +967,8 @@ fn run_deferred_cleanup_worker_inner(
 /// Handles both cases: running inside the source window (async) and outside (sync).
 /// `target_window_name` is the window name of the merge target.
 /// `source_handle` is the window name of the branch being merged/removed.
+/// `default_session` is the configured session to prefer in session mode when
+/// no workmux-managed session exists for the destination branch.
 pub fn navigate_to_target_and_close(
     mux: &dyn Multiplexer,
     prefix: &str,
@@ -974,6 +976,7 @@ pub fn navigate_to_target_and_close(
     source_handle: &str,
     cleanup_result: &CleanupResult,
     mode: MuxMode,
+    default_session: Option<&str>,
 ) -> Result<()> {
     use crate::multiplexer::MuxHandle;
 
@@ -1010,8 +1013,12 @@ pub fn navigate_to_target_and_close(
                 .and_then(|id| mux.shell_close_window_by_id_guard_cmd(id).ok())
                 .or_else(|| MuxHandle::shell_kill_window_target_cmd(mux, target).ok()),
             SourceTarget::Session { id, .. } => id.as_deref().and_then(|id| {
+                // A managed session for the destination branch wins; otherwise
+                // fall back to the configured session before the client's own
+                // previous session.
                 let preferred = (target_exists && target_mode == MuxMode::Session)
-                    .then_some(target_full.as_str());
+                    .then_some(target_full.as_str())
+                    .or(default_session);
                 mux.shell_close_session_by_id_guard_cmd(id, preferred).ok()
             }),
         })

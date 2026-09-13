@@ -370,6 +370,7 @@ pub fn merge(
             handle,
             &cleanup_result,
             mode,
+            context.config.default_session(),
         )
         .err()
     } else {

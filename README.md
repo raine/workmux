@@ -280,6 +280,7 @@ customize.
 | `worktree_dir`   | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.                         | `<project>__worktrees/`     |
 | `window_prefix`    | Prefix for tmux window/session names. Supports `{project}`.                                           | `wm-`                       |
 | `mode`             | Tmux mode (`window` or `session`)                                                                     | `window`                    |
+| `default_session`  | Session to return to when a workmux session closes (session mode)                                     | Previous session            |
 | `window_placement` | New tmux window placement (`after_current` or `rightmost`)                                            | `after_current`             |
 | `agent`            | Default agent for `<agent>` placeholder                                                               | `claude`                    |
 | `agents`         | Named agent commands ([docs](https://workmux.raine.dev/guide/agents#named-agents), global-only)       | `{}`                        |
@@ -2293,6 +2294,23 @@ workmux add feature-branch --session
   use session mode for that worktree.
 - **Navigation**: After `merge` or `remove`, workmux switches you back to the
   previous session.
+
+### Returning to a default session
+
+By default a client viewing a closing session returns to whichever session it
+was in previously. Set `default_session` to name a session to prefer instead:
+
+```yaml
+mode: session
+default_session: main
+```
+
+`close`, `remove` and `merge` then send clients to the `main` session. A managed
+session for the destination branch still wins, so this applies only where tmux
+would otherwise fall back to the previous session. The value is a literal tmux
+session name, so `window_prefix` is not applied and it can name a session
+workmux does not manage; if nothing matches it exactly, clients fall back to
+their previous sessions as before.
 
 ### Multiple windows per session
 

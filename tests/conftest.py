@@ -1364,6 +1364,7 @@ def write_workmux_config(
     base_branch: Optional[str] = None,
     prompt_file_only: Optional[bool] = None,
     window_placement: Optional[str] = None,
+    default_session: Optional[str] = None,
     layouts: Optional[Dict[str, Any]] = None,
     status_icons: Optional[Dict[str, str]] = None,
 ):
@@ -1403,6 +1404,8 @@ def write_workmux_config(
         config["prompt_file_only"] = prompt_file_only
     if window_placement is not None:
         config["window_placement"] = window_placement
+    if default_session is not None:
+        config["default_session"] = default_session
     if status_icons:
         config["status_icons"] = status_icons
     (repo_path / ".workmux.yaml").write_text(yaml.dump(config))

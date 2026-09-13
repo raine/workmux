@@ -622,6 +622,22 @@ impl TmuxBackend {
         }
     }
 
+    /// Close command for a session name, preferring `destination` for any
+    /// clients tmux has to relocate.
+    fn shell_kill_session_cmd_to(
+        &self,
+        full_name: &str,
+        destination: Option<&str>,
+    ) -> Result<String> {
+        let target = format!("={full_name}:");
+        let id = self.tmux_query(&["display-message", "-p", "-t", &target, "#{session_id}"])?;
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("Session {full_name} not found"));
+        }
+        self.shell_close_session_by_id_guard_cmd(id, destination)
+    }
+
     fn shell_escape(value: &str) -> String {
         format!("'{}'", value.replace('\'', r#"'\''"#))
     }
@@ -1046,8 +1062,17 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()> {
+        self.schedule_session_close_to(full_name, None, delay)
+    }
+
+    fn schedule_session_close_to(
+        &self,
+        full_name: &str,
+        destination: Option<&str>,
+        delay: Duration,
+    ) -> Result<()> {
         let delay_secs = format!("{:.3}", delay.as_secs_f64());
-        let kill = self.shell_kill_session_cmd(full_name)?;
+        let kill = self.shell_kill_session_cmd_to(full_name, destination)?;
         let script = format!("sleep {delay_secs}; {kill}");
 
         self.run_shell(&script)
@@ -1190,13 +1215,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
-        let target = format!("={full_name}:");
-        let id = self.tmux_query(&["display-message", "-p", "-t", &target, "#{session_id}"])?;
-        let id = id.trim();
-        if id.is_empty() {
-            return Err(anyhow!("Session {full_name} not found"));
-        }
-        self.shell_close_session_by_id_guard_cmd(id, None)
+        self.shell_kill_session_cmd_to(full_name, None)
     }
 
     fn shell_switch_to_last_session_cmd(&self) -> Result<String> {

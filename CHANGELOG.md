@@ -21,6 +21,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Add `default_session` to name a session that clients return to when a workmux session closes in session mode, instead of whichever session each client viewed previously.
+
 ## v0.1.262 (2026-09-12)
 
 - Fix empty dashboard review diffs for newly checked-out GitHub PRs and GitLab merge requests by comparing against their target branch. ([#276](https://github.com/raine/workmux/issues/276))

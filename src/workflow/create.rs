@@ -832,6 +832,7 @@ pub fn create_with_changes(
                 &create_result.resolved_handle,
                 &cleanup_result,
                 mode,
+                context.config.default_session(),
             )?;
 
             Err(anyhow!(

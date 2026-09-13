@@ -168,6 +168,7 @@ fn remove_with_hook_output(
             actual_handle,
             &cleanup_result,
             mode,
+            context.config.default_session(),
         )?;
     }
 

@@ -666,6 +666,12 @@ pub struct Config {
     /// None means "use default" (Window), Some means explicitly set
     pub mode: Option<MuxMode>,
 
+    /// Session mode only. Session to return to when a workmux-managed session
+    /// closes. Not prefixed with `window_prefix`, so it can name a session
+    /// workmux does not manage.
+    #[serde(default)]
+    pub default_session: Option<String>,
+
     /// Placement for new tmux windows in window mode.
     #[serde(default)]
     pub window_placement: Option<WindowPlacement>,
@@ -2756,6 +2762,9 @@ impl Config {
         // Special case: mode (project wins if explicitly set)
         merged.mode = project.mode.or(self.mode);
 
+        // Special case: default_session (project wins if explicitly set)
+        merged.default_session = project.default_session.or(self.default_session);
+
         // Special case: window_placement (project wins if explicitly set)
         merged.window_placement = project.window_placement.or(self.window_placement);
 
@@ -3049,6 +3058,15 @@ impl Config {
         self.mode.unwrap_or(MuxMode::Window)
     }
 
+    /// Session to return to when a workmux-managed session closes.
+    /// Blank values are treated as unset.
+    pub fn default_session(&self) -> Option<&str> {
+        self.default_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
     /// Get the window placement strategy.
     pub fn window_placement(&self) -> WindowPlacement {
         self.window_placement.unwrap_or_default()
@@ -3156,6 +3174,11 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # - window: Create windows within the current tmux session
 # - session: Create tmux sessions for each worktree
 # mode: session
+
+# Session mode only. Session to return to when a workmux session is closed or
+# removed, instead of whichever session the client was in previously.
+# Not prefixed with window_prefix. Default: the client's previous session.
+# default_session: main
 
 # Placement for new tmux windows in window mode.
 # Options: after_current (default), rightmost
@@ -3475,6 +3498,54 @@ mod tests {
     };
     use crate::test_support;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_session_is_none_by_default() {
+        assert_eq!(Config::default().default_session(), None);
+    }
+
+    #[test]
+    fn default_session_parses_from_config() {
+        let config: Config =
+            serde_yaml::from_str("default_session: main\n").expect("config parses");
+        assert_eq!(config.default_session(), Some("main"));
+    }
+
+    #[test]
+    fn default_session_treats_blank_value_as_unset() {
+        let config: Config =
+            serde_yaml::from_str("default_session: \"   \"\n").expect("config parses");
+        assert_eq!(config.default_session(), None);
+    }
+
+    #[test]
+    fn default_session_trims_surrounding_whitespace() {
+        let config: Config =
+            serde_yaml::from_str("default_session: \" my main \"\n").expect("config parses");
+        assert_eq!(config.default_session(), Some("my main"));
+    }
+
+    #[test]
+    fn default_session_project_value_overrides_global() {
+        let global: Config =
+            serde_yaml::from_str("default_session: global-main\n").expect("global config parses");
+        let project: Config =
+            serde_yaml::from_str("default_session: project-main\n").expect("project config parses");
+        assert_eq!(
+            global.merge(project).default_session(),
+            Some("project-main")
+        );
+    }
+
+    #[test]
+    fn default_session_inherits_global_value() {
+        let global: Config =
+            serde_yaml::from_str("default_session: global-main\n").expect("global config parses");
+        assert_eq!(
+            global.merge(Config::default()).default_session(),
+            Some("global-main")
+        );
+    }
 
     #[test]
     fn dashboard_closes_on_jump_by_default() {

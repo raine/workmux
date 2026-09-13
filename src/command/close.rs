@@ -182,7 +182,13 @@ pub fn run(name: Option<&str>) -> Result<()> {
         if mode == crate::config::MuxMode::Window {
             MuxHandle::schedule_window_target_close(mux.as_ref(), &window_target, delay)?;
         } else {
-            MuxHandle::schedule_close_full(mux.as_ref(), mode, &full_target_name, delay)?;
+            MuxHandle::schedule_close_full(
+                mux.as_ref(),
+                mode,
+                &full_target_name,
+                delay,
+                config.default_session(),
+            )?;
         }
     } else {
         if mode == crate::config::MuxMode::Window {
