@@ -56,7 +56,7 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
             let worktree_display = if wt.is_main {
                 wt.branch.clone()
             } else if wt.branch != wt.handle {
-                format!("{} \u{2192}{}", wt.handle, wt.branch)
+                format!("{} \u{2192} {}", wt.handle, wt.branch)
             } else {
                 wt.handle.clone()
             };
