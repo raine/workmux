@@ -26,6 +26,7 @@ The `commit` and `merge` values are text sent to the agent's pane. Use the `!` p
 | `preview_size`     | `60`                                                        | Preview pane height as percentage (10-90) |
 | `agent_columns`    | `[number, project, worktree, git, pr, status, time, title]` | Agents table columns, in display order    |
 | `worktree_columns` | `[number, project, worktree, git, pr, mux, age, agent]`     | Worktree table columns, in display order  |
+| `worktree_label`   | `handle-first`                                              | Which name leads the `worktree` cell      |
 | `close_on_jump`    | `true`                                                      | Close the dashboard after a jump          |
 
 ## Staying open after a jump
@@ -124,3 +125,22 @@ dashboard:
 ```
 
 See the [skills guide](/guide/skills/) for the `/merge` skill you can copy.
+
+## Worktree label order
+
+The `worktree` column shows a worktree's handle and, when the branch differs
+from it, the branch too. `worktree_label` picks which one comes first:
+
+```yaml
+dashboard:
+  worktree_label: branch-first
+```
+
+| Value          | Cell                   |
+| -------------- | ---------------------- |
+| `handle-first` | `my-handle →my/branch` |
+| `branch-first` | `my/branch →my-handle` |
+
+`branch-first` helps when handles are generated rather than chosen — with a
+handle like `t3code-0fbd2e70`, the branch is the half worth reading, and it is
+also the half that survives if the column has to truncate.
