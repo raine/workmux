@@ -29,6 +29,8 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let show_check_counts = app.config.dashboard.show_check_counts();
 
+    let worktree_max_width = worktree_width_budget(area.width);
+
     // Show the GitHub column when at least one worktree has a PR or checks.
     let show_pr_column = app.worktrees.iter().any(|worktree| {
         worktree.pr_info.is_some() || app.get_checks_for_worktree(worktree).is_some()
@@ -60,7 +62,7 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 wt.handle.clone()
             };
-            let worktree_display = truncate(&worktree_display, 25);
+            let worktree_display = truncate(&worktree_display, worktree_max_width);
 
             // Git status
             let git_status = app.git_statuses.get(&wt.path);
@@ -124,6 +126,7 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
     let table = build_worktree_table(
         &columns,
         row_data,
+        worktree_max_width,
         format::ResourceHeaderState {
             palette: &app.palette,
             spinner_frame: app.spinner_frame,
@@ -192,10 +195,21 @@ fn worktree_cell(
     }
 }
 
+/// Upper bound for the `worktree` cell.
+///
+/// The cell can carry both the handle and the branch, which a fixed cap cut off
+/// even in a very wide terminal. Half the table leaves room for every other
+/// column; the lower bound keeps narrow panes rendering as they always have,
+/// and the upper one stops a single long branch from crowding the rest out.
+fn worktree_width_budget(area_width: u16) -> usize {
+    (area_width as usize / 2).clamp(25, 80)
+}
+
 /// Derive headers, cells and constraints from the same visible column order.
 fn build_worktree_table(
     columns: &[WorktreeColumn],
     row_data: Vec<WorktreeRowData>,
+    worktree_max_width: usize,
     header_state: format::ResourceHeaderState<'_>,
 ) -> Table<'static> {
     let palette = header_state.palette;
@@ -219,7 +233,7 @@ fn build_worktree_table(
         .iter()
         .map(|r| r.worktree_display.clone())
         .collect();
-    let max_worktree_width = format::calc_column_width(&worktree_names, 8, 25, 1);
+    let max_worktree_width = format::calc_column_width(&worktree_names, 8, worktree_max_width, 1);
     let max_git_width = row_data
         .iter()
         .map(|row| {
@@ -616,6 +630,7 @@ mod tests {
         let table = build_worktree_table(
             columns,
             rows,
+            worktree_width_budget(width),
             format::ResourceHeaderState {
                 palette: &palette,
                 spinner_frame: 0,
@@ -738,5 +753,29 @@ mod tests {
         assert_eq!(buffer[(2, 1)].fg, palette.success);
         assert_eq!(buffer[(2, 2)].fg, palette.dimmed);
         assert_eq!(buffer[(0, 2)].symbol(), "▌");
+    }
+
+    #[test]
+    fn worktree_width_budget_scales_with_the_pane() {
+        // Narrow panes keep the historical fixed width.
+        assert_eq!(worktree_width_budget(40), 25);
+        assert_eq!(worktree_width_budget(50), 25);
+        // Wider panes get proportionally more, up to a ceiling.
+        assert_eq!(worktree_width_budget(120), 60);
+        assert_eq!(worktree_width_budget(200), 80);
+        assert_eq!(worktree_width_budget(400), 80);
+    }
+
+    #[test]
+    fn worktree_column_uses_the_extra_width_in_a_wide_pane() {
+        let long = "feat/some-rather-long-branch-name";
+        let mut r = row();
+        r.worktree_display = long.into();
+        let buffer = render(&[WorktreeColumn::Worktree], vec![r], 120, None);
+        assert!(
+            line(&buffer, 1).contains(long),
+            "long worktree label should survive in a wide pane, got {:?}",
+            line(&buffer, 1)
+        );
     }
 }
