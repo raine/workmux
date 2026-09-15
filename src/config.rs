@@ -108,9 +108,29 @@ pub struct DashboardConfig {
     #[serde(default)]
     pub sort_mode: Option<String>,
 
+    /// Which half of the worktree label comes first when the handle and the
+    /// branch differ.
+    /// Default: handle-first.
+    pub worktree_label: Option<WorktreeLabel>,
+
     /// Close the dashboard after jumping to an agent or worktree.
     /// Default: true.
     pub close_on_jump: Option<bool>,
+}
+
+/// Which half of the dashboard worktree label comes first.
+///
+/// Only applies when a worktree's handle and branch differ; otherwise the one
+/// name is shown on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreeLabel {
+    /// Handle first, then the branch it points at.
+    #[default]
+    HandleFirst,
+    /// Branch first, then the handle. Useful when handles are generated and
+    /// the branch is the name worth reading.
+    BranchFirst,
 }
 
 /// A configurable column of the dashboard agents table.
@@ -223,6 +243,11 @@ impl DashboardConfig {
     /// Default: false
     pub fn show_check_counts(&self) -> bool {
         self.show_check_counts.unwrap_or(false)
+    }
+
+    /// Which half of the worktree label leads. Default: handle-first.
+    pub fn worktree_label(&self) -> WorktreeLabel {
+        self.worktree_label.unwrap_or_default()
     }
 
     /// Whether the dashboard closes after jumping to an agent or worktree.
@@ -2798,6 +2823,10 @@ impl Config {
                 .worktree_columns
                 .or(self.dashboard.worktree_columns),
             sort_mode: project.dashboard.sort_mode.or(self.dashboard.sort_mode),
+            worktree_label: project
+                .dashboard
+                .worktree_label
+                .or(self.dashboard.worktree_label),
             close_on_jump: project
                 .dashboard
                 .close_on_jump
@@ -3287,6 +3316,8 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Columns of the agents table, in display order. Omit a column to hide it:
 # number, project, worktree, git, pr, status, time, title.
 # Worktree columns: number, project, worktree, git, pr, mux, age, agent.
+# Worktree label order when handle and branch differ: handle-first (default) or
+# branch-first.
 # Default sort mode for the agent list: priority (default), project, recency, natural.
 # Used only when no sort preference has been persisted in the dashboard.
 # dashboard:
@@ -3295,6 +3326,7 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   preview_size: 60
 #   agent_columns: [number, project, worktree, git, pr, status, time, title]
 #   worktree_columns: [number, project, worktree, git, pr, mux, age, agent]
+#   worktree_label: handle-first
 #   sort_mode: priority
 #   close_on_jump: true
 
@@ -3470,7 +3502,7 @@ mod tests {
         DEFAULT_WORKTREE_COLUMNS, ExtraMount, FileConfig, LayoutConfig, LimaConfig, NetworkConfig,
         NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget, SidebarHeight,
         SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode, WindowPlacement,
-        WorktreeColumn, is_agent_command, validate_domain, validate_group_add_entry,
+        WorktreeColumn, WorktreeLabel, is_agent_command, validate_domain, validate_group_add_entry,
         validate_layouts_config,
     };
     use crate::test_support;
@@ -3479,6 +3511,24 @@ mod tests {
     #[test]
     fn dashboard_closes_on_jump_by_default() {
         assert!(Config::default().dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_worktree_label_defaults_to_handle_first() {
+        assert_eq!(
+            Config::default().dashboard.worktree_label(),
+            WorktreeLabel::HandleFirst
+        );
+    }
+
+    #[test]
+    fn dashboard_worktree_label_parses_branch_first() {
+        let config: Config = serde_yaml::from_str("dashboard:\n  worktree_label: branch-first\n")
+            .expect("config parses");
+        assert_eq!(
+            config.dashboard.worktree_label(),
+            WorktreeLabel::BranchFirst
+        );
     }
 
     #[test]
