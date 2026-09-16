@@ -269,6 +269,12 @@ pub trait Multiplexer: Send + Sync {
         Ok(())
     }
 
+    /// Kill a session, preferring a destination for clients being relocated.
+    fn kill_session_to(&self, full_name: &str, destination: Option<&str>) -> Result<()> {
+        let _ = destination;
+        self.kill_session(full_name)
+    }
+
     /// Kill a window by its full name (including prefix)
     fn kill_window(&self, full_name: &str) -> Result<()>;
 

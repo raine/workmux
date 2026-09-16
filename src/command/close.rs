@@ -195,7 +195,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
             MuxHandle::kill_window_target(mux.as_ref(), &window_target)
                 .context("Failed to close target")?;
         } else {
-            MuxHandle::kill_full(mux.as_ref(), mode, &full_target_name)
+            mux.kill_session_to(&full_target_name, config.default_session())
                 .context("Failed to close target")?;
         }
         println!("✓ Closed {} '{}' (worktree kept)", kind, full_target_name);

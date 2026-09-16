@@ -1000,7 +1000,11 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn kill_session(&self, full_name: &str) -> Result<()> {
-        let script = self.shell_kill_session_cmd(full_name)?;
+        self.kill_session_to(full_name, None)
+    }
+
+    fn kill_session_to(&self, full_name: &str, destination: Option<&str>) -> Result<()> {
+        let script = self.shell_kill_session_cmd_to(full_name, destination)?;
         Cmd::new("sh").args(&["-c", &script]).run()?;
         Ok(())
     }

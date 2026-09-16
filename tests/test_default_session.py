@@ -17,6 +17,7 @@ from .conftest import (
     TmuxEnvironment,
     get_session_name,
     poll_until,
+    run_workmux_command,
     write_workmux_config,
 )
 from .test_popup_navigation import attached_client
@@ -138,3 +139,26 @@ def test_managed_target_wins_over_configured_session(
             f"managed session {managed_main} should win over {HOME_SESSION}, got "
             f"{client_session(env, client)}"
         )
+
+
+@pytest.mark.parametrize("destination", [HOME_SESSION, "missing-home"])
+def test_close_from_other_session_relocates_only_source_clients(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    repo_path: Path,
+    destination: str,
+):
+    env = mux_server
+    env.tmux(["new-session", "-d", "-s", HOME_SESSION])
+    worktree, source = prepare(
+        env, workmux_exe_path, repo_path, "external-close", destination
+    )
+    with attached_client(env) as (_, invoker), attached_client(env) as (_, viewer):
+        env.tmux(["switch-client", "-c", viewer, "-t", f"={source}:"])
+        run_workmux_command(env, workmux_exe_path, repo_path, "close external-close")
+
+        assert poll_until(lambda: session_gone(env, source), timeout=10)
+        expected = HOME_SESSION if destination == HOME_SESSION else "test"
+        assert client_session(env, viewer) == expected
+        assert client_session(env, invoker) == "test"
+        assert (worktree / ".git").exists()
