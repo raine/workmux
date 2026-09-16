@@ -214,6 +214,7 @@ jobs:
 
             def install
               bin.install "workmux"
+              generate_completions_from_executable(bin/"workmux", "completions")
             end
 
             test do
