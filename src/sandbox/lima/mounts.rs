@@ -2,7 +2,6 @@
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{Config, IsolationLevel};
 
@@ -87,65 +86,57 @@ pub fn determine_git_common_dir(worktree: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Get the Lima guest home directory.
+/// Guest mount points for host directories that belong in the guest home.
 ///
-/// Lima <2.1.0 creates a user with home at `/home/<user>.linux/`.
-/// Lima >=2.1.0 changed this to `/home/<user>.guest/`.
-fn lima_guest_home() -> Option<PathBuf> {
-    let username = std::env::var("USER").ok()?;
-    let suffix = lima_guest_home_suffix();
-    Some(PathBuf::from(format!("/home/{}.{}", username, suffix)))
+/// Mount points are baked into the instance config before the VM exists, but
+/// the guest home is not knowable then: Lima renames the guest user (moving
+/// `$HOME` with it) when the local username is not a valid Linux username, and
+/// the home suffix varies by Lima version. Mounting to fixed paths and linking
+/// them into the home from a provision script, which runs inside the VM where
+/// `$HOME` is known, avoids predicting any of it. See [`home_links`].
+const GUEST_AGENT_CONFIG: &str = "/mnt/workmux/agent-config";
+const GUEST_OPENCODE_CONFIG: &str = "/mnt/workmux/opencode-config";
+const GUEST_STATE: &str = "/mnt/workmux/state";
+
+/// Path, relative to the guest home, where an agent looks for its config.
+///
+/// Must stay in sync with `SandboxConfig::resolved_agent_config_dir`, which
+/// picks the host directory these mirror.
+fn guest_agent_config_subpath(agent: &str) -> Option<&'static str> {
+    Some(match agent {
+        "claude" => ".claude",
+        "copilot" => ".copilot",
+        "gemini" => ".gemini",
+        "agy" => ".gemini/antigravity-cli",
+        "codex" => ".codex",
+        "opencode" => ".local/share/opencode",
+        "pi" => ".pi/agent",
+        "omp" => ".omp/agent",
+        _ => return None,
+    })
 }
 
-/// Determine the guest home directory suffix based on Lima version.
+/// Symlinks a provision script must create so the guest home points at the
+/// mounts, as (mount point, path relative to `$HOME`).
 ///
-/// Returns "guest" for Lima >=2.1.0, "linux" for older versions.
-fn lima_guest_home_suffix() -> &'static str {
-    let version = Command::new("limactl")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        });
+/// Derived from the generated mounts so a mount that was skipped (e.g. no
+/// opencode config on the host) does not get a dangling link.
+pub fn home_links(agent: &str, mounts: &[Mount]) -> Vec<(&'static str, &'static str)> {
+    let mounted = |target: &str| mounts.iter().any(|m| m.guest_path == Path::new(target));
 
-    match version {
-        Some(v) => {
-            // Output format: "limactl version 2.1.0"
-            if let Some(ver_str) = v.trim().rsplit(' ').next()
-                && lima_version_gte(ver_str, "2.1.0")
-            {
-                return "guest";
-            }
-            "linux"
-        }
-        None => "linux",
+    let mut links = Vec::new();
+    if mounted(GUEST_AGENT_CONFIG)
+        && let Some(subpath) = guest_agent_config_subpath(agent)
+    {
+        links.push((GUEST_AGENT_CONFIG, subpath));
     }
-}
-
-/// Check if version `a` is >= version `b` using simple numeric comparison.
-fn lima_version_gte(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .map(|s| s.parse::<u32>().unwrap_or(0))
-            .collect()
-    };
-    let va = parse(a);
-    let vb = parse(b);
-    for i in 0..va.len().max(vb.len()) {
-        let a_part = va.get(i).copied().unwrap_or(0);
-        let b_part = vb.get(i).copied().unwrap_or(0);
-        match a_part.cmp(&b_part) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => continue,
-        }
+    if mounted(GUEST_OPENCODE_CONFIG) {
+        links.push((GUEST_OPENCODE_CONFIG, ".config/opencode"));
     }
-    true // equal
+    if mounted(GUEST_STATE) {
+        links.push((GUEST_STATE, ".workmux-state"));
+    }
+    links
 }
 
 /// Calculate the standard worktrees directory for a project.
@@ -273,18 +264,7 @@ fn generate_mounts_with_state_root(
 
     // Mount agent config directory
     if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent) {
-        let guest_subpath = match agent {
-            "claude" => ".claude",
-            "gemini" => ".gemini",
-            "codex" => ".codex",
-            "opencode" => ".local/share/opencode",
-            "pi" => ".pi/agent",
-            "omp" => ".omp/agent",
-            _ => unreachable!(),
-        };
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(guest_subpath))
-            .unwrap_or_else(|| auth_dir.clone());
+        let guest_path = PathBuf::from(GUEST_AGENT_CONFIG);
         mounts.push(Mount {
             host_path: auth_dir.clone(),
             guest_path: guest_path.clone(),
@@ -312,24 +292,18 @@ fn generate_mounts_with_state_root(
         && let Some(cfg_dir) = crate::agent_setup::opencode::opencode_config_dir()
         && cfg_dir.is_dir()
     {
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(".config/opencode"))
-            .unwrap_or_else(|| cfg_dir.clone());
         mounts.push(Mount {
             host_path: cfg_dir,
-            guest_path,
+            guest_path: PathBuf::from(GUEST_OPENCODE_CONFIG),
             read_only: true,
         });
     }
 
     // Mount per-VM state directory for workmux state
     if let Ok(state_dir) = lima_state_dir(vm_name) {
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(".workmux-state"))
-            .unwrap_or_else(|| state_dir.clone());
         mounts.push(Mount {
             host_path: state_dir,
-            guest_path,
+            guest_path: PathBuf::from(GUEST_STATE),
             read_only: false,
         });
     }
@@ -402,27 +376,54 @@ mod tests {
     }
 
     #[test]
-    fn test_lima_version_gte() {
-        // Equal
-        assert!(lima_version_gte("2.1.0", "2.1.0"));
-        // Greater
-        assert!(lima_version_gte("2.1.1", "2.1.0"));
-        assert!(lima_version_gte("2.2.0", "2.1.0"));
-        assert!(lima_version_gte("3.0.0", "2.1.0"));
-        // Less
-        assert!(!lima_version_gte("2.0.3", "2.1.0"));
-        assert!(!lima_version_gte("1.9.9", "2.1.0"));
-        assert!(!lima_version_gte("2.0.99", "2.1.0"));
+    fn test_home_links_follow_generated_mounts() {
+        let mounts = vec![
+            Mount::rw(PathBuf::from("/Users/test/code")),
+            Mount {
+                host_path: PathBuf::from("/Users/test/.claude"),
+                guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
+                read_only: false,
+            },
+            Mount {
+                host_path: PathBuf::from("/Users/test/.local/state/workmux/lima/wm-test"),
+                guest_path: PathBuf::from(GUEST_STATE),
+                read_only: false,
+            },
+        ];
+
+        assert_eq!(
+            home_links("claude", &mounts),
+            vec![
+                (GUEST_AGENT_CONFIG, ".claude"),
+                (GUEST_STATE, ".workmux-state")
+            ]
+        );
     }
 
     #[test]
-    fn test_lima_guest_home_suffix_returns_valid_suffix() {
-        let suffix = lima_guest_home_suffix();
-        assert!(
-            suffix == "linux" || suffix == "guest",
-            "unexpected suffix: {}",
-            suffix
+    fn test_home_links_skips_absent_mounts() {
+        // No opencode config on the host means no mount, so no dangling link.
+        let mounts = vec![Mount {
+            host_path: PathBuf::from("/Users/test/.local/share/opencode"),
+            guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
+            read_only: false,
+        }];
+
+        assert_eq!(
+            home_links("opencode", &mounts),
+            vec![(GUEST_AGENT_CONFIG, ".local/share/opencode")]
         );
+    }
+
+    #[test]
+    fn test_home_links_empty_for_unknown_agent() {
+        let mounts = vec![Mount {
+            host_path: PathBuf::from("/Users/test/.config/custom"),
+            guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
+            read_only: false,
+        }];
+
+        assert!(home_links("kiro", &mounts).is_empty());
     }
 
     fn init_git_project(parent: &Path) -> PathBuf {
