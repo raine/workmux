@@ -1806,6 +1806,7 @@ mod tests {
             sidebar_width: None,
             sidebar_height: None,
             sidebar_filter: None,
+            sidebar_group_by: None,
         };
 
         store.save_settings(&settings).unwrap();

@@ -3,5 +3,6 @@
 pub mod context;
 pub mod layout;
 pub mod parser;
+pub mod row;
 
 pub use parser::TokenId;

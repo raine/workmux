@@ -889,6 +889,16 @@ pub enum SidebarAction {
         #[arg(value_name = "MODE")]
         mode: Option<String>,
     },
+    /// Set sidebar grouping. Toggles between grouped and flat if no mode is
+    /// given.
+    Group {
+        /// Grouping: "none"/"off", "project" or "session"
+        #[arg(value_name = "MODE")]
+        mode: Option<String>,
+        /// Drop the runtime grouping and follow the config file again
+        #[arg(long, conflicts_with = "mode")]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1251,6 +1261,9 @@ pub fn run() -> Result<()> {
             }
             Some(SidebarAction::Filter { mode }) => {
                 command::sidebar::set_filter_mode(mode.as_deref())
+            }
+            Some(SidebarAction::Group { mode, clear }) => {
+                command::sidebar::set_group_by(mode.as_deref(), clear)
             }
             None => {
                 if session {

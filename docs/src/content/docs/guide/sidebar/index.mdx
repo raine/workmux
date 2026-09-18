@@ -80,10 +80,19 @@ sidebar:
   # Dim agents whose status has not changed for one hour (default: true)
   dim_stale: true
 
-  # Row ordering: "recency" (default, most recent status change first)
-  # or "window" (tmux window order - stable rows that match the window
-  # list, pairs well with the {window_index} template token)
+  # Row ordering: "recency" (default, most recent status change first),
+  # "priority" (agents needing attention first) or "window" (tmux window
+  # order - stable rows that match the window list, pairs well with the
+  # {window_index} template token)
   sort: recency
+
+  # Group agents into labeled sections: "project" or "session". Unset by
+  # default, which keeps one flat list without headers
+  group_by: project
+
+  # While grouped, fold each group's stale agents behind a toggle
+  # (default: true)
+  collapse_stale: true
 ```
 
 For a horizontal top bar:
@@ -130,6 +139,142 @@ Your preference is persisted across tmux restarts. The top bar always uses a
 horizontal chip layout, so `v` has no effect there. Horizontal templates render
 as many configured lines as the current height allows.
 
+## Grouping
+
+The sidebar is one flat list unless you ask for sections. Grouping suits a
+sidebar watching many repositories at once and gets in the way of one watching
+a single project, so it is opt in.
+
+Press `t` to try it without changing any config. `group_by` splits the list
+into sections, one per repository (`project`) or per tmux session (`session`),
+with a header above each section:
+
+```yaml
+sidebar:
+  group_by: project
+  sort: priority
+```
+
+Grouping and ordering are independent: `group_by` decides the sections, `sort`
+decides the order inside each section. Under `sort: priority` the order is
+waiting, done, working, unknown, stale or interrupted, then sleeping, with
+recent activity first inside each of those. Waiting and done agents stay at the
+top however long they have been waiting, and a working agent drops down only
+when interruption detection sees it stop progressing. Sections are sorted
+alphabetically and stay in place while agents change status, so rows only move
+within their own group. Sleeping agents sink to the bottom of their group
+instead of the bottom of the list.
+
+Headers are labels, not agents. They are skipped by `j`/`k` and `g`/`G`, cannot
+be clicked or selected, and are not counted by `{idx}`, `{jump_key}` or
+`workmux sidebar next|prev|jump <N>`. A header stays visible even when the
+session filter leaves a single group, and its count reflects the agents that
+sidebar actually shows, sleeping ones included.
+
+When you scroll into the middle of a group, that group's header pins to the top
+of the sidebar until the next group's header replaces it. On very short
+sidebars, keeping the selected agent visible takes priority over the pinned
+header.
+
+Headers are a left-sidebar feature. With `position: top`, `group_by` still
+orders the chips but no headers are drawn.
+
+`t` switches between grouped and flat at any time. The choice is a tmux global,
+so every sidebar switches together and the agent navigation commands follow the
+same order. It outlives a tmux restart and is also available from the command
+line:
+
+```bash
+workmux sidebar group          # Toggle between grouped and flat
+workmux sidebar group project  # One section per repository
+workmux sidebar group session  # One section per tmux session
+workmux sidebar group none     # One flat list, no headers
+workmux sidebar group --clear  # Follow the config file again
+```
+
+A runtime choice wins over `group_by` until you change it again, so use
+`--clear` after settling on a value in config.
+
+### Grouped templates
+
+A section header already names the project or session, so rows under it can
+drop what the header says. Templates under `templates.grouped` apply while
+grouping is on:
+
+```yaml
+sidebar:
+  group_by: project
+  templates:
+    grouped:
+      header: "{group} {fill} {group_count}"
+      tiles:
+        - "{primary} {pane_suffix} {fill} {elapsed}"
+        - "{pane_title} {fill} {git_stats}"
+```
+
+`grouped` accepts `compact`, `tiles` and `header`. Anything you leave out falls
+back to your ungrouped template of the same name, then to the grouped default,
+so templates you wrote before grouping existed carry over and you only write
+this block when you want the two presentations to differ.
+
+## Collapsing stale agents
+
+A sidebar watching many projects fills up with agents nobody is waiting on. A
+fold puts them behind their group's toggle, out of the way without hiding them
+for good. It comes with grouping and is on by default there; set
+`collapse_stale: false` to list every agent at full height instead:
+
+```yaml
+sidebar:
+  group_by: project
+  collapse_stale: false
+```
+
+An agent counts as stale once it is sleeping, or once an hour passes with no
+activity and no working or waiting status: exactly the agents `dim_stale` dims.
+
+A group's stale agents fold behind one dimmed toggle row that says how many it
+stands for:
+
+```text
+api                              3
+▌ ⠋ auth-refresh
+▌    api                      2:14
+──────────────────────────────────
+  ▸ 2 stale
+```
+
+A toggle is a row like any other: `j`/`k` stop on it, `Enter` folds and unfolds
+it, and clicking does the same. `h` and `l` (or the arrow keys) fold and unfold
+the group the selection is in, whether the selection sits on the toggle or on
+one of the group's agents, and `s` toggles it. `S` expands every group at once,
+or collapses them all when any is open. Expanded agents appear under the
+toggle, one line each rather than a full tile.
+
+A group whose agents are all stale collapses further: it has no live rows to
+head, so its header is its toggle and the whole project costs one row.
+
+```text
+──────────────── STALE ───────────
+▸ docs-site                      1
+▸ infra                          4
+```
+
+Those groups sort below every group that still holds live work, behind a rule
+marking where live work ends.
+
+Expansion is shared: it lives in a tmux global, so every sidebar pane shows the
+same groups open and it survives a tmux restart. The one thing a pane shows
+that others do not is the agent of its own window: a collapsed group still
+lists that one agent, so the sidebar never hides where you are, and the toggle
+counts only what stays folded.
+
+Numbering follows what the sidebar draws. A folded agent is not a jump target:
+it answers to no `{idx}` or `{jump_key}`, `workmux sidebar next|prev|jump <N>`
+passes over it, and the numbers close up behind it rather than leaving gaps.
+Unfold the group and its agents take their numbers back. `j`/`k` skip folded
+agents too, as they skip headers.
+
 ## Mouse support
 
 Click an agent tile or top-bar chip to jump to its pane, or scroll to navigate
@@ -137,15 +282,20 @@ the list. Requires `set -g mouse on` in your `~/.tmux.conf`.
 
 ## Keybindings
 
-| Key     | Action                   |
-| ------- | ------------------------ |
-| `j`/`k` | Navigate up/down         |
-| `Enter` | Jump to agent pane       |
-| `g`/`G` | Jump to first/last       |
-| `v`     | Toggle layout mode       |
-| `f`     | Toggle session filter    |
-| `z`     | Toggle sleeping on agent |
-| `q`     | Open quit confirmation   |
+| Key     | Action                    |
+| ------- | ------------------------- |
+| `j`/`k` | Navigate up/down          |
+| `Enter` | Jump to agent pane        |
+| `g`/`G` | Jump to first/last        |
+| `v`     | Toggle layout mode        |
+| `f`     | Toggle session filter     |
+| `t`     | Toggle grouping           |
+| `h`/`l` | Fold/unfold current group |
+| `s`     | Fold/unfold stale agents  |
+| `S`     | Fold/unfold every group   |
+| `z`     | Toggle sleeping on agent  |
+| `?`     | Show these keys           |
+| `q`     | Open quit confirmation    |
 
 ### Session filter
 
@@ -169,7 +319,9 @@ workmux sidebar filter none     # Show all agents (no filter)
 
 Press `z` to manually mark an agent as sleeping. Sleeping agents show a 💤 icon
 with dimmed colors and are pushed to the bottom of the list, regardless of their
-actual status. This is useful for temporarily deprioritizing agents you don't
+actual status. Under `group_by` they sink to the bottom of their own group.
+`sort: window` is the exception: it keeps every agent in window order, sleeping
+ones included. This is useful for temporarily deprioritizing agents you don't
 need to monitor. Press `z` again to wake them up.
 
 ## Agent navigation hotkeys

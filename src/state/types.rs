@@ -215,6 +215,10 @@ pub struct GlobalSettings {
     /// Sidebar filter mode: "none" or "session"
     #[serde(default)]
     pub sidebar_filter: Option<String>,
+
+    /// Sidebar grouping override: "none", "project" or "session"
+    #[serde(default)]
+    pub sidebar_group_by: Option<String>,
 }
 
 /// Tracks which pane last-done navigated to, so repeated presses cycle

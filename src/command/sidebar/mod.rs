@@ -906,6 +906,98 @@ fn read_sidebar_filter_mode() -> app::SidebarFilterMode {
     app::SidebarFilterMode::default()
 }
 
+/// Grouping accepted by the runtime override. `none` is the ungrouped list the
+/// sidebar had before grouping existed.
+pub(crate) fn parse_sidebar_group_by(raw: &str) -> Result<Option<crate::config::SidebarGroupBy>> {
+    match raw.trim().to_lowercase().as_str() {
+        "none" | "off" | "flat" => Ok(None),
+        "project" => Ok(Some(crate::config::SidebarGroupBy::Project)),
+        "session" => Ok(Some(crate::config::SidebarGroupBy::Session)),
+        other => bail!("invalid sidebar grouping {other:?}; expected none, project or session"),
+    }
+}
+
+pub(crate) fn group_by_option_value(
+    group_by: Option<crate::config::SidebarGroupBy>,
+) -> &'static str {
+    match group_by {
+        None | Some(crate::config::SidebarGroupBy::None) => "none",
+        Some(crate::config::SidebarGroupBy::Project) => "project",
+        Some(crate::config::SidebarGroupBy::Session) => "session",
+    }
+}
+
+/// Set sidebar grouping from CLI. With no mode, toggles between the configured
+/// grouping and a flat list. With `clear`, drops the runtime choice so the
+/// config file decides again.
+///
+/// A runtime choice outlives the session that made it, so without a way back
+/// an editor's `group_by` would silently stop taking effect.
+pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
+    let configured = crate::config::Config::load(None)
+        .map(|cfg| cfg.sidebar.group_by())
+        .unwrap_or_default();
+
+    let new_mode = if clear {
+        None
+    } else {
+        match mode {
+            Some(m) => Some(parse_sidebar_group_by(m)?),
+            None => Some(match read_sidebar_group_by(configured) {
+                Some(_) => None,
+                None => configured.or(Some(crate::config::SidebarGroupBy::Project)),
+            }),
+        }
+    };
+
+    match new_mode {
+        Some(mode) => Cmd::new("tmux")
+            .args(&[
+                "set-option",
+                "-g",
+                "@workmux_sidebar_group_by",
+                group_by_option_value(mode),
+            ])
+            .run()?,
+        None => Cmd::new("tmux")
+            .args(&["set-option", "-gu", "@workmux_sidebar_group_by"])
+            .run()?,
+    };
+
+    let store = crate::state::StateStore::new()?;
+    let mut settings = store.load_settings()?;
+    settings.sidebar_group_by = new_mode.map(|mode| group_by_option_value(mode).to_string());
+    store.save_settings(&settings)?;
+
+    signal_daemon();
+    Ok(())
+}
+
+/// Grouping currently in effect: the tmux override, else the persisted one,
+/// else what the config asks for.
+fn read_sidebar_group_by(
+    configured: Option<crate::config::SidebarGroupBy>,
+) -> Option<crate::config::SidebarGroupBy> {
+    if let Ok(output) = Cmd::new("tmux")
+        .args(&["show-option", "-gqv", "@workmux_sidebar_group_by"])
+        .run_and_capture_stdout()
+    {
+        let trimmed = output.trim();
+        if !trimmed.is_empty() {
+            return parse_sidebar_group_by(trimmed).unwrap_or(configured);
+        }
+    }
+
+    if let Ok(store) = crate::state::StateStore::new()
+        && let Ok(settings) = store.load_settings()
+        && let Some(ref mode) = settings.sidebar_group_by
+    {
+        return parse_sidebar_group_by(mode).unwrap_or(configured);
+    }
+
+    configured
+}
+
 fn current_listed_window_pane<'a>(
     panes: &'a [&str],
     current_pane_id: &'a str,
@@ -1062,6 +1154,35 @@ mod tests {
     fn serializes_session_id_set_deterministically() {
         let ids = parse_session_id_set("$2 $0 $1");
         assert_eq!(serialize_session_id_set(&ids), "$0 $1 $2");
+    }
+
+    #[test]
+    fn parse_sidebar_group_by_accepts_every_runtime_value() {
+        assert_eq!(parse_sidebar_group_by("none").unwrap(), None);
+        assert_eq!(parse_sidebar_group_by("Off").unwrap(), None);
+        assert_eq!(
+            parse_sidebar_group_by(" Project ").unwrap(),
+            Some(crate::config::SidebarGroupBy::Project)
+        );
+        assert_eq!(
+            parse_sidebar_group_by("session").unwrap(),
+            Some(crate::config::SidebarGroupBy::Session)
+        );
+        assert!(parse_sidebar_group_by("porject").is_err());
+    }
+
+    #[test]
+    fn group_by_option_values_round_trip() {
+        for mode in [
+            None,
+            Some(crate::config::SidebarGroupBy::Project),
+            Some(crate::config::SidebarGroupBy::Session),
+        ] {
+            assert_eq!(
+                parse_sidebar_group_by(group_by_option_value(mode)).unwrap(),
+                mode
+            );
+        }
     }
 
     #[test]
