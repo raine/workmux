@@ -2003,6 +2003,12 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub agent_config_dir: Option<String>,
 
+    /// Config directory declared by the selected agent, if it sets the env var
+    /// its type reads (e.g. `CLAUDE_CONFIG_DIR`). Resolved from the agents map
+    /// during config loading, not deserialized.
+    #[serde(skip)]
+    pub agent_declared_config_dir: Option<PathBuf>,
+
     /// Lima-specific configuration
     #[serde(default)]
     pub lima: LimaConfig,
@@ -2109,6 +2115,8 @@ impl SandboxConfig {
         if let Some(ref dir) = self.agent_config_dir {
             let expanded = dir.replace("{agent}", agent);
             Some(crate::util::expand_tilde(&expanded))
+        } else if let Some(ref dir) = self.agent_declared_config_dir {
+            Some(dir.clone())
         } else {
             let home = home::home_dir()?;
             match agent {
@@ -2344,6 +2352,26 @@ pub fn validate_layouts_config(layouts: &HashMap<String, LayoutConfig>) -> anyho
     Ok(())
 }
 
+/// Config directory a named agent declares, by setting the environment variable
+/// its agent type reads.
+///
+/// Sandboxes mount this instead of the agent type's default, so an agent
+/// configured to use a separate config directory keeps using it inside the
+/// sandbox. Agents are global-only config, so this cannot be steered by a
+/// checked-out repository.
+fn agent_declared_config_dir(name: &str, entry: &AgentEntry) -> Option<PathBuf> {
+    use crate::multiplexer::agent::{AgentCommand, resolve_profile_with_type_for_display};
+
+    let command = AgentCommand::from_entry(name, entry);
+    let profile = resolve_profile_with_type_for_display(
+        Some(&command.shell_string()),
+        entry.agent_type.as_deref(),
+    );
+    let value = command.env_value(profile.config_dir_env_var()?)?;
+
+    Some(crate::util::expand_tilde(&value))
+}
+
 /// Get the path to the global config file.
 ///
 /// Resolves via `$XDG_CONFIG_HOME/workmux/` (default `~/.config/workmux/`).
@@ -2547,6 +2575,8 @@ impl Config {
         // Resolve agent name through agents map
         if let Some(entry) = config.agents.get(&final_agent) {
             config.agent_type = entry.agent_type.clone();
+            config.sandbox.agent_declared_config_dir =
+                agent_declared_config_dir(&final_agent, entry);
             config.agent = Some(entry.command_or_default(&final_agent));
         } else {
             config.agent = Some(final_agent);
@@ -2935,6 +2965,8 @@ impl Config {
                 }
                 self.sandbox.agent_config_dir.clone()
             },
+            // Filled in after the merge, once the selected agent is known.
+            agent_declared_config_dir: None,
             lima: LimaConfig::merge(self.sandbox.lima, project.sandbox.lima),
             // Security: sandbox.container.devices, group_add, oci_runtime,
             // cap_add and security_opt are global-only. devices/group_add
@@ -3991,6 +4023,77 @@ mod tests {
 
         let disabled: Config = serde_yaml::from_str("merge_keep: false").unwrap();
         assert_eq!(disabled.merge_keep, Some(false));
+    }
+
+    /// Global config defining one named agent, selected by the project config.
+    fn resolve_with_agent(global_yaml: &str, project_yaml: &str) -> Config {
+        Config::merge_and_apply_defaults(
+            serde_yaml::from_str(global_yaml).expect("global config parses"),
+            serde_yaml::from_str(project_yaml).expect("project config parses"),
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sandbox_mounts_config_dir_declared_by_selected_agent() {
+        let config = resolve_with_agent(
+            "agents:\n  cc-work:\n    type: claude\n    env:\n      CLAUDE_CONFIG_DIR: /work/.claude\n",
+            "agent: cc-work\n",
+        );
+
+        assert_eq!(
+            config.sandbox.resolved_agent_config_dir("claude"),
+            Some(std::path::PathBuf::from("/work/.claude"))
+        );
+    }
+
+    #[test]
+    fn sandbox_reads_config_dir_from_command_string_form() {
+        let config = resolve_with_agent(
+            "agents:\n  cc-work: \"env CLAUDE_CONFIG_DIR=/work/.claude claude\"\n",
+            "agent: cc-work\n",
+        );
+
+        assert_eq!(
+            config.sandbox.resolved_agent_config_dir("claude"),
+            Some(std::path::PathBuf::from("/work/.claude"))
+        );
+    }
+
+    #[test]
+    fn sandbox_agent_config_dir_still_wins_over_declared_dir() {
+        let config = resolve_with_agent(
+            "sandbox:\n  agent_config_dir: /sandboxed/{agent}\nagents:\n  cc-work:\n    type: claude\n    env:\n      CLAUDE_CONFIG_DIR: /work/.claude\n",
+            "agent: cc-work\n",
+        );
+
+        assert_eq!(
+            config.sandbox.resolved_agent_config_dir("claude"),
+            Some(std::path::PathBuf::from("/sandboxed/claude"))
+        );
+    }
+
+    #[test]
+    fn agent_without_config_dir_env_falls_back_to_default() {
+        let config = resolve_with_agent(
+            "agents:\n  cc-work:\n    type: claude\n    args: [--verbose]\n",
+            "agent: cc-work\n",
+        );
+
+        assert!(config.sandbox.agent_declared_config_dir.is_none());
+    }
+
+    #[test]
+    fn config_dir_env_of_another_agent_type_is_ignored() {
+        // A claude agent setting CODEX_HOME declares nothing about its own config.
+        let config = resolve_with_agent(
+            "agents:\n  cc-work:\n    type: claude\n    env:\n      CODEX_HOME: /work/.codex\n",
+            "agent: cc-work\n",
+        );
+
+        assert!(config.sandbox.agent_declared_config_dir.is_none());
     }
 
     #[test]
