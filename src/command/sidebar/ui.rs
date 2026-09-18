@@ -871,17 +871,35 @@ fn group_band_bg(palette: &ThemePalette) -> Color {
 /// full-width band. The band, not a divider, is what sets a header apart from
 /// the agents under it, so a group costs one row.
 fn header_line(app: &SidebarApp, label: &str, count: usize, width: usize) -> Line<'static> {
+    let band = group_band_bg(&app.palette);
+    // The indent is decoration. A sidebar too narrow to spare it keeps the
+    // label and the count instead.
+    let indent = display_width(GROUP_LABEL_INDENT);
+    let indent = if width.saturating_sub(indent) < 4 {
+        0
+    } else {
+        indent
+    };
+    let mut spans = vec![Span::raw(&GROUP_LABEL_INDENT[..indent])];
+    spans.extend(header_spans(app, label, count, width - indent));
+    // A template that sets its own `bg=` keeps it; everything else gets the band.
+    apply_selection_bg(&mut spans, band);
+    pad_spans_to_width(&mut spans, width, Some(band));
+    Line::from(spans)
+}
+
+/// Indent shared by every group label, so a header lines up with the label of
+/// a collapsed group, which gives its first two columns to the chevron.
+const GROUP_LABEL_INDENT: &str = "  ";
+
+/// The header template solved for one group, without the band or the indent.
+fn header_spans(app: &SidebarApp, label: &str, count: usize, width: usize) -> Vec<Span<'static>> {
     let ctx = HeaderContext {
         label: label.to_string(),
         count,
         palette: &app.palette,
     };
-    let band = group_band_bg(&app.palette);
-    let mut spans = render_line(&ctx, &app.templates.group_header, width);
-    // A template that sets its own `bg=` keeps it; everything else gets the band.
-    apply_selection_bg(&mut spans, band);
-    pad_spans_to_width(&mut spans, width, Some(band));
-    Line::from(spans)
+    render_line(&ctx, &app.templates.group_header, width)
 }
 
 /// Chevron showing whether a toggle's agents are visible.
@@ -937,7 +955,12 @@ fn stale_group_line(
     let marker = format!("{} ", chevron(expanded));
     let marker_cols = display_width(&marker);
     let mut spans = vec![Span::styled(marker, Style::default().fg(marker_fg))];
-    spans.extend(header_line(app, label, count, width.saturating_sub(marker_cols)).spans);
+    spans.extend(header_spans(
+        app,
+        label,
+        count,
+        width.saturating_sub(marker_cols),
+    ));
     for span in &mut spans {
         span.style = span.style.bg(bg);
     }
@@ -1700,10 +1723,10 @@ mod tests {
         let mut app = grouped_compact_app();
         let lines = rendered(&mut app, 30, 9);
 
-        assert_eq!(lines[0].trim(), "api                        3");
+        assert_eq!(lines[0].trim(), "api                      3");
         assert!(lines[1].contains("auth-refresh"));
-        assert_eq!(lines[4].trim(), "mobile                     2");
-        assert_eq!(lines[7].trim(), "workmux                    1");
+        assert_eq!(lines[4].trim(), "mobile                   2");
+        assert_eq!(lines[7].trim(), "workmux                  1");
 
         // Headers hold no agent; the agents around them still resolve.
         assert_eq!(app.hit_test(1, 0), None);
@@ -1734,11 +1757,11 @@ mod tests {
 
         // The live agent keeps both of its tile lines; the stale ones are one
         // toggle row saying how many it stands for.
-        assert_eq!(lines[0].trim(), "api                             3");
+        assert_eq!(lines[0].trim(), "api                           3");
         assert!(lines[1].contains("auth-refresh"));
         assert!(lines[3].starts_with('─'));
         assert_eq!(lines[4].trim(), "▸ 2 stale");
-        assert_eq!(lines[6].trim(), "mobile                          2");
+        assert_eq!(lines[6].trim(), "mobile                        2");
 
         // Clicking the toggle shows them, one line each, with no divider
         // splitting the block they form.
@@ -1806,8 +1829,8 @@ mod tests {
 
         let lines = rendered(&mut app, 30, 9);
 
-        assert_eq!(lines[0].trim(), "api                        3");
-        assert_eq!(lines[4].trim(), "mobile                     2");
+        assert_eq!(lines[0].trim(), "api                      3");
+        assert_eq!(lines[4].trim(), "mobile                   2");
         assert!(lines[7].contains(" STALE "));
         // One row for the whole group, header and toggle at once.
         assert_eq!(lines[8].trim(), "▸ workmux                  1");
@@ -1821,7 +1844,7 @@ mod tests {
     fn compact_group_label_truncates_before_the_count_is_dropped() {
         let mut app = grouped_compact_app();
         let lines = rendered(&mut app, 10, 9);
-        assert_eq!(lines[0].trim(), "api    3");
+        assert_eq!(lines[0].trim(), "api  3");
 
         // Even at the narrowest width the count survives and the label gives way.
         let lines = rendered(&mut app, 6, 9);
@@ -1835,7 +1858,7 @@ mod tests {
         let lines = rendered(&mut app, 24, 26);
 
         // The label sits directly above its first agent, with no rule between.
-        assert_eq!(lines[0].trim(), "api                   3");
+        assert_eq!(lines[0].trim(), "api                 3");
         assert!(lines[1].contains("auth-refresh"));
         assert_eq!(app.hit_test(1, 0), None);
         assert_eq!(app.hit_test(1, 1), Some(0));
@@ -1884,7 +1907,7 @@ mod tests {
         let lines = rendered(&mut app, 24, 3);
 
         // Viewport starts inside the api group, so its header is pinned.
-        assert_eq!(lines[0].trim(), "api                  3");
+        assert_eq!(lines[0].trim(), "api                3");
         assert!(lines[2].contains("rate-limit"));
         // The pinned band is not a row and resolves to no agent.
         assert_eq!(app.hit_test(1, 0), None);
@@ -1898,7 +1921,7 @@ mod tests {
         // Real header visible at the top: no pin, no duplicate.
         app.select_index(1);
         let lines = rendered(&mut app, 24, 5);
-        assert_eq!(lines[0].trim(), "api                  3");
+        assert_eq!(lines[0].trim(), "api                3");
         assert!(lines[1].contains("auth-refresh"));
 
         // Scrolling into the next group swaps the pinned header.
@@ -1913,7 +1936,7 @@ mod tests {
         let mut app = grouped_tile_app();
         app.select_index(2);
         let lines = rendered(&mut app, 24, 8);
-        assert_eq!(lines[0].trim(), "api                   3");
+        assert_eq!(lines[0].trim(), "api                 3");
         // One pinned line, then list content, never a second header line.
         assert!(lines[1] == "─".repeat(24) || lines[1].starts_with('▌'));
         assert_eq!(app.hit_test(1, 0), None);
@@ -1924,7 +1947,7 @@ mod tests {
         assert!(
             !lines
                 .iter()
-                .any(|line| line.trim() == "api                   3")
+                .any(|line| line.trim() == "api                 3")
         );
     }
 
