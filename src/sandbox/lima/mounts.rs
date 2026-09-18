@@ -86,17 +86,8 @@ pub fn determine_git_common_dir(worktree: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Guest mount points for host directories that belong in the guest home.
-///
-/// Mount points are baked into the instance config before the VM exists, but
-/// the guest home is not knowable then: Lima renames the guest user (moving
-/// `$HOME` with it) when the local username is not a valid Linux username, and
-/// the home suffix varies by Lima version. Mounting to fixed paths and linking
-/// them into the home from a provision script, which runs inside the VM where
-/// `$HOME` is known, avoids predicting any of it. See [`home_links`].
-const GUEST_AGENT_CONFIG: &str = "/mnt/workmux/agent-config";
-const GUEST_OPENCODE_CONFIG: &str = "/mnt/workmux/opencode-config";
-const GUEST_STATE: &str = "/mnt/workmux/state";
+/// Lima expands this template after resolving the actual guest user and home.
+const GUEST_HOME: &str = "{{.Home}}";
 
 /// Path, relative to the guest home, where an agent looks for its config.
 ///
@@ -116,27 +107,8 @@ fn guest_agent_config_subpath(agent: &str) -> Option<&'static str> {
     })
 }
 
-/// Symlinks a provision script must create so the guest home points at the
-/// mounts, as (mount point, path relative to `$HOME`).
-///
-/// Derived from the generated mounts so a mount that was skipped (e.g. no
-/// opencode config on the host) does not get a dangling link.
-pub fn home_links(agent: &str, mounts: &[Mount]) -> Vec<(&'static str, &'static str)> {
-    let mounted = |target: &str| mounts.iter().any(|m| m.guest_path == Path::new(target));
-
-    let mut links = Vec::new();
-    if mounted(GUEST_AGENT_CONFIG)
-        && let Some(subpath) = guest_agent_config_subpath(agent)
-    {
-        links.push((GUEST_AGENT_CONFIG, subpath));
-    }
-    if mounted(GUEST_OPENCODE_CONFIG) {
-        links.push((GUEST_OPENCODE_CONFIG, ".config/opencode"));
-    }
-    if mounted(GUEST_STATE) {
-        links.push((GUEST_STATE, ".workmux-state"));
-    }
-    links
+fn guest_home_path(subpath: &str) -> PathBuf {
+    PathBuf::from(GUEST_HOME).join(subpath)
 }
 
 /// Calculate the standard worktrees directory for a project.
@@ -264,7 +236,9 @@ fn generate_mounts_with_state_root(
 
     // Mount agent config directory
     if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent) {
-        let guest_path = PathBuf::from(GUEST_AGENT_CONFIG);
+        let guest_subpath = guest_agent_config_subpath(agent)
+            .ok_or_else(|| anyhow::anyhow!("No guest config path for agent '{agent}'"))?;
+        let guest_path = guest_home_path(guest_subpath);
         mounts.push(Mount {
             host_path: auth_dir.clone(),
             guest_path: guest_path.clone(),
@@ -294,7 +268,7 @@ fn generate_mounts_with_state_root(
     {
         mounts.push(Mount {
             host_path: cfg_dir,
-            guest_path: PathBuf::from(GUEST_OPENCODE_CONFIG),
+            guest_path: guest_home_path(".config/opencode"),
             read_only: true,
         });
     }
@@ -303,7 +277,7 @@ fn generate_mounts_with_state_root(
     if let Ok(state_dir) = lima_state_dir(vm_name) {
         mounts.push(Mount {
             host_path: state_dir,
-            guest_path: PathBuf::from(GUEST_STATE),
+            guest_path: guest_home_path(".workmux-state"),
             read_only: false,
         });
     }
@@ -376,54 +350,25 @@ mod tests {
     }
 
     #[test]
-    fn test_home_links_follow_generated_mounts() {
-        let mounts = vec![
-            Mount::rw(PathBuf::from("/Users/test/code")),
-            Mount {
-                host_path: PathBuf::from("/Users/test/.claude"),
-                guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
-                read_only: false,
-            },
-            Mount {
-                host_path: PathBuf::from("/Users/test/.local/state/workmux/lima/wm-test"),
-                guest_path: PathBuf::from(GUEST_STATE),
-                read_only: false,
-            },
+    fn test_guest_agent_config_paths_use_lima_home_template() {
+        let cases = [
+            ("claude", ".claude"),
+            ("copilot", ".copilot"),
+            ("gemini", ".gemini"),
+            ("agy", ".gemini/antigravity-cli"),
+            ("codex", ".codex"),
+            ("opencode", ".local/share/opencode"),
+            ("pi", ".pi/agent"),
+            ("omp", ".omp/agent"),
         ];
 
-        assert_eq!(
-            home_links("claude", &mounts),
-            vec![
-                (GUEST_AGENT_CONFIG, ".claude"),
-                (GUEST_STATE, ".workmux-state")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_home_links_skips_absent_mounts() {
-        // No opencode config on the host means no mount, so no dangling link.
-        let mounts = vec![Mount {
-            host_path: PathBuf::from("/Users/test/.local/share/opencode"),
-            guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
-            read_only: false,
-        }];
-
-        assert_eq!(
-            home_links("opencode", &mounts),
-            vec![(GUEST_AGENT_CONFIG, ".local/share/opencode")]
-        );
-    }
-
-    #[test]
-    fn test_home_links_empty_for_unknown_agent() {
-        let mounts = vec![Mount {
-            host_path: PathBuf::from("/Users/test/.config/custom"),
-            guest_path: PathBuf::from(GUEST_AGENT_CONFIG),
-            read_only: false,
-        }];
-
-        assert!(home_links("kiro", &mounts).is_empty());
+        for (agent, subpath) in cases {
+            assert_eq!(
+                guest_home_path(guest_agent_config_subpath(agent).unwrap()),
+                PathBuf::from(GUEST_HOME).join(subpath)
+            );
+        }
+        assert_eq!(guest_agent_config_subpath("kiro"), None);
     }
 
     fn init_git_project(parent: &Path) -> PathBuf {
@@ -472,6 +417,7 @@ mod tests {
             .position(|m| m.host_path == parent_host_path)
             .expect("parent pi agent mount missing");
         let parent_guest_path = mounts[parent_idx].guest_path.clone();
+        assert_eq!(parent_guest_path, guest_home_path(".pi/agent"));
         let bin_idx = mounts
             .iter()
             .position(|m| m.guest_path == parent_guest_path.join("bin"))
@@ -511,6 +457,7 @@ mod tests {
             .iter()
             .find(|m| m.host_path == omp_host_path)
             .expect("parent omp agent mount missing");
+        assert_eq!(parent_mount.guest_path, guest_home_path(".omp/agent"));
         assert!(
             !mounts
                 .iter()
@@ -529,6 +476,12 @@ mod tests {
     fn test_non_pi_agent_has_no_bin_overlay() {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "claude");
+        let claude_host_path = agent_config_host_path(tmp.path(), "claude");
+        let claude_mount = mounts
+            .iter()
+            .find(|m| m.host_path == claude_host_path)
+            .expect("claude agent mount missing");
+        assert_eq!(claude_mount.guest_path, guest_home_path(".claude"));
 
         assert!(
             !mounts

@@ -100,7 +100,7 @@ No configuration is needed. If the host has no `user.name` or `user.email` confi
 
 Both sandbox backends mount agent-specific credential directories from the host. The mounted directory depends on the configured `agent`:
 
-| Agent      | Host directory             | Container mount               | Lima guest path                |
+| Agent      | Host directory             | Container mount               | Lima mount                     |
 | ---------- | -------------------------- | ----------------------------- | ------------------------------ |
 | `claude`   | `~/.claude/`               | `/tmp/.claude/`               | `$HOME/.claude/`               |
 | `gemini`   | `~/.gemini/`               | `/tmp/.gemini/`               | `$HOME/.gemini/`               |
@@ -110,8 +110,6 @@ Both sandbox backends mount agent-specific credential directories from the host.
 | `omp`      | `~/.omp/agent/`            | `/tmp/.omp/agent/`            | `$HOME/.omp/agent/`            |
 
 OpenCode's global config directory (`~/.config/opencode/`) is also mounted read-only, providing access to `opencode.json`, plugins, and global MCP definitions.
-
-On the Lima backend, the guest paths above are symlinks: the host directory is mounted at `/mnt/workmux/agent-config` and linked into `$HOME` during provisioning.
 
 Key behaviors:
 

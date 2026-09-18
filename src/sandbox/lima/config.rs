@@ -80,34 +80,6 @@ sudo ln -sfn "$BUN_INSTALL/bin/omp" /usr/local/bin/omp
 ///
 /// The `agent` parameter determines which CLI tool is installed during
 /// provisioning (e.g. "claude", "codex", "gemini", "opencode").
-/// Build the provision script that links mount points into the guest home.
-///
-/// Mounts land on fixed paths because the guest home is not knowable when the
-/// instance config is written; this script runs inside the VM, where `$HOME`
-/// is. It is idempotent (provisioning reruns on boot) and refuses to replace
-/// anything that is not already a symlink.
-fn lima_home_link_script(links: &[(&str, &str)]) -> String {
-    let mut script = String::from(
-        r#"#!/bin/bash
-set -eux
-link_into_home() {
-    target="$1"
-    link="$HOME/$2"
-    if [ -e "$link" ] && [ ! -L "$link" ]; then
-        echo "workmux: $link exists and is not a symlink; leaving it alone" >&2
-        return 0
-    fi
-    mkdir -p "$(dirname "$link")"
-    ln -sfn "$target" "$link"
-}
-"#,
-    );
-    for (target, subpath) in links {
-        script.push_str(&format!("link_into_home '{}' '{}'\n", target, subpath));
-    }
-    script
-}
-
 pub fn generate_lima_config(
     _instance_name: &str,
     mounts: &[Mount],
@@ -206,16 +178,6 @@ pub fn generate_lima_config(
 
     // Provision scripts (run on first VM creation only)
     let mut provisions = Vec::new();
-
-    // Link the fixed mount points into the guest home. Runs before the agent
-    // install script, which expects `$HOME/.workmux-state` to resolve.
-    let home_links = super::mounts::home_links(agent, mounts);
-    if !home_links.is_empty() {
-        let mut link_provision = serde_yaml::Mapping::new();
-        link_provision.insert("mode".into(), "user".into());
-        link_provision.insert("script".into(), lima_home_link_script(&home_links).into());
-        provisions.push(Value::Mapping(link_provision));
-    }
 
     if !sandbox_config.lima.skip_default_provision() {
         let system_script = r#"#!/bin/bash
@@ -374,6 +336,29 @@ mod tests {
     }
 
     #[test]
+    fn test_lima_home_template_is_preserved_in_mount_point() {
+        let mounts = vec![Mount {
+            host_path: PathBuf::from("/Users/test/.claude"),
+            guest_path: PathBuf::from("{{.Home}}/.claude"),
+            read_only: false,
+        }];
+        let yaml = generate_lima_config(
+            "test-vm",
+            &mounts,
+            &SandboxConfig::default(),
+            "claude",
+            false,
+        )
+        .unwrap();
+        let parsed = ParsedLimaConfig::parse(&yaml);
+
+        assert_eq!(
+            parsed.value["mounts"][0]["mountPoint"].as_str(),
+            Some("{{.Home}}/.claude")
+        );
+    }
+
+    #[test]
     fn test_generate_lima_config_provision_scripts() {
         let sandbox_config = SandboxConfig::default();
         let yaml = generate_test_yaml(&sandbox_config, "claude", true);
@@ -398,82 +383,6 @@ mod tests {
         assert!(
             yaml.contains(r#"ln -sfn "$HOME/.workmux-state/.claude.json" "$HOME/.claude.json""#)
         );
-    }
-
-    #[test]
-    fn test_home_link_provision_runs_before_agent_install() {
-        let mounts = vec![
-            Mount::rw(PathBuf::from("/Users/test/code")),
-            Mount {
-                host_path: PathBuf::from("/Users/test/.claude"),
-                guest_path: PathBuf::from("/mnt/workmux/agent-config"),
-                read_only: false,
-            },
-            Mount {
-                host_path: PathBuf::from("/Users/test/.local/state/workmux/lima/wm-test"),
-                guest_path: PathBuf::from("/mnt/workmux/state"),
-                read_only: false,
-            },
-        ];
-
-        let sandbox_config = SandboxConfig::default();
-        let yaml =
-            generate_lima_config("test-vm", &mounts, &sandbox_config, "claude", false).unwrap();
-        let parsed = ParsedLimaConfig::parse(&yaml);
-        let provisions = parsed.provisions();
-
-        let link = provisions[0]["script"].as_str().unwrap();
-        assert_eq!(provisions[0]["mode"].as_str().unwrap(), "user");
-        assert!(link.contains("link_into_home '/mnt/workmux/agent-config' '.claude'"));
-        assert!(link.contains("link_into_home '/mnt/workmux/state' '.workmux-state'"));
-
-        // The agent install script symlinks .claude.json into $HOME/.workmux-state,
-        // so the links must already exist by then.
-        let install_idx = provisions
-            .iter()
-            .position(|p| {
-                p["script"]
-                    .as_str()
-                    .is_some_and(|s| s.contains(".claude.json"))
-            })
-            .expect("agent install provision missing");
-        assert!(
-            install_idx > 0,
-            "links must be created before agent install"
-        );
-    }
-
-    #[test]
-    fn test_home_link_script_is_valid_bash() {
-        // A syntax error here would only surface as a failed provision at boot.
-        let script = lima_home_link_script(&[
-            ("/mnt/workmux/agent-config", ".local/share/opencode"),
-            ("/mnt/workmux/state", ".workmux-state"),
-        ]);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("link.sh");
-        std::fs::write(&path, &script).unwrap();
-
-        let status = std::process::Command::new("bash")
-            .arg("-n")
-            .arg(&path)
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "generated script is not valid bash:\n{script}"
-        );
-    }
-
-    #[test]
-    fn test_no_home_link_provision_without_home_mounts() {
-        let mounts = vec![Mount::rw(PathBuf::from("/Users/test/code"))];
-        let sandbox_config = SandboxConfig::default();
-        let yaml =
-            generate_lima_config("test-vm", &mounts, &sandbox_config, "claude", false).unwrap();
-
-        assert!(!yaml.contains("link_into_home"));
     }
 
     #[test]
