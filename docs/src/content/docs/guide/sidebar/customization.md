@@ -77,13 +77,35 @@ sidebars without a restart.
 Group headers use their own token set, and agent tokens are rejected there
 because a header does not represent one agent:
 
-| Token           | Description                                                              |
-| --------------- | ------------------------------------------------------------------------ |
-| `{group}`       | Group name: the project name or the tmux session name.                   |
-| `{group_count}` | Number of agents the sidebar shows in the group, sleeping ones included. |
+| Token            | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `{group}`        | Group name: the project name or the tmux session name.                   |
+| `{group_count}`  | Number of agents the sidebar shows in the group, sleeping ones included. |
+| `{group_status}` | Status tally for the group, using your status icons, most urgent first.  |
 
 `{group}` is flexible, so a long group name truncates before `{group_count}` is
 dropped.
+
+`{group_status}` says what a group holds rather than how much, which is what you
+want from a group you cannot see inside: one that is collapsed, or scrolled past
+behind the pinned header. It is not in the default header, since it costs
+columns a narrow sidebar would rather give the label.
+
+```yaml
+sidebar:
+  templates:
+    grouped:
+      header: "{group} {fill} {group_status} {group_count}"
+```
+
+```text
+  api                1 󰄴1 ⠋⠙1 󰒲1 4
+```
+
+One pair per status present, counting waiting, done, working and stale agents in
+that order. An agent that is merely idle has no icon of its own and is left out
+of the tally, though `{group_count}` still counts it. When the header runs out of
+room the least urgent pairs drop first, so what wants attention survives.
 
 `{git_ahead}` and `{git_behind}` already include the arrow prefix, so do not
 wrap them with another `↑` / `↓` literal in your template, otherwise a stray

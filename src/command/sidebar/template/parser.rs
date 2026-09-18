@@ -48,6 +48,7 @@ pub enum TokenId {
     JumpKey,
     Group,
     GroupCount,
+    GroupStatus,
 }
 
 impl TokenId {
@@ -99,6 +100,7 @@ impl fmt::Display for TokenId {
             TokenId::JumpKey => "jump_key",
             TokenId::Group => "group",
             TokenId::GroupCount => "group_count",
+            TokenId::GroupStatus => "group_status",
         };
         write!(f, "{}", s)
     }
@@ -247,6 +249,7 @@ pub fn parse_line(input: &str) -> Result<Vec<Token>, ParseError> {
                     "jump_key" => TokenId::JumpKey,
                     "group" => TokenId::Group,
                     "group_count" => TokenId::GroupCount,
+                    "group_status" => TokenId::GroupStatus,
                     other => {
                         return Err(ParseError {
                             message: format!("unknown token '{}' at column {}", other, start + 1),

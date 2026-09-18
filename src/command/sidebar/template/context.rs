@@ -227,7 +227,7 @@ impl<'a> RowContext<'a> {
                 None => String::new(),
             },
             // A header owns these; an agent row has no group of its own.
-            TokenId::Group | TokenId::GroupCount => String::new(),
+            TokenId::Group | TokenId::GroupCount | TokenId::GroupStatus => String::new(),
             TokenId::Idx => self
                 .idx
                 .map(|idx| (idx + 1).to_string())

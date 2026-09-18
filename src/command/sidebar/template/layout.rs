@@ -405,6 +405,12 @@ fn render_field(
             spans.push(styled_span(text, style, user_style, ctx));
         }
         git_width
+    } else if id == TokenId::GroupStatus {
+        let (status_spans, status_width) = ctx.group_status_spans(target_width);
+        for (text, style) in status_spans {
+            spans.push(styled_span(text, style, user_style, ctx));
+        }
+        status_width
     } else if is_pr_segment(id) {
         let (pr_spans, pr_width) = ctx.pr_check_spans(target_width);
         for (text, style) in pr_spans {

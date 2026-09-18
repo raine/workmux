@@ -1678,7 +1678,10 @@ fn query_pane_extent_for_pane(format: &str) -> Option<u16> {
 fn validate_group_header_tokens(tokens: &[Token]) -> Result<(), TemplateError> {
     for token in tokens {
         if let Token::Field(id) = token
-            && !matches!(id, TokenId::Group | TokenId::GroupCount)
+            && !matches!(
+                id,
+                TokenId::Group | TokenId::GroupCount | TokenId::GroupStatus
+            )
         {
             return Err(TemplateError {
                 location: "group_header".to_string(),
@@ -2532,8 +2535,18 @@ mod grouping_tests {
         assert_eq!(error.location, "group_header");
         assert!(error.message.contains("unsupported token 'primary'"));
 
-        let valid = parse_line("#[bold]{group} {fill} {group_count}").unwrap();
+        let valid = parse_line("#[bold]{group} {fill} {group_status} {group_count}").unwrap();
         assert!(validate_group_header_tokens(&valid).is_ok());
+    }
+
+    #[test]
+    fn the_default_header_asks_only_for_the_name_and_the_count() {
+        // `{group_status}` is available but not assumed: it costs columns a
+        // narrow sidebar would rather give the label.
+        assert_eq!(
+            DEFAULT_GROUP_HEADER_TEMPLATE,
+            "{group} {fill} {group_count}"
+        );
     }
 
     #[test]

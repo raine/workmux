@@ -15,13 +15,14 @@ use crate::tmux_style;
 use crate::ui::theme::ThemePalette;
 
 use super::app::{SidebarApp, SidebarFilterMode, SidebarLayoutMode, SidebarRow};
+use super::snapshot::group_label;
 use super::template::TokenId;
 use super::template::context::RowContext;
 use super::template::layout::{
     RenderOptions, is_blank_template_line, render_line, render_line_with_options,
 };
 use super::template::parser::Token;
-use super::template::row::HeaderContext;
+use super::template::row::{GroupStatusCount, HeaderContext};
 
 /// Compute pane suffixes like " (1)", " (2)" for agents sharing the same window.
 fn compute_pane_suffixes(agents: &[AgentPane]) -> Vec<String> {
@@ -820,12 +821,14 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, bg: Option<C
 }
 
 fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
-    if ctx.is_stale
-        || matches!(
-            ctx.agent.status,
-            Some(AgentStatus::Waiting | AgentStatus::Done)
-        )
-    {
+    status_icon_overhang(ctx.agent.status, ctx.is_stale)
+}
+
+/// Columns a status icon draws past its measured width. The waiting, done and
+/// sleeping glyphs are drawn double width while measuring one, so whatever sits
+/// beside them needs the extra column reserved.
+fn status_icon_overhang(status: Option<AgentStatus>, is_stale: bool) -> usize {
+    if is_stale || matches!(status, Some(AgentStatus::Waiting | AgentStatus::Done)) {
         1
     } else {
         0
@@ -894,12 +897,70 @@ const GROUP_LABEL_INDENT: &str = "  ";
 
 /// The header template solved for one group, without the band or the indent.
 fn header_spans(app: &SidebarApp, label: &str, count: usize, width: usize) -> Vec<Span<'static>> {
+    let statuses = if app
+        .templates
+        .group_header
+        .iter()
+        .any(|token| matches!(token, Token::Field(TokenId::GroupStatus)))
+    {
+        group_status_counts(app, label)
+    } else {
+        Vec::new()
+    };
     let ctx = HeaderContext {
         label: label.to_string(),
         count,
+        statuses,
         palette: &app.palette,
     };
     render_line(&ctx, &app.templates.group_header, width)
+}
+
+/// Tally the statuses of a group's agents, most urgent first, so a header can
+/// say what a section holds and not only how much. Stale agents are one bucket
+/// however they got there, matching the fold that hides them.
+fn group_status_counts(app: &SidebarApp, label: &str) -> Vec<GroupStatusCount> {
+    let Some(group_by) = app.group_by else {
+        return Vec::new();
+    };
+    // An agent with no status and no staleness has no icon of its own, so it
+    // is left out rather than tallied behind a blank.
+    let mut counts: Vec<usize> = vec![0; 4];
+    for agent in &app.agents {
+        if group_label(agent, group_by) != label {
+            continue;
+        }
+        let bucket = if app.stale_pane_ids.contains(&agent.pane_id) {
+            Some(3)
+        } else {
+            match agent.status {
+                Some(AgentStatus::Waiting) => Some(0),
+                Some(AgentStatus::Done) => Some(1),
+                Some(AgentStatus::Working) => Some(2),
+                None => None,
+            }
+        };
+        if let Some(bucket) = bucket {
+            counts[bucket] += 1;
+        }
+    }
+
+    let buckets = [
+        (Some(AgentStatus::Waiting), false),
+        (Some(AgentStatus::Done), false),
+        (Some(AgentStatus::Working), false),
+        (None, true),
+    ];
+    counts
+        .into_iter()
+        .zip(buckets)
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, (status, stale))| GroupStatusCount {
+            icon: status_icon_and_style(app, status, stale).0,
+            count,
+            pad: status_icon_overhang(status, stale),
+        })
+        .collect()
 }
 
 /// Chevron showing whether a toggle's agents are visible.
@@ -2151,6 +2212,37 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Quit sidebar?"));
         assert!(text.contains("yes / no"));
+    }
+
+    #[test]
+    fn a_header_can_tally_what_its_group_holds() {
+        let mut app = grouped_tile_app();
+        app.templates.group_header = crate::command::sidebar::template::parser::parse_line(
+            "{group} {fill} {group_status} {group_count}",
+        )
+        .unwrap();
+        app.refresh_stale_pane_ids();
+
+        let counts = group_status_counts(&app, "api");
+        let tally: Vec<(String, usize)> = counts
+            .iter()
+            .map(|status| {
+                (
+                    status.icon.iter().map(|(text, _)| text.as_str()).collect(),
+                    status.count,
+                )
+            })
+            .collect();
+        // Waiting first, stale last: the order the header should be read in.
+        // The working icon is an animation frame, so only its count is fixed.
+        assert_eq!(tally.len(), 3);
+        assert_eq!(tally[0], ("\u{1f4ac}".to_string(), 1));
+        assert_eq!(tally[1].1, 1);
+        assert_eq!(tally[2], ("\u{1f4a4}".to_string(), 1));
+
+        // The tally reaches the drawn header, not just the helper.
+        let lines = rendered(&mut app, 36, 26);
+        assert!(lines[0].contains('1'), "header was {:?}", lines[0]);
     }
 
     #[test]
