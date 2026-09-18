@@ -38,8 +38,8 @@ Each agent row displays:
 | `f`     | Toggle session filter     |
 | `z`     | Toggle sleeping on agent  |
 | `t`     | Toggle grouping           |
-| `h`/`l` | Fold/unfold current group |
-| `s`     | Fold/unfold stale agents  |
+| `h`/`l` | Unfold/fold current group |
+| `s`     | Toggle the current fold   |
 | `S`     | Fold/unfold every group   |
 | `?`     | Show these keys           |
 | `q`     | Open quit confirmation    |
