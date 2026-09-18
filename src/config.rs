@@ -3470,7 +3470,7 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #       # Group header row; accepts {group}, {group_count}, {fill} and #[...].
 #       header: "{group} {fill} {group_count}"
 #       tiles:
-#         - "{primary} {pane_suffix} {fill} {elapsed}"
+#         - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
 #         - "{pane_title} {fill} {git_stats}"
 
 #-------------------------------------------------------------------------------

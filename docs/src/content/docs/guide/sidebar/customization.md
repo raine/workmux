@@ -16,13 +16,13 @@ sidebar:
     tiles:
       - "{primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title} {fill} {pr_checks}"
+      - "{pane_title} {fill} {pr_number} {pr_checks}"
 
     # Horizontal mode: one string per visual line in each top bar chip.
     horizontal:
       - "{status_icon} {primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title} {fill} {pr_checks}"
+      - "{pane_title} {fill} {pr_number} {pr_checks}"
 
     # Used instead of the templates above while sidebar.group_by is set.
     # Anything left out falls back to the template of the same name above,
@@ -30,7 +30,7 @@ sidebar:
     grouped:
       header: "{group} {fill} {group_count}"
       tiles:
-        - "{primary} {pane_suffix} {fill} {elapsed}"
+        - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
         - "{pane_title} {fill} {git_stats}"
 ```
 

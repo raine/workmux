@@ -166,20 +166,21 @@ const DEFAULT_COMPACT_TEMPLATE: &str = "{status_icon} {primary} {pane_suffix} {f
 const DEFAULT_TILE_TEMPLATES: &[&str] = &[
     "{primary} {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
-    "{pane_title} {fill} {pr_checks}",
+    "{pane_title} {fill} {pr_number} {pr_checks}",
 ];
 const DEFAULT_HORIZONTAL_TEMPLATES: &[&str] = &[
     "{status_icon} {primary} {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
-    "{pane_title} {fill} {pr_checks}",
+    "{pane_title} {fill} {pr_number} {pr_checks}",
 ];
 
 /// Tile rows for the grouped presentation. The section header already names
-/// the project or session, so the row that would repeat it is dropped and its
-/// git stats move up beside the pane title.
+/// the project or session, so the row that would repeat it is dropped. What it
+/// carried moves up: git stats join the pane title, and the pull request the
+/// dropped row would have shown sits beside the identity line.
 const DEFAULT_GROUPED_TILE_TEMPLATES: &[&str] = &[
-    "{primary} {pane_suffix} {fill} {elapsed}",
-    "{pane_title} {fill} {git_stats}",
+    "{primary} {pane_suffix} {fill} {pr_number} {elapsed}",
+    "{pane_title} {fill} {pr_checks} {git_stats}",
 ];
 
 const DEFAULT_GROUP_HEADER_TEMPLATE: &str = "{group} {fill} {group_count}";
@@ -1859,14 +1860,14 @@ mod tests {
     }
 
     #[test]
-    fn default_multiline_templates_show_checks() {
+    fn default_multiline_templates_show_the_pull_request() {
         assert_eq!(
             DEFAULT_TILE_TEMPLATES.last(),
-            Some(&"{pane_title} {fill} {pr_checks}")
+            Some(&"{pane_title} {fill} {pr_number} {pr_checks}")
         );
         assert_eq!(
             DEFAULT_HORIZONTAL_TEMPLATES.last(),
-            Some(&"{pane_title} {fill} {pr_checks}")
+            Some(&"{pane_title} {fill} {pr_number} {pr_checks}")
         );
     }
 
