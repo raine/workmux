@@ -14,13 +14,15 @@ use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::tmux_style;
 use crate::ui::theme::ThemePalette;
 
-use super::app::{SidebarApp, SidebarFilterMode, SidebarLayoutMode};
+use super::app::{SidebarApp, SidebarFilterMode, SidebarLayoutMode, SidebarRow};
+use super::snapshot::group_label;
 use super::template::TokenId;
 use super::template::context::RowContext;
 use super::template::layout::{
     RenderOptions, is_blank_template_line, render_line, render_line_with_options,
 };
 use super::template::parser::Token;
+use super::template::row::{GroupStatusCount, HeaderContext};
 
 /// Compute pane suffixes like " (1)", " (2)" for agents sharing the same window.
 fn compute_pane_suffixes(agents: &[AgentPane]) -> Vec<String> {
@@ -114,14 +116,18 @@ struct SidebarListSetup {
     selected_idx: Option<usize>,
 }
 
+pub(crate) fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn sidebar_list_setup(app: &SidebarApp) -> SidebarListSetup {
     SidebarListSetup {
-        now_secs: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        now_secs: now_secs(),
         pane_suffixes: compute_pane_suffixes(&app.agents),
-        selected_idx: app.list_state.selected(),
+        selected_idx: app.selected_agent_idx(),
     }
 }
 
@@ -450,6 +456,7 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
 
     if app.position == crate::config::SidebarPosition::Top {
         render_horizontal_bar(f, app, area);
+        render_help(f, app);
         render_exit_confirmation(f, app);
         return;
     }
@@ -467,16 +474,22 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
     f.render_widget(block, area);
     let inner = render_template_error(f, app, inner);
 
-    let (list_area, filter_area) = if app.filter_mode == SidebarFilterMode::Session {
-        if inner.height > 1 {
-            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
-            let filter = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            (list, Some(filter))
-        } else {
-            (inner, None)
-        }
+    // The footer carries one line: the session filter when it is on, otherwise
+    // the grouping hint while it is still on offer.
+    let footer = if app.filter_mode == SidebarFilterMode::Session {
+        Some(filter_footer_line(app))
+    } else if app.show_hint() {
+        Some(hint_line(app, inner.width as usize))
     } else {
-        (inner, None)
+        None
+    };
+    let (list_area, filter_area) = match &footer {
+        Some(_) if inner.height > 1 => {
+            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
+            let footer = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            (list, Some(footer))
+        }
+        _ => (inner, None),
     };
     app.list_area = list_area;
 
@@ -485,23 +498,173 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
         SidebarLayoutMode::Tiles => render_tile_list(f, app, list_area),
     }
 
-    if let Some(filter_rect) = filter_area {
-        let label = app
-            .host_session()
-            .map(|s| format!("[session: {}]", s))
-            .unwrap_or_else(|| "[session]".to_string());
-        let label = truncate_to_width(&label, filter_rect.width as usize);
-        let line = Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(app.palette.dimmed)
-                .add_modifier(Modifier::DIM),
-        ))
-        .alignment(Alignment::Center);
-        f.render_widget(line, filter_rect);
+    if let (Some(rect), Some(line)) = (filter_area, footer) {
+        f.render_widget(line, rect);
     }
 
+    render_help(f, app);
     render_exit_confirmation(f, app);
+}
+
+/// Keys the sidebar answers to, paired with what they do. Keys that only act
+/// on groups are listed while grouping is on, since that is the only time they
+/// have anything to act on.
+fn help_entries(app: &SidebarApp) -> Vec<(&'static str, &'static str)> {
+    let mut entries = vec![("j k", "move"), ("g G", "first last"), ("enter", "jump")];
+    if app.group_by.is_some() {
+        entries.extend([
+            ("h l", "fold unfold"),
+            ("s", "fold group"),
+            ("S", "fold all"),
+        ]);
+    }
+    entries.extend([
+        ("t", "grouping"),
+        ("v", "layout"),
+        ("f", "session filter"),
+        ("z", "sleep"),
+        ("q", "quit"),
+    ]);
+    entries
+}
+
+/// Draw the key overlay over the list. A sidebar is narrow and has no room for
+/// a permanent legend, so the keys it added stay discoverable behind `?`.
+/// Style shared by the footer's two occupants. The band background separates
+/// the line from the list above it, which otherwise runs straight into it:
+/// both are dim text on the terminal background, and the footer is chrome
+/// rather than another row.
+fn footer_line(app: &SidebarApp, text: String) -> Line<'static> {
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(app.palette.dimmed)
+            .add_modifier(Modifier::DIM),
+    ))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(group_band_bg(&app.palette)))
+}
+
+fn filter_footer_line(app: &SidebarApp) -> Line<'static> {
+    let label = app
+        .host_session()
+        .map(|s| format!("[session: {}]", s))
+        .unwrap_or_else(|| "[session]".to_string());
+    footer_line(app, label)
+}
+
+/// One dim line offering the two keys worth knowing about: the one that groups
+/// the list, and the one that lists every other key. Named so the reader sees
+/// what the key would do to this sidebar, not what the feature is called.
+///
+/// A `new` badge marks the invitation while the sidebar is still the one the
+/// reader knows. Once they have taken it the line drops the badge and offers
+/// the way back instead, since by then the mode is not news.
+fn hint_line(app: &SidebarApp, width: usize) -> Line<'static> {
+    let (badge, options): (&str, Vec<String>) = match app.group_by {
+        Some(_) => (
+            "",
+            vec!["t  flat list  ·  ?  keys".into(), "t  flat  ·  ?".into()],
+        ),
+        None => {
+            let by = match app.configured_group_by {
+                Some(crate::config::SidebarGroupBy::Session) => "session",
+                _ => "project",
+            };
+            (
+                "new",
+                vec![
+                    format!("t  group by {by}  ·  ?  keys"),
+                    "t  group  ·  ?  keys".into(),
+                    "t  group  ·  ?".into(),
+                ],
+            )
+        }
+    };
+
+    let badge_width = if badge.is_empty() {
+        0
+    } else {
+        display_width(badge) + 2
+    };
+    let text = options
+        .iter()
+        .find(|option| badge_width + display_width(option) <= width)
+        .cloned()
+        .unwrap_or_else(|| options.last().cloned().unwrap_or_default());
+    // The badge is the first thing to go: the keys are the point of the line.
+    let badge = if badge_width + display_width(&text) <= width {
+        badge
+    } else {
+        ""
+    };
+
+    let dim = Style::default()
+        .fg(app.palette.dimmed)
+        .add_modifier(Modifier::DIM);
+    let mut spans = Vec::new();
+    if !badge.is_empty() {
+        spans.push(Span::styled(
+            badge.to_string(),
+            Style::default().fg(app.palette.accent),
+        ));
+        spans.push(Span::styled("  ".to_string(), dim));
+    }
+    spans.push(Span::styled(truncate_to_width(&text, width), dim));
+
+    Line::from(spans)
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(group_band_bg(&app.palette)))
+}
+
+fn render_help(f: &mut Frame, app: &SidebarApp) {
+    if !app.show_help {
+        return;
+    }
+
+    let entries = help_entries(app);
+    let terminal = f.area();
+    let key_width = entries.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+    let content_width = entries
+        .iter()
+        .map(|(_, action)| key_width + 1 + action.len())
+        .max()
+        .unwrap_or(0);
+    let width = ((content_width + 4) as u16).min(terminal.width);
+    let height = ((entries.len() + 2) as u16).min(terminal.height);
+    let area = Rect::new(
+        terminal.x + terminal.width.saturating_sub(width) / 2,
+        terminal.y + terminal.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.palette.help_border))
+        .padding(Padding::horizontal(1));
+    let inner_width = block.inner(area).width as usize;
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(key, action)| {
+            let label = format!("{key:key_width$} ");
+            Line::from(vec![
+                Span::styled(
+                    truncate_to_width(&label, inner_width),
+                    Style::default()
+                        .fg(app.palette.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    truncate_to_width(action, inner_width.saturating_sub(label.len())),
+                    Style::default().fg(app.palette.help_muted),
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_exit_confirmation(f: &mut Frame, app: &SidebarApp) {
@@ -739,12 +902,14 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, bg: Option<C
 }
 
 fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
-    if ctx.is_stale
-        || matches!(
-            ctx.agent.status,
-            Some(AgentStatus::Waiting | AgentStatus::Done)
-        )
-    {
+    status_icon_overhang(ctx.agent.status, ctx.is_stale)
+}
+
+/// Columns a status icon draws past its measured width. The waiting, done and
+/// sleeping glyphs are drawn double width while measuring one, so whatever sits
+/// beside them needs the extra column reserved.
+fn status_icon_overhang(status: Option<AgentStatus>, is_stale: bool) -> usize {
+    if is_stale || matches!(status, Some(AgentStatus::Waiting | AgentStatus::Done)) {
         1
     } else {
         0
@@ -765,7 +930,211 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-/// Compact single-line-per-agent list (original layout).
+/// Presentation row index of the group header owning `row`, if any sits above
+/// the viewport start.
+fn header_above(app: &SidebarApp, row: usize) -> Option<usize> {
+    app.rows[..row]
+        .iter()
+        .rposition(|r| matches!(r, SidebarRow::Header { .. } | SidebarRow::StaleGroup { .. }))
+}
+
+/// Background of the group header band, stepped away from the selection.
+///
+/// Selection is the sidebar's only other background, so a band that merely
+/// approaches it reads as a dimmer selected row rather than as a section break.
+/// The step goes in whichever direction the theme has room for it: toward black
+/// on a dark palette, toward white on a light one. Palettes whose colors are
+/// not RGB cannot be shifted, so they fall back to the current-row tint.
+fn group_band_bg(palette: &ThemePalette) -> Color {
+    /// Fraction of the distance from the selection toward the theme's extreme.
+    const STEP: f32 = 0.35;
+
+    let Color::Rgb(r, g, b) = palette.highlight_row_bg else {
+        return palette.current_row_bg;
+    };
+    let luminance = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
+    let target = if luminance < 0.5 { 0.0 } else { 255.0 };
+    let step = |channel: u8| {
+        let channel = f32::from(channel);
+        (channel + (target - channel) * STEP).round() as u8
+    };
+    Color::Rgb(step(r), step(g), step(b))
+}
+
+/// Header line for a group, rendered through the shared template solver onto a
+/// full-width band. The band, not a divider, is what sets a header apart from
+/// the agents under it, so a group costs one row.
+fn header_line(app: &SidebarApp, label: &str, count: usize, width: usize) -> Line<'static> {
+    let band = group_band_bg(&app.palette);
+    // The indent is decoration. A sidebar too narrow to spare it keeps the
+    // label and the count instead.
+    let indent = display_width(GROUP_LABEL_INDENT);
+    let indent = if width.saturating_sub(indent) < 4 {
+        0
+    } else {
+        indent
+    };
+    let mut spans = vec![Span::raw(&GROUP_LABEL_INDENT[..indent])];
+    spans.extend(header_spans(app, label, count, width - indent));
+    // A template that sets its own `bg=` keeps it; everything else gets the band.
+    apply_selection_bg(&mut spans, band);
+    pad_spans_to_width(&mut spans, width, Some(band));
+    Line::from(spans)
+}
+
+/// Indent shared by every group label, so a header lines up with the label of
+/// a collapsed group, which gives its first two columns to the chevron.
+const GROUP_LABEL_INDENT: &str = "  ";
+
+/// The header template solved for one group, without the band or the indent.
+fn header_spans(app: &SidebarApp, label: &str, count: usize, width: usize) -> Vec<Span<'static>> {
+    let statuses = if app
+        .templates
+        .group_header
+        .iter()
+        .any(|token| matches!(token, Token::Field(TokenId::GroupStatus)))
+    {
+        group_status_counts(app, label)
+    } else {
+        Vec::new()
+    };
+    let ctx = HeaderContext {
+        label: label.to_string(),
+        count,
+        statuses,
+        palette: &app.palette,
+    };
+    render_line(&ctx, &app.templates.group_header, width)
+}
+
+/// Tally the statuses of a group's agents, most urgent first, so a header can
+/// say what a section holds and not only how much. Stale agents are one bucket
+/// however they got there, matching the fold that hides them.
+fn group_status_counts(app: &SidebarApp, label: &str) -> Vec<GroupStatusCount> {
+    let Some(group_by) = app.group_by else {
+        return Vec::new();
+    };
+    // An agent with no status and no staleness has no icon of its own, so it
+    // is left out rather than tallied behind a blank.
+    let mut counts: Vec<usize> = vec![0; 4];
+    for agent in &app.agents {
+        if group_label(agent, group_by) != label {
+            continue;
+        }
+        let bucket = if app.stale_pane_ids.contains(&agent.pane_id) {
+            Some(3)
+        } else {
+            match agent.status {
+                Some(AgentStatus::Waiting) => Some(0),
+                Some(AgentStatus::Done) => Some(1),
+                Some(AgentStatus::Working) => Some(2),
+                None => None,
+            }
+        };
+        if let Some(bucket) = bucket {
+            counts[bucket] += 1;
+        }
+    }
+
+    let buckets = [
+        (Some(AgentStatus::Waiting), false),
+        (Some(AgentStatus::Done), false),
+        (Some(AgentStatus::Working), false),
+        (None, true),
+    ];
+    counts
+        .into_iter()
+        .zip(buckets)
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, (status, stale))| GroupStatusCount {
+            icon: status_icon_and_style(app, status, stale).0,
+            count,
+            pad: status_icon_overhang(status, stale),
+        })
+        .collect()
+}
+
+/// Chevron showing whether a toggle's agents are visible.
+fn chevron(expanded: bool) -> &'static str {
+    if expanded { "\u{25be}" } else { "\u{25b8}" }
+}
+
+/// Row standing for the stale agents of a group that also holds live ones.
+/// The count sits inline so it cannot be mistaken for a group header, which
+/// carries its count on the right. Selection brightens the text as well as the
+/// background: one short dim line leaves the background little to show through.
+fn stale_tail_line(
+    app: &SidebarApp,
+    count: usize,
+    expanded: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.highlight_row_bg)
+    } else {
+        Style::default().fg(app.palette.dimmed)
+    };
+    let text = format!("  {} {} stale", chevron(expanded), count);
+    let mut spans = vec![Span::styled(truncate_to_width(&text, width), style)];
+    if selected {
+        pad_spans_to_width(&mut spans, width, Some(app.palette.highlight_row_bg));
+    }
+    Line::from(spans)
+}
+
+/// Header of a group with no live agents, which is also its toggle.
+fn stale_group_line(
+    app: &SidebarApp,
+    label: &str,
+    count: usize,
+    expanded: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let bg = if selected {
+        app.palette.highlight_row_bg
+    } else {
+        group_band_bg(&app.palette)
+    };
+    let marker_fg = if selected {
+        app.palette.text
+    } else {
+        app.palette.dimmed
+    };
+    let marker = format!("{} ", chevron(expanded));
+    let marker_cols = display_width(&marker);
+    let mut spans = vec![Span::styled(marker, Style::default().fg(marker_fg))];
+    spans.extend(header_spans(
+        app,
+        label,
+        count,
+        width.saturating_sub(marker_cols),
+    ));
+    for span in &mut spans {
+        span.style = span.style.bg(bg);
+    }
+    pad_spans_to_width(&mut spans, width, Some(bg));
+    Line::from(spans)
+}
+
+/// Clamp a compact offset so the selected row stays visible, mirroring the/// Clamp a compact offset so the selected row stays visible, mirroring the
+/// rule ratatui applies during render. Computing it here keeps the sticky
+/// header in sync with the frame being drawn.
+fn compact_offset(offset: usize, selected: usize, height: usize) -> usize {
+    if height == 0 {
+        return offset;
+    }
+    let mut start = offset.min(selected);
+    if selected >= start + height {
+        start = selected + 1 - height;
+    }
+    start
+}
+
+/// Compact single-line-per-row list (original layout, plus group headers).
 fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     if app.agents.is_empty() {
         render_no_agents(f, app, area);
@@ -784,24 +1153,106 @@ fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     let render_options =
         RenderOptions::default().with_field_min_width(TokenId::StatusIcon, status_icon_width);
 
-    let items: Vec<ListItem> = contexts
+    let items: Vec<ListItem> = app
+        .rows
         .iter()
-        .map(|ctx| {
-            let mut spans = render_line_with_options(ctx, &template, width, &render_options);
+        .enumerate()
+        .map(|(row_idx, row)| match row {
+            SidebarRow::Agent(idx) => {
+                let ctx = &contexts[*idx];
+                let mut spans = render_line_with_options(ctx, &template, width, &render_options);
 
-            // Post-pass: apply selection background where the template has
-            // not already supplied an explicit user `bg=`.
-            if ctx.is_selected {
-                apply_selection_bg(&mut spans, app.palette.highlight_row_bg);
+                // Post-pass: apply selection background where the template has
+                // not already supplied an explicit user `bg=`.
+                if ctx.is_selected {
+                    apply_selection_bg(&mut spans, app.palette.highlight_row_bg);
+                }
+
+                ListItem::new(Line::from(spans))
             }
-
-            ListItem::new(Line::from(spans))
+            SidebarRow::Header { label, count } => {
+                ListItem::new(header_line(app, label, *count, width))
+            }
+            SidebarRow::Rule { label } => ListItem::new(labeled_rule(app, label, width)),
+            SidebarRow::StaleTail {
+                count, expanded, ..
+            } => ListItem::new(stale_tail_line(
+                app,
+                *count,
+                *expanded,
+                app.list_state.selected() == Some(row_idx),
+                width,
+            )),
+            SidebarRow::StaleGroup {
+                label,
+                count,
+                expanded,
+            } => ListItem::new(stale_group_line(
+                app,
+                label,
+                *count,
+                *expanded,
+                app.list_state.selected() == Some(row_idx),
+                width,
+            )),
         })
         .collect();
 
-    let list = List::new(items).highlight_style(Style::default().bg(app.palette.highlight_row_bg));
+    // Own the offset so the sticky header describes this frame, not the last.
+    let selected = app.list_state.selected().unwrap_or(0);
+    let height = area.height as usize;
+    let full_start = compact_offset(app.list_state.offset(), selected, height);
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    let mut sticky: Option<usize> = None;
+    let mut start = full_start;
+    if height > 1
+        && matches!(app.rows.get(full_start), Some(SidebarRow::Agent(_)))
+        && header_above(app, full_start).is_some()
+    {
+        let shrunk = compact_offset(app.list_state.offset(), selected, height - 1);
+        // Re-derive after shrinking: the smaller viewport can start on the
+        // next group's real header, which then needs no pin.
+        if !matches!(
+            app.rows.get(shrunk),
+            Some(SidebarRow::Header { .. } | SidebarRow::StaleGroup { .. })
+        ) {
+            sticky = header_above(app, shrunk);
+            start = shrunk;
+        }
+    }
+
+    *app.list_state.offset_mut() = start;
+
+    let list_area = match sticky {
+        Some(header_row) => {
+            let pinned = match app.rows.get(header_row) {
+                Some(SidebarRow::Header { label, count }) => {
+                    Some(header_line(app, label, *count, width))
+                }
+                Some(SidebarRow::StaleGroup {
+                    label,
+                    count,
+                    expanded,
+                }) => Some(stale_group_line(
+                    app, label, *count, *expanded, false, width,
+                )),
+                _ => None,
+            };
+            if let Some(line) = pinned {
+                f.render_widget(line, Rect::new(area.x, area.y, area.width, 1));
+            }
+            Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+        }
+        None => area,
+    };
+    // The pinned band is not a row, so it must not resolve to an agent.
+    app.list_area = list_area;
+
+    let list = List::new(items)
+        .scroll_padding(0)
+        .highlight_style(Style::default().bg(app.palette.highlight_row_bg));
+
+    f.render_stateful_widget(list, list_area, &mut app.list_state);
 }
 
 /// Fully visible tiles and the space reserved for their overflow indicator.
@@ -850,6 +1301,60 @@ fn tile_viewport(
     Some(TileViewport { start, end, more })
 }
 
+/// Divider line closing a tile or a group header.
+fn tile_divider(app: &SidebarApp, width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(app.palette.border),
+    ))
+}
+
+/// A divider carrying a centered label, marking a break in the list itself
+/// rather than the start of one group.
+fn labeled_rule(app: &SidebarApp, label: &str, width: usize) -> Line<'static> {
+    let text = format!(" {label} ");
+    let text_cols = display_width(&text).min(width);
+    let left = (width - text_cols) / 2;
+    let right = width - text_cols - left;
+    Line::from(vec![
+        Span::styled(
+            "\u{2500}".repeat(left),
+            Style::default().fg(app.palette.border),
+        ),
+        Span::styled(
+            truncate_to_width(&text, text_cols),
+            Style::default().fg(app.palette.dimmed),
+        ),
+        Span::styled(
+            "\u{2500}".repeat(right),
+            Style::default().fg(app.palette.border),
+        ),
+    ])
+}
+
+/// Lines of a tile-mode group header: the divider that closes the previous
+/// group, unless the header starts the list, and the label line. The label sits
+/// directly above its first agent, so a group costs one row more than its
+/// tiles.
+fn tile_header_lines(
+    app: &SidebarApp,
+    label: &str,
+    count: usize,
+    width: usize,
+    is_first_row: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if !is_first_row {
+        lines.push(tile_divider(app, width));
+    }
+    // One column of right margin, so the count lines up with the elapsed
+    // column of the tiles below it; the band still spans the full width.
+    let mut spans = header_line(app, label, count, width.saturating_sub(1)).spans;
+    pad_spans_to_width(&mut spans, width, Some(group_band_bg(&app.palette)));
+    lines.push(Line::from(spans));
+    lines
+}
+
 /// Tile layout: variable-height cards per agent with status stripe.
 fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     if app.agents.is_empty() {
@@ -860,17 +1365,78 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     let setup = sidebar_list_setup(app);
 
     let sep_width = area.width as usize;
-    let agent_count = app.agents.len();
     let tile_templates: Vec<_> = app.templates.tiles.clone();
     let body_width = (area.width as usize).saturating_sub(6); // stripe(2) + icon(2) + gap(1) + right margin(1)
 
-    let mut tile_heights = Vec::new();
-
     let items: Vec<ListItem> = app
-        .agents
+        .rows
         .iter()
         .enumerate()
-        .map(|(idx, agent)| {
+        .map(|(row_idx, row)| {
+            let idx = match row {
+                SidebarRow::Agent(idx) => *idx,
+                SidebarRow::Header { label, count } => {
+                    // The labeled rule above a section already closes the
+                    // group before it, so the header adds no divider of its own.
+                    let opens_list =
+                        row_idx == 0 || matches!(app.rows[row_idx - 1], SidebarRow::Rule { .. });
+                    return ListItem::new(tile_header_lines(
+                        app, label, *count, sep_width, opens_list,
+                    ));
+                }
+                SidebarRow::Rule { label } => {
+                    return ListItem::new(labeled_rule(app, label, sep_width));
+                }
+                SidebarRow::StaleTail {
+                    count, expanded, ..
+                } => {
+                    let mut lines = Vec::new();
+                    if row_idx > 0 && matches!(app.rows[row_idx - 1], SidebarRow::Agent(_)) {
+                        lines.push(tile_divider(app, sep_width));
+                    }
+                    lines.push(stale_tail_line(
+                        app,
+                        *count,
+                        *expanded,
+                        app.list_state.selected() == Some(row_idx),
+                        sep_width,
+                    ));
+                    if row_idx == app.rows.len() - 1 {
+                        lines.push(tile_divider(app, sep_width));
+                    }
+                    return ListItem::new(lines);
+                }
+                SidebarRow::StaleGroup {
+                    label,
+                    count,
+                    expanded,
+                } => {
+                    let mut lines = Vec::new();
+                    if row_idx > 0 && !matches!(app.rows[row_idx - 1], SidebarRow::Rule { .. }) {
+                        lines.push(tile_divider(app, sep_width));
+                    }
+                    let selected = app.list_state.selected() == Some(row_idx);
+                    let mut spans = stale_group_line(
+                        app,
+                        label,
+                        *count,
+                        *expanded,
+                        selected,
+                        sep_width.saturating_sub(1),
+                    )
+                    .spans;
+                    let bg = if selected {
+                        app.palette.highlight_row_bg
+                    } else {
+                        group_band_bg(&app.palette)
+                    };
+                    pad_spans_to_width(&mut spans, sep_width, Some(bg));
+                    lines.push(Line::from(spans));
+                    return ListItem::new(lines);
+                }
+            };
+            let agent = &app.agents[idx];
+            let collapsed = app.renders_collapsed(agent);
             let ctx = RowContext::build(
                 app,
                 agent,
@@ -911,13 +1477,22 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 String::new()
             };
 
-            // Separator at the top (between tiles, not on first item)
+            // Separator at the top, except after a header, which already
+            // closes with one, and except on the very first row. A run of
+            // collapsed rows reads as one block, so no divider splits it.
             let mut lines = Vec::new();
-            if idx > 0 {
-                lines.push(Line::from(Span::styled(
-                    "─".repeat(sep_width),
-                    Style::default().fg(app.palette.border),
-                )));
+            let previous_collapsed = row_idx
+                .checked_sub(1)
+                .and_then(|prev| match app.rows[prev] {
+                    SidebarRow::Agent(prev_idx) => {
+                        Some(app.renders_collapsed(&app.agents[prev_idx]))
+                    }
+                    _ => None,
+                });
+            if let Some(previous_collapsed) = previous_collapsed
+                && !(collapsed && previous_collapsed)
+            {
+                lines.push(tile_divider(app, sep_width));
             }
 
             let mut visible_lines = 0;
@@ -925,6 +1500,10 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
             for (line_idx, template) in tile_templates.iter().enumerate() {
                 if is_blank_template_line(template) {
                     continue;
+                }
+                // A collapsed agent keeps its first line and drops the rest.
+                if collapsed && visible_lines == 1 {
+                    break;
                 }
                 visible_lines += 1;
 
@@ -965,7 +1544,6 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
 
             // If all lines were empty, render at least one blank line so the tile doesn't collapse
             if visible_lines == 0 {
-                visible_lines = 1;
                 lines.push(Line::from(vec![
                     Span::styled("▌ ", stripe_bg_style),
                     Span::raw("  "),
@@ -975,36 +1553,83 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 ]));
             }
 
-            tile_heights.push(visible_lines);
-
-            // Bottom separator after the last item
-            if idx == agent_count - 1 {
-                lines.push(Line::from(Span::styled(
-                    "─".repeat(sep_width),
-                    Style::default().fg(app.palette.border),
-                )));
+            // Bottom separator after the last row
+            if row_idx == app.rows.len() - 1 {
+                lines.push(tile_divider(app, sep_width));
             }
 
             ListItem::new(lines)
         })
         .collect();
 
-    app.tile_heights = tile_heights;
     let heights: Vec<_> = items.iter().map(ListItem::height).collect();
-    let viewport = tile_viewport(
-        &heights,
-        app.list_state.offset(),
-        app.list_state.selected().unwrap_or(app.list_state.offset()),
-        area.height as usize,
-    );
+    app.tile_heights.clone_from(&heights);
+    let selected_row = app.list_state.selected().unwrap_or(app.list_state.offset());
+    let full_height = area.height as usize;
+    let full_view = tile_viewport(&heights, app.list_state.offset(), selected_row, full_height);
+
+    // Pin the current group's header when the viewport opens mid-group. The
+    // pin renders exactly like a header that opens the list: one label line.
+    const PIN_ROWS: usize = 1;
+    let mut sticky: Option<usize> = None;
+    let mut viewport = full_view;
+    if let Some(view) = &viewport
+        && full_height > PIN_ROWS
+        && matches!(app.rows.get(view.start), Some(SidebarRow::Agent(_)))
+        && header_above(app, view.start).is_some()
+        && let Some(shrunk) = tile_viewport(
+            &heights,
+            app.list_state.offset(),
+            selected_row,
+            full_height - PIN_ROWS,
+        )
+        // Re-derive after shrinking: the smaller viewport can start on the
+        // next group's real header, and the selected tile must still fit.
+        && !matches!(
+            app.rows.get(shrunk.start),
+            Some(SidebarRow::Header { .. } | SidebarRow::StaleGroup { .. })
+        )
+        && (shrunk.start..shrunk.end).contains(&selected_row)
+    {
+        sticky = header_above(app, shrunk.start);
+        viewport = Some(shrunk);
+    }
+
     let more = viewport.as_ref().is_some_and(|view| view.more);
-    let list_area = Rect::new(area.x, area.y, area.width, area.height - u16::from(more));
+    let pin_rows = u16::from(sticky.is_some()) * PIN_ROWS as u16;
+    if let Some(header_row) = sticky
+        && let Some(lines) = match app.rows.get(header_row) {
+            Some(SidebarRow::Header { label, count }) => {
+                Some(tile_header_lines(app, label, *count, sep_width, true))
+            }
+            Some(SidebarRow::StaleGroup {
+                label,
+                count,
+                expanded,
+            }) => Some(vec![stale_group_line(
+                app, label, *count, *expanded, false, sep_width,
+            )]),
+            _ => None,
+        }
+    {
+        f.render_widget(
+            ratatui::text::Text::from(lines),
+            Rect::new(area.x, area.y, area.width, PIN_ROWS as u16),
+        );
+    }
+    let list_area = Rect::new(
+        area.x,
+        area.y + pin_rows,
+        area.width,
+        area.height - pin_rows - u16::from(more),
+    );
     if let Some(view) = &viewport {
         *app.list_state.offset_mut() = view.start;
         let visible_height: usize = heights[view.start..view.end].iter().sum();
-        app.list_area = Rect::new(area.x, area.y, area.width, visible_height as u16);
+        // The pinned band is not a row, so it must not resolve to an agent.
+        app.list_area = Rect::new(area.x, list_area.y, area.width, visible_height as u16);
     } else {
-        app.list_area = Rect::new(area.x, area.y, area.width, 0);
+        app.list_area = Rect::new(area.x, list_area.y, area.width, 0);
     }
 
     // Selection backgrounds belong to tile content, not separators or the footer.
@@ -1012,10 +1637,26 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     f.render_stateful_widget(list, list_area, &mut app.list_state);
 
     if let Some(view) = viewport.filter(|view| view.more) {
-        let text = truncate_to_width(
-            &format!("↓ {} more", agent_count - view.end),
-            area.width as usize,
-        );
+        // Count agents, including the ones a collapsed toggle stands for,
+        // never presentation rows.
+        let hidden: usize = app.rows[view.end..]
+            .iter()
+            .map(|row| match row {
+                SidebarRow::Agent(_) => 1,
+                SidebarRow::StaleTail {
+                    count,
+                    expanded: false,
+                    ..
+                }
+                | SidebarRow::StaleGroup {
+                    count,
+                    expanded: false,
+                    ..
+                } => *count,
+                _ => 0,
+            })
+            .sum();
+        let text = truncate_to_width(&format!("↓ {} more", hidden), area.width as usize);
         f.render_widget(
             Line::from(Span::styled(text, Style::default().fg(app.palette.dimmed))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
@@ -1178,6 +1819,7 @@ mod tests {
                 agent_kind: None,
             });
         }
+        app.rebuild_rows();
         app.list_state.select(Some(0));
         app.host_agent_idx = Some(5);
         app
@@ -1197,6 +1839,268 @@ mod tests {
             .map(|line| super::super::template::parser::parse_line(line).unwrap())
             .collect();
         app
+    }
+
+    fn grouped_tile_app() -> SidebarApp {
+        let mut app = tile_app();
+        app.group_by = Some(crate::config::SidebarGroupBy::Session);
+        app.rebuild_rows();
+        app.list_state.select(app.row_of_agent(0));
+        app
+    }
+
+    fn grouped_compact_app() -> SidebarApp {
+        let mut app = tile_fixture();
+        app.layout_mode = SidebarLayoutMode::Compact;
+        app.group_by = Some(crate::config::SidebarGroupBy::Session);
+        app.rebuild_rows();
+        app.list_state.select(app.row_of_agent(0));
+        app
+    }
+
+    fn rendered(app: &mut SidebarApp, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| render_sidebar(f, app)).unwrap();
+        (0..height)
+            .map(|y| {
+                buffer_row(terminal.backend().buffer(), y)
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compact_headers_label_each_group_and_are_not_selectable() {
+        let mut app = grouped_compact_app();
+        let lines = rendered(&mut app, 30, 9);
+
+        assert_eq!(lines[0].trim(), "api                      3");
+        assert!(lines[1].contains("auth-refresh"));
+        assert_eq!(lines[4].trim(), "mobile                   2");
+        assert_eq!(lines[7].trim(), "workmux                  1");
+
+        // Headers hold no agent; the agents around them still resolve.
+        assert_eq!(app.hit_test(1, 0), None);
+        assert_eq!(app.hit_test(1, 1), Some(0));
+        assert_eq!(app.hit_test(1, 4), None);
+        assert_eq!(app.hit_test(1, 5), Some(3));
+    }
+
+    #[test]
+    fn stale_agents_fold_behind_a_toggle_and_expand_to_one_line_each() {
+        let mut app = tile_app();
+        app.group_by = Some(crate::config::SidebarGroupBy::Session);
+        app.collapse_stale = true;
+        app.templates.tiles = ["{primary} {pane_suffix} {fill}", "{pane_title} {fill}"]
+            .into_iter()
+            .map(|line| super::super::template::parser::parse_line(line).unwrap())
+            .collect();
+        // Working and waiting agents are never stale. Clearing the status of
+        // the rest leaves them with no activity at all, which is stale.
+        for idx in [1, 2] {
+            app.agents[idx].status = None;
+        }
+        app.refresh_stale_pane_ids();
+        app.rebuild_rows();
+        app.list_state.select(app.row_of_agent(0));
+
+        let lines = rendered(&mut app, 34, 20);
+
+        // The live agent keeps both of its tile lines; the stale ones are one
+        // toggle row saying how many it stands for.
+        assert_eq!(lines[0].trim(), "api                           3");
+        assert!(lines[1].contains("auth-refresh"));
+        assert!(lines[3].starts_with('─'));
+        assert_eq!(lines[4].trim(), "▸ 2 stale");
+        assert_eq!(lines[6].trim(), "mobile                        2");
+
+        // Clicking the toggle shows them, one line each, with no divider
+        // splitting the block they form.
+        let group = app.hit_test_toggle(1, 4).expect("toggle under the cursor");
+        assert_eq!(group, "api");
+        app.expanded_groups.insert(group);
+        app.rebuild_rows();
+        let lines = rendered(&mut app, 34, 20);
+        assert_eq!(lines[4].trim(), "▾ 2 stale");
+        assert!(lines[5].contains("rate-limit (1)"));
+        assert!(lines[6].contains("rate-limit (2)"));
+        assert!(lines[7].starts_with('─'));
+    }
+
+    #[test]
+    fn a_selected_toggle_shows_it_is_selected_in_both_layouts() {
+        let mut app = tile_app();
+        app.group_by = Some(crate::config::SidebarGroupBy::Session);
+        app.collapse_stale = true;
+        app.host_agent_idx = None;
+        for idx in [1, 2] {
+            app.agents[idx].status = None;
+        }
+        app.refresh_stale_pane_ids();
+        app.rebuild_rows();
+        let toggle = app
+            .rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::StaleTail { .. }))
+            .expect("a toggle row");
+        app.list_state.select(Some(toggle));
+
+        for mode in [SidebarLayoutMode::Tiles, SidebarLayoutMode::Compact] {
+            app.layout_mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(34, 20)).unwrap();
+            terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let y = (0..20)
+                .find(|y| buffer_row(buffer, *y).contains("stale"))
+                .expect("the toggle is drawn");
+            let cell = &buffer[(2, y)];
+            assert_eq!(
+                cell.bg, app.palette.highlight_row_bg,
+                "{mode:?} draws the selected toggle with the selection background"
+            );
+            assert_eq!(
+                cell.fg, app.palette.text,
+                "{mode:?} brightens the selected toggle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_with_no_live_work_collapses_to_its_own_header() {
+        let mut app = grouped_compact_app();
+        app.collapse_stale = true;
+        // The last group's only agent goes quiet, which is how the daemon
+        // comes to sort that group last. It is not the sidebar's own window,
+        // whose group never collapses.
+        app.agents[5].status = None;
+        app.host_agent_idx = None;
+        app.refresh_stale_pane_ids();
+        app.rebuild_rows();
+        app.list_state.select(app.row_of_agent(0));
+
+        let lines = rendered(&mut app, 30, 9);
+
+        assert_eq!(lines[0].trim(), "api                      3");
+        assert_eq!(lines[4].trim(), "mobile                   2");
+        assert!(lines[7].contains(" STALE "));
+        // One row for the whole group, header and toggle at once.
+        assert_eq!(lines[8].trim(), "▸ workmux                  1");
+
+        // It holds no agent, and toggling it names its own group.
+        assert_eq!(app.hit_test(1, 8), None);
+        assert_eq!(app.hit_test_toggle(1, 8).as_deref(), Some("workmux"));
+    }
+
+    #[test]
+    fn compact_group_label_truncates_before_the_count_is_dropped() {
+        let mut app = grouped_compact_app();
+        let lines = rendered(&mut app, 10, 9);
+        assert_eq!(lines[0].trim(), "api  3");
+
+        // Even at the narrowest width the count survives and the label gives way.
+        let lines = rendered(&mut app, 6, 9);
+        assert!(lines[4].trim().starts_with('…'));
+        assert!(lines[4].trim().ends_with('2'));
+    }
+
+    #[test]
+    fn a_tile_header_is_one_line_above_its_first_agent() {
+        let mut app = grouped_tile_app();
+        let lines = rendered(&mut app, 24, 26);
+
+        // The label sits directly above its first agent, with no rule between.
+        assert_eq!(lines[0].trim(), "api                 3");
+        assert!(lines[1].contains("auth-refresh"));
+        assert_eq!(app.hit_test(1, 0), None);
+        assert_eq!(app.hit_test(1, 1), Some(0));
+
+        // A later group is opened by the divider that closes the previous one.
+        let header = lines
+            .iter()
+            .position(|line| line.trim().starts_with("mobile"))
+            .unwrap();
+        assert_eq!(lines[header - 1], "─".repeat(24));
+        assert!(lines[header + 1].contains("ios-refactor"));
+        assert_eq!(app.hit_test(1, header as u16), None);
+    }
+
+    #[test]
+    fn a_group_header_renders_as_a_full_width_band() {
+        let mut app = grouped_tile_app();
+        let mut terminal = Terminal::new(TestBackend::new(24, 26)).unwrap();
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Every cell of the header row carries the band background, including
+        // the padding past the label and count.
+        for x in 0..24 {
+            assert_eq!(
+                buffer[(x, 0)].style().bg,
+                Some(group_band_bg(&app.palette)),
+                "column {x} of the header band"
+            );
+        }
+        // The agent row below it does not.
+        assert_ne!(buffer[(0, 1)].style().bg, Some(group_band_bg(&app.palette)));
+    }
+
+    #[test]
+    fn tile_overflow_counts_hidden_agents_not_header_rows() {
+        let mut app = grouped_tile_app();
+        let lines = rendered(&mut app, 24, 10);
+        assert_eq!(lines[9].trim(), "↓ 4 more");
+    }
+
+    #[test]
+    fn compact_sticky_header_pins_the_current_group() {
+        let mut app = grouped_compact_app();
+        app.select_index(2); // third api agent
+        let lines = rendered(&mut app, 24, 3);
+
+        // Viewport starts inside the api group, so its header is pinned.
+        assert_eq!(lines[0].trim(), "api                3");
+        assert!(lines[2].contains("rate-limit"));
+        // The pinned band is not a row and resolves to no agent.
+        assert_eq!(app.hit_test(1, 0), None);
+        assert_eq!(app.hit_test(1, 1), Some(1));
+    }
+
+    #[test]
+    fn compact_sticky_header_is_not_duplicated_or_stale_at_a_boundary() {
+        let mut app = grouped_compact_app();
+
+        // Real header visible at the top: no pin, no duplicate.
+        app.select_index(1);
+        let lines = rendered(&mut app, 24, 5);
+        assert_eq!(lines[0].trim(), "api                3");
+        assert!(lines[1].contains("auth-refresh"));
+
+        // Scrolling into the next group swaps the pinned header.
+        app.select_index(4);
+        let lines = rendered(&mut app, 24, 3);
+        assert!(lines.iter().any(|line| line.trim().starts_with("mobile")));
+        assert!(!lines.iter().any(|line| line.trim().starts_with("api")));
+    }
+
+    #[test]
+    fn tile_sticky_header_matches_an_inline_header_and_yields_to_the_selection() {
+        let mut app = grouped_tile_app();
+        app.select_index(2);
+        let lines = rendered(&mut app, 24, 8);
+        assert_eq!(lines[0].trim(), "api                 3");
+        // One pinned line, then list content, never a second header line.
+        assert!(lines[1] == "─".repeat(24) || lines[1].starts_with('▌'));
+        assert_eq!(app.hit_test(1, 0), None);
+
+        // Too short to hold the pin and the selected tile: the selection wins.
+        let lines = rendered(&mut app, 24, 4);
+        assert!(lines.iter().any(|line| line.contains("rate-limit")));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.trim() == "api                 3")
+        );
     }
 
     #[test]
@@ -1235,6 +2139,7 @@ mod tests {
         app.templates.tiles[1].clear();
         app.templates.tiles[2].clear();
         app.agents.truncate(4);
+        app.rebuild_rows();
         let mut terminal = Terminal::new(TestBackend::new(36, 6)).unwrap();
         terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
         assert_eq!(
@@ -1340,6 +2245,7 @@ mod tests {
                 agent_kind: Some("claude".to_string()),
             })
             .collect();
+        app.rebuild_rows();
         for agent in &app.agents {
             app.git_statuses.insert(
                 agent.path.clone(),
@@ -1397,6 +2303,124 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Quit sidebar?"));
         assert!(text.contains("yes / no"));
+    }
+
+    #[test]
+    fn a_header_can_tally_what_its_group_holds() {
+        let mut app = grouped_tile_app();
+        app.templates.group_header = crate::command::sidebar::template::parser::parse_line(
+            "{group} {fill} {group_status} {group_count}",
+        )
+        .unwrap();
+        app.refresh_stale_pane_ids();
+
+        let counts = group_status_counts(&app, "api");
+        let tally: Vec<(String, usize)> = counts
+            .iter()
+            .map(|status| {
+                (
+                    status.icon.iter().map(|(text, _)| text.as_str()).collect(),
+                    status.count,
+                )
+            })
+            .collect();
+        // Waiting first, stale last: the order the header should be read in.
+        // The working icon is an animation frame, so only its count is fixed.
+        assert_eq!(tally.len(), 3);
+        assert_eq!(tally[0], ("\u{1f4ac}".to_string(), 1));
+        assert_eq!(tally[1].1, 1);
+        assert_eq!(tally[2], ("\u{1f4a4}".to_string(), 1));
+
+        // The tally reaches the drawn header, not just the helper.
+        let lines = rendered(&mut app, 36, 26);
+        assert!(lines[0].contains('1'), "header was {:?}", lines[0]);
+    }
+
+    #[test]
+    fn the_grouping_hint_waits_for_a_sidebar_it_would_change() {
+        let mut app = grouped_tile_app();
+        app.hint_pending = true;
+        app.group_by = None;
+        app.rebuild_rows();
+        assert!(app.show_hint(), "flat list across projects offers the hint");
+
+        // Grouped: the offer survives the switch it invited, so acting on it
+        // rewords the line instead of removing the row under the list.
+        app.group_by = Some(crate::config::SidebarGroupBy::Project);
+        assert!(app.show_hint());
+        let lines = rendered(&mut app, 36, 12);
+        assert!(
+            lines.last().unwrap().contains("flat list"),
+            "footer was {:?}",
+            lines.last()
+        );
+        app.group_by = None;
+
+        // The top bar cannot spare a line, and a template error owns the same
+        // one and matters more.
+        app.position = crate::config::SidebarPosition::Top;
+        assert!(!app.show_hint());
+        app.position = crate::config::SidebarPosition::Left;
+        app.template_error = Some(TemplateError {
+            location: "tiles[0]".to_string(),
+            message: "unknown token".to_string(),
+        });
+        assert!(!app.show_hint());
+        app.template_error = None;
+
+        // One project: sections would only add a header.
+        app.agents
+            .retain(|agent| agent.path.starts_with("/demo/api"));
+        app.rebuild_rows();
+        assert!(!app.show_hint());
+    }
+
+    #[test]
+    fn the_grouping_hint_draws_on_the_footer_line() {
+        let mut app = grouped_tile_app();
+        app.hint_pending = true;
+        app.group_by = None;
+        app.filter_mode = super::SidebarFilterMode::None;
+        app.rebuild_rows();
+
+        let lines = rendered(&mut app, 36, 12);
+        let footer = lines.last().unwrap();
+        assert!(footer.contains("group by project"), "footer was {footer:?}");
+        assert!(footer.contains('?'));
+        // The hint takes the last row and nothing else: the list stops above it.
+        assert!(app.list_area.y + app.list_area.height <= 11);
+    }
+
+    #[test]
+    fn render_sidebar_shows_the_keys_behind_question_mark() {
+        let backend = TestBackend::new(34, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.template_error = None;
+        app.show_help = true;
+
+        let text = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..20)
+                .flat_map(|y| (0..34).map(move |x| buffer[(x, y)].symbol()))
+                .collect::<String>()
+        };
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+        let flat = text(&terminal);
+        assert!(flat.contains("grouping"));
+        assert!(flat.contains("quit"));
+        // Nothing is grouped, so the group keys would act on nothing.
+        assert!(!flat.contains("fold"));
+
+        app.group_by = Some(crate::config::SidebarGroupBy::Project);
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+        let grouped = text(&terminal);
+        assert!(grouped.contains("fold group"));
+        assert!(grouped.contains("fold unfold"));
     }
 
     #[test]

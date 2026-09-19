@@ -351,7 +351,9 @@ fn process_event(
         AppEvent::Input(Event::Mouse(mouse)) => {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(idx) = app.hit_test(mouse.column, mouse.row) {
+                    if let Some(group) = app.hit_test_toggle(mouse.column, mouse.row) {
+                        app.toggle_group(&group);
+                    } else if let Some(idx) = app.hit_test(mouse.column, mouse.row) {
                         app.select_index(idx);
                         app.jump_to_selected();
                     }
@@ -388,6 +390,13 @@ fn handle_key_press(
         return;
     }
 
+    // The overlay covers the list, so the next key dismisses it rather than
+    // acting on rows the user cannot see.
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+
     match (code, modifiers) {
         (KeyCode::Char('q'), _)
         | (KeyCode::Esc, _)
@@ -396,12 +405,27 @@ fn handle_key_press(
         }
         (KeyCode::Char('j'), _) | (KeyCode::Down, _) => app.next(),
         (KeyCode::Char('k'), _) | (KeyCode::Up, _) => app.previous(),
-        (KeyCode::Enter, _) => app.jump_to_selected(),
+        (KeyCode::Enter, _) => {
+            if app.selected_toggle().is_some() {
+                app.toggle_selected_group();
+            } else {
+                app.jump_to_selected();
+            }
+        }
+        (KeyCode::Char('h'), _) | (KeyCode::Left, _) => app.set_selected_group_expanded(false),
+        (KeyCode::Char('l'), _) | (KeyCode::Right, _) => app.set_selected_group_expanded(true),
         (KeyCode::Char('G'), _) => app.select_last(),
         (KeyCode::Char('g'), _) => app.select_first(),
         (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
         (KeyCode::Char('z'), _) => app.toggle_sleeping(),
         (KeyCode::Char('f'), _) => app.toggle_filter_mode(),
+        (KeyCode::Char('t'), _) => app.toggle_grouping(),
+        (KeyCode::Char('s'), _) => app.toggle_selected_group(),
+        (KeyCode::Char('S'), _) => app.toggle_all_groups(),
+        (KeyCode::Char('?'), _) => {
+            app.show_help = true;
+            app.dismiss_hint();
+        }
         _ => {}
     }
 }
@@ -551,6 +575,19 @@ mod tests {
         handle_key_press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(!app.pending_exit);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn any_key_closes_the_help_overlay_without_acting() {
+        let mut app = test_app();
+
+        handle_key_press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(app.show_help);
+
+        // 'q' would normally ask to quit, but it is spent closing the overlay.
+        handle_key_press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.show_help);
+        assert!(!app.pending_exit);
     }
 
     #[test]

@@ -1,10 +1,10 @@
-//! Layout solver: turns a parsed token line and a RowContext into styled spans.
+//! Layout solver: turns a parsed token line and a template row into styled spans.
 
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-use super::context::RowContext;
 use super::parser::{Token, TokenId};
+use super::row::TemplateRow;
 use crate::tmux_style::apply_tmux_directives;
 
 /// Optional layout constraints applied while rendering a template line.
@@ -36,12 +36,16 @@ impl RenderOptions {
 /// 3. Left segment: fixed tokens at natural width; first flex token absorbs slack.
 /// 4. If total exceeds width: drop right-segment field tokens in reverse order.
 /// 5. If still exceeding: truncate leftmost flex token with ellipsis.
-pub fn render_line(ctx: &RowContext, tokens: &[Token], width: usize) -> Vec<Span<'static>> {
+pub fn render_line(
+    ctx: &(impl TemplateRow + ?Sized),
+    tokens: &[Token],
+    width: usize,
+) -> Vec<Span<'static>> {
     render_line_with_options(ctx, tokens, width, &RenderOptions::default())
 }
 
 pub fn render_line_with_options(
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     tokens: &[Token],
     width: usize,
     options: &RenderOptions,
@@ -145,7 +149,7 @@ struct TokenInfo {
 }
 
 impl TokenInfo {
-    fn new(token: &Token, ctx: &RowContext, options: &RenderOptions) -> Self {
+    fn new(token: &Token, ctx: &(impl TemplateRow + ?Sized), options: &RenderOptions) -> Self {
         match token {
             Token::Literal(s) => Self {
                 token: Token::Literal(s.clone()),
@@ -260,7 +264,7 @@ fn is_whitespace_literal(info: &TokenInfo) -> bool {
 
 fn render_common_token(
     info: &TokenInfo,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     user_style: &mut Style,
     spans: &mut Vec<Span<'static>>,
     used_width: &mut usize,
@@ -281,7 +285,7 @@ fn render_common_token(
 }
 
 fn render_with_layout(
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     left: &[TokenInfo],
     right: &[TokenInfo],
     width: usize,
@@ -383,7 +387,7 @@ fn render_with_layout(
 
 fn render_field(
     spans: &mut Vec<Span<'static>>,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     id: TokenId,
     target_width: usize,
     max_width: usize,
@@ -401,6 +405,12 @@ fn render_field(
             spans.push(styled_span(text, style, user_style, ctx));
         }
         git_width
+    } else if id == TokenId::GroupStatus {
+        let (status_spans, status_width) = ctx.group_status_spans(target_width);
+        for (text, style) in status_spans {
+            spans.push(styled_span(text, style, user_style, ctx));
+        }
+        status_width
     } else if is_pr_segment(id) {
         let (pr_spans, pr_width) = ctx.pr_check_spans(target_width);
         for (text, style) in pr_spans {
@@ -438,12 +448,12 @@ fn render_field(
 
 fn render_status_icon_spans(
     spans: &mut Vec<Span<'static>>,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     max_width: usize,
     user_style: Style,
 ) -> usize {
     let mut width = 0;
-    for (text, style) in &ctx.status_icon_spans {
+    for (text, style) in ctx.status_icon_spans() {
         let remaining = max_width.saturating_sub(width);
         if remaining == 0 {
             break;
@@ -461,8 +471,13 @@ fn render_status_icon_spans(
 
 /// Build a `Span` whose style is the intrinsic base patched by the user
 /// overlay, except on stale rows where the user overlay is ignored.
-fn styled_span(text: String, base: Style, user_style: Style, ctx: &RowContext) -> Span<'static> {
-    if ctx.is_stale {
+fn styled_span(
+    text: String,
+    base: Style,
+    user_style: Style,
+    ctx: &(impl TemplateRow + ?Sized),
+) -> Span<'static> {
+    if ctx.is_stale() {
         Span::styled(text, base)
     } else {
         Span::styled(text, base.patch(user_style))
@@ -567,7 +582,7 @@ mod tests {
             agent_icon: String::new(),
             agent_icon_color: None,
             agent_label: String::new(),
-            idx: 0,
+            idx: Some(0),
             spinner_frame: 0,
         }
     }

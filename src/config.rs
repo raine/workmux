@@ -242,6 +242,23 @@ pub struct TemplatesConfig {
     /// Multi-line templates for horizontal bar chips (one string per line).
     #[serde(alias = "top")]
     pub horizontal: Option<Vec<String>>,
+    /// Templates used instead of the ones above while grouping is on.
+    pub grouped: Option<GroupedTemplatesConfig>,
+}
+
+/// Templates for the grouped presentation. A section header carries the
+/// project or session name, so rows there can drop what the header already
+/// says. Anything left unset falls back to the ungrouped template of the same
+/// name, then to the built-in grouped default.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupedTemplatesConfig {
+    /// Single-line template for compact mode.
+    pub compact: Option<String>,
+    /// Multi-line templates for tile mode (one string per line).
+    pub tiles: Option<Vec<String>>,
+    /// Single-line template for group header rows.
+    pub header: Option<String>,
 }
 
 /// Detailed per-agent icon override: `{ icon, color }`.
@@ -337,30 +354,72 @@ pub struct SidebarConfig {
     /// Per-agent icon overrides.
     pub agent_icons: Option<AgentIcons>,
 
-    /// Row ordering: "recency" (default) or "window".
+    /// Row ordering: "recency" (default), "priority" or "window".
     pub sort: Option<SidebarSort>,
+
+    /// Group agents into labeled sections: "project" or "session". Unset or
+    /// "none" keeps one combined list.
+    pub group_by: Option<SidebarGroupBy>,
 
     /// Dim agents whose sidebar activity state exceeds the stale threshold.
     /// Default: true.
     pub dim_stale: Option<bool>,
+
+    /// Fold stale agents behind their group's toggle, giving the ones on show
+    /// a single line instead of a full tile. Part of the grouped presentation,
+    /// so it has no effect while grouping is off. Default: true.
+    pub collapse_stale: Option<bool>,
 }
 
 impl SidebarConfig {
     pub fn dim_stale(&self) -> bool {
         self.dim_stale.unwrap_or(true)
     }
+
+    /// Whether stale agents fold behind their group's toggle. Folding belongs
+    /// to the grouped presentation, so callers apply this only once grouping
+    /// is on.
+    pub fn collapse_stale(&self) -> bool {
+        self.collapse_stale.unwrap_or(true)
+    }
+
+    /// Grouping asked for by config, with `none` resolved. Grouping is opt in:
+    /// an unset value keeps the single flat list.
+    pub fn group_by(&self) -> Option<SidebarGroupBy> {
+        match self.group_by? {
+            SidebarGroupBy::None => None,
+            mode => Some(mode),
+        }
+    }
 }
 
-/// Sidebar row ordering.
+/// Sidebar row ordering within a group, or within the whole list when
+/// grouping is not configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarSort {
     /// Most recent status change first, sleeping agents last.
     #[default]
     Recency,
+    /// Agents needing attention first: waiting, done, working, unknown,
+    /// stale or interrupted, sleeping. Recent activity breaks ties.
+    Priority,
     /// Multiplexer window order (session name, then window index). Keeps
     /// rows stable while agents work, matching the tmux window list.
     Window,
+}
+
+/// Sidebar grouping: how agents are divided into labeled sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarGroupBy {
+    /// One combined list with no sections.
+    #[serde(alias = "off")]
+    None,
+    /// One section per repository.
+    Project,
+    /// One section per multiplexer session.
+    Session,
 }
 
 /// Sidebar pane position.
@@ -2410,6 +2469,42 @@ pub fn global_config_path() -> Option<PathBuf> {
     Some(yaml)
 }
 
+/// Merge sidebar templates field by field so a project override that sets one
+/// template keeps inheriting the others.
+fn merge_sidebar_templates(
+    global: Option<&TemplatesConfig>,
+    project: Option<&TemplatesConfig>,
+) -> Option<TemplatesConfig> {
+    match (global, project) {
+        (None, None) => None,
+        (Some(g), None) => Some(g.clone()),
+        (None, Some(p)) => Some(p.clone()),
+        (Some(g), Some(p)) => Some(TemplatesConfig {
+            compact: p.compact.clone().or_else(|| g.compact.clone()),
+            tiles: p.tiles.clone().or_else(|| g.tiles.clone()),
+            horizontal: p.horizontal.clone().or_else(|| g.horizontal.clone()),
+            grouped: merge_grouped_templates(g.grouped.as_ref(), p.grouped.as_ref()),
+        }),
+    }
+}
+
+/// Merge the grouped templates field by field, like their ungrouped peers.
+fn merge_grouped_templates(
+    global: Option<&GroupedTemplatesConfig>,
+    project: Option<&GroupedTemplatesConfig>,
+) -> Option<GroupedTemplatesConfig> {
+    match (global, project) {
+        (None, None) => None,
+        (Some(g), None) => Some(g.clone()),
+        (None, Some(p)) => Some(p.clone()),
+        (Some(g), Some(p)) => Some(GroupedTemplatesConfig {
+            compact: p.compact.clone().or_else(|| g.compact.clone()),
+            tiles: p.tiles.clone().or_else(|| g.tiles.clone()),
+            header: p.header.clone().or_else(|| g.header.clone()),
+        }),
+    }
+}
+
 impl Config {
     /// Load and merge global and project configurations.
     pub fn load(cli_agent: Option<&str>) -> anyhow::Result<Self> {
@@ -2856,11 +2951,10 @@ impl Config {
                     .item_width
                     .or(self.sidebar.horizontal.item_width),
             },
-            templates: project
-                .sidebar
-                .templates
-                .clone()
-                .or(self.sidebar.templates.clone()),
+            templates: merge_sidebar_templates(
+                self.sidebar.templates.as_ref(),
+                project.sidebar.templates.as_ref(),
+            ),
             agent_icons: match (
                 self.sidebar.agent_icons.clone(),
                 project.sidebar.agent_icons.clone(),
@@ -2872,7 +2966,12 @@ impl Config {
                 (g, p) => p.or(g),
             },
             sort: project.sidebar.sort.or(self.sidebar.sort),
+            group_by: project.sidebar.group_by.or(self.sidebar.group_by),
             dim_stale: project.sidebar.dim_stale.or(self.sidebar.dim_stale),
+            collapse_stale: project
+                .sidebar
+                .collapse_stale
+                .or(self.sidebar.collapse_stale),
         };
 
         // Sandbox config: per-field override with nested struct merging
@@ -3374,8 +3473,20 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Default: "tiles". Can be toggled at runtime with 'v' key.
 #   layout: tiles
 #
+#   # Row ordering: "recency" (default), "priority" or "window".
+#   sort: recency
+#
+#   # Group agents into labeled sections: "project" or "session". Unset keeps
+#   # one flat list; the 't' key switches at runtime. Headers are rendered only
+#   # in left sidebars.
+#   group_by: project
+#
 #   # Dim agents whose sidebar activity state is older than one hour. Default: true.
 #   dim_stale: true
+#
+#   # While grouped, fold each group's stale agents behind a toggle and move
+#   # groups holding nothing but stale agents below the rest. Default: true.
+#   collapse_stale: true
 #
 #   horizontal:
 #     item_width: 24  # horizontal chip width in columns, clamped 12-80
@@ -3385,6 +3496,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #       - "{status_icon} {primary} {pane_suffix} {fill} {elapsed}"
 #       - "{secondary} {fill} {git_stats}"
 #       - "{pane_title}"
+#     # Used while grouping is on. Anything left out falls back to the template
+#     # above it, then to the built-in grouped default.
+#     grouped:
+#       # Group header row; accepts {group}, {group_count}, {fill} and #[...].
+#       header: "{group} {fill} {group_count}"
+#       tiles:
+#         - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
+#         - "{pane_title} {fill} {git_stats}"
 
 #-------------------------------------------------------------------------------
 # Sandbox
@@ -4377,6 +4496,41 @@ sidebar:
         assert_eq!(merged.sidebar.width, Some(SidebarWidth::Absolute(40)));
         assert_eq!(merged.sidebar.height, Some(SidebarHeight::Absolute(4)));
         assert_eq!(merged.sidebar.horizontal.item_width, Some(36));
+    }
+
+    #[test]
+    fn sidebar_grouping_is_opt_in_and_brings_folding_with_it() {
+        let default_config = Config::default();
+        assert_eq!(default_config.sidebar.group_by(), None);
+
+        let grouped: Config = serde_yaml::from_str("sidebar:\n  group_by: project\n").unwrap();
+        assert_eq!(
+            grouped.sidebar.group_by(),
+            Some(super::SidebarGroupBy::Project)
+        );
+        assert!(grouped.sidebar.collapse_stale());
+
+        let unfolded: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  group_by: session
+  collapse_stale: false
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unfolded.sidebar.group_by(),
+            Some(super::SidebarGroupBy::Session)
+        );
+        assert!(!unfolded.sidebar.collapse_stale());
+
+        for raw in [
+            "sidebar:\n  group_by: none\n",
+            "sidebar:\n  group_by: off\n",
+        ] {
+            let off: Config = serde_yaml::from_str(raw).unwrap();
+            assert_eq!(off.sidebar.group_by(), None);
+        }
     }
 
     #[test]
@@ -6458,6 +6612,48 @@ panes:
             "error should mention layout name: {}",
             err
         );
+    }
+
+    #[test]
+    fn merge_sidebar_templates_inherits_unset_fields() {
+        let mut global = Config::default();
+        global.sidebar.templates = Some(crate::config::TemplatesConfig {
+            compact: Some("{primary}".into()),
+            tiles: Some(vec!["{primary}".into()]),
+            horizontal: Some(vec!["{secondary}".into()]),
+            grouped: Some(crate::config::GroupedTemplatesConfig {
+                header: Some("{group}".into()),
+                tiles: Some(vec!["{primary}".into()]),
+                ..Default::default()
+            }),
+        });
+        let mut project = Config::default();
+        project.sidebar.templates = Some(crate::config::TemplatesConfig {
+            grouped: Some(crate::config::GroupedTemplatesConfig {
+                tiles: Some(vec!["{pane_title}".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let templates = global.merge(project).sidebar.templates.unwrap();
+        assert_eq!(templates.compact.as_deref(), Some("{primary}"));
+        assert_eq!(templates.tiles, Some(vec!["{primary}".to_string()]));
+        assert_eq!(templates.horizontal, Some(vec!["{secondary}".to_string()]));
+
+        // The grouped block merges per field too, so overriding its rows keeps
+        // the inherited header.
+        let grouped = templates.grouped.unwrap();
+        assert_eq!(grouped.header.as_deref(), Some("{group}"));
+        assert_eq!(grouped.tiles, Some(vec!["{pane_title}".to_string()]));
+    }
+
+    #[test]
+    fn sidebar_grouping_and_sort_reject_unknown_values() {
+        let error = serde_yaml::from_str::<Config>("sidebar:\n  group_by: proj\n").unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+        let error = serde_yaml::from_str::<Config>("sidebar:\n  sort: urgency\n").unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

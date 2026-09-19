@@ -16,13 +16,22 @@ sidebar:
     tiles:
       - "{primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title} {fill} {pr_checks}"
+      - "{pane_title} {fill} {pr_number} {pr_checks}"
 
     # Horizontal mode: one string per visual line in each top bar chip.
     horizontal:
       - "{status_icon} {primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title} {fill} {pr_checks}"
+      - "{pane_title} {fill} {pr_number} {pr_checks}"
+
+    # Used instead of the templates above while sidebar.group_by is set.
+    # Anything left out falls back to the template of the same name above,
+    # then to the grouped default.
+    grouped:
+      header: "{group} {fill} {group_count}"
+      tiles:
+        - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
+        - "{pane_title} {fill} {git_stats}"
 ```
 
 The values shown above are also the built-in defaults, so leaving these keys
@@ -30,7 +39,9 @@ unset gives you the standard rendering. `top` is also accepted as an alias for
 `horizontal`.
 
 Templates can be set in either the global config or a project's `.workmux.yaml`.
-Project values override global values. Changes are picked up live by running
+Project values override global values field by field, so a project that sets
+only `grouped.tiles` keeps the global `compact`, `tiles` and `horizontal`
+templates. Changes are picked up live by running
 sidebars without a restart.
 
 ## Tokens
@@ -59,9 +70,37 @@ sidebars without a restart.
 | `{git_dirty}`    | Diff glyph when the working tree is dirty. Empty when clean.                                                                                    |
 | `{git_conflict}` | Conflict glyph when the worktree has merge conflicts. Empty otherwise.                                                                          |
 | `{status_label}` | Display name for the agent status: `Working`, `Waiting`, `Done`, or empty when no status.                                                       |
-| `{idx}`          | 1-based sidebar position (`1`, `2`, ...).                                                                                                       |
+| `{idx}`          | 1-based position among the sidebar's agents; group headers are not counted.                                                                     |
 | `{jump_key}`     | The `M-1`..`M-9` chord label for the first nine rows. Empty for row 10 and beyond.                                                              |
 | `{fill}`         | Layout marker that splits a line into a left and right segment. At most one per line.                                                           |
+
+Group headers use their own token set, and agent tokens are rejected there
+because a header does not represent one agent:
+
+| Token            | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `{group}`        | Group name: the project name or the tmux session name.                   |
+| `{group_count}`  | Number of agents the sidebar shows in the group, sleeping ones included. |
+| `{group_status}` | Status tally for the group, using your status icons, most urgent first.  |
+
+`{group}` is flexible, so a long group name truncates before `{group_count}` is
+dropped.
+
+`{group_status}` says what a group holds rather than how much, which is what you
+want from a group you cannot see inside: one that is folded, or scrolled out of
+view behind the pinned header. It is not in the default header:
+
+```yaml
+sidebar:
+  templates:
+    grouped:
+      header: "{group} {fill} {group_status} {group_count}"
+```
+
+One pair per status present, counting waiting, done, working and stale agents in
+that order. An idle agent has no icon of its own, so it is left out of the tally
+while `{group_count}` still counts it. When the header runs out of room the
+least urgent pairs drop first.
 
 `{git_ahead}` and `{git_behind}` already include the arrow prefix, so do not
 wrap them with another `↑` / `↓` literal in your template, otherwise a stray
@@ -89,7 +128,7 @@ at column 1 in tiles[0]` until the template is fixed.
 tokens after it form the right segment. The leftmost flex token in the left
 segment absorbs ellipsis-truncation when there isn't enough room. Flex tokens
 are: `{primary}`, `{secondary}`, `{worktree}`, `{project}`, `{session}`,
-`{window}`, `{pane_title}`. Other tokens always render at their natural width.
+`{window}`, `{pane_title}`, `{group}`. Other tokens always render at their natural width.
 
 When a line has more slack than the flex token needs, the leftover is emitted as
 spaces between the left and right segments, so right-segment tokens like

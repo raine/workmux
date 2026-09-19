@@ -46,6 +46,9 @@ pub enum TokenId {
     StatusLabel,
     Idx,
     JumpKey,
+    Group,
+    GroupCount,
+    GroupStatus,
 }
 
 impl TokenId {
@@ -60,6 +63,7 @@ impl TokenId {
                 | TokenId::Session
                 | TokenId::Window
                 | TokenId::PaneTitle
+                | TokenId::Group
         )
     }
 }
@@ -94,6 +98,9 @@ impl fmt::Display for TokenId {
             TokenId::StatusLabel => "status_label",
             TokenId::Idx => "idx",
             TokenId::JumpKey => "jump_key",
+            TokenId::Group => "group",
+            TokenId::GroupCount => "group_count",
+            TokenId::GroupStatus => "group_status",
         };
         write!(f, "{}", s)
     }
@@ -240,6 +247,9 @@ pub fn parse_line(input: &str) -> Result<Vec<Token>, ParseError> {
                     "status_label" => TokenId::StatusLabel,
                     "idx" => TokenId::Idx,
                     "jump_key" => TokenId::JumpKey,
+                    "group" => TokenId::Group,
+                    "group_count" => TokenId::GroupCount,
+                    "group_status" => TokenId::GroupStatus,
                     other => {
                         return Err(ParseError {
                             message: format!("unknown token '{}' at column {}", other, start + 1),

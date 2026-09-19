@@ -56,8 +56,9 @@ pub struct RowContext<'a> {
     /// Pre-resolved agent label string (empty when no profile matches).
     pub agent_label: String,
     /// 0-based sidebar row index. Rendered as 1-based via the `idx` and
-    /// `jump_key` tokens.
-    pub idx: usize,
+    /// `jump_key` tokens. `None` for an agent the published pane list leaves
+    /// out, which no number can reach.
+    pub idx: Option<usize>,
     /// Current spinner frame for animated PR checks.
     pub spinner_frame: u8,
 }
@@ -103,9 +104,8 @@ impl<'a> RowContext<'a> {
         let is_interrupted = app.interrupted_pane_ids.contains(&agent.pane_id);
         let is_stale = should_dim_agent(
             app.dim_stale,
-            is_agent_stale(
-                agent.activity_ts(),
-                agent.status,
+            agent_is_stale(
+                agent,
                 now_secs,
                 app.stale_threshold_secs,
                 is_sleeping,
@@ -113,6 +113,7 @@ impl<'a> RowContext<'a> {
             ),
         );
         let is_active = app.host_agent_idx == Some(idx);
+        let jump_idx = app.jump_numbers.get(idx).copied().flatten();
         let is_selected = selected_idx == Some(idx);
 
         let (status_icon_spans, status_icon_style) =
@@ -155,7 +156,7 @@ impl<'a> RowContext<'a> {
             agent_icon,
             agent_icon_color,
             agent_label,
-            idx,
+            idx: jump_idx,
             spinner_frame: app.spinner_frame,
         }
     }
@@ -225,14 +226,16 @@ impl<'a> RowContext<'a> {
                 Some(AgentStatus::Done) => "Done".to_string(),
                 None => String::new(),
             },
-            TokenId::Idx => (self.idx + 1).to_string(),
-            TokenId::JumpKey => {
-                if self.idx < 9 {
-                    format!("M-{}", self.idx + 1)
-                } else {
-                    String::new()
-                }
-            }
+            // A header owns these; an agent row has no group of its own.
+            TokenId::Group | TokenId::GroupCount | TokenId::GroupStatus => String::new(),
+            TokenId::Idx => self
+                .idx
+                .map(|idx| (idx + 1).to_string())
+                .unwrap_or_default(),
+            TokenId::JumpKey => match self.idx {
+                Some(idx) if idx < 9 => format!("M-{}", idx + 1),
+                _ => String::new(),
+            },
         }
     }
 
@@ -425,6 +428,26 @@ fn is_hostname_title_with(title: &str, hostname: Option<&str>) -> bool {
     hostname.is_some_and(|hostname| !hostname.is_empty() && title == hostname)
 }
 
+/// Whether an agent counts as stale: asleep, or not visibly progressing for
+/// longer than the threshold. Independent of `dim_stale`, which only decides
+/// whether staleness is also dimmed.
+pub(crate) fn agent_is_stale(
+    agent: &AgentPane,
+    now_secs: u64,
+    stale_threshold_secs: u64,
+    is_sleeping: bool,
+    is_interrupted: bool,
+) -> bool {
+    is_agent_stale(
+        agent.activity_ts(),
+        agent.status,
+        now_secs,
+        stale_threshold_secs,
+        is_sleeping,
+        is_interrupted,
+    )
+}
+
 fn is_agent_stale(
     activity_ts: Option<u64>,
     status: Option<AgentStatus>,
@@ -455,7 +478,7 @@ fn should_dim_agent(dim_stale: bool, is_stale: bool) -> bool {
     dim_stale && is_stale
 }
 
-fn display_width(s: &str) -> usize {
+pub(crate) fn display_width(s: &str) -> usize {
     s.chars()
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
         .sum()
@@ -468,6 +491,36 @@ fn format_compact_elapsed(secs: u64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+impl super::row::TemplateRow for RowContext<'_> {
+    fn resolve(&self, token: TokenId) -> String {
+        RowContext::resolve(self, token)
+    }
+
+    fn intrinsic_style(&self, token: TokenId) -> Style {
+        RowContext::intrinsic_style(self, token)
+    }
+
+    fn natural_width(&self, token: TokenId) -> usize {
+        RowContext::natural_width(self, token)
+    }
+
+    fn status_icon_spans(&self) -> &[(String, Style)] {
+        &self.status_icon_spans
+    }
+
+    fn is_stale(&self) -> bool {
+        self.is_stale
+    }
+
+    fn git_segment_spans(&self, token: TokenId, width: usize) -> (Vec<(String, Style)>, usize) {
+        RowContext::git_segment_spans(self, token, width)
+    }
+
+    fn pr_check_spans(&self, width: usize) -> (Vec<(String, Style)>, usize) {
+        RowContext::pr_check_spans(self, width)
     }
 }
 
@@ -762,7 +815,7 @@ mod tests {
             agent_icon: String::new(),
             agent_icon_color: None,
             agent_label: String::new(),
-            idx,
+            idx: Some(idx),
             spinner_frame: 0,
         }
     }

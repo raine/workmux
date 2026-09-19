@@ -215,6 +215,24 @@ pub struct GlobalSettings {
     /// Sidebar filter mode: "none" or "session"
     #[serde(default)]
     pub sidebar_filter: Option<String>,
+
+    /// Sidebar grouping override: "none", "project" or "session"
+    #[serde(default)]
+    pub sidebar_group_by: Option<String>,
+
+    /// Version whose sidebar hint has been offered. A different version means
+    /// the hint has not been shown for what is now installed.
+    #[serde(default)]
+    pub sidebar_hint_version: Option<String>,
+
+    /// When the sidebar hint was first shown for that version (Unix seconds),
+    /// so it can retire itself rather than becoming furniture.
+    #[serde(default)]
+    pub sidebar_hint_since: Option<u64>,
+
+    /// Whether the user has answered the sidebar hint.
+    #[serde(default)]
+    pub sidebar_hint_dismissed: bool,
 }
 
 /// Tracks which pane last-done navigated to, so repeated presses cycle

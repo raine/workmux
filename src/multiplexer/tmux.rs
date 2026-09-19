@@ -45,7 +45,8 @@ const SIDEBAR_STATE_FORMAT: &str = concat!(
     "\x1f#{window_active}\x1f#{session_attached}\x1f#{pane_active}\x1f#{window_index}\x1f",
     server_boot_format!(),
     "\x1f#{@workmux_sidebar_position}\x1f#{@workmux_sidebar_layout}",
-    "\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}"
+    "\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}",
+    "\x1f#{@workmux_sidebar_group_by}\x1f#{@workmux_sidebar_expanded}"
 );
 
 /// One tmux server observation containing every input needed by a daemon tick.
@@ -63,6 +64,8 @@ pub(crate) struct TmuxSidebarSnapshot {
     pub layout: Option<String>,
     pub filter: Option<String>,
     pub sleeping_panes: Option<String>,
+    pub group_by: Option<String>,
+    pub expanded_groups: Option<String>,
 }
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
@@ -153,6 +156,8 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
         layout: None,
         filter: None,
         sleeping_panes: None,
+        group_by: None,
+        expanded_groups: None,
     };
 
     for record in live_pane_records(output) {
@@ -162,7 +167,7 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
                 .or_else(|| record.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
                 .unwrap_or(record),
         );
-        if fields.len() != 17 || fields[0].is_empty() {
+        if fields.len() != 19 || fields[0].is_empty() {
             return Err(anyhow!("tmux returned malformed sidebar state: {record:?}"));
         }
 
@@ -230,6 +235,8 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
             snapshot.layout = nonempty(fields[14]);
             snapshot.filter = nonempty(fields[15]);
             snapshot.sleeping_panes = nonempty(fields[16]);
+            snapshot.group_by = nonempty(fields[17]);
+            snapshot.expanded_groups = nonempty(fields[18]);
         }
     }
 
@@ -1684,7 +1691,7 @@ mod tests {
 
     #[test]
     fn sidebar_snapshot_parses_one_server_observation() {
-        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n";
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\x1fproject\x1fapi\tmobile\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\x1fproject\x1fapi\tmobile\n";
 
         let snapshot = parse_sidebar_snapshot(output).unwrap();
 
@@ -1707,13 +1714,15 @@ mod tests {
         assert_eq!(snapshot.layout.as_deref(), Some("compact"));
         assert_eq!(snapshot.filter.as_deref(), Some("session"));
         assert_eq!(snapshot.sleeping_panes.as_deref(), Some("%7 %8"));
+        assert_eq!(snapshot.group_by.as_deref(), Some("project"));
+        assert_eq!(snapshot.expanded_groups.as_deref(), Some("api\tmobile"));
     }
 
     #[test]
     fn sidebar_snapshot_accepts_attached_client_counts() {
         for attached in [0, 1, 2, 10] {
             let output = format!(
-                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n"
             );
             let snapshot = parse_sidebar_snapshot(&output).unwrap();
             assert_eq!(snapshot.live_panes.len(), 1);
@@ -1728,7 +1737,7 @@ mod tests {
 
     #[test]
     fn sidebar_snapshot_counts_linked_panes_once_and_tracks_each_session() {
-        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%7\x1f12345\x1fnode\x1fAgent\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f1\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f0\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n\x1e%7\x1f12345\x1fnode\x1fAgent\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f1\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f0\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n";
         let snapshot = parse_sidebar_snapshot(output).unwrap();
         assert_eq!(snapshot.live_panes.len(), 2);
         assert_eq!(snapshot.window_pane_counts["@2"], 2);
@@ -1752,13 +1761,13 @@ mod tests {
         let error = parse_sidebar_snapshot("\x1e%7\x1f12345\n").unwrap_err();
         assert!(error.to_string().contains("malformed sidebar state"));
 
-        let malformed_pid = "\x1e%7\x1fnot-a-pid\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
+        let malformed_pid = "\x1e%7\x1fnot-a-pid\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n";
         let error = parse_sidebar_snapshot(malformed_pid).unwrap_err();
         assert!(error.to_string().contains("malformed sidebar pane PID"));
 
         for attached in ["", "-1", "invalid"] {
             let output = format!(
-                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\x1f\n"
             );
             let error = parse_sidebar_snapshot(&output).unwrap_err();
             assert!(
