@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Cell, Paragraph, Row, Table},
 };
 
-use crate::config::WorktreeColumn;
+use crate::config::{WorktreeColumn, WorktreeLabel};
 
 use super::super::agent;
 use super::super::app::App;
@@ -56,7 +56,14 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
             let worktree_display = if wt.is_main {
                 wt.branch.clone()
             } else if wt.branch != wt.handle {
-                format!("{} \u{2192}{}", wt.handle, wt.branch)
+                match app.config.dashboard.worktree_label() {
+                    WorktreeLabel::HandleFirst => {
+                        format!("{} \u{2192}{}", wt.handle, wt.branch)
+                    }
+                    WorktreeLabel::BranchFirst => {
+                        format!("{} \u{2192}{}", wt.branch, wt.handle)
+                    }
+                }
             } else {
                 wt.handle.clone()
             };
