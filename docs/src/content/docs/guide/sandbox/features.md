@@ -124,7 +124,9 @@ The container backend also uses a separate config file for Claude, mounted to `/
 
 ### Custom config directory
 
-By default, each agent's standard config directory is mounted into the sandbox (see table above). To use a separate directory, keeping sandbox config isolated from the host:
+By default, each agent's standard config directory is mounted into the sandbox (see table above). A [named agent](/guide/agents/) that sets the environment variable its agent type reads for a config directory, such as `CLAUDE_CONFIG_DIR`, gets that directory mounted instead, at the standard location inside the sandbox.
+
+To use a separate directory for every agent, keeping sandbox config isolated from the host:
 
 ```yaml
 # ~/.config/workmux/config.yaml

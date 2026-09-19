@@ -45,6 +45,13 @@ pub trait AgentProfile: Send + Sync {
         None
     }
 
+    /// Environment variable this agent reads to locate its config directory.
+    ///
+    /// Returns `None` for agents that only look in a fixed location.
+    fn config_dir_env_var(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Format the prompt injection argument for this agent.
     ///
     /// Returns the CLI fragment to append (e.g., `-- "$(cat PROMPT.md)"`).
@@ -86,6 +93,10 @@ pub trait AgentProfile: Send + Sync {
 pub struct ClaudeProfile;
 
 impl AgentProfile for ClaudeProfile {
+    fn config_dir_env_var(&self) -> Option<&'static str> {
+        Some("CLAUDE_CONFIG_DIR")
+    }
+
     fn name(&self) -> &'static str {
         "claude"
     }
@@ -190,6 +201,10 @@ impl AgentProfile for OpenCodeProfile {
 pub struct CodexProfile;
 
 impl AgentProfile for CodexProfile {
+    fn config_dir_env_var(&self) -> Option<&'static str> {
+        Some("CODEX_HOME")
+    }
+
     fn name(&self) -> &'static str {
         "codex"
     }
@@ -282,6 +297,10 @@ impl AgentProfile for GrokProfile {
 pub struct PiProfile;
 
 impl AgentProfile for PiProfile {
+    fn config_dir_env_var(&self) -> Option<&'static str> {
+        Some("PI_CODING_AGENT_DIR")
+    }
+
     fn name(&self) -> &'static str {
         "pi"
     }
@@ -306,6 +325,10 @@ impl AgentProfile for PiProfile {
 pub struct OmpProfile;
 
 impl AgentProfile for OmpProfile {
+    fn config_dir_env_var(&self) -> Option<&'static str> {
+        Some("PI_CODING_AGENT_DIR")
+    }
+
     fn name(&self) -> &'static str {
         "omp"
     }
@@ -506,6 +529,32 @@ impl AgentCommand {
         command
     }
 
+    /// Value of an environment variable this command sets, from either the
+    /// structured `env` map or an `env VAR=value` prefix in the command string.
+    pub fn env_value(&self, key: &str) -> Option<String> {
+        if let Some(value) = self.env.get(key) {
+            return match value {
+                AgentEnvValue::Literal(value) => Some(value.clone()),
+                AgentEnvValue::FromEnv { from_env } => std::env::var(from_env).ok(),
+            };
+        }
+
+        self.env_assignments.iter().find_map(|assignment| {
+            assignment
+                .strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(|value| value.to_string())
+        })
+    }
+
+    /// Drop an environment variable from both forms, so it is not exported when
+    /// the command runs.
+    pub fn remove_env(&mut self, key: &str) {
+        self.env.remove(key);
+        self.env_assignments
+            .retain(|assignment| !assignment.starts_with(&format!("{key}=")));
+    }
+
     pub fn shell_string(&self) -> String {
         let mut parts = Vec::new();
         if !self.env_args.is_empty() || !self.env_assignments.is_empty() || !self.env.is_empty() {
@@ -553,6 +602,24 @@ pub fn shell_quote(s: &str) -> String {
         .unwrap_or_else(|_| "''".to_string())
 }
 
+/// Like [`resolve_profile_with_type`], but without the `which`/tmux lookups, so
+/// it is safe to call while loading config.
+pub fn resolve_profile_with_type_for_display(
+    agent_command: Option<&str>,
+    type_override: Option<&str>,
+) -> &'static dyn AgentProfile {
+    let profile = resolve_profile_for_display(agent_command);
+    if profile.name() != "default" {
+        return profile;
+    }
+    if let Some(type_name) = type_override
+        && let Some(&p) = PROFILES.iter().find(|p| p.name() == type_name)
+    {
+        return p;
+    }
+    profile
+}
+
 #[derive(Clone)]
 pub struct SelectedAgent {
     pub command: AgentCommand,
@@ -566,6 +633,14 @@ impl SelectedAgent {
 
     pub fn shell_command(&self) -> String {
         self.command.shell_string()
+    }
+
+    /// Use the agent's standard config path inside a sandbox, where the
+    /// selected host config directory is mounted.
+    pub fn use_sandbox_config_dir(&mut self) {
+        if let Some(var) = self.profile.config_dir_env_var() {
+            self.command.remove_env(var);
+        }
     }
 
     pub fn from_raw(command: &str) -> Option<Self> {
@@ -1040,6 +1115,51 @@ mod tests {
     fn test_type_override_invalid() {
         let profile = resolve_profile_with_type(Some("/path/to/wrapper"), Some("nonexistent"));
         assert_eq!(profile.name(), "default");
+    }
+
+    #[test]
+    fn test_remove_env_drops_both_forms() {
+        let entry = AgentEntry {
+            command: None,
+            agent_type: Some("claude".to_string()),
+            args: Vec::new(),
+            env: BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                AgentEnvValue::Literal("/work/.claude".to_string()),
+            )]),
+        };
+        let mut command = AgentCommand::from_entry("cc-work", &entry);
+        assert_eq!(
+            command.env_value("CLAUDE_CONFIG_DIR"),
+            Some("/work/.claude".to_string())
+        );
+
+        command.remove_env("CLAUDE_CONFIG_DIR");
+        assert_eq!(command.env_value("CLAUDE_CONFIG_DIR"), None);
+        assert!(!command.shell_string().contains("CLAUDE_CONFIG_DIR"));
+
+        // Same for the `env VAR=value command` string form.
+        let mut command =
+            AgentCommand::parse("env CLAUDE_CONFIG_DIR=/work/.claude claude --verbose").unwrap();
+        assert_eq!(
+            command.env_value("CLAUDE_CONFIG_DIR"),
+            Some("/work/.claude".to_string())
+        );
+
+        command.remove_env("CLAUDE_CONFIG_DIR");
+        assert_eq!(command.env_value("CLAUDE_CONFIG_DIR"), None);
+        assert_eq!(command.shell_string(), "claude --verbose");
+    }
+
+    #[test]
+    fn test_config_dir_env_var_per_profile() {
+        assert_eq!(
+            ClaudeProfile.config_dir_env_var(),
+            Some("CLAUDE_CONFIG_DIR")
+        );
+        assert_eq!(CodexProfile.config_dir_env_var(), Some("CODEX_HOME"));
+        assert_eq!(PiProfile.config_dir_env_var(), Some("PI_CODING_AGENT_DIR"));
+        assert_eq!(GeminiProfile.config_dir_env_var(), None);
     }
 
     #[test]

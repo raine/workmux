@@ -12,12 +12,31 @@ use crate::config::{Config, ConfigLocation};
 pub const FROZEN_CONFIG_ENV: &str = "WORKMUX_FROZEN_CONFIG";
 const SNAPSHOT_VERSION: u32 = 1;
 
+/// Shell assignment that preserves a frozen config for a child command.
+pub fn shell_assignment() -> Option<String> {
+    shell_assignment_with(|key| std::env::var_os(key))
+}
+
+fn shell_assignment_with(
+    get_env: impl FnOnce(&str) -> Option<std::ffi::OsString>,
+) -> Option<String> {
+    get_env(FROZEN_CONFIG_ENV).map(|path| {
+        format!(
+            "{}='{}'",
+            FROZEN_CONFIG_ENV,
+            crate::shell::shell_escape(&path.to_string_lossy())
+        )
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 struct FrozenConfigFile {
     version: u32,
     config: Config,
     selected_agent: Option<String>,
     agent_type: Option<String>,
+    #[serde(default)]
+    agent_declared_config_dir: Option<PathBuf>,
     location: Option<ConfigLocation>,
 }
 
@@ -46,6 +65,7 @@ impl FrozenConfigGuard {
             config: config.clone(),
             selected_agent: config.selected_agent.clone(),
             agent_type: config.agent_type.clone(),
+            agent_declared_config_dir: config.sandbox.agent_declared_config_dir.clone(),
             location: location.cloned(),
         };
         let mut file = tempfile::Builder::new()
@@ -112,6 +132,7 @@ pub fn load(path: &Path) -> Result<(Config, Option<ConfigLocation>)> {
 
     snapshot.config.selected_agent = snapshot.selected_agent;
     snapshot.config.agent_type = snapshot.agent_type;
+    snapshot.config.sandbox.agent_declared_config_dir = snapshot.agent_declared_config_dir;
     Ok((snapshot.config, snapshot.location))
 }
 
@@ -200,9 +221,23 @@ mod tests {
     }
 
     #[test]
+    fn shell_assignment_preserves_snapshot_for_supervisor() {
+        let assignment = shell_assignment_with(|key| {
+            assert_eq!(key, FROZEN_CONFIG_ENV);
+            Some("/tmp/config path/it's.json".into())
+        });
+
+        assert_eq!(
+            assignment.as_deref(),
+            Some("WORKMUX_FROZEN_CONFIG='/tmp/config path/it'\\''s.json'")
+        );
+    }
+
+    #[test]
     fn round_trip_preserves_resolved_config_and_location() {
         let root = tempfile::tempdir().unwrap();
-        let config = sample_config();
+        let mut config = sample_config();
+        config.sandbox.agent_declared_config_dir = Some(PathBuf::from("/work/.claude"));
         let location = sample_location(root.path());
         let (_directory, guard) = capture(&config, Some(&location));
 
@@ -214,6 +249,10 @@ mod tests {
         );
         assert_eq!(loaded.agent_type, config.agent_type);
         assert_eq!(loaded.selected_agent, config.selected_agent);
+        assert_eq!(
+            loaded.sandbox.agent_declared_config_dir,
+            Some(PathBuf::from("/work/.claude"))
+        );
         assert_eq!(loaded_location, Some(location));
     }
 
@@ -333,6 +372,7 @@ sandbox:
             version: SNAPSHOT_VERSION + 1,
             selected_agent: config.selected_agent.clone(),
             agent_type: config.agent_type.clone(),
+            agent_declared_config_dir: config.sandbox.agent_declared_config_dir.clone(),
             config,
             location: None,
         };

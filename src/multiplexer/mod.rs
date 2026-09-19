@@ -765,6 +765,7 @@ pub trait Multiplexer: Send + Sync {
                                 if let Some(flag) = selected_agent.profile.skip_permissions_flag() {
                                     selected_agent.command.prepend_args_fragment(flag);
                                 }
+                                selected_agent.use_sandbox_config_dir();
                                 resolved.render_command()
                             } else {
                                 resolved.command.clone()
