@@ -2,7 +2,6 @@
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{Config, IsolationLevel};
 
@@ -87,65 +86,29 @@ pub fn determine_git_common_dir(worktree: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Get the Lima guest home directory.
+/// Lima expands this template after resolving the actual guest user and home.
+const GUEST_HOME: &str = "{{.Home}}";
+
+/// Path, relative to the guest home, where an agent looks for its config.
 ///
-/// Lima <2.1.0 creates a user with home at `/home/<user>.linux/`.
-/// Lima >=2.1.0 changed this to `/home/<user>.guest/`.
-fn lima_guest_home() -> Option<PathBuf> {
-    let username = std::env::var("USER").ok()?;
-    let suffix = lima_guest_home_suffix();
-    Some(PathBuf::from(format!("/home/{}.{}", username, suffix)))
+/// Must stay in sync with `SandboxConfig::resolved_agent_config_dir`, which
+/// picks the host directory these mirror.
+fn guest_agent_config_subpath(agent: &str) -> Option<&'static str> {
+    Some(match agent {
+        "claude" => ".claude",
+        "copilot" => ".copilot",
+        "gemini" => ".gemini",
+        "agy" => ".gemini/antigravity-cli",
+        "codex" => ".codex",
+        "opencode" => ".local/share/opencode",
+        "pi" => ".pi/agent",
+        "omp" => ".omp/agent",
+        _ => return None,
+    })
 }
 
-/// Determine the guest home directory suffix based on Lima version.
-///
-/// Returns "guest" for Lima >=2.1.0, "linux" for older versions.
-fn lima_guest_home_suffix() -> &'static str {
-    let version = Command::new("limactl")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        });
-
-    match version {
-        Some(v) => {
-            // Output format: "limactl version 2.1.0"
-            if let Some(ver_str) = v.trim().rsplit(' ').next()
-                && lima_version_gte(ver_str, "2.1.0")
-            {
-                return "guest";
-            }
-            "linux"
-        }
-        None => "linux",
-    }
-}
-
-/// Check if version `a` is >= version `b` using simple numeric comparison.
-fn lima_version_gte(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .map(|s| s.parse::<u32>().unwrap_or(0))
-            .collect()
-    };
-    let va = parse(a);
-    let vb = parse(b);
-    for i in 0..va.len().max(vb.len()) {
-        let a_part = va.get(i).copied().unwrap_or(0);
-        let b_part = vb.get(i).copied().unwrap_or(0);
-        match a_part.cmp(&b_part) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => continue,
-        }
-    }
-    true // equal
+fn guest_home_path(subpath: &str) -> PathBuf {
+    PathBuf::from(GUEST_HOME).join(subpath)
 }
 
 /// Calculate the standard worktrees directory for a project.
@@ -273,18 +236,9 @@ fn generate_mounts_with_state_root(
 
     // Mount agent config directory
     if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent) {
-        let guest_subpath = match agent {
-            "claude" => ".claude",
-            "gemini" => ".gemini",
-            "codex" => ".codex",
-            "opencode" => ".local/share/opencode",
-            "pi" => ".pi/agent",
-            "omp" => ".omp/agent",
-            _ => unreachable!(),
-        };
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(guest_subpath))
-            .unwrap_or_else(|| auth_dir.clone());
+        let guest_subpath = guest_agent_config_subpath(agent)
+            .ok_or_else(|| anyhow::anyhow!("No guest config path for agent '{agent}'"))?;
+        let guest_path = guest_home_path(guest_subpath);
         mounts.push(Mount {
             host_path: auth_dir.clone(),
             guest_path: guest_path.clone(),
@@ -312,24 +266,18 @@ fn generate_mounts_with_state_root(
         && let Some(cfg_dir) = crate::agent_setup::opencode::opencode_config_dir()
         && cfg_dir.is_dir()
     {
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(".config/opencode"))
-            .unwrap_or_else(|| cfg_dir.clone());
         mounts.push(Mount {
             host_path: cfg_dir,
-            guest_path,
+            guest_path: guest_home_path(".config/opencode"),
             read_only: true,
         });
     }
 
     // Mount per-VM state directory for workmux state
     if let Ok(state_dir) = lima_state_dir(vm_name) {
-        let guest_path = lima_guest_home()
-            .map(|h| h.join(".workmux-state"))
-            .unwrap_or_else(|| state_dir.clone());
         mounts.push(Mount {
             host_path: state_dir,
-            guest_path,
+            guest_path: guest_home_path(".workmux-state"),
             read_only: false,
         });
     }
@@ -402,27 +350,25 @@ mod tests {
     }
 
     #[test]
-    fn test_lima_version_gte() {
-        // Equal
-        assert!(lima_version_gte("2.1.0", "2.1.0"));
-        // Greater
-        assert!(lima_version_gte("2.1.1", "2.1.0"));
-        assert!(lima_version_gte("2.2.0", "2.1.0"));
-        assert!(lima_version_gte("3.0.0", "2.1.0"));
-        // Less
-        assert!(!lima_version_gte("2.0.3", "2.1.0"));
-        assert!(!lima_version_gte("1.9.9", "2.1.0"));
-        assert!(!lima_version_gte("2.0.99", "2.1.0"));
-    }
+    fn test_guest_agent_config_paths_use_lima_home_template() {
+        let cases = [
+            ("claude", ".claude"),
+            ("copilot", ".copilot"),
+            ("gemini", ".gemini"),
+            ("agy", ".gemini/antigravity-cli"),
+            ("codex", ".codex"),
+            ("opencode", ".local/share/opencode"),
+            ("pi", ".pi/agent"),
+            ("omp", ".omp/agent"),
+        ];
 
-    #[test]
-    fn test_lima_guest_home_suffix_returns_valid_suffix() {
-        let suffix = lima_guest_home_suffix();
-        assert!(
-            suffix == "linux" || suffix == "guest",
-            "unexpected suffix: {}",
-            suffix
-        );
+        for (agent, subpath) in cases {
+            assert_eq!(
+                guest_home_path(guest_agent_config_subpath(agent).unwrap()),
+                PathBuf::from(GUEST_HOME).join(subpath)
+            );
+        }
+        assert_eq!(guest_agent_config_subpath("kiro"), None);
     }
 
     fn init_git_project(parent: &Path) -> PathBuf {
@@ -471,6 +417,7 @@ mod tests {
             .position(|m| m.host_path == parent_host_path)
             .expect("parent pi agent mount missing");
         let parent_guest_path = mounts[parent_idx].guest_path.clone();
+        assert_eq!(parent_guest_path, guest_home_path(".pi/agent"));
         let bin_idx = mounts
             .iter()
             .position(|m| m.guest_path == parent_guest_path.join("bin"))
@@ -510,6 +457,7 @@ mod tests {
             .iter()
             .find(|m| m.host_path == omp_host_path)
             .expect("parent omp agent mount missing");
+        assert_eq!(parent_mount.guest_path, guest_home_path(".omp/agent"));
         assert!(
             !mounts
                 .iter()
@@ -528,6 +476,12 @@ mod tests {
     fn test_non_pi_agent_has_no_bin_overlay() {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "claude");
+        let claude_host_path = agent_config_host_path(tmp.path(), "claude");
+        let claude_mount = mounts
+            .iter()
+            .find(|m| m.host_path == claude_host_path)
+            .expect("claude agent mount missing");
+        assert_eq!(claude_mount.guest_path, guest_home_path(".claude"));
 
         assert!(
             !mounts

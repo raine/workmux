@@ -336,6 +336,29 @@ mod tests {
     }
 
     #[test]
+    fn test_lima_home_template_is_preserved_in_mount_point() {
+        let mounts = vec![Mount {
+            host_path: PathBuf::from("/Users/test/.claude"),
+            guest_path: PathBuf::from("{{.Home}}/.claude"),
+            read_only: false,
+        }];
+        let yaml = generate_lima_config(
+            "test-vm",
+            &mounts,
+            &SandboxConfig::default(),
+            "claude",
+            false,
+        )
+        .unwrap();
+        let parsed = ParsedLimaConfig::parse(&yaml);
+
+        assert_eq!(
+            parsed.value["mounts"][0]["mountPoint"].as_str(),
+            Some("{{.Home}}/.claude")
+        );
+    }
+
+    #[test]
     fn test_generate_lima_config_provision_scripts() {
         let sandbox_config = SandboxConfig::default();
         let yaml = generate_test_yaml(&sandbox_config, "claude", true);
