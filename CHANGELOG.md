@@ -21,6 +21,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix named agents with custom config directories using the wrong configuration inside sandboxes, including coordinator and RPC-spawned agents. ([#288](https://github.com/raine/workmux/pull/288))
+
 ## v0.1.263 (2026-09-16)
 
 - Fix dashboard removal and sweep actions targeting the wrong worktree when managing multiple projects. ([#272](https://github.com/raine/workmux/pull/272))
