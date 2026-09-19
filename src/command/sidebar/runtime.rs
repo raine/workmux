@@ -422,7 +422,10 @@ fn handle_key_press(
         (KeyCode::Char('t'), _) => app.toggle_grouping(),
         (KeyCode::Char('s'), _) => app.toggle_selected_group(),
         (KeyCode::Char('S'), _) => app.toggle_all_groups(),
-        (KeyCode::Char('?'), _) => app.show_help = true,
+        (KeyCode::Char('?'), _) => {
+            app.show_help = true;
+            app.dismiss_hint();
+        }
         _ => {}
     }
 }

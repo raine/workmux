@@ -1807,6 +1807,9 @@ mod tests {
             sidebar_height: None,
             sidebar_filter: None,
             sidebar_group_by: None,
+            sidebar_hint_version: None,
+            sidebar_hint_since: None,
+            sidebar_hint_dismissed: false,
         };
 
         store.save_settings(&settings).unwrap();

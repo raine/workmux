@@ -294,6 +294,8 @@ pub struct SidebarApp {
     pub pending_exit: bool,
     /// Whether the key overlay is open.
     pub show_help: bool,
+    /// Whether this sidebar still offers the grouping hint.
+    pub hint_pending: bool,
     /// When true, quit without triggering global sidebar shutdown (last-pane auto-exit).
     pub quit_silent: bool,
     pub quit_reason: Option<String>,
@@ -397,6 +399,7 @@ impl SidebarApp {
             should_quit: false,
             pending_exit: false,
             show_help: false,
+            hint_pending: false,
             quit_silent: false,
             quit_reason: None,
             palette: ThemePalette::from_config(&Config::default().theme, ThemeMode::Dark),
@@ -494,6 +497,7 @@ impl SidebarApp {
             should_quit: false,
             pending_exit: false,
             show_help: false,
+            hint_pending: claim_hint_for_this_version(),
             quit_silent: false,
             quit_reason: None,
             palette,
@@ -684,6 +688,49 @@ impl SidebarApp {
         self.current_width = cfg.sidebar.width.clone();
         self.dim_stale = cfg.sidebar.dim_stale();
         self.configured_group_by = cfg.sidebar.group_by();
+    }
+
+    /// Whether to offer the grouping hint on this frame.
+    ///
+    /// The hint stays through the switch it invites rather than vanishing the
+    /// moment it is acted on, so pressing `t` changes a line of text instead of
+    /// reflowing the sidebar, and someone who has just landed in an unfamiliar
+    /// mode can read the way back out of it.
+    ///
+    /// It is drawn only where it applies: more than one project, since a single
+    /// project has nothing to group; not in the top bar, where a line is a
+    /// third of the sidebar; and not over a template error, which owns the same
+    /// row and matters more.
+    pub fn show_hint(&self) -> bool {
+        self.hint_pending
+            && self.position != SidebarPosition::Top
+            && self.template_error.is_none()
+            && self.distinct_projects() > 1
+    }
+
+    fn distinct_projects(&self) -> usize {
+        let mut projects: Vec<&str> = self
+            .agents
+            .iter()
+            .filter_map(|agent| agent.path.parent()?.file_name()?.to_str())
+            .collect();
+        projects.sort_unstable();
+        projects.dedup();
+        projects.len()
+    }
+
+    /// The hint has served its purpose once the user answers it.
+    pub fn dismiss_hint(&mut self) {
+        if !self.hint_pending {
+            return;
+        }
+        self.hint_pending = false;
+        if let Ok(store) = crate::state::StateStore::new()
+            && let Ok(mut settings) = store.load_settings()
+        {
+            settings.sidebar_hint_dismissed = true;
+            let _ = store.save_settings(&settings);
+        }
     }
 
     /// Re-resolve templates for the presentation now on screen, reparsing only
@@ -1512,6 +1559,41 @@ impl SidebarApp {
     fn query_host_window_height(&self) -> u16 {
         query_window_height_for_pane().unwrap_or(0)
     }
+}
+
+/// How long the grouping hint stays on offer before retiring itself.
+const HINT_LIFETIME_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Whether this client should still offer the grouping hint, recording the
+/// installed version the first time it asks.
+///
+/// The hint belongs to a version, not to a sidebar: a new release offers it
+/// once, and answering it, or simply leaving it alone for a fortnight, retires
+/// it. State is shared by every pane, so the answer holds across windows and
+/// tmux restarts.
+fn claim_hint_for_this_version() -> bool {
+    let Ok(store) = crate::state::StateStore::new() else {
+        return false;
+    };
+    let Ok(mut settings) = store.load_settings() else {
+        return false;
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let now = super::ui::now_secs();
+
+    if settings.sidebar_hint_version.as_deref() != Some(version) {
+        settings.sidebar_hint_version = Some(version.to_string());
+        settings.sidebar_hint_since = Some(now);
+        settings.sidebar_hint_dismissed = false;
+        let _ = store.save_settings(&settings);
+        return true;
+    }
+    if settings.sidebar_hint_dismissed {
+        return false;
+    }
+    settings
+        .sidebar_hint_since
+        .is_some_and(|since| now.saturating_sub(since) < HINT_LIFETIME_SECS)
 }
 
 /// Resolve template strings for the presentation currently on screen.

@@ -474,16 +474,22 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
     f.render_widget(block, area);
     let inner = render_template_error(f, app, inner);
 
-    let (list_area, filter_area) = if app.filter_mode == SidebarFilterMode::Session {
-        if inner.height > 1 {
-            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
-            let filter = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            (list, Some(filter))
-        } else {
-            (inner, None)
-        }
+    // The footer carries one line: the session filter when it is on, otherwise
+    // the grouping hint while it is still on offer.
+    let footer = if app.filter_mode == SidebarFilterMode::Session {
+        Some(filter_footer_line(app))
+    } else if app.show_hint() {
+        Some(hint_line(app, inner.width as usize))
     } else {
-        (inner, None)
+        None
+    };
+    let (list_area, filter_area) = match &footer {
+        Some(_) if inner.height > 1 => {
+            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
+            let footer = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            (list, Some(footer))
+        }
+        _ => (inner, None),
     };
     app.list_area = list_area;
 
@@ -492,20 +498,8 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
         SidebarLayoutMode::Tiles => render_tile_list(f, app, list_area),
     }
 
-    if let Some(filter_rect) = filter_area {
-        let label = app
-            .host_session()
-            .map(|s| format!("[session: {}]", s))
-            .unwrap_or_else(|| "[session]".to_string());
-        let label = truncate_to_width(&label, filter_rect.width as usize);
-        let line = Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(app.palette.dimmed)
-                .add_modifier(Modifier::DIM),
-        ))
-        .alignment(Alignment::Center);
-        f.render_widget(line, filter_rect);
+    if let (Some(rect), Some(line)) = (filter_area, footer) {
+        f.render_widget(line, rect);
     }
 
     render_help(f, app);
@@ -536,6 +530,93 @@ fn help_entries(app: &SidebarApp) -> Vec<(&'static str, &'static str)> {
 
 /// Draw the key overlay over the list. A sidebar is narrow and has no room for
 /// a permanent legend, so the keys it added stay discoverable behind `?`.
+/// Style shared by the footer's two occupants. The band background separates
+/// the line from the list above it, which otherwise runs straight into it:
+/// both are dim text on the terminal background, and the footer is chrome
+/// rather than another row.
+fn footer_line(app: &SidebarApp, text: String) -> Line<'static> {
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(app.palette.dimmed)
+            .add_modifier(Modifier::DIM),
+    ))
+    .alignment(Alignment::Center)
+    .style(Style::default().bg(group_band_bg(&app.palette)))
+}
+
+fn filter_footer_line(app: &SidebarApp) -> Line<'static> {
+    let label = app
+        .host_session()
+        .map(|s| format!("[session: {}]", s))
+        .unwrap_or_else(|| "[session]".to_string());
+    footer_line(app, label)
+}
+
+/// One dim line offering the two keys worth knowing about: the one that groups
+/// the list, and the one that lists every other key. Named so the reader sees
+/// what the key would do to this sidebar, not what the feature is called.
+///
+/// A `new` badge marks the invitation while the sidebar is still the one the
+/// reader knows. Once they have taken it the line drops the badge and offers
+/// the way back instead, since by then the mode is not news.
+fn hint_line(app: &SidebarApp, width: usize) -> Line<'static> {
+    let (badge, options): (&str, Vec<String>) = match app.group_by {
+        Some(_) => (
+            "",
+            vec!["t  flat list  ·  ?  keys".into(), "t  flat  ·  ?".into()],
+        ),
+        None => {
+            let by = match app.configured_group_by {
+                Some(crate::config::SidebarGroupBy::Session) => "session",
+                _ => "project",
+            };
+            (
+                "new",
+                vec![
+                    format!("t  group by {by}  ·  ?  keys"),
+                    "t  group  ·  ?  keys".into(),
+                    "t  group  ·  ?".into(),
+                ],
+            )
+        }
+    };
+
+    let badge_width = if badge.is_empty() {
+        0
+    } else {
+        display_width(badge) + 2
+    };
+    let text = options
+        .iter()
+        .find(|option| badge_width + display_width(option) <= width)
+        .cloned()
+        .unwrap_or_else(|| options.last().cloned().unwrap_or_default());
+    // The badge is the first thing to go: the keys are the point of the line.
+    let badge = if badge_width + display_width(&text) <= width {
+        badge
+    } else {
+        ""
+    };
+
+    let dim = Style::default()
+        .fg(app.palette.dimmed)
+        .add_modifier(Modifier::DIM);
+    let mut spans = Vec::new();
+    if !badge.is_empty() {
+        spans.push(Span::styled(
+            badge.to_string(),
+            Style::default().fg(app.palette.accent),
+        ));
+        spans.push(Span::styled("  ".to_string(), dim));
+    }
+    spans.push(Span::styled(truncate_to_width(&text, width), dim));
+
+    Line::from(spans)
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(group_band_bg(&app.palette)))
+}
+
 fn render_help(f: &mut Frame, app: &SidebarApp) {
     if !app.show_help {
         return;
@@ -857,17 +938,27 @@ fn header_above(app: &SidebarApp, row: usize) -> Option<usize> {
         .rposition(|r| matches!(r, SidebarRow::Header { .. } | SidebarRow::StaleGroup { .. }))
 }
 
-/// Header line for a group, rendered through the shared template solver.
-/// Background of the group header band: the current-row tint nudged toward the
-/// selection tint, so it reads as a section break without being mistaken for
-/// the selected row. Non-RGB palette colors keep the current-row tint.
+/// Background of the group header band, stepped away from the selection.
+///
+/// Selection is the sidebar's only other background, so a band that merely
+/// approaches it reads as a dimmer selected row rather than as a section break.
+/// The step goes in whichever direction the theme has room for it: toward black
+/// on a dark palette, toward white on a light one. Palettes whose colors are
+/// not RGB cannot be shifted, so they fall back to the current-row tint.
 fn group_band_bg(palette: &ThemePalette) -> Color {
-    match (palette.current_row_bg, palette.highlight_row_bg) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            Color::Rgb(r1 / 2 + r2 / 2, g1 / 2 + g2 / 2, b1 / 2 + b2 / 2)
-        }
-        (current, _) => current,
-    }
+    /// Fraction of the distance from the selection toward the theme's extreme.
+    const STEP: f32 = 0.35;
+
+    let Color::Rgb(r, g, b) = palette.highlight_row_bg else {
+        return palette.current_row_bg;
+    };
+    let luminance = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
+    let target = if luminance < 0.5 { 0.0 } else { 255.0 };
+    let step = |channel: u8| {
+        let channel = f32::from(channel);
+        (channel + (target - channel) * STEP).round() as u8
+    };
+    Color::Rgb(step(r), step(g), step(b))
 }
 
 /// Header line for a group, rendered through the shared template solver onto a
@@ -2243,6 +2334,61 @@ mod tests {
         // The tally reaches the drawn header, not just the helper.
         let lines = rendered(&mut app, 36, 26);
         assert!(lines[0].contains('1'), "header was {:?}", lines[0]);
+    }
+
+    #[test]
+    fn the_grouping_hint_waits_for_a_sidebar_it_would_change() {
+        let mut app = grouped_tile_app();
+        app.hint_pending = true;
+        app.group_by = None;
+        app.rebuild_rows();
+        assert!(app.show_hint(), "flat list across projects offers the hint");
+
+        // Grouped: the offer survives the switch it invited, so acting on it
+        // rewords the line instead of removing the row under the list.
+        app.group_by = Some(crate::config::SidebarGroupBy::Project);
+        assert!(app.show_hint());
+        let lines = rendered(&mut app, 36, 12);
+        assert!(
+            lines.last().unwrap().contains("flat list"),
+            "footer was {:?}",
+            lines.last()
+        );
+        app.group_by = None;
+
+        // The top bar cannot spare a line, and a template error owns the same
+        // one and matters more.
+        app.position = crate::config::SidebarPosition::Top;
+        assert!(!app.show_hint());
+        app.position = crate::config::SidebarPosition::Left;
+        app.template_error = Some(TemplateError {
+            location: "tiles[0]".to_string(),
+            message: "unknown token".to_string(),
+        });
+        assert!(!app.show_hint());
+        app.template_error = None;
+
+        // One project: sections would only add a header.
+        app.agents
+            .retain(|agent| agent.path.starts_with("/demo/api"));
+        app.rebuild_rows();
+        assert!(!app.show_hint());
+    }
+
+    #[test]
+    fn the_grouping_hint_draws_on_the_footer_line() {
+        let mut app = grouped_tile_app();
+        app.hint_pending = true;
+        app.group_by = None;
+        app.filter_mode = super::SidebarFilterMode::None;
+        app.rebuild_rows();
+
+        let lines = rendered(&mut app, 36, 12);
+        let footer = lines.last().unwrap();
+        assert!(footer.contains("group by project"), "footer was {footer:?}");
+        assert!(footer.contains('?'));
+        // The hint takes the last row and nothing else: the list stops above it.
+        assert!(app.list_area.y + app.list_area.height <= 11);
     }
 
     #[test]
