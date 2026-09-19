@@ -2336,14 +2336,7 @@ pub fn run() -> Result<()> {
             let agent_list = snapshot
                 .agents
                 .iter()
-                .filter(|agent| {
-                    !super::snapshot::is_folded(
-                        agent,
-                        snapshot.group_by,
-                        &snapshot.stale_pane_ids,
-                        &snapshot.expanded_groups,
-                    )
-                })
+                .filter(|agent| !super::snapshot::is_folded(snapshot, agent))
                 .map(|agent| agent.pane_id.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");

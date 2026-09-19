@@ -256,18 +256,24 @@ pub(crate) fn order_agents(
     }
 }
 
-/// Whether an agent is folded away: judged stale, with its group collapsed.
-/// A flat list has no groups and therefore hides nothing.
-pub fn is_folded(
-    agent: &AgentPane,
-    group_by: Option<SidebarGroupBy>,
-    stale: &HashSet<String>,
-    expanded: &[String],
-) -> bool {
-    let Some(group_by) = group_by else {
+/// Whether an agent is folded away in the sidebar this snapshot describes.
+///
+/// Folding belongs to the grouped left sidebar: a flat list has no groups to
+/// fold behind, the top bar draws no toggles, and `collapse_stale: false` asks
+/// for every agent at full height. Anything that hides an agent from the rows
+/// must hide it from the pane list behind `jump` as well, or the numbers under
+/// the rows address agents the list does not carry.
+pub fn is_folded(snapshot: &SidebarSnapshot, agent: &AgentPane) -> bool {
+    let Some(group_by) = snapshot.group_by else {
         return false;
     };
-    stale.contains(&agent.pane_id) && !expanded.contains(&group_label(agent, group_by))
+    if !snapshot.collapse_stale || snapshot.position == SidebarPosition::Top {
+        return false;
+    }
+    snapshot.stale_pane_ids.contains(&agent.pane_id)
+        && !snapshot
+            .expanded_groups
+            .contains(&group_label(agent, group_by))
 }
 
 /// Inputs for one snapshot build.
@@ -518,6 +524,38 @@ mod tests {
         a.activity_ts = Some(now.saturating_sub(age));
         a.status_ts = a.activity_ts;
         a
+    }
+
+    #[test]
+    fn only_a_sidebar_that_folds_hides_an_agent_from_the_pane_list() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let stale = grouped_agent("api", "main", 1, 6 * 60 * 60, now);
+        let mut snapshot = build(vec![stale.clone()], HashMap::new(), HashMap::new());
+        snapshot.group_by = Some(SidebarGroupBy::Project);
+        snapshot.stale_pane_ids = HashSet::from([stale.pane_id.clone()]);
+        snapshot.collapse_stale = true;
+        assert!(is_folded(&snapshot, &stale));
+
+        // Folding is a property of the grouped left sidebar. Every way of
+        // turning it off has to reach the pane list too, or `jump <N>` counts
+        // agents the rows do not fold away.
+        snapshot.collapse_stale = false;
+        assert!(!is_folded(&snapshot, &stale));
+
+        snapshot.collapse_stale = true;
+        snapshot.position = SidebarPosition::Top;
+        assert!(!is_folded(&snapshot, &stale));
+
+        snapshot.position = SidebarPosition::Left;
+        snapshot.group_by = None;
+        assert!(!is_folded(&snapshot, &stale));
+
+        snapshot.group_by = Some(SidebarGroupBy::Project);
+        snapshot.expanded_groups = vec!["api".to_string()];
+        assert!(!is_folded(&snapshot, &stale));
     }
 
     fn order(agents: &[AgentPane]) -> Vec<String> {
