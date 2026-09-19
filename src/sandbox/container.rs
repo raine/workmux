@@ -1266,8 +1266,11 @@ pub fn wrap_for_container(
     // the sandbox supervisor.
     let command = command.strip_prefix(' ').unwrap_or(command);
 
+    let frozen_config = crate::frozen_config::shell_assignment()
+        .map(|assignment| format!("{assignment} "))
+        .unwrap_or_default();
     let mut parts = format!(
-        "workmux sandbox run '{}'",
+        "{frozen_config}workmux sandbox run '{}'",
         shell_escape(&pane_cwd.to_string_lossy()),
     );
 

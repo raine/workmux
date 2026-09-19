@@ -121,6 +121,49 @@ fn resolve_agent(config: &Config) -> &'static str {
     .name()
 }
 
+fn configured_sandbox_agent_command(config: &Config) -> String {
+    let Some(mut agent) = crate::multiplexer::agent::resolve_selected_agent(config, None) else {
+        return "claude".to_string();
+    };
+    agent.use_sandbox_config_dir();
+    agent.shell_command()
+}
+
+#[cfg(test)]
+mod agent_command_tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_agent_uses_mounted_config_path_for_string_entry() {
+        let mut config: Config = serde_yaml::from_str(
+            "agents:\n  cc-work: env CLAUDE_CONFIG_DIR=~/work/.claude claude --verbose\n",
+        )
+        .unwrap();
+        config.selected_agent = Some("cc-work".to_string());
+
+        assert_eq!(
+            configured_sandbox_agent_command(&config),
+            "claude --verbose"
+        );
+    }
+
+    #[test]
+    fn sandbox_agent_preserves_other_structured_agent_settings() {
+        let mut config: Config = serde_yaml::from_str(
+            "agents:\n  cc-work:\n    type: claude\n    command: ./claude\n    args: [--verbose]\n    env:\n      ANTHROPIC_BASE_URL: http://localhost:1234\n      CLAUDE_CONFIG_DIR: ~/work/.claude\n",
+        )
+        .unwrap();
+        config.selected_agent = Some("cc-work".to_string());
+
+        let command = configured_sandbox_agent_command(&config);
+
+        assert_eq!(
+            command,
+            "env ANTHROPIC_BASE_URL=http://localhost:1234 ./claude --verbose"
+        );
+    }
+}
+
 fn run_agent(command: Vec<String>) -> Result<()> {
     let config = Config::load(None)?;
     sandbox::notice::show_once();
@@ -137,8 +180,7 @@ fn run_agent(command: Vec<String>) -> Result<()> {
 
     // Build agent command: explicit args or configured agent
     let agent_command = if command.is_empty() {
-        let agent = config.agent.as_deref().unwrap_or("claude");
-        vec![agent.to_string()]
+        vec![configured_sandbox_agent_command(&config)]
     } else {
         command
     };

@@ -765,12 +765,7 @@ pub trait Multiplexer: Send + Sync {
                                 if let Some(flag) = selected_agent.profile.skip_permissions_flag() {
                                     selected_agent.command.prepend_args_fragment(flag);
                                 }
-                                // The agent's config directory is mounted at the
-                                // standard location inside the sandbox, so a host
-                                // path here would point at nothing.
-                                if let Some(var) = selected_agent.profile.config_dir_env_var() {
-                                    selected_agent.command.remove_env(var);
-                                }
+                                selected_agent.use_sandbox_config_dir();
                                 resolved.render_command()
                             } else {
                                 resolved.command.clone()

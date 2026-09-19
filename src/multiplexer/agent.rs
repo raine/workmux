@@ -635,6 +635,14 @@ impl SelectedAgent {
         self.command.shell_string()
     }
 
+    /// Use the agent's standard config path inside a sandbox, where the
+    /// selected host config directory is mounted.
+    pub fn use_sandbox_config_dir(&mut self) {
+        if let Some(var) = self.profile.config_dir_env_var() {
+            self.command.remove_env(var);
+        }
+    }
+
     pub fn from_raw(command: &str) -> Option<Self> {
         let command = AgentCommand::parse(command)?;
         let profile = resolve_profile(Some(&command.shell_string()));

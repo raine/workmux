@@ -36,9 +36,12 @@ pub fn wrap_for_lima(
     // Pass the command as a single quoted argument. The sandbox supervisor
     // (sandbox_run.rs) handles wrapping it in `sh -lc '...'` for limactl,
     // which is necessary because limactl/SSH flattens separate args.
+    let frozen_config = crate::frozen_config::shell_assignment()
+        .map(|assignment| format!("{assignment} "))
+        .unwrap_or_default();
     // Prefix with space to prevent shell history entry.
     Ok(format!(
-        " workmux sandbox run '{}' -- '{}'",
+        " {frozen_config}workmux sandbox run '{}' -- '{}'",
         shell_escape(&working_dir.to_string_lossy()),
         shell_escape(command)
     ))
