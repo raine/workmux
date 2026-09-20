@@ -326,15 +326,34 @@ panes:
 
 Each pane supports:
 
-| Option       | Description                                                    | Default |
-| ------------ | -------------------------------------------------------------- | ------- |
-| `name`       | Pane display name (currently applied by the Zellij backend)    | —       |
-| `command`    | Command to run (see [agent placeholders](#agent-placeholders)) | Shell   |
-| `focus`      | Whether this pane receives focus                               | `false` |
-| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                | `false` |
-| `split`      | Split direction (`horizontal` or `vertical`)                   | —       |
-| `size`       | Absolute size in lines/cells                                   | 50%     |
-| `percentage` | Size as percentage (1-100)                                     | 50%     |
+| Option       | Description                                                                  | Default          |
+| ------------ | ---------------------------------------------------------------------------- | ---------------- |
+| `name`       | Pane display name (currently applied by the Zellij backend)                  | ---              |
+| `command`    | Command to run (see [agent placeholders](#agent-placeholders))               | Shell            |
+| `focus`      | Whether this pane receives focus                                             | `false`          |
+| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                              | `false`          |
+| `split`      | Split direction (`horizontal` or `vertical`)                                 | ---              |
+| `size`       | Absolute size in lines/cells                                                 | 50%              |
+| `percentage` | Size as percentage (1-100)                                                   | 50%              |
+| `target`     | 0-based pane index to split from; defaults to most recent pane               | most recent pane |
+
+Use `target` when you want to split something other than the pane that was just
+created. The target must reference an earlier pane in the same layout.
+
+```yaml
+panes:
+  - command: nvim
+    focus: true
+  - command: pnpm install && pnpm run dev
+    split: vertical
+    size: 15
+  - command: <agent>
+    split: horizontal
+    target: 0
+```
+
+This creates three panes: `nvim` is at the top left, the agent is to its right,
+and the dev server spans the bottom.
 
 ##### Agent placeholders
 

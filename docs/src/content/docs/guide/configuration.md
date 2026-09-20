@@ -174,15 +174,37 @@ panes:
 
 Each pane supports:
 
-| Option       | Description                                                          | Default |
-| ------------ | -------------------------------------------------------------------- | ------- |
-| `name`       | Pane display name (currently applied by the Zellij backend)          | ---     |
-| `command`    | Command to run (see [agent placeholders](#agent-placeholders) below) | Shell   |
-| `focus`      | Whether this pane receives focus                                     | `false` |
-| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                      | `false` |
-| `split`      | Split direction (`horizontal`, `vertical`, or Zellij-only `stacked`) | ---     |
-| `size`       | Absolute size in lines/cells                                         | 50%     |
-| `percentage` | Size as percentage (1-100)                                           | 50%     |
+| Option       | Description                                                          | Default          |
+| ------------ | -------------------------------------------------------------------- | ---------------- |
+| `name`       | Pane display name (currently applied by the Zellij backend)          | ---              |
+| `command`    | Command to run (see [agent placeholders](#agent-placeholders) below) | Shell            |
+| `focus`      | Whether this pane receives focus                                     | `false`          |
+| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                      | `false`          |
+| `split`      | Split direction (`horizontal`, `vertical`, or Zellij-only `stacked`) | ---              |
+| `size`       | Absolute size in lines/cells                                         | 50%              |
+| `percentage` | Size as percentage (1-100)                                           | 50%              |
+| `target`     | 0-based pane index to split from; defaults to most recent pane       | most recent pane |
+
+Use `target` when a new pane should split from an earlier pane instead of the
+one that was just created. This is useful for layouts with two panes across the
+top and one full-width pane on the bottom.
+
+```yaml
+panes:
+  - command: nvim
+    focus: true
+  - command: pnpm install && pnpm run dev
+    split: vertical
+    size: 15
+  - command: <agent>
+    split: horizontal
+    target: 0
+```
+
+The example places `nvim` at the top left, the agent to its right, and the dev
+server across the bottom. `target` must refer to a pane that already exists in
+the same layout. For example, pane `2` can target `0` or `1`, but not `2` or any
+later pane.
 
 `size` is supported by tmux. Kitty and WezTerm do not provide a fixed-cell split operation. `percentage` is supported by tmux and WezTerm, and by Kitty when using the `splits` layout.
 
