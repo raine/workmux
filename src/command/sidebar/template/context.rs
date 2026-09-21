@@ -42,6 +42,9 @@ pub struct RowContext<'a> {
     pub pr_summary: Option<&'a PrSummary>,
     /// GitHub check summary for this agent's path.
     pub check_summary: Option<&'a CheckSummary>,
+    /// RAM (PSS, KiB) of this agent's process tree. `None` when unavailable or
+    /// the memory readout is off.
+    pub memory: Option<u64>,
     /// Row flags.
     pub is_stale: bool,
     pub is_active: bool,
@@ -128,6 +131,7 @@ impl<'a> RowContext<'a> {
         let git_status = app.git_statuses.get(&agent.path);
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
+        let memory = app.memory.get(&agent.pane_id).copied();
         let kind =
             effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
@@ -148,6 +152,7 @@ impl<'a> RowContext<'a> {
             git_status,
             pr_summary,
             check_summary,
+            memory,
             is_stale,
             is_active,
             is_selected,
@@ -184,6 +189,7 @@ impl<'a> RowContext<'a> {
             TokenId::AgentIcon => self.agent_icon.clone(),
             TokenId::PaneSuffix => self.pane_suffix.clone(),
             TokenId::Elapsed => self.elapsed.clone(),
+            TokenId::Memory => self.memory.map(crate::mem::format_kb).unwrap_or_default(),
             TokenId::GitStats
             | TokenId::GitCommitted
             | TokenId::GitUncommitted
@@ -621,6 +627,7 @@ mod tests {
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            pane_pid: 0,
         }
     }
 
@@ -755,6 +762,7 @@ mod tests {
             git_status: git,
             pr_summary: pr,
             check_summary: checks,
+            memory: None,
             is_stale: false,
             is_active: false,
             is_selected: false,

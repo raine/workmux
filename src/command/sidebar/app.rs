@@ -247,6 +247,8 @@ pub struct SidebarApp {
     pub pr_statuses: HashMap<PathBuf, PrSummary>,
     /// GitHub check summary per worktree path (received from daemon snapshots).
     pub check_statuses: HashMap<PathBuf, CheckSummary>,
+    /// RAM (PSS, KiB) per agent pane_id (received from daemon snapshots).
+    pub memory: HashMap<String, u64>,
     /// Pane IDs of agents detected as interrupted by the daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pane IDs of agents manually marked as sleeping by the user.
@@ -330,6 +332,7 @@ impl SidebarApp {
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             check_statuses: HashMap::new(),
+            memory: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             sleeping_pane_ids: std::collections::HashSet::new(),
             templates: ParsedTemplates {
@@ -411,6 +414,7 @@ impl SidebarApp {
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             check_statuses: HashMap::new(),
+            memory: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             sleeping_pane_ids: std::collections::HashSet::new(),
             templates,
@@ -459,6 +463,7 @@ impl SidebarApp {
         self.git_statuses = snapshot.git_statuses;
         self.pr_statuses = snapshot.pr_statuses;
         self.check_statuses = snapshot.check_statuses;
+        self.memory = snapshot.memory;
         self.interrupted_pane_ids = snapshot.interrupted_pane_ids;
         self.sleeping_pane_ids = snapshot.sleeping_pane_ids;
 
@@ -1536,6 +1541,7 @@ mod tests {
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            pane_pid: 0,
         }
     }
 
@@ -1556,6 +1562,7 @@ mod tests {
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             check_statuses: HashMap::new(),
+            memory: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             sleeping_pane_ids: std::collections::HashSet::new(),
             agents: vec![
@@ -1723,6 +1730,7 @@ mod filter_tests {
                 window_cmd: None,
                 agent_command: None,
                 agent_kind: None,
+                pane_pid: 0,
             },
             AgentPane {
                 session: "s".to_string(),
@@ -1739,6 +1747,7 @@ mod filter_tests {
                 window_cmd: None,
                 agent_command: None,
                 agent_kind: None,
+                pane_pid: 0,
             },
         ];
         let active_panes = std::collections::HashSet::from(["%2".to_string()]);

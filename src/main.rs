@@ -14,6 +14,7 @@ mod gitlab;
 mod llm;
 mod logger;
 mod markdown;
+mod mem;
 mod multiplexer;
 mod naming;
 mod nerdfont;

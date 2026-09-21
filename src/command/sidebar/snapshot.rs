@@ -46,6 +46,10 @@ pub struct SidebarSnapshot {
     /// GitHub check summary per worktree path (computed by daemon background worker).
     #[serde(default)]
     pub check_statuses: HashMap<PathBuf, CheckSummary>,
+    /// RAM (PSS, KiB) per agent pane_id (computed by daemon memory worker).
+    /// Empty when the sidebar memory readout is disabled.
+    #[serde(default)]
+    pub memory: HashMap<String, u64>,
     /// Pane IDs of agents detected as interrupted (working but no pane output change).
     #[serde(default)]
     pub interrupted_pane_ids: HashSet<String>,
@@ -77,6 +81,7 @@ pub fn build_snapshot(
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     check_statuses: HashMap<PathBuf, CheckPathEntry>,
+    memory: HashMap<String, u64>,
     sleeping_pane_ids: &HashSet<String>,
 ) -> SidebarSnapshot {
     let done_icon = status_icons.done();
@@ -185,6 +190,7 @@ pub fn build_snapshot(
         git_statuses,
         pr_statuses,
         check_statuses,
+        memory,
         interrupted_pane_ids: HashSet::new(),
         sleeping_pane_ids: live_sleeping,
         agents,
@@ -212,6 +218,7 @@ mod tests {
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            pane_pid: 0,
         }
     }
 
@@ -274,6 +281,7 @@ mod tests {
             git_statuses,
             pr_statuses,
             check_statuses,
+            HashMap::new(),
             &HashSet::new(),
         )
     }
@@ -339,6 +347,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
             &HashSet::new(),
         );
         assert_eq!(snapshot.agents[0].window_index, Some(4));
@@ -376,6 +385,7 @@ mod tests {
             SidebarFilterMode::default(),
             SidebarSort::Window,
             &StatusIcons::default(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
