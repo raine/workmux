@@ -383,11 +383,20 @@ pub struct SidebarConfig {
     /// Dim agents whose sidebar activity state exceeds the stale threshold.
     /// Default: true.
     pub dim_stale: Option<bool>,
+
+    /// Show each agent's RAM usage (PSS of its process tree) in the row and a
+    /// session-total footer at the bottom of the sidebar. Linux only.
+    /// Default: false.
+    pub memory: Option<bool>,
 }
 
 impl SidebarConfig {
     pub fn dim_stale(&self) -> bool {
         self.dim_stale.unwrap_or(true)
+    }
+
+    pub fn memory(&self) -> bool {
+        self.memory.unwrap_or(false)
     }
 }
 
@@ -2894,6 +2903,7 @@ impl Config {
             },
             sort: project.sidebar.sort.or(self.sidebar.sort),
             dim_stale: project.sidebar.dim_stale.or(self.sidebar.dim_stale),
+            memory: project.sidebar.memory.or(self.sidebar.memory),
         };
 
         // Sandbox config: per-field override with nested struct merging

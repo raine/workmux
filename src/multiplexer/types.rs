@@ -124,6 +124,10 @@ pub struct AgentPane {
     /// before falling back to stem-based profile resolution.
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// PID of the pane's shell process. Used by the sidebar memory readout to
+    /// price the agent's process tree. `0` when unknown.
+    #[serde(default)]
+    pub pane_pid: u32,
 }
 
 impl AgentPane {

@@ -537,6 +537,7 @@ mod tests {
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            pane_pid: 0,
         }
     }
 
@@ -560,6 +561,7 @@ mod tests {
             git_status: None,
             pr_summary: None,
             check_summary: None,
+            memory: None,
             is_stale: false,
             is_active: false,
             is_selected: false,

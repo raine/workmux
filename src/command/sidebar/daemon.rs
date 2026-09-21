@@ -110,6 +110,7 @@ fn snapshots_equal(
         git_statuses: _,
         pr_statuses: _,
         check_statuses: _,
+        memory: _,
         interrupted_pane_ids: _,
         sleeping_pane_ids: _,
         agents: _,
@@ -125,6 +126,7 @@ fn snapshots_equal(
         && git_status_maps_equal(&left.git_statuses, &right.git_statuses)
         && left.pr_statuses == right.pr_statuses
         && left.check_statuses == right.check_statuses
+        && left.memory == right.memory
         && left.interrupted_pane_ids == right.interrupted_pane_ids
         && left.sleeping_pane_ids == right.sleeping_pane_ids
         && left.agents == right.agents
@@ -1006,6 +1008,106 @@ fn merge_github_outcome(
         }
     }
     (prs, checks)
+}
+
+/// An agent's pane, sent to the memory worker to price its process tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemWorkerPane {
+    pane_id: String,
+    pane_pid: u32,
+}
+
+type MemCache = Arc<Mutex<HashMap<String, u64>>>;
+
+/// How often the memory worker re-prices the active agents' process trees.
+const MEM_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Background worker that periodically sums the PSS of each agent's process
+/// tree (via `crate::mem`) and publishes a `pane_id -> KiB` cache. Idle and
+/// scan-free until it is sent a non-empty pane list, so it costs nothing when
+/// the memory readout is disabled (the daemon then only ever sends `[]`).
+fn spawn_mem_worker(
+    term: Arc<AtomicBool>,
+    dirty_flag: Arc<AtomicBool>,
+    wake_tx: std::sync::mpsc::SyncSender<()>,
+) -> (MemCache, std::sync::mpsc::Sender<Vec<MemWorkerPane>>) {
+    let cache: MemCache = Arc::new(Mutex::new(HashMap::new()));
+    let cache_clone = cache.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<MemWorkerPane>>();
+
+    thread::spawn(move || {
+        let mut active: Vec<MemWorkerPane> = Vec::new();
+        let mut last_refresh = Instant::now() - MEM_REFRESH_INTERVAL;
+
+        while !term.load(Ordering::Relaxed) {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(entries) => {
+                    active = entries;
+                    while let Ok(entries) = rx.try_recv() {
+                        active = entries;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            if active.is_empty() {
+                let changed = cache_clone
+                    .lock()
+                    .map(|mut c| {
+                        let was_populated = !c.is_empty();
+                        c.clear();
+                        was_populated
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    dirty_flag.store(true, Ordering::Relaxed);
+                    let _ = wake_tx.try_send(());
+                }
+                // Re-price promptly when agents return.
+                last_refresh = Instant::now() - MEM_REFRESH_INTERVAL;
+                continue;
+            }
+
+            // RAM changes continuously, so re-price on the interval regardless of
+            // whether the pane set changed (unlike the branch-keyed GitHub worker).
+            if last_refresh.elapsed() < MEM_REFRESH_INTERVAL {
+                continue;
+            }
+            last_refresh = Instant::now();
+
+            let pids: Vec<u32> = active
+                .iter()
+                .map(|entry| entry.pane_pid)
+                .filter(|pid| *pid != 0)
+                .collect();
+            let by_pid = crate::mem::tree_pss_kb_many(&pids);
+
+            let mut next = HashMap::new();
+            for entry in &active {
+                if let Some(kb) = by_pid.get(&entry.pane_pid) {
+                    next.insert(entry.pane_id.clone(), *kb);
+                }
+            }
+
+            let changed = if let Ok(mut cache) = cache_clone.lock() {
+                if *cache == next {
+                    false
+                } else {
+                    *cache = next;
+                    true
+                }
+            } else {
+                false
+            };
+            if changed {
+                dirty_flag.store(true, Ordering::Relaxed);
+                let _ = wake_tx.try_send(());
+            }
+        }
+    });
+
+    (cache, tx)
 }
 
 fn spawn_github_worker(
@@ -2065,6 +2167,8 @@ pub fn run() -> Result<()> {
     );
     let (git_cache, git_path_tx) =
         spawn_git_worker(term.clone(), publication_dirty.clone(), wake_tx.clone());
+    let (mem_cache, mem_path_tx) =
+        spawn_mem_worker(term.clone(), publication_dirty.clone(), wake_tx.clone());
     let (pr_cache, check_cache, github_path_tx) =
         spawn_github_worker(term.clone(), publication_dirty.clone(), wake_tx);
 
@@ -2165,13 +2269,14 @@ pub fn run() -> Result<()> {
 
         if publish_pending && let Some((agents, tmux_state)) = &cached_inputs {
             publish_pending = false;
-            let (position, layout_mode, sort) = {
+            let (position, layout_mode, sort, memory_enabled) = {
                 let cfg = config.lock().unwrap();
                 (
                     read_sidebar_position(&cfg, tmux_state.position.as_deref()),
                     read_sidebar_layout_mode(&cfg, tmux_state.layout.as_deref())
                         .unwrap_or_default(),
                     cfg.sidebar.sort.unwrap_or_default(),
+                    cfg.sidebar.memory(),
                 )
             };
             let now = Instant::now();
@@ -2197,6 +2302,11 @@ pub fn run() -> Result<()> {
                         .ok()
                         .map(|c| c.clone())
                         .unwrap_or_default(),
+                    memory: if memory_enabled {
+                        mem_cache.lock().ok().map(|c| c.clone()).unwrap_or_default()
+                    } else {
+                        HashMap::new()
+                    },
                     sleeping_pane_ids: read_sleeping_panes(tmux_state.sleeping_panes.as_deref()),
                 },
                 &mut inactivity_tracker,
@@ -2251,6 +2361,21 @@ pub fn run() -> Result<()> {
                 })
                 .collect();
             let _ = github_path_tx.send(github_entries);
+
+            let mem_entries: Vec<MemWorkerPane> = if memory_enabled {
+                output
+                    .snapshot
+                    .agents
+                    .iter()
+                    .map(|agent| MemWorkerPane {
+                        pane_id: agent.pane_id.clone(),
+                        pane_pid: agent.pane_pid,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let _ = mem_path_tx.send(mem_entries);
 
             let live_paths: HashSet<PathBuf> = output
                 .snapshot
@@ -2371,6 +2496,8 @@ struct TickInput {
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     check_statuses: HashMap<PathBuf, CheckPathEntry>,
+    /// RAM (PSS, KiB) per agent pane_id. Empty when the memory readout is off.
+    memory: HashMap<String, u64>,
     sleeping_pane_ids: HashSet<String>,
 }
 
@@ -2417,6 +2544,7 @@ fn compute_tick(
         git_statuses,
         pr_statuses,
         check_statuses,
+        memory,
         sleeping_pane_ids,
     } = input;
 
@@ -2456,6 +2584,7 @@ fn compute_tick(
         git_statuses,
         pr_statuses,
         check_statuses,
+        memory,
         &sleeping_pane_ids,
     );
     snapshot.interrupted_pane_ids = interrupted.clone();
@@ -2599,6 +2728,7 @@ mod tests {
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            pane_pid: 0,
         }
     }
 
@@ -2809,6 +2939,7 @@ mod tests {
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             check_statuses: HashMap::new(),
+            memory: HashMap::new(),
             interrupted_pane_ids: HashSet::new(),
             sleeping_pane_ids: HashSet::new(),
             agents: Vec::new(),
@@ -4182,6 +4313,7 @@ mod tests {
                     git_statuses: HashMap::new(),
                     pr_statuses: HashMap::new(),
                     check_statuses: HashMap::new(),
+                    memory: HashMap::new(),
                     sleeping_pane_ids: HashSet::new(),
                 },
                 tracker,

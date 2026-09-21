@@ -467,17 +467,24 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
     f.render_widget(block, area);
     let inner = render_template_error(f, app, inner);
 
-    let (list_area, filter_area) = if app.filter_mode == SidebarFilterMode::Session {
-        if inner.height > 1 {
-            let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
-            let filter = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            (list, Some(filter))
-        } else {
-            (inner, None)
-        }
-    } else {
-        (inner, None)
-    };
+    // Carve footer rows from the bottom of the inner area. The session RAM
+    // total (when the memory readout has data) is the bottom-most row; the
+    // transient session-filter label sits just above it. The list gets what
+    // remains, so it never collides with tile mode's own bottom "↓ N more" row.
+    let mut body = inner;
+    let mut memory_area = None;
+    if !app.memory.is_empty() && body.height > 1 {
+        let row = Rect::new(body.x, body.y + body.height - 1, body.width, 1);
+        body.height -= 1;
+        memory_area = Some(row);
+    }
+    let mut filter_area = None;
+    if app.filter_mode == SidebarFilterMode::Session && body.height > 1 {
+        let row = Rect::new(body.x, body.y + body.height - 1, body.width, 1);
+        body.height -= 1;
+        filter_area = Some(row);
+    }
+    let list_area = body;
     app.list_area = list_area;
 
     match app.layout_mode {
@@ -499,6 +506,20 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
         ))
         .alignment(Alignment::Center);
         f.render_widget(line, filter_rect);
+    }
+
+    if let Some(memory_rect) = memory_area {
+        let total: u64 = app.memory.values().sum();
+        let label = format!("Σ {}", crate::mem::format_kb(total));
+        let label = truncate_to_width(&label, memory_rect.width as usize);
+        let line = Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(app.palette.dimmed)
+                .add_modifier(Modifier::DIM),
+        ))
+        .alignment(Alignment::Center);
+        f.render_widget(line, memory_rect);
     }
 
     render_exit_confirmation(f, app);
@@ -1176,6 +1197,7 @@ mod tests {
                 window_cmd: None,
                 agent_command: None,
                 agent_kind: None,
+                pane_pid: 0,
             });
         }
         app.list_state.select(Some(0));
@@ -1338,6 +1360,7 @@ mod tests {
                 window_cmd: None,
                 agent_command: Some("claude".to_string()),
                 agent_kind: Some("claude".to_string()),
+                pane_pid: 0,
             })
             .collect();
         for agent in &app.agents {
