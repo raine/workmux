@@ -21,13 +21,14 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.268 (2026-09-26)
+
+- Prevent unrelated Claude background sessions from overwriting an interactive pane's status and session identity, while preserving status tracking for attached `/bg` continuations. ([#300](https://github.com/raine/workmux/issues/300))
+
 ## v0.1.267 (2026-09-25)
 
-- Configure when agents become stale in the dashboard and sidebar with
-  `stale_after`, using seconds or durations such as `90m` or `5h`.
-  ([#298](https://github.com/raine/workmux/issues/298))
-- Keep the dashboard responsive while removing worktrees, with a deleting
-  indicator and clear feedback if removal fails or continues in the background.
+- Configure when agents become stale in the dashboard and sidebar with `stale_after`, using seconds or durations such as `90m` or `5h`. ([#298](https://github.com/raine/workmux/issues/298))
+- Keep the dashboard responsive while removing worktrees, with a deleting indicator and clear feedback if removal fails or continues in the background.
 
 ## v0.1.266 (2026-09-22)
 
