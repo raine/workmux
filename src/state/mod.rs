@@ -43,9 +43,14 @@ pub fn persist_agent_update(
 /// Register a live agent pane without assigning it an activity status.
 ///
 /// Registration snapshots only live pane data, preventing state from an
-/// unrelated agent process in the same pane from leaking into this record.
-pub fn persist_agent_registration(mux: &dyn Multiplexer, pane_id: &str) {
-    persist_agent_snapshot(mux, pane_id, None, None, None, false);
+/// unrelated agent process in the same pane from leaking into this record. A
+/// hook-provided session ID binds later pane-less events to this registration.
+pub fn persist_agent_registration(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    agent_session_id: Option<String>,
+) {
+    persist_agent_snapshot(mux, pane_id, None, None, agent_session_id, false);
 }
 
 /// Clear an agent's persisted status without deleting its state record.

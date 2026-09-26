@@ -2,7 +2,10 @@ use anyhow::Result;
 use clap::ValueEnum;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::io::{IsTerminal, Read};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{IsTerminal, Read, Seek, SeekFrom};
+use std::path::Path;
 use tracing::warn;
 
 use crate::config::Config;
@@ -86,9 +89,15 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     let config = Config::load(None)?;
-    let agent_session_id = read_hook_session_id();
-    run_for_status_target(agent_session_id.as_deref(), |mux, pane_id| {
-        apply_status_update(&cmd, &config, mux, pane_id, agent_session_id.as_deref())
+    let hook = read_hook_input();
+    run_for_status_target(hook.as_ref(), |mux, pane_id| {
+        apply_status_update(
+            &cmd,
+            &config,
+            mux,
+            pane_id,
+            hook.as_ref().and_then(HookInput::session_id),
+        )
     })
 }
 
@@ -101,9 +110,16 @@ pub fn register_agent() -> Result<()> {
         return register_via_rpc();
     }
 
-    run_for_status_target(None, |mux, pane_id| {
+    let hook = read_hook_input();
+    run_for_status_target(hook.as_ref(), |mux, pane_id| {
         let _ = mux.clear_status(pane_id);
-        crate::state::persist_agent_registration(mux, pane_id);
+        crate::state::persist_agent_registration(
+            mux,
+            pane_id,
+            hook.as_ref()
+                .and_then(HookInput::session_id)
+                .map(str::to_string),
+        );
         crate::command::sidebar::request_refresh_for(mux);
         Ok(())
     })
@@ -114,7 +130,7 @@ fn status_tracking_disabled() -> bool {
 }
 
 fn run_for_status_target(
-    agent_session_id: Option<&str>,
+    hook: Option<&HookInput>,
     mut update: impl FnMut(&dyn Multiplexer, &str) -> Result<()>,
 ) -> Result<()> {
     match StatusTarget::from_env() {
@@ -150,11 +166,11 @@ fn run_for_status_target(
     }
 
     // A status update requires identity tied to a live pane. Hooks can lose
-    // multiplexer variables, so tmux additionally accepts process ancestry or
-    // an exact agent session binding recorded by an earlier hook.
+    // multiplexer variables, so tmux additionally accepts an exact agent
+    // session binding or process ancestry with agent-specific ownership checks.
     for backend in status_backend_candidates() {
         let mux = create_backend(backend);
-        if let Some(pane_id) = resolve_status_pane_id(&*mux, agent_session_id) {
+        if let Some(pane_id) = resolve_status_pane_id(&*mux, hook) {
             return update(&*mux, &pane_id);
         }
     }
@@ -261,9 +277,23 @@ fn status_backend_candidates_for(
 #[derive(Deserialize)]
 struct HookInput {
     session_id: Option<String>,
+    transcript_path: Option<String>,
 }
 
-fn read_hook_session_id() -> Option<String> {
+impl HookInput {
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref().filter(|value| !value.is_empty())
+    }
+
+    fn transcript_path(&self) -> Option<&Path> {
+        self.transcript_path
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(Path::new)
+    }
+}
+
+fn read_hook_input() -> Option<HookInput> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return None;
@@ -271,17 +301,14 @@ fn read_hook_session_id() -> Option<String> {
 
     let mut input = String::new();
     stdin.lock().read_to_string(&mut input).ok()?;
-    parse_hook_session_id(&input)
+    parse_hook_input(&input)
 }
 
-fn parse_hook_session_id(input: &str) -> Option<String> {
-    serde_json::from_str::<HookInput>(input)
-        .ok()?
-        .session_id
-        .filter(|session_id| !session_id.is_empty())
+fn parse_hook_input(input: &str) -> Option<HookInput> {
+    serde_json::from_str(input).ok()
 }
 
-fn resolve_status_pane_id(mux: &dyn Multiplexer, agent_session_id: Option<&str>) -> Option<String> {
+fn resolve_status_pane_id(mux: &dyn Multiplexer, hook: Option<&HookInput>) -> Option<String> {
     if let Some(pane_id) = mux.current_pane_id().filter(|pane_id| !pane_id.is_empty()) {
         return Some(pane_id);
     }
@@ -291,24 +318,138 @@ fn resolve_status_pane_id(mux: &dyn Multiplexer, agent_session_id: Option<&str>)
     }
 
     let live_panes = mux.get_all_live_pane_info().ok()?;
-    if let Ok(parents) = process_parent_snapshot()
-        && let Some(pane_id) =
-            select_pane_for_process_ancestry(&live_panes, &parents, std::process::id())
+    let agents = StateStore::new().ok()?.list_all_agents().ok()?;
+    let server_boot_id = mux.server_boot_id().ok().flatten();
+    let instance = mux.instance_id();
+
+    if let Some(agent_session_id) = hook.and_then(HookInput::session_id)
+        && let Some(pane_id) = select_pane_for_agent_session(
+            &agents,
+            &live_panes,
+            mux.name(),
+            &instance,
+            agent_session_id,
+            server_boot_id.as_deref(),
+        )
     {
         return Some(pane_id);
     }
 
-    let agent_session_id = agent_session_id?;
-    let agents = StateStore::new().ok()?.list_all_agents().ok()?;
-    let server_boot_id = mux.server_boot_id().ok().flatten();
-    select_pane_for_agent_session(
+    let parents = process_parent_snapshot().ok()?;
+    let pane_id = select_pane_for_process_ancestry(&live_panes, &parents, std::process::id())?;
+    if !claude_background_hook() {
+        return Some(pane_id);
+    }
+
+    // Claude background workers share their supervisor's process ancestry.
+    // Only a transcript continuation proves that the worker is attached to
+    // the pane rather than an unrelated background session.
+    let hook = hook?;
+    continuation_owns_ancestry_pane(
         &agents,
         &live_panes,
         mux.name(),
-        &mux.instance_id(),
-        agent_session_id,
+        &instance,
+        &pane_id,
+        hook,
         server_boot_id.as_deref(),
     )
+    .then_some(pane_id)
+}
+
+fn claude_background_hook() -> bool {
+    std::env::var_os("CLAUDE_JOB_DIR").is_some_and(|value| !value.is_empty())
+}
+
+fn continuation_owns_ancestry_pane(
+    agents: &[AgentState],
+    live_panes: &HashMap<String, LivePaneInfo>,
+    backend: &str,
+    instance: &str,
+    pane_id: &str,
+    hook: &HookInput,
+    server_boot_id: Option<&str>,
+) -> bool {
+    let Some(new_session_id) = hook.session_id() else {
+        return false;
+    };
+    let Some(transcript_path) = hook.transcript_path() else {
+        return false;
+    };
+    let Some(agent) = agents.iter().find(|agent| {
+        agent.pane_key.backend == backend
+            && agent.pane_key.instance == instance
+            && agent.pane_key.pane_id == pane_id
+            && server_boot_id.is_some_and(|live| agent.boot_id.as_deref() == Some(live))
+            && live_panes.get(pane_id).is_some_and(|pane| {
+                agent.pane_pid != 0
+                    && pane.pid == Some(agent.pane_pid)
+                    && pane.current_command.as_deref() == Some(agent.command.as_str())
+            })
+    }) else {
+        return false;
+    };
+    let Some(previous_session_id) = agent.agent_session_id.as_deref() else {
+        return false;
+    };
+
+    transcript_records_continuation(transcript_path, previous_session_id, new_session_id)
+}
+
+fn transcript_records_continuation(
+    current_transcript: &Path,
+    previous_session_id: &str,
+    new_session_id: &str,
+) -> bool {
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+
+    if previous_session_id == new_session_id
+        || !valid_session_id(previous_session_id)
+        || !valid_session_id(new_session_id)
+        || current_transcript.file_name() != Some(OsStr::new(&format!("{new_session_id}.jsonl")))
+    {
+        return false;
+    }
+
+    let Some(parent) = current_transcript.parent() else {
+        return false;
+    };
+    let previous_transcript = parent.join(format!("{previous_session_id}.jsonl"));
+    let Ok(mut file) = File::open(previous_transcript) else {
+        return false;
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let start = length.saturating_sub(MAX_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut tail = Vec::new();
+    if file.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    let tail = String::from_utf8_lossy(&tail);
+
+    tail.lines().any(|line| {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        record.get("type").and_then(|value| value.as_str()) == Some("continued-in")
+            && record.get("sessionId").and_then(|value| value.as_str()) == Some(previous_session_id)
+            && record
+                .get("continuedInSessionId")
+                .and_then(|value| value.as_str())
+                == Some(new_session_id)
+    })
+}
+
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn process_parent_snapshot() -> Result<HashMap<u32, u32>> {
@@ -508,13 +649,72 @@ mod tests {
     }
 
     #[test]
-    fn parses_hook_session_identity() {
+    fn parses_hook_identity_and_transcript() {
+        let hook = parse_hook_input(
+            r#"{"session_id":"session-1","transcript_path":"/repo/session-1.jsonl"}"#,
+        )
+        .unwrap();
+        assert_eq!(hook.session_id(), Some("session-1"));
         assert_eq!(
-            parse_hook_session_id(r#"{"session_id":"session-1","cwd":"/repo"}"#),
-            Some("session-1".to_string())
+            hook.transcript_path(),
+            Some(Path::new("/repo/session-1.jsonl"))
         );
-        assert_eq!(parse_hook_session_id(r#"{"session_id":""}"#), None);
-        assert_eq!(parse_hook_session_id("not json"), None);
+
+        let empty = parse_hook_input(r#"{"session_id":"","transcript_path":""}"#).unwrap();
+        assert_eq!(empty.session_id(), None);
+        assert_eq!(empty.transcript_path(), None);
+        assert!(parse_hook_input("not json").is_none());
+    }
+
+    #[test]
+    fn transcript_continuation_requires_exact_lineage() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_transcript = dir.path().join("session-old.jsonl");
+        let new_transcript = dir.path().join("session-new.jsonl");
+        std::fs::write(
+            &old_transcript,
+            concat!(
+                "{\"type\":\"user\"}\n",
+                "{\"type\":\"continued-in\",\"sessionId\":\"session-old\",",
+                "\"continuedInSessionId\":\"session-new\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(&new_transcript, "").unwrap();
+
+        assert!(transcript_records_continuation(
+            &new_transcript,
+            "session-old",
+            "session-new"
+        ));
+        assert!(!transcript_records_continuation(
+            &new_transcript,
+            "another-session",
+            "session-new"
+        ));
+        assert!(!transcript_records_continuation(
+            &new_transcript,
+            "session-old",
+            "another-session"
+        ));
+    }
+
+    #[test]
+    fn transcript_continuation_rejects_untrusted_session_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session-new.jsonl");
+        std::fs::write(dir.path().join("session-old.jsonl"), "").unwrap();
+
+        assert!(!transcript_records_continuation(
+            &transcript,
+            "../session-old",
+            "session-new"
+        ));
+        assert!(!transcript_records_continuation(
+            &dir.path().join("wrong-name.jsonl"),
+            "session-old",
+            "session-new"
+        ));
     }
 
     #[test]
@@ -642,6 +842,58 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn ancestry_candidate_requires_continuation_for_background_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_transcript = dir.path().join("session-old.jsonl");
+        let new_transcript = dir.path().join("session-new.jsonl");
+        std::fs::write(
+            old_transcript,
+            concat!(
+                "{\"type\":\"continued-in\",\"sessionId\":\"session-old\",",
+                "\"continuedInSessionId\":\"session-new\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(&new_transcript, "").unwrap();
+
+        let agents = vec![agent_state("%1", 100, "session-old")];
+        let panes = HashMap::from([("%1".to_string(), live_pane(100, "claude"))]);
+        let hook = HookInput {
+            session_id: Some("session-new".to_string()),
+            transcript_path: Some(new_transcript.display().to_string()),
+        };
+
+        assert!(continuation_owns_ancestry_pane(
+            &agents,
+            &panes,
+            "tmux",
+            "default",
+            "%1",
+            &hook,
+            Some("boot-1"),
+        ));
+
+        let unrelated = HookInput {
+            session_id: Some("unrelated-session".to_string()),
+            transcript_path: Some(
+                dir.path()
+                    .join("unrelated-session.jsonl")
+                    .display()
+                    .to_string(),
+            ),
+        };
+        assert!(!continuation_owns_ancestry_pane(
+            &agents,
+            &panes,
+            "tmux",
+            "default",
+            "%1",
+            &unrelated,
+            Some("boot-1"),
+        ));
     }
 
     #[test]

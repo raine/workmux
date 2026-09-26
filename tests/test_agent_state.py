@@ -325,6 +325,97 @@ def test_set_window_status_without_tmux_env_uses_process_ancestry(
 
 
 @pytest.mark.tmux_only
+def test_background_continuation_requires_transcript_lineage(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-status-background-lineage"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None, "tmux binary not found"
+    tmux_wrapper = env.fake_bin_dir / "tmux"
+    env.install_script(
+        tmux_wrapper,
+        "#!/bin/sh\n"
+        f'exec {shlex.quote(real_tmux)} -S {shlex.quote(str(env.socket_path))} "$@"\n',
+    )
+
+    transcripts = env.tmp_path / "transcripts"
+    transcripts.mkdir()
+    old_session = "session-old"
+    new_session = "session-new"
+    unrelated_session = "session-unrelated"
+    old_transcript = transcripts / f"{old_session}.jsonl"
+    new_transcript = transcripts / f"{new_session}.jsonl"
+    unrelated_transcript = transcripts / f"{unrelated_session}.jsonl"
+    old_transcript.write_text(
+        json.dumps(
+            {
+                "type": "continued-in",
+                "sessionId": old_session,
+                "continuedInSessionId": new_session,
+            }
+        )
+        + "\n"
+    )
+    new_transcript.write_text("")
+    unrelated_transcript.write_text("")
+
+    old_input = json.dumps(
+        {"session_id": old_session, "transcript_path": str(old_transcript)}
+    )
+    new_input = json.dumps(
+        {"session_id": new_session, "transcript_path": str(new_transcript)}
+    )
+    unrelated_input = json.dumps(
+        {
+            "session_id": unrelated_session,
+            "transcript_path": str(unrelated_transcript),
+        }
+    )
+    marker_path = env.tmp_path / "background-lineage-finished"
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    command = (
+        "unset TMUX TMUX_PANE; "
+        f"cd {shlex.quote(str(worktree_path))} && "
+        f"printf %s {shlex.quote(old_input)} | "
+        f"{shlex.quote(str(workmux_exe_path))} set-window-status working && "
+        f"printf %s {shlex.quote(new_input)} | "
+        f"CLAUDE_JOB_DIR={shlex.quote(str(env.tmp_path / 'job-new'))} "
+        f"{shlex.quote(str(workmux_exe_path))} register-agent && "
+        f"printf %s {shlex.quote(new_input)} | "
+        f"CLAUDE_JOB_DIR={shlex.quote(str(env.tmp_path / 'job-new'))} "
+        f"{shlex.quote(str(workmux_exe_path))} set-window-status done && "
+        f"printf %s {shlex.quote(unrelated_input)} | "
+        f"CLAUDE_JOB_DIR={shlex.quote(str(env.tmp_path / 'job-unrelated'))} "
+        f"{shlex.quote(str(workmux_exe_path))} set-window-status waiting; "
+        f"touch {shlex.quote(str(marker_path))}"
+    )
+    status_cmd = make_env_script(
+        env,
+        command,
+        {
+            "HOME": str(env.home_path),
+            "PATH": env.env["PATH"],
+            "XDG_STATE_HOME": env.env["XDG_STATE_HOME"],
+            "WORKMUX_BACKEND": "tmux",
+        },
+    )
+    env.send_keys(window_name, status_cmd)
+
+    assert poll_until(lambda: marker_path.exists(), timeout=5.0)
+    state_files = list_agent_state_files(env)
+    assert len(state_files) == 1
+    state = read_agent_state(state_files[0])
+    assert state["status"] == "done"
+    assert state["agent_session_id"] == new_session
+
+
+@pytest.mark.tmux_only
 def test_set_window_status_without_pane_identity_refuses_cwd_match(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

@@ -456,7 +456,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
         ),
         "register" => {
             let _ = ctx.mux.clear_status(&ctx.pane_id);
-            crate::state::persist_agent_registration(&*ctx.mux, &ctx.pane_id);
+            crate::state::persist_agent_registration(&*ctx.mux, &ctx.pane_id, None);
             crate::command::sidebar::request_refresh_for(&*ctx.mux);
             return RpcResponse::Ok;
         }
