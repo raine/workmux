@@ -1,5 +1,9 @@
 """Tests for shell initialization and login shell behavior."""
 
+import shlex
+import shutil
+import sys
+
 import pytest
 
 from ..conftest import (
@@ -98,3 +102,46 @@ class TestLoginShell:
             f"Expected 2 login shells, log content:\n"
             f"{log_file.read_text() if log_file.exists() else 'File not found'}"
         )
+
+
+@pytest.mark.tmux_only
+def test_pane_command_survives_input_flush_during_zsh_initialization(
+    mux_server: MuxEnvironment,
+    workmux_exe_path,
+    repo_path,
+):
+    """Pane commands are sent after async-style zsh initialization settles."""
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh is not installed")
+
+    env = mux_server
+    branch_name = "feature-async-shell-init"
+    marker_file = env.home_path / "pane_command_ran"
+    zdotdir = env.home_path / "async-zsh"
+    zdotdir.mkdir()
+
+    flush_input = (
+        "import sys, termios; termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)"
+    )
+    (zdotdir / ".zshrc").write_text(
+        "sleep 0.2\n"
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(flush_input)}\n"
+        "PS1='workmux-ready% '\n"
+    )
+
+    env.configure_default_shell(zsh)
+    env.set_session_env("ZDOTDIR", str(zdotdir))
+    write_workmux_config(
+        repo_path,
+        panes=[{"command": f"touch {shlex.quote(str(marker_file))}"}],
+    )
+
+    add_branch_and_get_worktree(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name,
+    )
+
+    wait_for_file(env, marker_file, timeout=5.0)
