@@ -58,7 +58,7 @@ Run `workmux setup` to automatically detect your agent CLIs and install status t
 workmux setup
 ```
 
-This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
+This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. For OpenCode, setup checks `opencode --version` and installs the matching V1 or V2 plugin; an unknown version is left unchanged. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
 
 Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
 
@@ -116,13 +116,33 @@ Restart omp for the extension to take effect.
 
 ## OpenCode setup
 
-If you prefer manual setup, download the workmux status plugin to your global OpenCode plugin directory:
+Use `workmux setup` to install the plugin matching your installed OpenCode version. V1 and V2 use different plugin APIs; installing the V1 file in OpenCode V2 will not work. Setup removes the other version's workmux plugin when switching versions while preserving unrelated plugins.
+
+Setup recognizes older bundled plugins and records installed-file fingerprints in `.workmux-status.json` inside the OpenCode configuration directory for future version switches. If a conflicting plugin has local edits, setup leaves it in place and reports an error; save those edits and remove the conflicting workmux files before retrying.
+
+The V2 plugin runs in the full-screen terminal UI. It tracks session families viewed in that pane and continues reporting their current background work after navigation away or tab closure. Ownership expires when that work finishes, so later executions elsewhere do not update the old pane. It supports tmux, WezTerm, Zellij, and Kitty, and does not register an agent outside a supported multiplexer pane.
+
+Headless `opencode run` is not tracked by the V2 plugin. OpenCode's shared server does not provide the originating client's pane identity to this integration, and headless runs do not load its TUI entrypoint. Full V1/V2 parity for headless runs requires a separate client-side integration; the server plugin must not infer a pane from the shared server's environment.
+
+For manual **OpenCode V1** setup, download the original plugin:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins
-curl -o ~/.config/opencode/plugins/workmux-status.ts \
+curl -fsSL -o ~/.config/opencode/plugins/workmux-status.ts \
   https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/plugins/workmux-status.ts
 ```
+
+For manual **OpenCode V2** setup, download the V2 package files:
+
+```bash
+mkdir -p ~/.config/opencode/plugins/workmux-status
+for file in index.ts tui.ts status.ts; do
+  curl -fsSL -o "$HOME/.config/opencode/plugins/workmux-status/$file" \
+    "https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/v2/workmux-status/$file"
+done
+```
+
+When switching versions manually, remove the other version's workmux plugin after saving any local changes. V1 files may be in either `plugin/workmux-status.ts` (legacy) or `plugins/workmux-status.ts`; the V2 package is `plugins/workmux-status/`. Do not remove unrelated plugins or configuration.
 
 Restart OpenCode for the plugin to take effect.
 

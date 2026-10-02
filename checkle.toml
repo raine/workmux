@@ -18,7 +18,7 @@ command = ["cargo", "test", "--bin", "workmux", "--message-format=json"]
 [[check]]
 name = "status-plugin-tests"
 mode = "auto"
-command = ["bun", "test", "tests/opencode_status_plugin.test.ts", "tests/pi_status_extension.test.ts"]
+command = ["bun", "test", "tests/opencode_status_plugin.test.ts", "tests/opencode_status_plugin_v2.test.ts", "tests/opencode_status_tracker_v2.test.ts", "tests/pi_status_extension.test.ts"]
 
 [[check]]
 name = "ruff-check"

@@ -3,12 +3,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from .conftest import (
     MuxEnvironment,
     run_workmux_command,
 )
-from .support.setup import run_setup_with_answers, write_claude_manual_status_hook
-
+from .support.setup import (
+    install_opencode_version,
+    run_setup_with_answers,
+    write_claude_manual_status_hook,
+)
 
 # ---------------------------------------------------------------------------
 # Non-interactive tests (no prompt expected)
@@ -84,7 +89,8 @@ class TestSetupNoPrompt:
         workmux_exe_path: Path,
         repo_path: Path,
     ):
-        """OpenCode with the bundled plugin shows all-configured message."""
+        """OpenCode V1 with the original plugin shows all-configured message."""
+        install_opencode_version(mux_server, "v1.18.29")
         plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
         plugin_dir.mkdir(parents=True)
         bundled_plugin = (
@@ -95,6 +101,33 @@ class TestSetupNoPrompt:
             / "workmux-status.ts"
         )
         (plugin_dir / "workmux-status.ts").write_text(bundled_plugin.read_text())
+
+        result = run_workmux_command(
+            mux_server, workmux_exe_path, repo_path, "setup --hooks"
+        )
+        assert "All agents have status tracking configured" in result.stdout
+
+    def test_opencode_v2_plugin_configured(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        repo_path: Path,
+    ):
+        """The V2 package files are recognized without prompting."""
+        install_opencode_version(mux_server, "v2.0.18")
+        plugin_dir = (
+            mux_server.home_path / ".config" / "opencode" / "plugins" / "workmux-status"
+        )
+        plugin_dir.mkdir(parents=True)
+        bundled = (
+            Path(__file__).parent.parent
+            / "resources"
+            / "opencode"
+            / "v2"
+            / "workmux-status"
+        )
+        for name in ("index.ts", "tui.ts", "status.ts"):
+            (plugin_dir / name).write_text((bundled / name).read_text())
 
         result = run_workmux_command(
             mux_server, workmux_exe_path, repo_path, "setup --hooks"
@@ -131,6 +164,7 @@ class TestSetupNoPrompt:
         repo_path: Path,
     ):
         """Both agents configured shows all-configured message."""
+        install_opencode_version(mux_server, "v1.18.29")
         write_claude_manual_status_hook(mux_server.home_path / ".claude")
         plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
         plugin_dir.mkdir(parents=True)
@@ -242,30 +276,24 @@ class TestSetupInstall:
         mux_server: MuxEnvironment,
         workmux_exe_path: Path,
     ):
+        install_opencode_version(mux_server, "v1.18.29")
         plugin_dir = mux_server.home_path / ".config" / "opencode" / "plugins"
         plugin_dir.mkdir(parents=True)
-        bundled_plugin = (
+        historical_plugin = (
             Path(__file__).parent.parent
-            / "resources"
+            / "tests"
+            / "fixtures"
             / "opencode"
-            / "plugins"
-            / "workmux-status.ts"
+            / "v1-0b0c3875.ts"
         ).read_text()
-        registration = """  try {
-    await $`workmux register-agent`.quiet();
-  } catch {
-    // Status tracking remains available when registration cannot reach workmux.
-  }
+        (plugin_dir / "workmux-status.ts").write_text(historical_plugin)
 
-"""
-        (plugin_dir / "workmux-status.ts").write_text(
-            bundled_plugin.replace(registration, "")
-        )
-
+        # This historical version produces a long diff; its trailing added
+        # handler remains visible when the confirmation prompt is displayed.
         run_setup_with_answers(
             mux_server,
             workmux_exe_path,
-            expected_output=("workmux register-agent",),
+            expected_output=("case 'session.deleted':",),
         )
 
         assert (
@@ -331,7 +359,8 @@ class TestSetupInstall:
         workmux_exe_path: Path,
         repo_path: Path,
     ):
-        """Accepting installs the OpenCode plugin file."""
+        """Accepting installs the original plugin only for OpenCode V1."""
+        install_opencode_version(mux_server, "v1.18.29")
         opencode_dir = mux_server.home_path / ".config" / "opencode"
         opencode_dir.mkdir(parents=True)
 
@@ -342,6 +371,50 @@ class TestSetupInstall:
         assert not (opencode_dir / "package.json").exists()
         plugin_text = plugin_path.read_text()
         assert "workmux register-agent" in plugin_text
+
+    @pytest.mark.parametrize(
+        "v1_source",
+        [
+            "resources/opencode/plugins/workmux-status.ts",
+            "tests/fixtures/opencode/v1-0b0c3875.ts",
+        ],
+        ids=["current-v1", "historical-v1"],
+    )
+    def test_opencode_v2_install_replaces_v1_entrypoint(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        repo_path: Path,
+        v1_source: str,
+    ):
+        """V2 setup removes only the conflicting workmux V1 entrypoint."""
+        install_opencode_version(mux_server, "v2.0.18")
+        opencode_dir = mux_server.home_path / ".config" / "opencode"
+        plugins = opencode_dir / "plugins"
+        plugins.mkdir(parents=True)
+        bundled_v1 = Path(__file__).parent.parent / v1_source
+        (plugins / "workmux-status.ts").write_text(bundled_v1.read_text())
+        (plugins / "custom.ts").write_text("// keep me")
+
+        run_setup_with_answers(mux_server, workmux_exe_path, hooks_answer="y")
+
+        bundled_v2 = (
+            Path(__file__).parent.parent
+            / "resources"
+            / "opencode"
+            / "v2"
+            / "workmux-status"
+        )
+        installed_v2 = plugins / "workmux-status"
+        for name in ("index.ts", "tui.ts", "status.ts"):
+            assert (installed_v2 / name).read_text() == (bundled_v2 / name).read_text()
+        assert not (plugins / "workmux-status.ts").exists()
+        assert (plugins / "custom.ts").read_text() == "// keep me"
+
+        result = run_workmux_command(
+            mux_server, workmux_exe_path, repo_path, "setup --hooks"
+        )
+        assert "All agents have status tracking configured" in result.stdout
 
     def test_omp_install_accept(
         self,
@@ -373,6 +446,7 @@ class TestSetupInstall:
         repo_path: Path,
     ):
         """Accepting installs both agents' hooks."""
+        install_opencode_version(mux_server, "v1.18.29")
         claude_dir = mux_server.home_path / ".claude"
         claude_dir.mkdir()
         opencode_dir = mux_server.home_path / ".config" / "opencode"
