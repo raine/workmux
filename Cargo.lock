@@ -3292,6 +3292,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "shlex",
  "signal-hook 0.4.4",
  "similar",

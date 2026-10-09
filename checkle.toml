@@ -20,6 +20,12 @@ name = "status-plugin-tests"
 mode = "auto"
 command = ["bun", "test", "tests/opencode_status_plugin.test.ts", "tests/pi_status_extension.test.ts", "tests/omp_status_extension.test.ts"]
 
+# V2 tests use real subprocesses; isolate them from other suites' spawn mocks.
+[[check]]
+name = "opencode-v2-status-plugin-tests"
+mode = "auto"
+command = ["bun", "test", "tests/opencode_status_plugin_v2.test.ts", "tests/opencode_status_tracker_v2.test.ts"]
+
 [[check]]
 name = "ruff-check"
 mode = "auto"
@@ -37,4 +43,4 @@ command = ["bash", "-lc", "cd docs && bun run format:check && node scripts/check
 
 [[group]]
 name = "all"
-checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "status-plugin-tests", "ruff-check", "pyright", "docs-check"]
+checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "status-plugin-tests", "opencode-v2-status-plugin-tests", "ruff-check", "pyright", "docs-check"]
