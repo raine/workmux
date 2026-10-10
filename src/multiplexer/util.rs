@@ -630,6 +630,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_structured_pane_command_injects_copilot_prompt_after_configured_args() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let mut config = config_with_agent("copilot-yolo");
+        config.agents.insert(
+            "copilot-yolo".to_string(),
+            crate::config::AgentEntry {
+                command: Some("copilot".to_string()),
+                agent_type: Some("copilot".to_string()),
+                args: vec!["--yolo".to_string()],
+                env: std::collections::BTreeMap::new(),
+            },
+        );
+        let resolved = resolve_pane_command_with_config(
+            Some("<agent>"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+        assert_eq!(resolved.command, " copilot --yolo -i \"$(cat PROMPT.md)\"");
+        assert!(resolved.prompt_injected);
+        assert_eq!(resolved.selected_agent.unwrap().kind(), "copilot");
+    }
+
+    #[test]
     fn resolve_structured_pane_command_injects_prompt_once_for_literal_agent_name() {
         let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
         let working_dir = PathBuf::from("/tmp/worktree");

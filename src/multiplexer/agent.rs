@@ -135,6 +135,26 @@ impl AgentProfile for GeminiProfile {
     }
 }
 
+pub struct CopilotProfile;
+
+impl AgentProfile for CopilotProfile {
+    fn name(&self) -> &'static str {
+        "copilot"
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("-i \"$(cat {})\"", prompt_path)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct AntigravityProfile;
 
 impl AgentProfile for AntigravityProfile {
@@ -340,6 +360,7 @@ impl AgentProfile for DefaultProfile {
 static PROFILES: &[&dyn AgentProfile] = &[
     &ClaudeProfile,
     &GeminiProfile,
+    &CopilotProfile,
     &AntigravityProfile,
     &OpenCodeProfile,
     &CodexProfile,
@@ -686,6 +707,21 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_profile() {
+        let profile = CopilotProfile;
+        assert_eq!(profile.name(), "copilot");
+        assert!(!profile.needs_bang_delay());
+        assert!(!profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "-i \"$(cat PROMPT.md)\""
+        );
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
+        assert_eq!(profile.auto_name_command(), None);
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
     fn test_antigravity_profile() {
         let profile = AntigravityProfile;
         assert_eq!(profile.name(), "agy");
@@ -844,6 +880,12 @@ mod tests {
     fn test_resolve_profile_gemini() {
         let profile = resolve_profile(Some("gemini"));
         assert_eq!(profile.name(), "gemini");
+    }
+
+    #[test]
+    fn test_resolve_profile_copilot() {
+        let profile = resolve_profile(Some("copilot --yolo"));
+        assert_eq!(profile.name(), "copilot");
     }
 
     #[test]
