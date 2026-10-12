@@ -46,22 +46,6 @@ const V2_FILES: &[(&str, &str)] = &[
     ),
 ];
 
-fn v2_fingerprints(name: &str) -> &'static [&'static str] {
-    match name {
-        "index.ts" => &["3a5903c7cfbab7e316632b7cf061207bca9ca39ec540001c5db1b24249593998"], // db27c992
-        "tui.ts" => &[
-            "1e6e7d16f441255ef78a030c419294ce5f1882efcaff5577896a71bbfa933e73", // db27c992
-            "c95875959986f90ba9b86687c55356f5c1237e6b075b2c846a37e30bb8e5b061", // 9bfa1fbe
-            "ec5371ab906d3daddb0554c3d881828438f985c440546d9d282e8ea7aac29ff9", // a57b1793
-        ],
-        "status.ts" => &[
-            "3405839a7b133e1b37e5784330d2c9334ed2e5ed9498960e3f1845f479de05f1", // db27c992
-            "bc1de787e0eff07ba0d5de7a6418c429e1ccd9749fd9a66c9dbe4bcd5b313b8c", // a57b1793
-        ],
-        _ => &[],
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenCodeVersion {
     V1,
@@ -349,7 +333,7 @@ fn validate_v2_files(config_dir: &Path, manifest: &InstallManifest) -> Result<()
                 &format!("plugins/workmux-status/{name}"),
                 &fs::read_to_string(&path)?,
                 source,
-                v2_fingerprints(name),
+                &[],
             )
         {
             anyhow::bail!(
@@ -675,24 +659,6 @@ mod tests {
             fs::read_to_string(tmp.path().join("plugins/workmux-status.ts")).unwrap(),
             PLUGIN_SOURCE
         );
-        assert!(!v2_dir(tmp.path()).exists());
-        assert!(matches!(
-            check_at(tmp.path(), OpenCodeVersion::V1).unwrap(),
-            StatusCheck::Installed
-        ));
-    }
-
-    #[test]
-    fn v1_install_migrates_a_partial_historical_v2_bundle() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(v2_dir(tmp.path())).unwrap();
-        fs::write(
-            v2_dir(tmp.path()).join("status.ts"),
-            include_str!("../../tests/fixtures/opencode/v2-status-db27c992.ts"),
-        )
-        .unwrap();
-
-        install_at(tmp.path(), OpenCodeVersion::V1).unwrap();
         assert!(!v2_dir(tmp.path()).exists());
         assert!(matches!(
             check_at(tmp.path(), OpenCodeVersion::V1).unwrap(),
