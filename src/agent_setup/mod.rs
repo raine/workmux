@@ -247,6 +247,15 @@ fn same_install_target(first: Option<&Path>, second: Option<&Path>) -> bool {
 ///
 /// Never fails globally -- per-agent errors are captured in `StatusCheck::Error`.
 pub fn check_all() -> Vec<AgentCheck> {
+    check_all_with_opencode_check(opencode::check)
+}
+
+/// Check integrations for explicit setup, including OpenCode version detection.
+pub fn check_all_for_setup() -> Vec<AgentCheck> {
+    check_all_with_opencode_check(opencode::check_for_setup)
+}
+
+fn check_all_with_opencode_check(check_opencode: fn() -> Result<StatusCheck>) -> Vec<AgentCheck> {
     let mut results = Vec::new();
 
     if let Some(reason) = claude::detect() {
@@ -353,7 +362,7 @@ pub fn check_all() -> Vec<AgentCheck> {
     }
 
     if let Some(reason) = opencode::detect() {
-        let status = match opencode::check() {
+        let status = match check_opencode() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
         };
@@ -544,7 +553,11 @@ pub fn prompt_wizard() -> Result<()> {
         }
 
         for check in &needs_hooks {
-            if matches!(check.status, StatusCheck::UpdateAvailable) {
+            // OpenCode's preview needs a version probe; only explicit setup or
+            // an accepted installation may start the agent CLI.
+            if check.agent != Agent::OpenCode
+                && matches!(check.status, StatusCheck::UpdateAvailable)
+            {
                 print_update_diff(check.agent);
             }
         }

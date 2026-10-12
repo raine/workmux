@@ -15,7 +15,11 @@ pub fn run(hooks_only: bool, skills_only: bool) -> Result<()> {
     let do_hooks = !skills_only || hooks_only;
     let do_skills = !hooks_only || skills_only;
 
-    let checks = agent_setup::check_all();
+    let checks = if do_hooks {
+        agent_setup::check_all_for_setup()
+    } else {
+        agent_setup::check_all()
+    };
 
     if checks.is_empty() {
         println!(

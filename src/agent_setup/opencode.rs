@@ -266,8 +266,25 @@ fn check_at(config_dir: &Path, version: OpenCodeVersion) -> Result<StatusCheck> 
     }
 }
 
-/// Check if workmux plugin is installed for OpenCode.
+fn check_installed_at(config_dir: &Path) -> Result<StatusCheck> {
+    let version = if v2_files_present(config_dir) {
+        OpenCodeVersion::V2
+    } else {
+        OpenCodeVersion::V1
+    };
+    check_at(config_dir, version)
+}
+
+/// Check installed plugin files without starting OpenCode.
 pub fn check() -> Result<StatusCheck> {
+    let Some(config_dir) = opencode_config_dir() else {
+        return Ok(StatusCheck::NotInstalled);
+    };
+    check_installed_at(&config_dir)
+}
+
+/// Check that installed plugin files match the installed OpenCode version.
+pub fn check_for_setup() -> Result<StatusCheck> {
     let Some(config_dir) = opencode_config_dir() else {
         return Ok(StatusCheck::NotInstalled);
     };
@@ -536,6 +553,47 @@ mod tests {
             resolve_config_dir(None, Some("".into()), Some("/home/user".into())),
             Some(PathBuf::from("/home/user/.config/opencode"))
         );
+    }
+
+    #[test]
+    fn routine_checks_follow_installed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::NotInstalled
+        ));
+
+        install_at(tmp.path(), OpenCodeVersion::V1).unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::Installed
+        ));
+        fs::write(
+            tmp.path().join("plugins/workmux-status.ts"),
+            "// old plugin\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+        fs::remove_file(tmp.path().join("plugins/workmux-status.ts")).unwrap();
+
+        install_at(tmp.path(), OpenCodeVersion::V2).unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::Installed
+        ));
+        fs::remove_file(v2_dir(tmp.path()).join("tui.ts")).unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+        fs::write(tmp.path().join("plugins/workmux-status.ts"), PLUGIN_SOURCE).unwrap();
+        assert!(matches!(
+            check_installed_at(tmp.path()).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
     }
 
     #[test]
