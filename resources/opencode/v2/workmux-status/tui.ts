@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { Plugin } from '@opencode/plugin/tui';
-import { StatusTracker, type WindowStatus } from './status';
+import { applyEvent, isActive, sessionState, windowStatus, type SessionEvent, type SessionState, type WindowStatus } from './status';
 
 function hasLocalPane(): boolean {
   // Match workmux's backend selection, but require an identifiable local pane.
@@ -16,6 +16,12 @@ function hasLocalPane(): boolean {
   if (process.env.WEZTERM_PANE) return panes.wezterm;
   if (process.env.ZELLIJ || process.env.ZELLIJ_PANE_ID || process.env.ZELLIJ_SESSION_NAME) return panes.zellij;
   return panes.kitty;
+}
+
+function isMissingSession(error: unknown, sessionID: string): boolean {
+  return typeof error === 'object' && error !== null
+    && '_tag' in error && error._tag === 'SessionNotFoundError'
+    && 'sessionID' in error && error.sessionID === sessionID;
 }
 
 function workmux(...args: string[]): Promise<boolean> {
@@ -45,202 +51,231 @@ export default Plugin.define({
     let reported: WindowStatus | undefined;
     let queue = workmux('register-agent').then(() => {});
 
-    const tracker = new StatusTracker((status) => {
+    type OwnedSession = SessionState & { idle?: number | null };
+    type Snapshot = { events: SessionEvent[]; inFlight: boolean; retryAt: number };
+    type Family = { sessions: Map<string, OwnedSession>; snapshot?: Snapshot };
+    const families = new Map<string, Family>();
+    const deleted = new Set<string>();
+    let visibleRoot: string | undefined;
+
+    function publish() {
+      for (const [root, family] of families) {
+        if (root !== visibleRoot && !family.snapshot && ![...family.sessions.values()].some(isActive)) {
+          families.delete(root);
+        }
+      }
+      const status = windowStatus([...families.values()].flatMap((family) => [...family.sessions.values()]));
+      if (status === 'done' && (desired === undefined || [...families.values()].some((family) => family.snapshot))) return;
+      if (status === desired && status === reported) return;
       desired = status;
       queue = queue.then(async () => {
         if (closed || desired === reported || !desired) return;
         const next = desired;
         if (await workmux('set-window-status', next)) reported = next;
       });
-    });
-
-    // Server events and the tabs list are shared between clients. Only this
-    // TUI's current route establishes ownership of a session family.
-    type Lease = {
-      members: Set<string>;
-      hydrating: boolean;
-      hydrated: boolean;
-      hydration: ReturnType<StatusTracker['beginHydration']>;
-    };
-    const roots = new Map<string, Lease>();
-    const owned = new Map<string, string>();
-    const parents = new Map<string, string>();
-    const deleted = new Set<string>();
-    let visibleRoot: string | undefined;
-
-    function isOwned(sessionID: string): boolean {
-      if (deleted.has(sessionID)) return false;
-      const existing = owned.get(sessionID);
-      if (existing && roots.has(existing)) return true;
-      const root = ctx.data.session.root(sessionID);
-      const parent = parents.get(sessionID) ?? ctx.data.session.get(sessionID)?.parentID;
-      const owner = !deleted.has(root) && roots.has(root)
-        ? root
-        : parent && isOwned(parent) ? owned.get(parent) : undefined;
-      if (!owner) return false;
-      owned.set(sessionID, owner);
-      roots.get(owner)?.members.add(sessionID);
-      return true;
     }
 
-    function releaseIfIdle(root: string) {
-      const lease = roots.get(root);
-      if (!lease || visibleRoot === root || lease.hydrating) return;
-      if (!lease.hydrated && !deleted.has(root)) return;
-      if ([...lease.members].some((sessionID) => tracker.isActive(sessionID))) return;
-      roots.delete(root);
-      lease.hydration.finish();
-      for (const sessionID of lease.members) {
-        if (owned.get(sessionID) === root) owned.delete(sessionID);
-        tracker.forget(sessionID);
-        parents.delete(sessionID);
+    function owner(sessionID: string, parentID?: string): Family | undefined {
+      if (deleted.has(sessionID)) return;
+      for (const family of families.values()) {
+        if (family.sessions.has(sessionID) || (parentID && family.sessions.has(parentID))) return family;
       }
+      return families.get(ctx.data.session.root(parentID ?? sessionID));
     }
 
-    async function hydrate(root: string, lease: Lease) {
-      lease.hydrating = true;
-      let hydrated = false;
+    function observe(family: Family, event: SessionEvent) {
+      applyEvent(family.sessions, event);
+      const state = family.sessions.get(event.sessionID);
+      const info = ctx.data.session.get(event.sessionID);
+      if (state && !('idle' in state) && info) state.idle = info.time?.idle ?? null;
+    }
+
+    function moveFamily(root: string, nextRoot: string, family: Family) {
+      const target = families.get(nextRoot) ?? family;
+      for (const [id, state] of family.sessions) {
+        if (!target.sessions.has(id)) target.sessions.set(id, state);
+      }
+      families.delete(root);
+      families.set(nextRoot, target);
+      target.snapshot = { events: [], inFlight: false, retryAt: 0 };
+      if (visibleRoot === root) visibleRoot = nextRoot;
+      void refresh(nextRoot, target);
+    }
+
+    async function refresh(root: string, family: Family) {
+      const snapshot = family.snapshot;
+      if (!snapshot || snapshot.inFlight || snapshot.retryAt > Date.now()) return;
+      snapshot.inFlight = true;
+      snapshot.events = [];
+      const current = () => !closed && families.get(root) === family && family.snapshot === snapshot;
       try {
-        // The family cache may be empty until the root's metadata is loaded.
         await ctx.data.session.sync(root);
-        if (closed || roots.get(root) !== lease || deleted.has(root)) return;
-        const family = new Set([root, ...ctx.data.session.family(root)]);
-        // Claim the complete known family before any child awaits. Its events
-        // may arrive before the child's own root/parent metadata is cached.
-        for (const sessionID of family) {
-          if (deleted.has(sessionID)) continue;
-          owned.set(sessionID, root);
-          lease.members.add(sessionID);
+        if (!current()) return;
+        const resolvedRoot = ctx.data.session.root(root);
+        if (resolvedRoot !== root) {
+          moveFamily(root, resolvedRoot, family);
+          return;
         }
-        for (const sessionID of family) {
-          if (closed || roots.get(root) !== lease) return;
-          if (deleted.has(sessionID)) continue;
-          if (sessionID !== root) await ctx.data.session.sync(sessionID);
-          await Promise.all([
-            ctx.data.session.permission.sync(sessionID),
-            ctx.data.session.form.sync(sessionID),
+        const rootInfo = ctx.data.session.get(root);
+        const active = await ctx.client.session.active();
+        if (!current()) return;
+        const sessions = new Map<string, OwnedSession>([[root, sessionState()]]);
+        const metadata = new Map([[root, rootInfo]]);
+        // parentID selects direct children; page and recurse to include the whole
+        // family, including descendants that have never entered the TUI cache.
+        for (const sessionID of sessions.keys()) {
+          let cursor: string | undefined;
+          do {
+            const page = await ctx.client.session.list({ parentID: sessionID, order: 'desc', cursor });
+            if (!current()) return;
+            for (const child of page.data) {
+              if (!deleted.has(child.id)) {
+                sessions.set(child.id, sessionState());
+                metadata.set(child.id, child);
+              }
+            }
+            cursor = page.cursor.next ?? undefined;
+          } while (cursor);
+        }
+        for (const [sessionID, state] of sessions) {
+          const requests = await Promise.all([
+            ctx.client.permission.list({ sessionID }),
+            ctx.client.session.form.list({ sessionID }),
+          ]).catch((error: unknown) => {
+            if (sessionID !== root && isMissingSession(error, sessionID)) return;
+            throw error;
+          });
+          if (!requests) {
+            sessions.delete(sessionID);
+            continue;
+          }
+          const [permissions, forms] = requests;
+          if (!current()) return;
+          state.running = sessionID in active;
+          state.pending = new Set([
+            ...permissions.map((request) => `permission:${request.id}`),
+            ...forms.map((form) => `form:${form.id}`),
           ]);
-          if (closed || roots.get(root) !== lease || deleted.has(root) || deleted.has(sessionID)) continue;
-          const pending = [
-            ...(ctx.data.session.permission.list(sessionID) ?? []).map((request) => `permission:${request.id}`),
-            ...(ctx.data.session.form.list(sessionID) ?? []).map((form) => `form:${form.id}`),
-          ];
-          if (ctx.data.session.status(sessionID) === 'running' || pending.length) {
-            lease.hydration.seed(sessionID, pending);
+          const info = metadata.get(sessionID);
+          if (info) state.idle = info.time?.idle ?? null;
+          const previous = family.sessions.get(sessionID);
+          // A terminal marker advancing while disconnected means this session's
+          // retained execution ended; a later execution belongs to another view.
+          if (root !== visibleRoot && previous && 'idle' in previous && state.idle != null
+              && state.idle > (previous.idle ?? 0)) {
+            state.running = false;
+            state.pending.clear();
           }
         }
-        hydrated = true;
+        // Events may precede descendant discovery. Buffer them before ownership
+        // filtering and replay only those that belong to the discovered family.
+        for (const event of snapshot.events) {
+          if (sessions.has(event.sessionID) || (event.parentID && sessions.has(event.parentID))) {
+            applyEvent(sessions, event);
+          }
+        }
+        if (!current()) return;
+        family.sessions = sessions;
+        family.snapshot = undefined;
+        publish();
       } catch (error) {
-        // Keep the completion barrier until reconciliation can load the family,
-        // even if its tab closed while a background child was being discovered.
-        console.warn('[workmux.status] could not hydrate session status', error);
-      } finally {
-        if (hydrated || closed || deleted.has(root)) lease.hydration.finish();
-        if (roots.get(root) !== lease) return;
-        lease.hydrating = false;
-        lease.hydrated = hydrated;
-        releaseIfIdle(root);
+        if (!current()) return;
+        if (isMissingSession(error, root)) {
+          deleted.add(root);
+          families.delete(root);
+          publish();
+          return;
+        }
+        snapshot.inFlight = false;
+        snapshot.retryAt = Date.now() + 1000;
+        console.warn('[workmux.status] could not refresh session status', error);
       }
     }
 
-    function claim(sessionID: string) {
-      if (deleted.has(sessionID)) return;
-      const root = ctx.data.session.root(sessionID);
-      if (deleted.has(root)) return;
-      let lease = roots.get(root);
-      if (!lease) {
-        lease = { members: new Set(), hydrating: false, hydrated: false, hydration: tracker.beginHydration() };
-        roots.set(root, lease);
-      }
-      owned.set(sessionID, root);
-      lease.members.add(sessionID);
-      if (!lease.hydrating && !lease.hydrated) {
-        void hydrate(root, lease);
-      }
-    }
-
-    function captureLocalSessions() {
+    function captureLocalSession() {
       const route = ctx.ui.router.current();
       const sessionID = route.type === 'session' ? route.sessionID : undefined;
-      const root = sessionID && !deleted.has(sessionID) ? ctx.data.session.root(sessionID) : undefined;
-      visibleRoot = root && !deleted.has(root) ? root : undefined;
-      if (sessionID && visibleRoot) claim(sessionID);
-      for (const [ownedRoot, lease] of roots) {
-        if (!lease.hydrating && !lease.hydrated && !deleted.has(ownedRoot)) void hydrate(ownedRoot, lease);
-        releaseIfIdle(ownedRoot);
+      visibleRoot = sessionID && !deleted.has(sessionID) ? ctx.data.session.root(sessionID) : undefined;
+      if (visibleRoot && deleted.has(visibleRoot)) visibleRoot = undefined;
+      if (visibleRoot) {
+        for (const [root, family] of families) {
+          if (root !== visibleRoot && ctx.data.session.root(root) === visibleRoot) moveFamily(root, visibleRoot, family);
+        }
       }
+      if (visibleRoot && !families.has(visibleRoot)) {
+        const sessions = new Map<string, OwnedSession>();
+        for (const id of new Set([visibleRoot, sessionID!, ...ctx.data.session.family(visibleRoot)])) {
+          if (deleted.has(id)) continue;
+          const info = ctx.data.session.get(id);
+          sessions.set(id, {
+            ...sessionState(ctx.data.session.status(id) === 'running'),
+            ...(info ? { idle: info.time?.idle ?? null } : {}),
+          });
+        }
+        families.set(visibleRoot, { sessions, snapshot: { events: [], inFlight: false, retryAt: 0 } });
+      }
+      for (const [root, family] of families) void refresh(root, family);
+      publish();
     }
 
     const stop = ctx.data.listen(({ details: event }) => {
       if (closed) return;
-      captureLocalSessions();
-
-      if (event.type === 'session.created') {
-        deleted.delete(event.data.sessionID);
-        if (event.data.parentID) {
-          parents.set(event.data.sessionID, event.data.parentID);
-          if (isOwned(event.data.parentID)) isOwned(event.data.sessionID);
-        }
-        return;
+      if (event.type === 'server.connected') {
+        for (const family of families.values()) family.snapshot = { events: [], inFlight: false, retryAt: 0 };
       }
-
-      const sessionID = event.type === 'form.created'
-        ? event.data.form.sessionID
-        : 'sessionID' in event.data && typeof event.data.sessionID === 'string'
-          ? event.data.sessionID
-          : undefined;
-      if (!sessionID || !isOwned(sessionID)) return;
-      const owner = owned.get(sessionID);
-
+      captureLocalSession();
+      let change: SessionEvent;
       switch (event.type) {
+        case 'session.created':
+          change = { type: 'created', sessionID: event.data.sessionID, parentID: event.data.parentID };
+          deleted.delete(change.sessionID);
+          break;
         case 'session.execution.started':
-          tracker.start(sessionID);
-          break;
-        case 'session.status':
-          if (event.data.status.type === 'busy' || event.data.status.type === 'retry') tracker.busy(sessionID);
-          if (event.data.status.type === 'idle') tracker.finish(sessionID);
-          break;
-        case 'permission.asked':
-          tracker.wait(sessionID, `permission:${event.data.id}`);
-          break;
-        case 'permission.replied':
-          tracker.resume(sessionID, `permission:${event.data.requestID}`);
-          break;
-        case 'form.created':
-          tracker.wait(sessionID, `form:${event.data.form.id}`);
-          break;
-        case 'form.replied':
-        case 'form.cancelled':
-          tracker.resume(sessionID, `form:${event.data.id}`);
+          change = { type: 'started', sessionID: event.data.sessionID };
           break;
         case 'session.execution.succeeded':
         case 'session.execution.failed':
         case 'session.execution.interrupted':
-        case 'session.idle':
-          tracker.finish(sessionID);
+          change = { type: 'finished', sessionID: event.data.sessionID };
           break;
         case 'session.deleted':
-          tracker.forget(sessionID);
-          owned.delete(sessionID);
-          parents.delete(sessionID);
-          if (owner) roots.get(owner)?.members.delete(sessionID);
-          if (visibleRoot === sessionID) visibleRoot = undefined;
-          deleted.add(sessionID);
-          roots.get(sessionID)?.hydration.finish();
+          change = { type: 'deleted', sessionID: event.data.sessionID };
           break;
+        case 'permission.asked':
+          change = { type: 'asked', sessionID: event.data.sessionID, requestID: `permission:${event.data.id}` };
+          break;
+        case 'permission.replied':
+          change = { type: 'replied', sessionID: event.data.sessionID, requestID: `permission:${event.data.requestID}` };
+          break;
+        case 'form.created':
+          change = { type: 'asked', sessionID: event.data.form.sessionID, requestID: `form:${event.data.form.id}` };
+          break;
+        case 'form.replied':
+        case 'form.cancelled':
+          change = { type: 'replied', sessionID: event.data.sessionID, requestID: `form:${event.data.id}` };
+          break;
+        default:
+          return;
       }
-      if (owner) releaseIfIdle(owner);
+      for (const family of families.values()) family.snapshot?.events.push(change);
+      const family = owner(change.sessionID, change.parentID);
+      if (family) observe(family, change);
+      if (change.type === 'deleted') {
+        deleted.add(change.sessionID);
+        families.delete(change.sessionID);
+        if (visibleRoot === change.sessionID) visibleRoot = undefined;
+      }
+      publish();
     });
 
-    captureLocalSessions();
-    // A newly opened session can become visible after its first server event.
-    // Reconcile client-local navigation so its already-running turn is picked up.
-    const timer = setInterval(captureLocalSessions, 500);
+    captureLocalSession();
+    // Snapshot cache commits and route changes do not emit server events.
+    const timer = setInterval(captureLocalSession, 500);
     return () => {
       closed = true;
       clearInterval(timer);
       stop();
-      for (const lease of roots.values()) lease.hydration.finish();
+      families.clear();
     };
   },
 });

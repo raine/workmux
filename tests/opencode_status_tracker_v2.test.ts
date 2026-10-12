@@ -1,68 +1,60 @@
 import { expect, test } from 'bun:test';
-import { StatusTracker, type WindowStatus } from '../resources/opencode/v2/workmux-status/status';
+import { applyEvent, isActive, sessionState, windowStatus, type SessionState } from '../resources/opencode/v2/workmux-status/status';
 
-function tracker() {
-  const reports: WindowStatus[] = [];
-  return { reports, status: new StatusTracker((value) => reports.push(value)) };
-}
-
-test('reports working, waiting, resumed and done without duplicate writes', () => {
-  const { status, reports } = tracker();
-  status.start('parent');
-  status.busy('parent');
-  status.wait('parent', 'permission:1');
-  status.busy('parent');
-  status.resume('parent', 'permission:1');
-  status.finish('parent');
-  status.busy('parent');
-  expect(reports).toEqual(['working', 'waiting', 'working', 'done']);
+test('derives working, waiting, resumed, and done from execution and requests', () => {
+  const sessions = new Map<string, SessionState>();
+  applyEvent(sessions, { type: 'started', sessionID: 'parent' });
+  expect(windowStatus(sessions.values())).toBe('working');
+  applyEvent(sessions, { type: 'asked', sessionID: 'parent', requestID: 'permission:1' });
+  expect(windowStatus(sessions.values())).toBe('waiting');
+  applyEvent(sessions, { type: 'replied', sessionID: 'parent', requestID: 'permission:1' });
+  expect(windowStatus(sessions.values())).toBe('working');
+  applyEvent(sessions, { type: 'finished', sessionID: 'parent' });
+  expect(windowStatus(sessions.values())).toBe('done');
 });
 
 test('waits until every permission and form is answered', () => {
-  const { status, reports } = tracker();
-  status.start('parent');
-  status.wait('parent', 'permission:1');
-  status.wait('parent', 'form:2');
-  status.resume('parent', 'permission:1');
-  status.resume('parent', 'form:2');
-  expect(reports).toEqual(['working', 'waiting', 'working']);
+  const sessions = new Map([['parent', sessionState(true)]]);
+  applyEvent(sessions, { type: 'asked', sessionID: 'parent', requestID: 'permission:1' });
+  applyEvent(sessions, { type: 'asked', sessionID: 'parent', requestID: 'form:2' });
+  applyEvent(sessions, { type: 'replied', sessionID: 'parent', requestID: 'permission:1' });
+  expect(windowStatus(sessions.values())).toBe('waiting');
+  applyEvent(sessions, { type: 'replied', sessionID: 'parent', requestID: 'form:2' });
+  expect(windowStatus(sessions.values())).toBe('working');
 });
 
-test('one idle child does not finish another running or waiting session', () => {
-  const { status, reports } = tracker();
-  status.start('parent');
-  status.start('child');
-  status.wait('child', 'form:1');
-  status.finish('parent');
-  status.resume('child', 'form:1');
-  status.finish('child');
-  expect(reports).toEqual(['working', 'waiting', 'working', 'done']);
+test('one finished parent does not finish a running or waiting child', () => {
+  const sessions = new Map([['parent', sessionState(true)], ['child', sessionState(true, ['form:1'])]]);
+  applyEvent(sessions, { type: 'finished', sessionID: 'parent' });
+  expect(windowStatus(sessions.values())).toBe('waiting');
+  applyEvent(sessions, { type: 'replied', sessionID: 'child', requestID: 'form:1' });
+  expect(windowStatus(sessions.values())).toBe('working');
+  applyEvent(sessions, { type: 'finished', sessionID: 'child' });
+  expect(windowStatus(sessions.values())).toBe('done');
 });
 
-test('a new execution rearms busy after completion', () => {
-  const { status, reports } = tracker();
-  status.start('parent');
-  status.finish('parent');
-  status.busy('parent');
-  status.start('parent');
-  expect(reports).toEqual(['working', 'done', 'working']);
+test('a new execution starts after completion', () => {
+  const sessions = new Map([['parent', sessionState(true)]]);
+  applyEvent(sessions, { type: 'finished', sessionID: 'parent' });
+  applyEvent(sessions, { type: 'started', sessionID: 'parent' });
+  expect(windowStatus(sessions.values())).toBe('working');
 });
 
-test('seeding an already running session includes its pending requests', () => {
-  const { status, reports } = tracker();
-  status.seed('parent', ['permission:1']);
-  status.resume('parent', 'permission:1');
-  status.forget('parent');
-  expect(reports).toEqual(['waiting', 'working', 'done']);
+test('replying to a standalone form does not invent a running execution', () => {
+  const sessions = new Map<string, SessionState>();
+  applyEvent(sessions, { type: 'asked', sessionID: 'parent', requestID: 'form:1' });
+  expect(windowStatus(sessions.values())).toBe('waiting');
+  applyEvent(sessions, { type: 'replied', sessionID: 'parent', requestID: 'form:1' });
+  expect(windowStatus(sessions.values())).toBe('done');
+  expect(isActive(sessions.get('parent')!)).toBe(false);
 });
 
-test('active state follows execution and permission lifetimes', () => {
-  const { status } = tracker();
-  expect(status.isActive('parent')).toBe(false);
-  status.start('parent');
-  expect(status.isActive('parent')).toBe(true);
-  status.wait('parent', 'permission:1');
-  expect(status.isActive('parent')).toBe(true);
-  status.finish('parent');
-  expect(status.isActive('parent')).toBe(false);
+test('completion clears pending requests and deletion forgets the session', () => {
+  const sessions = new Map([['parent', sessionState(true, ['permission:1'])]]);
+  applyEvent(sessions, { type: 'finished', sessionID: 'parent' });
+  expect(isActive(sessions.get('parent')!)).toBe(false);
+  expect(sessions.get('parent')!.pending.size).toBe(0);
+  applyEvent(sessions, { type: 'deleted', sessionID: 'parent' });
+  expect(sessions.size).toBe(0);
+  expect(windowStatus(sessions.values())).toBe('done');
 });

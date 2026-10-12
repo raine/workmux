@@ -6,6 +6,52 @@ import { join } from 'node:path';
 mock.module('@opencode/plugin/tui', () => ({ Plugin: { define: (definition: unknown) => definition } }));
 
 const { default: plugin } = await import('../resources/opencode/v2/workmux-status/tui');
+// SDK snapshots default to the fixture data; tests can supply an independent
+// client to model server state that has not reached the TUI cache.
+function setup(ctx: any) {
+  if (ctx.data && !ctx.client) {
+    const session = ctx.data.session;
+    const route = ctx.ui.router.current();
+    const root = route.type === 'session' ? session.root(route.sessionID) : undefined;
+    ctx.client = {
+      session: {
+        active: async () => Object.fromEntries([root, ...(root ? session.family(root) : [])]
+          .filter((id) => id && session.status(id) === 'running').map((id) => [id, { type: 'running' }])),
+        list: async ({ parentID }: { parentID: string }) => ({
+          data: parentID === root ? session.family(root).filter((id: string) => id !== root).map((id: string) => ({ id })) : [],
+          cursor: {},
+        }),
+        form: { list: async ({ sessionID }: { sessionID: string }) => {
+          await session.form.sync(sessionID);
+          return session.form.list(sessionID) ?? [];
+        } },
+      },
+      permission: { list: async ({ sessionID }: { sessionID: string }) => {
+        await session.permission.sync(sessionID);
+        return session.permission.list(sessionID) ?? [];
+      } },
+    };
+  }
+  return plugin.setup(ctx);
+}
+
+function snapshotClient(options: {
+  active: () => Promise<Record<string, { type: 'running' }>>;
+  children?: (parentID: string, cursor?: string) => Promise<{ data: { id: string }[]; cursor: { next?: string } }>;
+  permissions?: (sessionID: string) => Promise<{ id: string }[]>;
+  forms?: () => Promise<{ id: string }[]>;
+}) {
+  return {
+    session: {
+      active: options.active,
+      list: ({ parentID, cursor }: { parentID: string; cursor?: string }) =>
+        options.children?.(parentID, cursor) ?? Promise.resolve({ data: [], cursor: {} }),
+      form: { list: options.forms ?? (async () => []) },
+    },
+    permission: { list: ({ sessionID }: { sessionID: string }) => options.permissions?.(sessionID) ?? Promise.resolve([]) },
+  };
+}
+
 const originalPath = process.env.PATH;
 const originalLog = process.env.WORKMUX_TEST_LOG;
 const muxVariables = ['TMUX', 'TMUX_PANE', 'WEZTERM_PANE', 'ZELLIJ', 'ZELLIJ_PANE_ID', 'ZELLIJ_SESSION_NAME', 'KITTY_WINDOW_ID', 'WORKMUX_BACKEND'] as const;
@@ -30,7 +76,7 @@ async function calls() {
 }
 
 async function waitForCalls(count: number) {
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < 300; i++) {
     if ((await calls()).length >= count) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -46,23 +92,26 @@ function deferred() {
 async function hydrationHarness(options: {
   family?: string[];
   root?: (id: string) => string;
+  get?: (id: string) => any;
   sync?: (id: string) => Promise<void>;
   permissionSync?: () => Promise<void>;
   pending?: string[];
   pendingSession?: string;
   forms?: string[];
+  client?: ReturnType<typeof snapshotClient>;
 } = {}) {
   process.env.TMUX = 'test-tmux';
   process.env.TMUX_PANE = '%123';
   let handler: (input: any) => void = () => {};
   let open = true;
-  const cleanup = await plugin.setup({
+  const cleanup = await setup({
+    client: options.client,
     data: {
       listen: (callback: typeof handler) => { handler = callback; return () => {}; },
       session: {
         root: options.root ?? (() => 'ours'),
         family: () => options.family ?? ['ours'],
-        get: () => undefined,
+        get: options.get ?? (() => undefined),
         status: () => 'running',
         sync: options.sync ?? (async () => {}),
         permission: {
@@ -102,7 +151,7 @@ test('hydration reconciles pending requests after a busy event', async () => {
   });
   try {
     await waitForCalls(1);
-    harness.emit('session.status', { sessionID: 'ours', status: { type: 'busy' } });
+    harness.emit('session.execution.started', { sessionID: 'ours' });
     await waitForCalls(2);
     permissions.resolve();
     await waitForCalls(3);
@@ -126,7 +175,7 @@ test.each(['permission.replied', 'form.replied', 'form.cancelled'])('hydration d
   });
   try {
     await waitForCalls(1);
-    harness.emit('session.status', { sessionID: 'ours', status: { type: 'busy' } });
+    harness.emit('session.execution.started', { sessionID: 'ours' });
     await waitForCalls(2);
     harness.emit(type, { sessionID: 'ours', requestID: 'request', id: 'request' });
     permissions.resolve();
@@ -142,7 +191,11 @@ test('hydration never reports done while a running child is still loading', asyn
   const child = deferred();
   const harness = await hydrationHarness({
     family: ['ours', 'child'],
-    sync: async (id) => { if (id === 'child') await child.promise; },
+    client: snapshotClient({
+      active: async () => ({ ours: { type: 'running' }, child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+      permissions: async (id) => { if (id === 'child') await child.promise; return []; },
+    }),
   });
   try {
     await waitForCalls(2);
@@ -170,9 +223,11 @@ test.each(['permission.replied', 'session.execution.succeeded', 'session.deleted
   const harness = await hydrationHarness({
     family: ['ours', 'child'],
     root: (id) => id, // The family is known, but the child's root/parent metadata is not.
-    sync: async (id) => { if (id === 'child') await child.promise; },
-    pending: ['request'],
-    pendingSession: 'child',
+    client: snapshotClient({
+      active: async () => ({ ours: { type: 'running' }, child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+      permissions: async (id) => { if (id !== 'child') return []; await child.promise; return [{ id: 'request' }]; },
+    }),
   });
   try {
     await waitForCalls(2);
@@ -192,20 +247,25 @@ test.each(['permission.replied', 'session.execution.succeeded', 'session.deleted
   }
 });
 
-test('hydration retries a failed child sync after the tab closes without premature completion', async () => {
+test('hydration retries a failed child snapshot after the tab closes without premature completion', async () => {
   const firstAttempt = deferred();
   const retry = deferred();
   let attempts = 0;
   const harness = await hydrationHarness({
     family: ['ours', 'child'],
-    sync: async (id) => {
-      if (id !== 'child') return;
-      if (++attempts === 1) {
-        await firstAttempt.promise;
-        throw new Error('temporary sync failure');
-      }
-      retry.resolve();
-    },
+    client: snapshotClient({
+      active: async () => ({ child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+      permissions: async (id) => {
+        if (id !== 'child') return [];
+        if (++attempts === 1) {
+          await firstAttempt.promise;
+          throw new Error('temporary snapshot failure');
+        }
+        retry.resolve();
+        return [];
+      },
+    }),
   });
   try {
     await waitForCalls(2);
@@ -214,7 +274,7 @@ test('hydration retries a failed child sync after the tab closes without prematu
     firstAttempt.resolve();
     await Bun.sleep(50);
     expect(await calls()).toEqual(['%123|register-agent', '%123|set-window-status working']);
-    await Promise.race([retry.promise, Bun.sleep(1200)]);
+    await Promise.race([retry.promise, Bun.sleep(2200)]);
     expect(attempts).toBe(2);
     await Bun.sleep(50);
     expect(await calls()).toHaveLength(2);
@@ -232,7 +292,7 @@ test.each(['session.execution.succeeded', 'session.execution.failed', 'session.e
   const harness = await hydrationHarness({ permissionSync: () => permissions.promise, pending: ['request'] });
   try {
     await waitForCalls(1);
-    harness.emit('session.status', { sessionID: 'ours', status: { type: 'busy' } });
+    harness.emit('session.execution.started', { sessionID: 'ours' });
     await waitForCalls(2);
     harness.emit(type, { sessionID: 'ours' });
     permissions.resolve();
@@ -274,7 +334,7 @@ test('releases closed tabs after background work finishes', async () => {
     },
   };
 
-  const cleanup = await plugin.setup(ctx as any);
+  const cleanup = await setup(ctx as any);
   await waitForCalls(1);
   expect(await calls()).toEqual(['%123|register-agent']);
   const emit = (type: string, data: object) => handler({ details: { type, data } });
@@ -345,9 +405,9 @@ test('shared tabs do not claim another pane', async () => {
   }
 
   process.env.TMUX_PANE = '%123';
-  const cleanupA = await plugin.setup(client('ours') as any);
+  const cleanupA = await setup(client('ours') as any);
   process.env.TMUX_PANE = '%456';
-  const cleanupB = await plugin.setup(client('other') as any);
+  const cleanupB = await setup(client('other') as any);
   await waitForCalls(2);
   process.env.TMUX_PANE = '%123';
   handlers[0]({ details: { type: 'session.execution.started', data: { sessionID: 'ours' } } });
@@ -371,18 +431,22 @@ test('shared tabs do not claim another pane', async () => {
   if (typeof cleanupB === 'function') await cleanupB();
 });
 
-test('hydrates after root sync so a running family member is found', async () => {
+test('discovers a running child independently of the TUI family and status caches', async () => {
   process.env.TMUX = 'test-tmux';
   process.env.TMUX_PANE = '%123';
   let rootSynced = false;
   const ctx = {
+    client: snapshotClient({
+      active: async () => ({ child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+    }),
     data: {
       listen: () => () => {},
       session: {
         root: (id: string) => id,
-        family: () => rootSynced ? ['ours', 'child'] : ['ours'],
+        family: () => ['ours'],
         get: () => undefined, // the child's metadata is not in this cache yet
-        status: (id: string) => id === 'child' ? 'running' : 'idle',
+        status: () => 'idle',
         sync: async (id: string) => { if (id === 'ours') rootSynced = true; },
         permission: { sync: async () => {}, list: () => [] },
         form: { sync: async () => {}, list: () => [] },
@@ -390,8 +454,9 @@ test('hydrates after root sync so a running family member is found', async () =>
     },
     ui: { router: { current: () => ({ type: 'session', sessionID: 'ours' }) }, tabs: { list: () => [] } },
   };
-  const cleanup = await plugin.setup(ctx as any);
+  const cleanup = await setup(ctx as any);
   await waitForCalls(2);
+  expect(rootSynced).toBe(true);
   expect(await calls()).toEqual(['%123|register-agent', '%123|set-window-status working']);
   if (typeof cleanup === 'function') await cleanup();
 });
@@ -403,13 +468,14 @@ test('late hydration does not reclaim a deleted root', async () => {
   const sync = new Promise<void>((resolve) => { resume = resolve; });
   let handler: (input: any) => void = () => {};
   const ctx = {
+    client: snapshotClient({ active: async () => ({ ours: { type: 'running' } }) }),
     data: {
       listen: (callback: typeof handler) => { handler = callback; return () => {}; },
       session: {
         root: (id: string) => id,
         family: () => ['ours'],
         get: () => undefined,
-        status: () => 'running',
+        status: () => 'idle',
         sync: () => sync,
         permission: { sync: async () => {}, list: () => [] },
         form: { sync: async () => {}, list: () => [] },
@@ -417,7 +483,7 @@ test('late hydration does not reclaim a deleted root', async () => {
     },
     ui: { router: { current: () => ({ type: 'session', sessionID: 'ours' }) }, tabs: { list: () => [] } },
   };
-  const cleanup = await plugin.setup(ctx as any);
+  const cleanup = await setup(ctx as any);
   await waitForCalls(1);
   handler({ details: { type: 'session.deleted', data: { sessionID: 'ours' } } });
   resume();
@@ -437,6 +503,10 @@ test('closing a tab during hydration keeps discovered background work until comp
   let tabOpen = true;
   let handler: (input: any) => void = () => {};
   const ctx = {
+    client: snapshotClient({
+      active: async () => ({ child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+    }),
     data: {
       listen: (callback: typeof handler) => { handler = callback; return () => {}; },
       session: {
@@ -453,7 +523,7 @@ test('closing a tab during hydration keeps discovered background work until comp
     },
     ui: { router: { current: () => tabOpen ? { type: 'session', sessionID: 'ours' } : { type: 'home' } }, tabs: { list: () => [] } },
   };
-  const cleanup = await plugin.setup(ctx as any);
+  const cleanup = await setup(ctx as any);
   await waitForCalls(1);
   tabOpen = false;
   handler({ details: { type: 'session.created', data: { sessionID: 'unrelated' } } });
@@ -494,7 +564,7 @@ test.each([
       tabs: { list: () => [] },
     },
   };
-  const cleanup = await plugin.setup(ctx as any);
+  const cleanup = await setup(ctx as any);
   await waitForCalls(1);
   handler({ details: { type: 'session.execution.started', data: { sessionID: 'ours' } } });
   await waitForCalls(2);
@@ -510,6 +580,247 @@ test.each([
   { name: 'explicit backend without its pane ID', vars: { WEZTERM_PANE: '81', WORKMUX_BACKEND: 'tmux' } },
 ])('does nothing in $name', async ({ vars }) => {
   Object.assign(process.env, vars);
-  await plugin.setup({} as any);
+  await setup({} as any);
   expect(await calls()).toEqual([]);
+});
+
+test('reads running status without waiting for the TUI active cache', async () => {
+  const active = deferred();
+  const harness = await hydrationHarness({
+    client: snapshotClient({ active: async () => {
+      await active.promise;
+      return { ours: { type: 'running' } };
+    } }),
+  });
+  try {
+    await waitForCalls(1);
+    active.resolve();
+    await waitForCalls(2);
+    expect(await calls()).toEqual(['%123|register-agent', '%123|set-window-status working']);
+  } finally {
+    active.resolve();
+    await harness.cleanup();
+  }
+});
+
+test('discovers paginated descendants without claiming unrelated active sessions', async () => {
+  const visited: string[] = [];
+  const harness = await hydrationHarness({
+    family: ['ours'],
+    client: snapshotClient({
+      active: async () => ({ grandchild: { type: 'running' }, unrelated: { type: 'running' } }),
+      children: async (parentID, cursor) => {
+        visited.push(`${parentID}:${cursor ?? ''}`);
+        if (parentID === 'ours' && !cursor) return { data: [{ id: 'child' }], cursor: { next: 'page2' } };
+        if (parentID === 'ours') return { data: [{ id: 'sibling' }], cursor: {} };
+        return { data: parentID === 'child' ? [{ id: 'grandchild' }] : [], cursor: {} };
+      },
+    }),
+  });
+  try {
+    await waitForCalls(2);
+    expect(visited).toEqual(['ours:', 'ours:page2', 'child:', 'sibling:', 'grandchild:']);
+    harness.emit('session.execution.succeeded', { sessionID: 'grandchild' });
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('reconnect reconciles missed completion and releases closed-tab ownership', async () => {
+  let running = true;
+  const harness = await hydrationHarness({
+    client: snapshotClient({ active: async () => running ? { ours: { type: 'running' } } : {} }),
+  });
+  try {
+    await waitForCalls(2);
+    harness.close();
+    running = false;
+    harness.emit('server.connected', {});
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+    harness.emit('session.execution.started', { sessionID: 'ours' });
+    await Bun.sleep(50);
+    expect(await calls()).toHaveLength(3);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('reconnect removes requests answered while disconnected', async () => {
+  let pending = true;
+  const harness = await hydrationHarness({
+    client: snapshotClient({
+      active: async () => ({ ours: { type: 'running' } }),
+      permissions: async () => pending ? [{ id: 'allow-edit' }] : [],
+      forms: async () => pending ? [{ id: 'question' }] : [],
+    }),
+  });
+  try {
+    await waitForCalls(2);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status waiting');
+    pending = false;
+    harness.emit('server.connected', {});
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status working');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('reconnect discards an unfinished snapshot from the previous connection', async () => {
+  const oldSnapshot = deferred();
+  const started = deferred();
+  let snapshots = 0;
+  const harness = await hydrationHarness({
+    client: snapshotClient({
+      active: async () => ({}),
+      permissions: async () => {
+        if (++snapshots !== 1) return [];
+        started.resolve();
+        await oldSnapshot.promise;
+        return [{ id: 'stale-request' }];
+      },
+    }),
+  });
+  try {
+    await started.promise;
+    harness.emit('session.execution.started', { sessionID: 'ours' });
+    await waitForCalls(2);
+    harness.emit('server.connected', {});
+    await waitForCalls(3);
+    oldSnapshot.resolve();
+    await Bun.sleep(50);
+    expect(await calls()).toEqual([
+      '%123|register-agent', '%123|set-window-status working', '%123|set-window-status done',
+    ]);
+  } finally {
+    oldSnapshot.resolve();
+    await harness.cleanup();
+  }
+});
+
+test('completion before descendant discovery overrides an earlier active snapshot', async () => {
+  const discovery = deferred();
+  const started = deferred();
+  const harness = await hydrationHarness({
+    family: ['ours'],
+    root: (id) => id,
+    client: snapshotClient({
+      active: async () => ({ child: { type: 'running' } }),
+      children: async (parentID) => {
+        if (parentID !== 'ours') return { data: [], cursor: {} };
+        started.resolve();
+        await discovery.promise;
+        return { data: [{ id: 'child' }], cursor: {} };
+      },
+    }),
+  });
+  try {
+    await started.promise;
+    await waitForCalls(2);
+    harness.emit('session.execution.succeeded', { sessionID: 'child' });
+    discovery.resolve();
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+  } finally {
+    discovery.resolve();
+    await harness.cleanup();
+  }
+});
+
+test('reconnect does not claim a later execution after retained work finished', async () => {
+  let idle = 10;
+  const harness = await hydrationHarness({
+    get: () => ({ time: { idle } }),
+    client: snapshotClient({
+      active: async () => ({ ours: { type: 'running' } }),
+      permissions: async () => idle === 10 ? [] : [{ id: 'new-execution' }],
+    }),
+  });
+  try {
+    await waitForCalls(2);
+    harness.close();
+    idle = 20;
+    harness.emit('server.connected', {});
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+    harness.emit('permission.asked', { sessionID: 'ours', id: 'new-execution' });
+    await Bun.sleep(50);
+    expect(await calls()).toHaveLength(3);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('a root deleted while disconnected releases its ownership instead of retrying forever', async () => {
+  let removed = false;
+  const harness = await hydrationHarness({
+    sync: async () => {
+      if (removed) throw Object.assign(new Error('session not found'), { _tag: 'SessionNotFoundError', sessionID: 'ours' });
+    },
+    client: snapshotClient({ active: async () => ({ ours: { type: 'running' } }) }),
+  });
+  try {
+    await waitForCalls(2);
+    removed = true;
+    harness.emit('server.connected', {});
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+    harness.emit('session.execution.started', { sessionID: 'ours' });
+    await Bun.sleep(50);
+    expect(await calls()).toHaveLength(3);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('a child deleted during discovery does not hold the completion barrier', async () => {
+  const removed = deferred();
+  const harness = await hydrationHarness({
+    family: ['ours', 'child'],
+    client: snapshotClient({
+      active: async () => ({ child: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ours' ? [{ id: 'child' }] : [], cursor: {} }),
+      permissions: async (id) => {
+        if (id === 'child') {
+          await removed.promise;
+          throw Object.assign(new Error('session not found'), { _tag: 'SessionNotFoundError', sessionID: id });
+        }
+        return [];
+      },
+    }),
+  });
+  try {
+    await waitForCalls(2);
+    removed.resolve();
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+  } finally {
+    removed.resolve();
+    await harness.cleanup();
+  }
+});
+
+test('resolves a viewed session ancestry without creating duplicate ownership', async () => {
+  let metadataLoaded = false;
+  const synced: string[] = [];
+  const harness = await hydrationHarness({
+    root: (id) => metadataLoaded && id === 'ours' ? 'ancestor' : id,
+    sync: async (id) => { synced.push(id); metadataLoaded = true; },
+    client: snapshotClient({
+      active: async () => ({ ours: { type: 'running' } }),
+      children: async (parentID) => ({ data: parentID === 'ancestor' ? [{ id: 'ours' }] : [], cursor: {} }),
+    }),
+  });
+  try {
+    await waitForCalls(2);
+    expect(synced).toEqual(['ours', 'ancestor']);
+    harness.emit('session.execution.succeeded', { sessionID: 'ours' });
+    await waitForCalls(3);
+    expect((await calls()).at(-1)).toBe('%123|set-window-status done');
+  } finally {
+    await harness.cleanup();
+  }
 });
