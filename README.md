@@ -139,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/raine/workmux/main/scripts/install.
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew install raine/workmux/workmux
+brew install workmux
 ```
 
 <details>
