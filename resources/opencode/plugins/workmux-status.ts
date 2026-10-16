@@ -173,3 +173,181 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $, client }) => {
     },
   };
 };
+
+// Preserve the V1 implementation above for OpenCode V1 and existing tests,
+// while exposing a valid V2 default module for V2's server loader.
+export default {
+  id: "workmux-status",
+  async setup(ctx: any) {
+    const $shell: any = (globalThis as any).Bun?.$;
+    try {
+      await $shell`workmux register-agent`.quiet();
+    } catch {
+      // Status tracking remains available when registration cannot reach workmux.
+    }
+
+    const statusBySession = new Map<string, string>();
+    const acceptBusyBySession = new Map<string, boolean>();
+    const deletedSessions = new Set<string>();
+    const childBySession = new Map<string, boolean>();
+    let reportedStatus: string | undefined;
+    let pendingPrompt: string | undefined;
+    let statusQueue = Promise.resolve();
+
+    function writeStatus(status: string, prompt?: string) {
+      const command =
+        prompt === undefined
+          ? $shell`workmux set-window-status ${status}`
+          : $shell`workmux set-window-status ${status} < ${new Response(JSON.stringify({ prompt }))}`;
+      return command.quiet().then(() => {}, () => {});
+    }
+
+    function queueStatus(status: string, prompt?: string) {
+      statusQueue = statusQueue.then(
+        () => writeStatus(status, prompt),
+        () => writeStatus(status, prompt),
+      );
+      return statusQueue;
+    }
+
+    function takePrompt(status: string) {
+      if (status !== "working") {
+        return undefined;
+      }
+      const prompt = pendingPrompt;
+      pendingPrompt = undefined;
+      return prompt;
+    }
+
+    async function isChildSession(sessionID: string) {
+      const known = childBySession.get(sessionID);
+      if (known !== undefined) {
+        return known;
+      }
+      try {
+        const result: any = await ctx.session.get({ sessionID });
+        const data = result?.data ?? result;
+        if (!data) {
+          return true;
+        }
+        const isChild = Boolean(data.parentID);
+        childBySession.set(sessionID, isChild);
+        return isChild;
+      } catch {
+        return true;
+      }
+    }
+
+    async function reportAggregateStatus() {
+      const statuses = [...statusBySession.values()];
+      let status = "done";
+
+      if (statuses.includes("waiting")) {
+        status = "waiting";
+      } else if (statuses.includes("working")) {
+        status = "working";
+      }
+
+      if (reportedStatus === status && !(status === "working" && pendingPrompt !== undefined)) {
+        return;
+      }
+
+      reportedStatus = status;
+      await queueStatus(status, takePrompt(status));
+    }
+
+    async function setStatus(sessionID: string | undefined, status: string) {
+      if (!sessionID || deletedSessions.has(sessionID)) {
+        return;
+      }
+
+      const previous = statusBySession.get(sessionID);
+      if (status === "done" && previous === undefined) {
+        return;
+      }
+      if (status === "working" && acceptBusyBySession.get(sessionID) === false) {
+        return;
+      }
+      if (previous === status) {
+        return;
+      }
+
+      statusBySession.set(sessionID, status);
+      if (status === "done") {
+        acceptBusyBySession.set(sessionID, false);
+      } else {
+        acceptBusyBySession.set(sessionID, true);
+      }
+
+      await reportAggregateStatus();
+    }
+
+    await ctx.session.hook("prompt", async (event: any) => {
+      const sessionID = event?.sessionID ?? event?.properties?.sessionID;
+      if (await isChildSession(sessionID)) {
+        return;
+      }
+      const prompt = String(event?.prompt?.text ?? "");
+      if (!prompt.trim()) {
+        return;
+      }
+      pendingPrompt = prompt;
+      if (reportedStatus === "working") {
+        await queueStatus("working", takePrompt("working"));
+      }
+    });
+
+    const controller = new AbortController();
+    const task = (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        const currentEvent: any = event;
+        if (currentEvent?.type === "message.updated" && currentEvent?.properties?.info?.role === "user") {
+          const sessionID = currentEvent?.properties?.sessionID ?? currentEvent?.properties?.info?.sessionID;
+          if (sessionID) {
+            acceptBusyBySession.set(sessionID, true);
+          }
+        }
+
+        switch (currentEvent?.type) {
+          case "session.created":
+            childBySession.set(currentEvent.properties.info.id, Boolean(currentEvent.properties.info.parentID));
+            break;
+          case "session.status":
+            if (currentEvent.properties.status.type === "busy") {
+              await setStatus(currentEvent.properties.sessionID, "working");
+            }
+            if (currentEvent.properties.status.type === "idle") {
+              await setStatus(currentEvent.properties.sessionID, "done");
+            }
+            break;
+          case "permission.asked":
+          case "question.asked":
+            await setStatus(currentEvent.properties.sessionID, "waiting");
+            break;
+          case "permission.replied":
+          case "question.replied":
+            await setStatus(currentEvent.properties.sessionID, "working");
+            break;
+          case "session.idle":
+            await setStatus(currentEvent.properties.sessionID, "done");
+            break;
+          case "session.deleted": {
+            const sessionID = currentEvent.properties.info.id;
+            deletedSessions.add(sessionID);
+            acceptBusyBySession.delete(sessionID);
+            childBySession.delete(sessionID);
+            if (statusBySession.delete(sessionID)) {
+              await reportAggregateStatus();
+            }
+            break;
+          }
+        }
+      }
+    })().catch(() => {});
+
+    return async () => {
+      controller.abort();
+      await task.catch(() => {});
+    };
+  },
+};
