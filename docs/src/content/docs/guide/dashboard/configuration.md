@@ -90,7 +90,7 @@ Dropping `number` hides the jump key, and `1`-`9` still jump to the first nine r
 
 The opt-in `prompt` column shows the last prompt you sent to each agent, on one line and cut with `…` to fit. Status hooks store the prompt only while the `prompt` column or a [`{prompt}` sidebar token](/guide/sidebar/customization/#tokens) is configured, evaluated with the agent's project configuration. Removing both stops capture, and each agent's stored prompt is deleted at its next status update.
 
-Prompts come from Claude Code, Codex, Gemini CLI, Copilot CLI, Grok, OpenCode, pi, and oh-my-pi. Prompts sent to subagents and messages the agent injects itself are ignored. A prompt with no text, such as an image alone, keeps the previous prompt. A prompt passed when the agent starts, such as `workmux add -p`, may not be shown until you send the next one. OpenCode, pi, and oh-my-pi report prompts once `workmux setup` updates their status plugin.
+Prompts come from Claude Code, Codex, Gemini CLI, Copilot CLI, Grok, Kimi Code, OpenCode, pi, and oh-my-pi. Prompts sent to subagents and messages the agent injects itself are ignored. A prompt with no text, such as an image alone, keeps the previous prompt. A prompt passed when the agent starts, such as `workmux add -p`, may not be shown until you send the next one. OpenCode, pi, and oh-my-pi report prompts once `workmux setup` updates their status plugin.
 
 ### Worktree columns
 

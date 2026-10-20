@@ -211,6 +211,30 @@ impl AgentProfile for CodexProfile {
     }
 }
 
+pub struct KimiProfile;
+
+impl AgentProfile for KimiProfile {
+    fn name(&self) -> &'static str {
+        "kimi"
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--auto")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("\"$(cat {})\"", prompt_path)
+    }
+
+    fn auto_name_command(&self) -> Option<&'static str> {
+        Some(r#"sh -c 'kimi -p "$(cat)"'"#)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct KiroProfile;
 
 impl AgentProfile for KiroProfile {
@@ -345,6 +369,7 @@ static PROFILES: &[&dyn AgentProfile] = &[
     &CodexProfile,
     &PiProfile,
     &OmpProfile,
+    &KimiProfile,
     &KiroProfile,
     &VibeProfile,
     &GrokProfile,
@@ -740,6 +765,20 @@ mod tests {
     }
 
     #[test]
+    fn test_kimi_profile() {
+        let profile = KimiProfile;
+        assert_eq!(profile.name(), "kimi");
+        assert!(!profile.needs_bang_delay());
+        assert!(!profile.needs_auto_status());
+        assert_eq!(profile.skip_permissions_flag(), Some("--auto"));
+        assert_eq!(
+            profile.auto_name_command(),
+            Some(r#"sh -c 'kimi -p "$(cat)"'"#)
+        );
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
     fn test_kiro_profile() {
         let profile = KiroProfile;
         assert_eq!(profile.name(), "kiro-cli");
@@ -874,6 +913,12 @@ mod tests {
     fn test_resolve_profile_codex() {
         let profile = resolve_profile(Some("codex"));
         assert_eq!(profile.name(), "codex");
+    }
+
+    #[test]
+    fn test_resolve_profile_kimi() {
+        let profile = resolve_profile(Some("kimi"));
+        assert_eq!(profile.name(), "kimi");
     }
 
     #[test]

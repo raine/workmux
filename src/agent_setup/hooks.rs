@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-fn is_workmux_hook_command(command: &str) -> bool {
+pub(crate) fn is_workmux_hook_command(command: &str) -> bool {
     command.contains("workmux set-window-status") || command.contains("workmux register-agent")
 }
 
