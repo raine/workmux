@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use crate::util::{PROJECT_PLACEHOLDER, expand_project_placeholder};
+use crate::util::{ORIGIN_NAME_PLACEHOLDER, PROJECT_PLACEHOLDER, expand_window_prefix};
 use crate::{cmd, git, nerdfont};
 use which::{which, which_in};
 
@@ -859,7 +859,8 @@ pub struct Config {
     pub worktree_dir: Option<String>,
 
     /// Prefix for tmux window names (optional, defaults to "wm-")
-    /// Supports a `{project}` placeholder for the main worktree's directory name.
+    /// Supports `{project}` for the main worktree directory and `{origin_name}`
+    /// for the origin repository name (falling back to `{project}`).
     #[serde(default)]
     pub window_prefix: Option<String>,
 
@@ -2897,14 +2898,22 @@ impl Config {
             &defaults_root,
         )?;
 
-        // Expand `{project}` against the main worktree so every worktree of a
+        // Expand naming placeholders against the main worktree so every worktree of a
         // repository resolves the same prefix, whatever directory it runs from.
         // Outside a repository there is no project, so the template stands.
         if let Some(prefix) = config.window_prefix.as_deref()
-            && prefix.contains(PROJECT_PLACEHOLDER)
+            && (prefix.contains(PROJECT_PLACEHOLDER) || prefix.contains(ORIGIN_NAME_PLACEHOLDER))
             && let Ok(main_root) = git::get_main_worktree_root_in(Some(start_dir))
         {
-            config.window_prefix = Some(expand_project_placeholder(prefix, &main_root)?);
+            let origin_url = prefix
+                .contains(ORIGIN_NAME_PLACEHOLDER)
+                .then(|| git::get_remote_url_in("origin", Some(&main_root)).ok())
+                .flatten();
+            config.window_prefix = Some(expand_window_prefix(
+                prefix,
+                &main_root,
+                origin_url.as_deref(),
+            )?);
         }
 
         debug!(
@@ -3584,7 +3593,9 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # worktree_prefix: ""
 
 # Prefix for tmux window and session names. Supports `{project}` for the main
-# worktree's directory name, e.g. `{project} ` to scope session names by repo.
+# worktree's directory name and `{origin_name}` for origin's repository name
+# without .git (falls back to {project} if unavailable). For bare layouts, use
+# `{origin_name}-` to name sessions by repository instead of the .bare directory.
 # Default: "wm-"
 # window_prefix: "wm-"
 

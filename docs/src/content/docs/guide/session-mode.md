@@ -37,6 +37,33 @@ workmux open feature-branch --mode window
 - **Persistence**: The mode is stored per-worktree in git config. Once a worktree is created with session mode, `open`, `close`, `remove`, and `merge` automatically use the correct mode.
 - **Navigation**: `workmux add` switches your client to the new session. When a session closes, clients still viewing it return to their previous sessions. For an in-session `merge`, the merge target's managed session takes precedence when available; for `remove`, the main branch's managed session takes precedence. A configured [`default_session`](#returning-to-a-default-session) is used when no managed session is available. Clients already viewing other sessions stay put. If preferred navigation is unavailable or cannot be safely targeted, tmux chooses another session. Closing the last session detaches its clients.
 
+## Naming sessions by repository
+
+Use `{origin_name}` in `window_prefix` to name sessions after the repository:
+
+```yaml
+mode: session
+window_prefix: "{origin_name}-"
+```
+
+With an origin URL ending in `example-repo.git`, `workmux open main` creates or selects
+`example-repo-main`. This also works with bare layouts such as `example-repo/.bare` and
+existing sibling worktrees. Opening the same worktree again reuses its session.
+
+The name comes from the last path component of the configured `origin` URL,
+without `.git`; no network request is made. HTTPS, SSH, SCP-style, and local
+remotes are supported. If origin is missing or unusable, it falls back to
+`{project}`, the main worktree directory name (the bare directory for bare
+repositories). Every linked worktree uses the same repository anchor.
+
+`{project}` keeps its existing meaning, and `{origin_name}` is only supported in
+`window_prefix`, not `worktree_dir`. Git branch names and worktree paths do not
+change.
+
+Changing the prefix or origin URL does not rename existing sessions. Close or
+rename the old sessions explicitly when adopting a new naming scheme. Repositories
+with the same basename share the same prefix; add a literal namespace if needed.
+
 ## Returning to a default session
 
 By default a client viewing a closing session returns to whichever session it was in previously. Set `default_session` to name a session to prefer instead:
