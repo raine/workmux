@@ -20,15 +20,16 @@ The Zellij backend is new and experimental. It depends on unreleased Zellij feat
 
 ## Differences from tmux
 
-| Feature              | tmux                 | Zellij            |
-| -------------------- | -------------------- | ----------------- |
-| Agent status in tabs | Yes (window names)   | Yes (tab titles)  |
-| Tab ordering         | Insert after current | Appends to end    |
-| Scope                | tmux session         | Zellij session    |
-| Session mode         | Yes                  | No (window only)  |
-| Pane size control    | Percentage-based     | 50/50 splits only |
-| Stacked panes        | No                   | Yes               |
-| Dashboard preview    | Yes                  | No                |
+| Feature              | tmux                 | Zellij             |
+| -------------------- | -------------------- | ------------------ |
+| Agent status in tabs | Yes (window names)   | Yes (tab titles)   |
+| Tab ordering         | Insert after current | Appends to end     |
+| Scope                | tmux session         | Zellij session     |
+| Session mode         | Yes                  | No (window only)   |
+| Pane size control    | Percentage-based     | 50/50 splits only  |
+| Stacked panes        | No                   | Yes                |
+| Dashboard preview    | Yes                  | No                 |
+| Agent sidebar        | Yes                  | Yes (experimental) |
 
 - **Tab ordering**: New tabs appear at the end of the tab bar (no "insert after" support like tmux)
 - **Session isolation**: workmux operates within the current Zellij session. Tabs in other sessions are not affected.
@@ -36,6 +37,45 @@ The Zellij backend is new and experimental. It depends on unreleased Zellij feat
 - **Pane splits**: Horizontal and vertical splits are 50/50 - percentage-based sizing is not available via the Zellij CLI.
 - **Stacked panes**: Use `split: stacked` in a pane config to create a Zellij stack with the previous pane, or with the pane selected by `target`.
 - **No dashboard preview**: Zellij's `dump-screen` only captures the focused pane, so preview in the dashboard is disabled.
+
+## Sidebar
+
+The [agent sidebar](/guide/sidebar/) works across every tab in the current
+Zellij session:
+
+```bash
+workmux sidebar
+workmux sidebar on --position top
+workmux sidebar off
+```
+
+Zellij has no global hook equivalent to tmux, so the sidebar daemon detects new
+tabs while it polls session state and adds a sidebar within about two seconds.
+Closing the sidebar or running `workmux sidebar off` removes it from every tab
+in the session.
+
+Zellij sessions are already isolated, so `workmux sidebar --session` behaves
+the same as `workmux sidebar`. Left and top placement are supported. workmux
+uses `override-layout` to wrap the complete existing content tree and apply
+`sidebar.width`, `sidebar.height`, `--width`, or `--height` exactly when the
+layout is created. Running terminal panes, focus, floating pane coordinates,
+and nested split proportions are retained. Reapplying the sidebar replaces its
+existing panes rather than adding duplicates. Sidebar clients use the Zellij
+backend even when the session runs inside another supported terminal.
+Enabling the sidebar does not launch the configured `panes` again. Temporary
+layout slots are removed without closing user panes, and the built-in tab and
+status bars keep their original plugin aliases.
+
+If an earlier sidebar build has already clipped the bars, reload them in place:
+
+```bash
+zellij action start-or-reload-plugin zellij:tab-bar
+zellij action start-or-reload-plugin zellij:status-bar
+```
+
+This leaves terminal panes running. Unmarked extra shells created by older
+builds must be closed manually; workmux cannot safely distinguish them from
+user-created shells.
 
 ## Requirements
 
@@ -93,6 +133,8 @@ next status update rather than clearing when the tab receives focus.
 - Agent status icons do not auto-clear when a tab receives focus
 - Dashboard preview pane is disabled (captures focused pane only)
 - Horizontal and vertical pane splits are always 50/50 (no percentage-based sizing)
+- Fixed sidebar sizes follow Zellij's layout behavior when the terminal itself
+  is resized
 - Tab insertion ordering is not supported (new tabs always appear at the end)
 - Some edge cases may not be as thoroughly tested as the tmux backend
 
