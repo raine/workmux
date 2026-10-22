@@ -54,26 +54,40 @@ fn wait_for_socket(instance_id: &str, timeout: Duration) -> bool {
 }
 
 /// Read the daemon PID from the tmux global option.
-fn daemon_pid() -> Option<String> {
-    Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_daemon_pid"])
-        .run_and_capture_stdout()
+fn daemon_pid(mux: &dyn Multiplexer) -> Option<String> {
+    if mux.name() == "tmux" {
+        return Cmd::new("tmux")
+            .args(&["show-option", "-gqv", "@workmux_sidebar_daemon_pid"])
+            .run_and_capture_stdout()
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+
+    super::session_state::read(&mux.instance_id())
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|state| state.daemon_pid)
+        .map(|pid| pid.to_string())
 }
 
 /// Kill the sidebar daemon (sends SIGTERM, cleans up tmux option).
 pub(super) fn kill_daemon() {
-    if let Some(pid) = daemon_pid() {
+    let mux = create_backend(detect_backend());
+    if let Some(pid) = daemon_pid(mux.as_ref()) {
         let _ = std::process::Command::new("kill")
             .args(["-TERM", &pid])
             .stderr(std::process::Stdio::null())
             .status();
     }
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sidebar_daemon_pid"])
-        .run();
+    if mux.name() == "tmux" {
+        let _ = Cmd::new("tmux")
+            .args(&["set-option", "-gu", "@workmux_sidebar_daemon_pid"])
+            .run();
+    } else {
+        let _ = super::session_state::update(&mux.instance_id(), |state| {
+            state.daemon_pid = None;
+        });
+    }
 }
 
 fn signal_pid(pid: &str) {
@@ -89,15 +103,13 @@ pub(super) fn signal_daemon_for(mux: &dyn Multiplexer) {
         if let Ok(Some(pid)) = tmux.global_option("@workmux_sidebar_daemon_pid") {
             signal_pid(&pid);
         }
+    } else if let Some(pid) = daemon_pid(mux) {
+        signal_pid(&pid);
     }
 }
 
 /// Signal the daemon to do an immediate refresh, bypassing tmux hook latency.
 pub(super) fn signal_daemon() {
     let mux = create_backend(detect_backend());
-    if mux.name() == "tmux" {
-        signal_daemon_for(mux.as_ref());
-    } else if let Some(pid) = daemon_pid() {
-        signal_pid(&pid);
-    }
+    signal_daemon_for(mux.as_ref());
 }
