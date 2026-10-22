@@ -1,6 +1,6 @@
 //! Sidebar TUI for monitoring active workmux agents.
 //!
-//! Uses a daemon process that polls tmux and pushes state snapshots to
+//! Uses a daemon process that polls the active multiplexer and pushes snapshots to
 //! render-only sidebar clients via Unix socket. Each sidebar pane connects
 //! to the daemon and receives updates, enabling instant window-switch response
 //! without per-pane polling.
@@ -9,7 +9,7 @@
 //!
 //! - `app` - application state and selection logic
 //! - `client` - Unix socket client for receiving daemon snapshots
-//! - `daemon` - background process that polls tmux and broadcasts snapshots
+//! - `daemon` - background process that polls multiplexer state and broadcasts snapshots
 //! - `daemon_ctrl` - daemon lifecycle (spawn, kill, signal, health checks)
 //! - `hooks` - tmux hook installation and removal
 //! - `layout_tree` - tmux layout tree parser, reflow, and sidebar removal
@@ -26,12 +26,15 @@ mod hooks;
 mod layout_tree;
 mod panes;
 mod runtime;
+mod session_state;
 mod snapshot;
 mod template;
 mod ui;
+mod zellij_panes;
 
 use crate::cmd::Cmd;
 use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
+use crate::multiplexer::{Multiplexer, create_backend, detect_backend, detect_backend_strict};
 use anyhow::{Result, anyhow, bail};
 
 pub(crate) use self::app::templates_use_prompt;
@@ -71,6 +74,60 @@ pub(super) enum SidebarScope {
     Global,
     /// Sidebar active in specific sessions (by stable session_id like "$0").
     Sessions(std::collections::HashSet<String>),
+}
+
+fn navigate_zellij(mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
+    let state = session_state::read(&mux.instance_id())?;
+    let mut panes: Vec<String> = state.ordered_agents;
+    if panes.is_empty() {
+        bail!("no sidebar agents found (is the sidebar running?)");
+    }
+
+    let live = mux.get_all_live_pane_info()?;
+    let current_pane_id = mux
+        .active_pane_id()
+        .or_else(|| mux.current_pane_id())
+        .unwrap_or_default();
+    let current_window_id = live
+        .get(&current_pane_id)
+        .and_then(|info| info.window_id.clone())
+        .unwrap_or_default();
+    let pane_window_ids: std::collections::HashMap<String, String> = live
+        .iter()
+        .filter_map(|(pane_id, info)| Some((pane_id.clone(), info.window_id.as_ref()?.clone())))
+        .collect();
+
+    if read_sidebar_filter_mode() == app::SidebarFilterMode::Session {
+        let current_session = mux.instance_id();
+        panes.retain(|pane_id| {
+            live.get(pane_id)
+                .and_then(|info| info.session.as_deref())
+                .is_none_or(|session| session == current_session)
+        });
+    }
+    if panes.is_empty() {
+        bail!("no matching agents found");
+    }
+
+    let pane_refs: Vec<&str> = panes.iter().map(String::as_str).collect();
+    let current_anchor = navigation_anchor_pane(
+        &pane_refs,
+        &current_pane_id,
+        &current_window_id,
+        &pane_window_ids,
+    );
+    let current_idx = current_anchor
+        .and_then(|pane_id| pane_refs.iter().position(|candidate| *candidate == pane_id));
+    let target_idx = match &action {
+        NavAction::Jump(n) => compute_nav_target(&action, current_idx, pane_refs.len())
+            .ok_or_else(|| anyhow!("agent {} out of range (1-{})", n, pane_refs.len()))?,
+        _ => compute_nav_target(&action, current_idx, pane_refs.len())
+            .expect("non-empty pane list guarantees a navigation target"),
+    };
+
+    mux.switch_to_pane(pane_refs[target_idx], None)?;
+    signal_daemon_for(mux);
+    Ok(())
 }
 
 fn parse_scope(raw: &str, enabled: bool) -> SidebarScope {
@@ -219,9 +276,17 @@ fn configured_position(
 }
 
 pub(super) fn read_sidebar_position(config: &crate::config::Config) -> SidebarPosition {
-    if let Ok(output) = Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_position"])
-        .run_and_capture_stdout()
+    let mux = create_backend(detect_backend());
+    if mux.name() == "zellij" {
+        if let Ok(state) = session_state::read(&mux.instance_id())
+            && let Some(position) = state.position
+        {
+            return position;
+        }
+    } else if mux.name() == "tmux"
+        && let Ok(output) = Cmd::new("tmux")
+            .args(&["show-option", "-gqv", "@workmux_sidebar_position"])
+            .run_and_capture_stdout()
     {
         match output.trim() {
             "top" => return SidebarPosition::Top,
@@ -234,6 +299,14 @@ pub(super) fn read_sidebar_position(config: &crate::config::Config) -> SidebarPo
 }
 
 fn set_sidebar_position(position: SidebarPosition) {
+    let mux = create_backend(detect_backend());
+    if mux.name() == "zellij" {
+        let _ = session_state::update(&mux.instance_id(), |state| {
+            state.position = Some(position);
+        });
+        return;
+    }
+
     let value = match position {
         SidebarPosition::Left => "left",
         SidebarPosition::Top => "top",
@@ -395,6 +468,9 @@ fn effective_size_for(
 
 /// Reflow all sidebar windows except the given one.
 pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
+    if create_backend(detect_backend()).name() == "zellij" {
+        return;
+    }
     let config = crate::config::Config::load(None).unwrap_or_default();
     let synced = read_sidebar_width();
     let sidebars = panes::list_sidebar_panes();
@@ -426,6 +502,9 @@ pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
 
 /// Reflow sidebar layouts in all windows.
 pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
+    if create_backend(detect_backend()).name() == "zellij" {
+        return Ok(());
+    }
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());
@@ -483,11 +562,18 @@ fn apply_cli_dimensions(
     }
 }
 
-fn require_tmux() -> Result<()> {
-    if std::env::var("TMUX").is_err() {
-        return Err(anyhow!("Sidebar requires tmux"));
+fn sidebar_mux() -> Result<std::sync::Arc<dyn Multiplexer>> {
+    let mux = create_backend(detect_backend_strict()?);
+    if !matches!(mux.name(), "tmux" | "zellij") {
+        return Err(anyhow!(
+            "Sidebar is supported only by tmux and Zellij, not {}",
+            mux.name()
+        ));
     }
-    Ok(())
+    if !mux.is_running().unwrap_or(false) {
+        return Err(anyhow!("{} is not running", mux.name()));
+    }
+    Ok(mux)
 }
 
 fn stop_all() {
@@ -497,13 +583,50 @@ fn stop_all() {
     clear_sidebar_globals();
 }
 
+fn on_zellij(
+    mux: &dyn Multiplexer,
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    let mut config = crate::config::Config::load(None)?;
+    apply_cli_dimensions(&mut config, width, height);
+    let position = configured_position(&config, position);
+    let instance_id = mux.instance_id();
+    let previous = session_state::read(&instance_id).unwrap_or_default();
+    if previous.position.is_some_and(|current| current != position) {
+        zellij_panes::kill_all_sidebars(&instance_id)?;
+    }
+    let width = config.sidebar.width.clone();
+    let height = config.sidebar.height.clone();
+    session_state::update(&instance_id, |state| {
+        state.enabled = true;
+        state.position = Some(position);
+        state.width.clone_from(&width);
+        state.height.clone_from(&height);
+    })?;
+    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
+    ensure_daemon_running()?;
+    zellij_panes::create_sidebars_in_all_tabs(&instance_id, position, true)
+}
+
+fn off_zellij(mux: &dyn Multiplexer) -> Result<()> {
+    let instance_id = mux.instance_id();
+    session_state::update(&instance_id, |state| state.enabled = false)?;
+    kill_daemon();
+    zellij_panes::kill_all_sidebars(&instance_id)
+}
+
 /// Ensure the sidebar is running globally across all tmux windows.
 pub fn on(
     position: Option<SidebarPosition>,
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    require_tmux()?;
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        return on_zellij(mux.as_ref(), position, width, height);
+    }
     let mut config = crate::config::Config::load(None)?;
     let scope = current_scope();
     let appearance_changed = position.is_some() || width.is_some() || height.is_some();
@@ -534,8 +657,12 @@ pub fn on(
 
 /// Ensure the global sidebar is stopped.
 pub fn off() -> Result<()> {
-    require_tmux()?;
-    stop_all();
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        off_zellij(mux.as_ref())?;
+    } else {
+        stop_all();
+    }
     Ok(())
 }
 
@@ -545,7 +672,16 @@ pub fn toggle(
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    require_tmux()?;
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        let instance_id = mux.instance_id();
+        return if zellij_panes::current_tab_has_sidebar(&instance_id).unwrap_or(false) {
+            off_zellij(mux.as_ref())?;
+            Ok(())
+        } else {
+            on_zellij(mux.as_ref(), position, width, height)
+        };
+    }
 
     // Determine intent based on the current window's state
     let current_window = Cmd::new("tmux")
@@ -569,7 +705,10 @@ pub fn on_session(
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    require_tmux()?;
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        return on_zellij(mux.as_ref(), position, width, height);
+    }
     let mut config = crate::config::Config::load(None)?;
     let appearance_changed = position.is_some() || width.is_some() || height.is_some();
     apply_cli_dimensions(&mut config, width, height);
@@ -617,7 +756,11 @@ pub fn on_session(
 
 /// Ensure the sidebar is stopped for the current tmux session.
 pub fn off_session() -> Result<()> {
-    require_tmux()?;
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        off_zellij(mux.as_ref())?;
+        return Ok(());
+    }
     let scope = current_scope();
     let session_id = get_current_session_id()?;
     match scope {
@@ -647,7 +790,10 @@ pub fn toggle_session(
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    require_tmux()?;
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        return toggle(position, width, height);
+    }
 
     let scope = current_scope();
     let session_id = get_current_session_id()?;
@@ -706,6 +852,19 @@ fn resolve_target_window(window_id: Option<&str>) -> Result<String> {
 
 /// Sync sidebar into a window (called by tmux hooks for new windows/sessions).
 pub fn sync(window_id: Option<&str>) -> Result<()> {
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        let instance_id = mux.instance_id();
+        let state = session_state::read(&instance_id)?;
+        if state.enabled {
+            zellij_panes::create_sidebar_in_active_tab(
+                &instance_id,
+                state.position.unwrap_or_default(),
+            )?;
+        }
+        return Ok(());
+    }
+
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());
@@ -740,6 +899,9 @@ pub fn sync(window_id: Option<&str>) -> Result<()> {
 /// Finds the sidebar pane in the target window and runs the layout tree
 /// reflow to keep the sidebar at the correct width and content panes balanced.
 pub fn reflow(window_id: Option<&str>) -> Result<()> {
+    if create_backend(detect_backend()).name() == "zellij" {
+        return Ok(());
+    }
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());
@@ -870,9 +1032,17 @@ fn parse_sidebar_filter_mode(raw: &str) -> Result<app::SidebarFilterMode> {
 }
 
 fn read_sidebar_filter_mode() -> app::SidebarFilterMode {
-    if let Ok(output) = Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_filter"])
-        .run_and_capture_stdout()
+    let mux = create_backend(detect_backend());
+    if mux.name() == "zellij" {
+        if let Ok(state) = session_state::read(&mux.instance_id())
+            && let Some(mode) = state.filter
+        {
+            return parse_sidebar_filter_mode(&mode).unwrap_or_default();
+        }
+    } else if mux.name() == "tmux"
+        && let Ok(output) = Cmd::new("tmux")
+            .args(&["show-option", "-gqv", "@workmux_sidebar_filter"])
+            .run_and_capture_stdout()
     {
         let trimmed = output.trim();
         if !trimmed.is_empty() {
@@ -918,6 +1088,7 @@ pub(crate) fn group_by_option_value(
 /// A runtime choice outlives the session that made it, so without a way back
 /// an editor's `group_by` would silently stop taking effect.
 pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
+    let mux = sidebar_mux()?;
     let configured = crate::config::Config::load(None)
         .map(|cfg| cfg.sidebar.group_by())
         .unwrap_or_default();
@@ -934,19 +1105,25 @@ pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
         }
     };
 
-    match new_mode {
-        Some(mode) => Cmd::new("tmux")
-            .args(&[
-                "set-option",
-                "-g",
-                "@workmux_sidebar_group_by",
-                group_by_option_value(mode),
-            ])
-            .run()?,
-        None => Cmd::new("tmux")
-            .args(&["set-option", "-gu", "@workmux_sidebar_group_by"])
-            .run()?,
-    };
+    if mux.name() == "zellij" {
+        session_state::update(&mux.instance_id(), |state| {
+            state.group_by = new_mode.map(|mode| group_by_option_value(mode).to_string());
+        })?;
+    } else {
+        match new_mode {
+            Some(mode) => Cmd::new("tmux")
+                .args(&[
+                    "set-option",
+                    "-g",
+                    "@workmux_sidebar_group_by",
+                    group_by_option_value(mode),
+                ])
+                .run()?,
+            None => Cmd::new("tmux")
+                .args(&["set-option", "-gu", "@workmux_sidebar_group_by"])
+                .run()?,
+        };
+    }
 
     let store = crate::state::StateStore::new()?;
     let mut settings = store.load_settings()?;
@@ -957,14 +1134,22 @@ pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
     Ok(())
 }
 
-/// Grouping currently in effect: the tmux override, else the persisted one,
+/// Grouping currently in effect: the backend override, else the persisted one,
 /// else what the config asks for.
 fn read_sidebar_group_by(
     configured: Option<crate::config::SidebarGroupBy>,
 ) -> Option<crate::config::SidebarGroupBy> {
-    if let Ok(output) = Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_group_by"])
-        .run_and_capture_stdout()
+    let mux = create_backend(detect_backend());
+    if mux.name() == "zellij" {
+        if let Ok(state) = session_state::read(&mux.instance_id())
+            && let Some(mode) = state.group_by
+        {
+            return parse_sidebar_group_by(&mode).unwrap_or(configured);
+        }
+    } else if mux.name() == "tmux"
+        && let Ok(output) = Cmd::new("tmux")
+            .args(&["show-option", "-gqv", "@workmux_sidebar_group_by"])
+            .run_and_capture_stdout()
     {
         let trimmed = output.trim();
         if !trimmed.is_empty() {
@@ -1013,8 +1198,9 @@ fn navigation_anchor_pane<'a>(
 /// Respects the sidebar filter mode: when set to "session", only navigates
 /// among agents in the current tmux session.
 pub fn navigate(action: NavAction) -> Result<()> {
-    if std::env::var("TMUX").is_err() {
-        return Err(anyhow!("Sidebar requires tmux"));
+    let mux = sidebar_mux()?;
+    if mux.name() == "zellij" {
+        return navigate_zellij(mux.as_ref(), action);
     }
 
     let agents_str = Cmd::new("tmux")
@@ -1090,20 +1276,26 @@ pub fn navigate(action: NavAction) -> Result<()> {
 
 /// Set sidebar filter mode from CLI. Toggles if no mode is given.
 pub fn set_filter_mode(mode: Option<&str>) -> Result<()> {
+    let mux = sidebar_mux()?;
     let new_mode = match mode {
         Some(m) => parse_sidebar_filter_mode(m)?,
         None => read_sidebar_filter_mode().toggle(),
     };
 
-    // Write to tmux global
-    Cmd::new("tmux")
-        .args(&[
-            "set-option",
-            "-g",
-            "@workmux_sidebar_filter",
-            new_mode.as_str(),
-        ])
-        .run()?;
+    if mux.name() == "zellij" {
+        session_state::update(&mux.instance_id(), |state| {
+            state.filter = Some(new_mode.as_str().to_string());
+        })?;
+    } else {
+        Cmd::new("tmux")
+            .args(&[
+                "set-option",
+                "-g",
+                "@workmux_sidebar_filter",
+                new_mode.as_str(),
+            ])
+            .run()?;
+    }
 
     // Persist to settings.json
     let store = crate::state::StateStore::new()?;

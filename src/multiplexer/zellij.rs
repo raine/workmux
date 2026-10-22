@@ -27,12 +27,14 @@ pub struct ZellijBackend {
     session_name: Option<String>,
 }
 
-/// Info about a pane from `zellij action list-panes --json --tab --command`
+/// Info about a pane from `zellij action list-panes --json --all`
 #[derive(Debug, serde::Deserialize)]
 struct PaneInfo {
     id: u32,
     is_plugin: bool,
     is_focused: bool,
+    #[serde(default)]
+    is_floating: bool,
     terminal_command: Option<String>,
     /// Running command (more reliable than terminal_command, available with --command flag)
     #[serde(default)]
@@ -46,7 +48,38 @@ struct PaneInfo {
     #[serde(default)]
     tab_name: String,
     #[serde(default)]
+    tab_position: Option<u32>,
+    #[serde(default)]
+    pane_x: Option<u16>,
+    #[serde(default)]
+    pane_y: Option<u16>,
+    #[serde(default)]
+    pane_columns: Option<u16>,
+    #[serde(default)]
+    pane_rows: Option<u16>,
+    #[serde(default)]
     title: String,
+    #[serde(default)]
+    plugin_url: Option<String>,
+}
+
+impl From<&PaneInfo> for ZellijSidebarPane {
+    fn from(pane: &PaneInfo) -> Self {
+        Self {
+            pane_id: format!("terminal_{}", pane.id),
+            title: pane.title.clone(),
+            command: pane
+                .pane_command
+                .clone()
+                .or_else(|| pane.terminal_command.clone()),
+            is_focused: pane.is_focused,
+            is_floating: pane.is_floating,
+            pane_x: pane.pane_x,
+            pane_y: pane.pane_y,
+            pane_columns: pane.pane_columns,
+            pane_rows: pane.pane_rows,
+        }
+    }
 }
 
 /// Info about a tab from `zellij action list-tabs --json`
@@ -58,6 +91,44 @@ struct TabInfo {
     name: String,
     #[allow(dead_code)]
     active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ZellijSidebarPane {
+    pub pane_id: String,
+    pub title: String,
+    pub command: Option<String>,
+    pub is_focused: bool,
+    pub is_floating: bool,
+    pub pane_x: Option<u16>,
+    pub pane_y: Option<u16>,
+    pub pane_columns: Option<u16>,
+    pub pane_rows: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ZellijSidebarTab {
+    pub tab_id: u32,
+    pub position: u32,
+    pub active: bool,
+    pub panes: Vec<ZellijSidebarPane>,
+    pub ui_plugin_aliases: HashSet<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ZellijSidebarSnapshot {
+    pub live_panes: std::collections::HashMap<String, LivePaneInfo>,
+    pub active_windows: std::collections::HashSet<(String, String)>,
+    pub pane_window_ids: std::collections::HashMap<String, String>,
+    pub pane_window_indexes: std::collections::HashMap<String, u32>,
+    pub active_pane_ids: std::collections::HashSet<String>,
+    pub window_pane_counts: std::collections::HashMap<String, usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ZellijSidebarObservation {
+    pub tabs: Vec<ZellijSidebarTab>,
+    pub snapshot: ZellijSidebarSnapshot,
 }
 
 impl TabInfo {
@@ -155,6 +226,85 @@ fn pane_navigation(panes: &[PaneInfo], target_id: u32) -> Result<(u32, isize)> {
         .expect("target pane is included in its tab");
 
     Ok((tab_id, target_idx as isize - current_idx as isize))
+}
+
+const PANE_TABLE_HEADER: [&str; 13] = [
+    "TAB_ID", "TAB_POS", "TAB_NAME", "PANE_ID", "TYPE", "TITLE", "FOCUSED", "FLOATING", "EXITED",
+    "X", "Y", "ROWS", "COLS",
+];
+
+/// Parse `list-panes --geometry --state --tab` table output. Returns `None` for any
+/// unexpected shape so callers can fall back to the JSON query.
+fn parse_pane_table(output: &str, tabs: &[TabInfo]) -> Option<Vec<(u32, ZellijSidebarPane)>> {
+    let mut lines = output.lines();
+    let header: Vec<_> = lines.next()?.split_whitespace().collect();
+    if header != PANE_TABLE_HEADER {
+        return None;
+    }
+    let mut panes = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let mut spans = Vec::new();
+        let mut start = None;
+        for (index, character) in line.char_indices() {
+            match (character.is_whitespace(), start) {
+                (false, None) => start = Some(index),
+                (true, Some(begin)) => {
+                    spans.push((begin, index));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(begin) = start {
+            spans.push((begin, line.len()));
+        }
+        let token = |index: usize| &line[spans[index].0..spans[index].1];
+        let tab_id: u32 = token(0).parse().ok()?;
+        // Tab names may contain spaces; list-tabs tells us how many tokens to skip.
+        let pane_index = 2 + tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)?
+            .name
+            .split_whitespace()
+            .count();
+        let count = spans.len();
+        if count < pane_index + 2 + 7 {
+            return None;
+        }
+        match token(pane_index + 1) {
+            "plugin" => continue,
+            "terminal" => {}
+            _ => return None,
+        }
+        let pane_id = token(pane_index);
+        parse_pane_id(pane_id)?;
+        let title = if count > pane_index + 9 {
+            &line[spans[pane_index + 2].0..spans[count - 8].1]
+        } else {
+            ""
+        };
+        let flag = |index: usize| match token(index) {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+        let number = |index: usize| token(index).parse::<u16>().ok();
+        panes.push((
+            tab_id,
+            ZellijSidebarPane {
+                pane_id: pane_id.to_string(),
+                title: title.to_string(),
+                command: None,
+                is_focused: flag(count - 7)?,
+                is_floating: flag(count - 6)?,
+                pane_x: Some(number(count - 4)?),
+                pane_y: Some(number(count - 3)?),
+                pane_rows: Some(number(count - 2)?),
+                pane_columns: Some(number(count - 1)?),
+            },
+        ));
+    }
+    Some(panes)
 }
 
 fn query_json_with_retry<T, F>(mut query: F, parse_context: &str, delay: Duration) -> Result<T>
@@ -300,15 +450,12 @@ impl ZellijBackend {
         parse_tab_name_from_output(&output)
     }
 
-    /// Query all panes using `zellij action list-panes --json --tab --command`
-    ///
-    /// The `--tab` flag includes `tab_id`, `tab_name`, `tab_position`.
-    /// The `--command` flag includes `pane_command`, `pane_cwd`.
+    /// Include non-selectable UI plugins as well as tab, command, and geometry fields.
     fn list_panes(&self) -> Result<Vec<PaneInfo>> {
         query_json_with_retry(
             || {
                 self.command()
-                    .args(&["action", "list-panes", "--json", "--tab", "--command"])
+                    .args(&["action", "list-panes", "--json", "--all"])
                     .run_and_capture_stdout()
                     .context("Failed to list panes")
             },
@@ -376,11 +523,42 @@ impl ZellijBackend {
             .ok_or_else(|| anyhow!("Window '{}' not found", full_name))
     }
 
-    fn go_to_tab_by_id(&self, tab_id: u32) -> Result<()> {
+    pub(crate) fn go_to_tab_by_id(&self, tab_id: u32) -> Result<()> {
         self.command()
             .args(&["action", "go-to-tab-by-id", &tab_id.to_string()])
             .run()
             .with_context(|| format!("Failed to switch to zellij tab {}", tab_id))?;
+        Ok(())
+    }
+
+    pub(crate) fn dump_layout(&self) -> Result<String> {
+        self.command()
+            .args(&["action", "dump-layout"])
+            .run_and_capture_stdout()
+            .context("Failed to dump Zellij layout")
+    }
+
+    pub(crate) fn override_active_tab_layout(&self, layout: &str) -> Result<()> {
+        self.command()
+            .args(&[
+                "action",
+                "override-layout",
+                "--apply-only-to-active-tab",
+                "--retain-existing-terminal-panes",
+                "--layout-string",
+                layout,
+            ])
+            .run()
+            .context("Failed to override active Zellij tab layout")?;
+        Ok(())
+    }
+
+    pub(crate) fn reapply_active_tab_layout(&self) -> Result<()> {
+        // Sidebar overrides install only a base layout, so cycling reapplies it without spawning.
+        self.command()
+            .args(&["action", "next-swap-layout"])
+            .run()
+            .context("Failed to reapply active Zellij tab layout")?;
         Ok(())
     }
 
@@ -437,16 +615,196 @@ impl ZellijBackend {
             session: self.session_name(),
             window: Some(canonical_tab_name(&pane.tab_name).to_string()).filter(|t| !t.is_empty()),
             session_id: None,
-            window_id: None,
-            window_index: None,
+            window_id: pane.tab_id.map(|id| id.to_string()),
+            window_index: pane.tab_position,
         }
     }
 
-    fn focus_pane_by_id(&self, pane_id: &str) -> Result<()> {
+    fn build_sidebar_tabs(&self, panes: &[PaneInfo], tabs: &[TabInfo]) -> Vec<ZellijSidebarTab> {
+        tabs.iter()
+            .map(|tab| ZellijSidebarTab {
+                tab_id: tab.tab_id,
+                position: tab.position,
+                active: tab.active,
+                ui_plugin_aliases: panes
+                    .iter()
+                    .filter(|pane| pane.is_plugin && pane.tab_id == Some(tab.tab_id))
+                    .filter_map(|pane| pane.plugin_url.as_deref())
+                    .filter(|url| matches!(*url, "tab-bar" | "status-bar"))
+                    .map(str::to_owned)
+                    .collect(),
+                panes: panes
+                    .iter()
+                    .filter(|pane| !pane.is_plugin && pane.tab_id == Some(tab.tab_id))
+                    .map(ZellijSidebarPane::from)
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn build_sidebar_snapshot(
+        &self,
+        panes: &[PaneInfo],
+        tabs: &[TabInfo],
+    ) -> ZellijSidebarSnapshot {
+        let session = self.session_name().unwrap_or_else(|| "default".to_string());
+        let mut snapshot = ZellijSidebarSnapshot {
+            live_panes: std::collections::HashMap::new(),
+            active_windows: std::collections::HashSet::new(),
+            pane_window_ids: std::collections::HashMap::new(),
+            pane_window_indexes: std::collections::HashMap::new(),
+            active_pane_ids: std::collections::HashSet::new(),
+            window_pane_counts: std::collections::HashMap::new(),
+        };
+
+        for tab in tabs {
+            let window_id = tab.tab_id.to_string();
+            if tab.active {
+                snapshot
+                    .active_windows
+                    .insert((session.clone(), window_id.clone()));
+            }
+            let tab_panes: Vec<_> = panes
+                .iter()
+                .filter(|pane| !pane.is_plugin && pane.tab_id == Some(tab.tab_id))
+                .collect();
+            snapshot
+                .window_pane_counts
+                .insert(window_id.clone(), tab_panes.len());
+
+            for pane in tab_panes {
+                let pane_id = format!("terminal_{}", pane.id);
+                snapshot
+                    .pane_window_ids
+                    .insert(pane_id.clone(), window_id.clone());
+                snapshot
+                    .pane_window_indexes
+                    .insert(pane_id.clone(), pane.tab_position.unwrap_or(tab.position));
+                if pane.is_focused {
+                    snapshot.active_pane_ids.insert(pane_id.clone());
+                }
+                snapshot
+                    .live_panes
+                    .insert(pane_id, self.build_live_pane_info(pane));
+            }
+        }
+
+        snapshot
+    }
+
+    pub(crate) fn sidebar_observation(&self) -> Result<ZellijSidebarObservation> {
+        let panes = self.list_panes()?;
+        let tabs = self.list_tabs()?;
+        Ok(ZellijSidebarObservation {
+            tabs: self.build_sidebar_tabs(&panes, &tabs),
+            snapshot: self.build_sidebar_snapshot(&panes, &tabs),
+        })
+    }
+
+    pub(crate) fn sidebar_tabs(&self) -> Result<Vec<ZellijSidebarTab>> {
+        Ok(self.sidebar_observation()?.tabs)
+    }
+
+    /// Pane titles, state, and geometry without commands or plugin aliases.
+    ///
+    /// JSON output makes Zellij resolve every pane's command and cwd, which costs
+    /// hundreds of milliseconds per call. The table form skips that work.
+    pub(crate) fn sidebar_layout_tabs(&self) -> Result<Vec<ZellijSidebarTab>> {
+        let output = self
+            .command()
+            .args(&["action", "list-panes", "--geometry", "--state", "--tab"])
+            .run_and_capture_stdout();
+        let tabs = self.list_tabs()?;
+        let Some(panes) = output
+            .ok()
+            .and_then(|output| parse_pane_table(&output, &tabs))
+        else {
+            return self.sidebar_tabs();
+        };
+        Ok(tabs
+            .iter()
+            .map(|tab| ZellijSidebarTab {
+                tab_id: tab.tab_id,
+                position: tab.position,
+                active: tab.active,
+                ui_plugin_aliases: HashSet::new(),
+                panes: panes
+                    .iter()
+                    .filter(|(tab_id, _)| *tab_id == tab.tab_id)
+                    .map(|(_, pane)| pane.clone())
+                    .collect(),
+            })
+            .collect())
+    }
+
+    pub(crate) fn sidebar_tab_panes(&self, tab_id: u32) -> Result<Vec<ZellijSidebarPane>> {
+        Ok(self
+            .sidebar_layout_tabs()?
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| tab.panes)
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn close_pane_by_id(&self, pane_id: &str) -> Result<()> {
         self.command()
+            .args(&["action", "close-pane", "--pane-id", pane_id])
+            .run()
+            .with_context(|| format!("Failed to close zellij pane '{}'", pane_id))
+            .map(|_| ())
+    }
+
+    pub(crate) fn focus_pane_by_id(&self, pane_id: &str) -> Result<()> {
+        if let Err(error) = self
+            .command()
             .args(&["action", "focus-pane-id", pane_id])
             .run()
-            .with_context(|| format!("Failed to focus zellij pane '{}'", pane_id))?;
+        {
+            // Zellij reports an error for an already-focused pane; navigation is idempotent.
+            if let Some(id) = parse_pane_id(pane_id)
+                && error.to_string().lines().last()
+                    == Some(format!("Pane Terminal({id}) is already focused").as_str())
+            {
+                return Ok(());
+            }
+            return Err(error).with_context(|| format!("Failed to focus zellij pane '{pane_id}'"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn move_pane_by_id(&self, pane_id: &str, direction: &str) -> Result<()> {
+        self.command()
+            .args(&["action", "move-pane", "--pane-id", pane_id, direction])
+            .run()
+            .with_context(|| format!("Failed to move zellij pane '{pane_id}' {direction}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn set_floating_pane_coordinates(
+        &self,
+        pane_id: &str,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        self.command()
+            .args(&[
+                "action",
+                "change-floating-pane-coordinates",
+                "--pane-id",
+                pane_id,
+                "--x",
+                &x.to_string(),
+                "--y",
+                &y.to_string(),
+                "--width",
+                &width.to_string(),
+                "--height",
+                &height.to_string(),
+            ])
+            .run()
+            .with_context(|| format!("Failed to restore floating Zellij pane '{pane_id}'"))?;
         Ok(())
     }
 }
@@ -764,34 +1122,8 @@ impl Multiplexer for ZellijBackend {
         Ok(())
     }
 
-    fn switch_to_pane(&self, pane_id: &str, window_hint: Option<&str>) -> Result<()> {
-        // Zellij can't switch to arbitrary panes by ID, so switch to the containing tab.
-        let tab_name = window_hint.ok_or_else(|| {
-            anyhow!(
-                "Zellij switch_to_pane requires window_hint (tab name) for pane '{}'",
-                pane_id
-            )
-        })?;
-
-        debug!(pane_id, tab_name, "switch_to_pane: switching to tab");
-
-        // Try to switch by tab ID for more reliability
-        let tabs = self.list_tabs()?;
-        if let Some(tab) = tabs.iter().find(|t| t.name == tab_name) {
-            let tab_id = tab.tab_id().to_string();
-            self.command()
-                .args(&["action", "go-to-tab-by-id", &tab_id])
-                .run()
-                .with_context(|| format!("Failed to switch to tab '{}' by ID", tab_name))?;
-        } else {
-            // Fallback to name-based switch
-            self.command()
-                .args(&["action", "go-to-tab-name", tab_name])
-                .run()
-                .with_context(|| format!("Failed to switch to tab '{}'", tab_name))?;
-        }
-
-        Ok(())
+    fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
+        self.focus_pane_by_id(pane_id)
     }
 
     fn kill_pane(&self, pane_id: &str) -> Result<()> {
@@ -1186,12 +1518,19 @@ mod tests {
             id,
             is_plugin,
             is_focused: false,
+            is_floating: false,
             terminal_command: None,
             pane_command: None,
             pane_cwd: None,
             tab_id,
             tab_name: String::new(),
+            tab_position: None,
+            pane_x: None,
+            pane_y: None,
+            pane_columns: None,
+            pane_rows: None,
             title: String::new(),
+            plugin_url: None,
         }
     }
 
@@ -1227,6 +1566,21 @@ mod tests {
         assert_eq!(backend.instance_id(), "dev session");
         assert_eq!(backend.shell_command(), "zellij --session 'dev session'");
         assert!(backend.is_inside_session());
+    }
+
+    #[test]
+    fn live_pane_info_uses_stable_tab_identity() {
+        let backend = ZellijBackend::for_session("dev");
+        let mut pane = test_pane(7, false, Some(42));
+        pane.tab_position = Some(3);
+        pane.tab_name = "feature".to_string();
+
+        let info = backend.build_live_pane_info(&pane);
+
+        assert_eq!(info.session.as_deref(), Some("dev"));
+        assert_eq!(info.window.as_deref(), Some("feature"));
+        assert_eq!(info.window_id.as_deref(), Some("42"));
+        assert_eq!(info.window_index, Some(3));
     }
 
     // === normalize_terminal_pane_id ===
@@ -1330,6 +1684,35 @@ mod tests {
             find_created_terminal_pane_id(&before_ids, &panes, Some(7), None),
             None
         );
+    }
+
+    #[test]
+    fn pane_table_keeps_spaced_names_and_rejects_unknown_shapes() {
+        let tabs = [TabInfo {
+            tab_id: 4,
+            position: 1,
+            name: "wm feature one".to_string(),
+            active: true,
+        }];
+        let output = "TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS\n\
+            4  1  wm feature one  plugin_0  plugin  tab-bar  false  false  false  0  0  1  80\n\
+            4  1  wm feature one  terminal_7  terminal  sleep  300  true  false  false  24  1  43  56\n";
+
+        let panes = parse_pane_table(output, &tabs).unwrap();
+        assert_eq!(panes.len(), 1);
+        let (tab_id, pane) = &panes[0];
+        assert_eq!(*tab_id, 4);
+        assert_eq!(pane.pane_id, "terminal_7");
+        assert_eq!(pane.title, "sleep  300");
+        assert!(pane.is_focused && !pane.is_floating);
+        assert_eq!(
+            (pane.pane_x, pane.pane_y, pane.pane_rows, pane.pane_columns),
+            (Some(24), Some(1), Some(43), Some(56))
+        );
+
+        assert!(parse_pane_table("[]", &tabs).is_none());
+        let unknown_tab = output.replace("\n4  1", "\n5  1");
+        assert!(parse_pane_table(&unknown_tab, &tabs).is_none());
     }
 
     #[test]

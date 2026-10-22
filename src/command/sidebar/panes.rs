@@ -366,6 +366,34 @@ fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
 /// our session from the scope set. Full cleanup (daemon, hooks) only happens
 /// when no scoped sessions remain.
 pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
+    let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
+    if mux.name() == "zellij" {
+        use std::os::unix::process::CommandExt;
+        // The helper must survive closing this pane so it can restore this tab too.
+        let result = std::env::current_exe().and_then(|exe| {
+            let mut command = std::process::Command::new(exe);
+            command.args(["sidebar", "off"]);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            command.output()
+        });
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => tracing::warn!(
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "failed to stop Zellij sidebars"
+            ),
+            Err(error) => tracing::warn!(%error, "failed to stop Zellij sidebars"),
+        }
+        return;
+    }
+
     let config = crate::config::Config::load(None).unwrap_or_default();
     let position = super::read_sidebar_position(&config);
     let our_pane = identity.pane_id.as_str();

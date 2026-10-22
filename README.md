@@ -80,7 +80,7 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 - [Dashboard](#workmux-dashboard) for monitoring agents, reviewing changes, and
   sending commands
 - [Sidebar](https://workmux.raine.dev/guide/sidebar/) for a persistent,
-  at-a-glance view of all agents across tmux windows
+  at-a-glance view of all agents across tmux windows or Zellij tabs
 - [Delegate tasks to worktree agents](#delegating-tasks-with-worktree) with the
   `/worktree` skill
 - [Display agent status in tmux window names](#agent-status-tracking)
@@ -607,7 +607,7 @@ alias wm='workmux'
 - [`resurrect`](#workmux-resurrect) - Restore worktree windows after a crash
 - [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`dashboard`](#workmux-dashboard) - Show TUI dashboard of all active agents
-- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux
+- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux or Zellij
 - [`reap-agents`](#workmux-reap-agents) - Exit tracked agent processes older than a threshold
 - [`config edit`](#workmux-config-edit) - Edit the global configuration file
 - [`init`](#workmux-init) - Generate configuration file
@@ -1899,11 +1899,10 @@ Then press `prefix + Ctrl-s` to open the dashboard as a tmux popup.
 
 ### `workmux sidebar`
 
-Toggles a live agent status sidebar on the left or top edge of all tmux
-windows. By default, each sidebar pane shows active agents across all tmux
-sessions with live status updates, providing an always-visible overview without
-taking over the full screen like the dashboard. Use `workmux sidebar filter session`
-to show only agents in the current tmux session.
+Toggles a live agent status sidebar on the left or top edge of tmux windows or
+Zellij tabs. tmux can show agents across sessions; Zellij is scoped to the
+current session. The sidebar provides an always-visible overview without taking
+over the full screen like the dashboard.
 
 ```bash
 workmux sidebar                       # Toggle sidebar on/off (all sessions)
@@ -1967,9 +1966,12 @@ bind C-t run-shell "workmux sidebar"
 
 Then press `prefix + Ctrl-t` to toggle the sidebar.
 
-> **Note:** The sidebar is currently tmux-only. When enabled, a sidebar pane is
-> created in every existing window, and new windows automatically get one via a
-> tmux hook.
+> **Note:** Zellij sidebar support is experimental. It creates a pane in every
+> tab of the current Zellij session and detects new tabs during the daemon's
+> two-second poll. workmux applies the sidebar with Zellij's `override-layout`
+> action, retaining running terminal panes and the existing nested split
+> proportions. Configured width and height are applied exactly when the layout
+> is created.
 
 ---
 

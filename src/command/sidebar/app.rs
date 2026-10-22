@@ -46,7 +46,7 @@ impl SidebarLayoutMode {
     }
 }
 
-/// Sidebar filter mode: show all agents or only those in the host tmux session.
+/// Sidebar filter mode: show all agents or only those in the host multiplexer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarFilterMode {
@@ -374,7 +374,7 @@ pub struct SidebarApp {
     /// Deadline after which pending resize should be processed.
     pub(super) resize_deadline: Option<Instant>,
     suppress_resize_once: bool,
-    /// Filter mode: show all agents or only those in the host tmux session.
+    /// Filter mode: show all agents or only those in the host multiplexer session.
     pub filter_mode: SidebarFilterMode,
 }
 
@@ -470,7 +470,7 @@ impl SidebarApp {
         let window_prefix = config.window_prefix().to_string();
         let status_icons = config.status_icons.clone();
 
-        let host_identity = detect_host_identity();
+        let host_identity = detect_host_identity(mux.as_ref());
 
         let template_config = config.sidebar.templates.clone();
         let current_templates = resolved_template_strings(
@@ -991,17 +991,24 @@ impl SidebarApp {
         let mut labels: Vec<&str> = self.expanded_groups.iter().map(String::as_str).collect();
         labels.sort_unstable();
         let value = labels.join("\t");
-        let result = if value.is_empty() {
+        let result = if self.mux.name() == "zellij" {
+            super::session_state::update(&self.mux.instance_id(), |state| {
+                state.expanded_groups = labels.iter().map(|label| (*label).to_string()).collect();
+            })
+            .map(|_| ())
+        } else if value.is_empty() {
             Cmd::new("tmux")
                 .args(&["set-option", "-gu", "@workmux_sidebar_expanded"])
                 .run()
+                .map(|_| ())
         } else {
             Cmd::new("tmux")
                 .args(&["set-option", "-g", "@workmux_sidebar_expanded", &value])
                 .run()
+                .map(|_| ())
         };
         if let Err(error) = result {
-            warn!(%error, "failed to persist expanded sidebar groups to tmux");
+            warn!(%error, "failed to persist expanded sidebar groups");
         }
         let selected_agent = self.selected_agent_idx();
         let selected_toggle = self.selected_toggle();
@@ -1347,7 +1354,10 @@ impl SidebarApp {
     }
 
     fn focus_pane(&self, pane_id: &str) {
-        let _ = self.mux.switch_to_pane(pane_id, None);
+        if let Err(error) = self.mux.switch_to_pane(pane_id, None) {
+            warn!(%error, %pane_id, "failed to navigate to sidebar agent");
+            return;
+        }
         // Signal daemon directly to bypass tmux hook round-trip latency.
         super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
     }
@@ -1397,15 +1407,20 @@ impl SidebarApp {
             SidebarLayoutMode::Compact => SidebarLayoutMode::Tiles,
             SidebarLayoutMode::Tiles => SidebarLayoutMode::Compact,
         };
-        // Persist to tmux so all sidebar instances pick it up immediately
-        let _ = Cmd::new("tmux")
-            .args(&[
-                "set-option",
-                "-g",
-                "@workmux_sidebar_layout",
-                self.layout_mode.as_str(),
-            ])
-            .run();
+        if self.mux.name() == "zellij" {
+            let _ = super::session_state::update(&self.mux.instance_id(), |state| {
+                state.layout = Some(self.layout_mode.as_str().to_string());
+            });
+        } else {
+            let _ = Cmd::new("tmux")
+                .args(&[
+                    "set-option",
+                    "-g",
+                    "@workmux_sidebar_layout",
+                    self.layout_mode.as_str(),
+                ])
+                .run();
+        }
         // Persist to settings.json so it survives tmux restarts
         if let Ok(store) = crate::state::StateStore::new()
             && let Ok(mut settings) = store.load_settings()
@@ -1417,8 +1432,8 @@ impl SidebarApp {
     }
 
     /// Toggle the sleeping state of the selected agent.
-    /// Does a read-modify-write on the tmux global option so concurrent
-    /// toggles from different sidebar clients don't clobber each other.
+    /// Does a read-modify-write on shared sidebar state so concurrent clients
+    /// do not clobber each other.
     pub fn toggle_sleeping(&mut self) {
         let Some(pane_id) = self
             .selected_agent_idx()
@@ -1428,14 +1443,18 @@ impl SidebarApp {
             return;
         };
 
-        // Read current set from tmux (source of truth) to avoid losing
-        // toggles made by other sidebar clients since our last snapshot.
-        let mut current: std::collections::HashSet<String> = Cmd::new("tmux")
-            .args(&["show-option", "-gqv", "@workmux_sleeping_panes"])
-            .run_and_capture_stdout()
-            .ok()
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
+        let mut current: std::collections::HashSet<String> = if self.mux.name() == "zellij" {
+            super::session_state::read(&self.mux.instance_id())
+                .map(|state| state.sleeping_panes)
+                .unwrap_or_default()
+        } else {
+            Cmd::new("tmux")
+                .args(&["show-option", "-gqv", "@workmux_sleeping_panes"])
+                .run_and_capture_stdout()
+                .ok()
+                .map(|s| s.split_whitespace().map(String::from).collect())
+                .unwrap_or_default()
+        };
 
         if !current.insert(pane_id.clone()) {
             current.remove(&pane_id);
@@ -1444,16 +1463,21 @@ impl SidebarApp {
         // Update local state for immediate rendering
         self.sleeping_pane_ids = current.clone();
 
-        // Write back to tmux
-        let panes: String = current.into_iter().collect::<Vec<_>>().join(" ");
-        if panes.is_empty() {
-            let _ = Cmd::new("tmux")
-                .args(&["set-option", "-gu", "@workmux_sleeping_panes"])
-                .run();
+        if self.mux.name() == "zellij" {
+            let _ = super::session_state::update(&self.mux.instance_id(), |state| {
+                state.sleeping_panes = current;
+            });
         } else {
-            let _ = Cmd::new("tmux")
-                .args(&["set-option", "-g", "@workmux_sleeping_panes", &panes])
-                .run();
+            let panes: String = current.into_iter().collect::<Vec<_>>().join(" ");
+            if panes.is_empty() {
+                let _ = Cmd::new("tmux")
+                    .args(&["set-option", "-gu", "@workmux_sleeping_panes"])
+                    .run();
+            } else {
+                let _ = Cmd::new("tmux")
+                    .args(&["set-option", "-g", "@workmux_sleeping_panes", &panes])
+                    .run();
+            }
         }
 
         // Signal daemon for immediate refresh (re-sort + broadcast)
@@ -1462,17 +1486,24 @@ impl SidebarApp {
 
     pub fn toggle_filter_mode(&mut self) {
         self.filter_mode = self.filter_mode.toggle();
-        // Persist to tmux so all sidebar instances pick it up immediately
-        if let Err(error) = Cmd::new("tmux")
-            .args(&[
-                "set-option",
-                "-g",
-                "@workmux_sidebar_filter",
-                self.filter_mode.as_str(),
-            ])
-            .run()
-        {
-            warn!(%error, "failed to persist sidebar filter mode to tmux");
+        let result = if self.mux.name() == "zellij" {
+            super::session_state::update(&self.mux.instance_id(), |state| {
+                state.filter = Some(self.filter_mode.as_str().to_string());
+            })
+            .map(|_| ())
+        } else {
+            Cmd::new("tmux")
+                .args(&[
+                    "set-option",
+                    "-g",
+                    "@workmux_sidebar_filter",
+                    self.filter_mode.as_str(),
+                ])
+                .run()
+                .map(|_| ())
+        };
+        if let Err(error) = result {
+            warn!(%error, "failed to persist sidebar filter mode");
         }
         // Persist to settings.json so it survives tmux restarts
         match crate::state::StateStore::new().and_then(|store| {
@@ -1488,23 +1519,31 @@ impl SidebarApp {
     }
 
     /// Switch between the configured grouping and one ungrouped list. The
-    /// choice is a tmux global, so every sidebar and the agent navigation
-    /// commands move together.
+    /// choice is shared, so every sidebar and the agent navigation commands
+    /// move together.
     pub fn toggle_grouping(&mut self) {
         let next = match self.group_by {
             Some(_) => None,
             None => self.configured_group_by.or(Some(SidebarGroupBy::Project)),
         };
-        if let Err(error) = Cmd::new("tmux")
-            .args(&[
-                "set-option",
-                "-g",
-                "@workmux_sidebar_group_by",
-                super::group_by_option_value(next),
-            ])
-            .run()
-        {
-            warn!(%error, "failed to persist sidebar grouping to tmux");
+        let result = if self.mux.name() == "zellij" {
+            super::session_state::update(&self.mux.instance_id(), |state| {
+                state.group_by = Some(super::group_by_option_value(next).to_string());
+            })
+            .map(|_| ())
+        } else {
+            Cmd::new("tmux")
+                .args(&[
+                    "set-option",
+                    "-g",
+                    "@workmux_sidebar_group_by",
+                    super::group_by_option_value(next),
+                ])
+                .run()
+                .map(|_| ())
+        };
+        if let Err(error) = result {
+            warn!(%error, "failed to persist sidebar grouping");
         }
         match crate::state::StateStore::new().and_then(|store| {
             let mut settings = store.load_settings()?;
@@ -1950,7 +1989,19 @@ fn try_reparse_templates(
 }
 
 /// Detect the sidebar's stable host identity from its tmux pane.
-fn detect_host_identity() -> Option<HostIdentity> {
+fn detect_host_identity(mux: &dyn Multiplexer) -> Option<HostIdentity> {
+    if mux.name() == "zellij" {
+        let pane_id = mux.current_pane_id()?;
+        let info = mux.get_live_pane_info(&pane_id).ok()??;
+        let session_name = info.session.unwrap_or_else(|| mux.instance_id());
+        return Some(HostIdentity {
+            session_id: session_name.clone(),
+            session_name,
+            window_id: info.window_id?,
+            pane_id,
+        });
+    }
+
     let pane_id = std::env::var("TMUX_PANE")
         .ok()
         .filter(|pane_id| !pane_id.is_empty())?;

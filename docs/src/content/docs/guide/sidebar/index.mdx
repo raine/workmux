@@ -1,6 +1,6 @@
 ---
 title: "Sidebar"
-description: A persistent agent status sidebar for tmux windows
+description: A persistent agent status sidebar for tmux windows and Zellij tabs
 ---
 
 import Screenshot from "../../../../components/Screenshot.astro";
@@ -9,9 +9,9 @@ import tiles from "../../../../assets/screenshots/sidebar-tiles.webp";
 import grouped from "../../../../assets/screenshots/sidebar-grouped.webp";
 import topBar from "../../../../assets/screenshots/sidebar-top-bar.webp";
 
-The sidebar provides an always-visible agent overview pinned to the left edge or
-top edge of every tmux window. Unlike the dashboard, which is a full-screen TUI
-you open on demand, the sidebar stays on screen while you work.
+The sidebar provides an always-visible agent overview pinned to the left or top
+edge of every tmux window or Zellij tab. Unlike the dashboard, which is a
+full-screen TUI you open on demand, the sidebar stays on screen while you work.
 
 <div style="display: flex; justify-content: center; margin: 1.5rem 0;">
 
@@ -27,8 +27,8 @@ you open on demand, the sidebar stays on screen while you work.
 ## Setup
 
 :::caution[Prerequisites]
-The sidebar requires [status tracking hooks](/guide/status-tracking/) to be
-configured and tmux as the backend.
+The sidebar requires [status tracking hooks](/guide/status-tracking/) and either
+tmux or the experimental Zellij backend.
 :::
 
 Toggle the sidebar with:
@@ -48,6 +48,10 @@ again disables it.
 When the global sidebar is active, `workmux sidebar --session` hides it in the
 current tmux session only. Run it again to show the sidebar in that session
 again without affecting other sessions.
+
+On Zellij, the sidebar appears in every tab of the current Zellij session.
+Zellij sessions are already isolated, so `--session` has the same effect as the
+default command. New tabs receive a sidebar within about two seconds.
 
 Optionally, add a tmux binding for quick access:
 
@@ -142,6 +146,13 @@ and is clamped between 12 and 80. Position changes take effect the next time you
 toggle the sidebar off and on. Use `workmux sidebar --position top` or
 `--position left` to override the configured placement for that toggle.
 
+tmux and Zellij apply these sizes exactly when the sidebar layout is created.
+For Zellij, workmux wraps the complete existing content tree with
+`override-layout`, so the sidebar takes space proportionally from the existing
+nested layout instead of resizing only the adjacent pane. Running terminal
+panes and focus are retained. Manual resizing remains in effect until
+`workmux sidebar on` is run again.
+
 ## Layout modes
 
 The left sidebar supports two layout modes, toggled with `v` in the sidebar
@@ -162,7 +173,7 @@ The count includes only hidden agents, not agents above the viewport. The footer
 is not selectable and disappears when the final agent is visible. On very short
 sidebars, showing the selected tile takes priority over the footer.
 
-Your preference is persisted across tmux restarts. The top bar always uses a
+Your preference is persisted across multiplexer restarts. The top bar always uses a
 horizontal chip layout, so `v` has no effect there. Horizontal templates render
 as many configured lines as the current height allows.
 
@@ -287,12 +298,13 @@ every agent it shows.
 ## Mouse support
 
 Click an agent tile or top-bar chip to jump to its pane, or scroll to navigate
-the list. Requires `set -g mouse on` in your `~/.tmux.conf`.
+the list. tmux requires `set -g mouse on` in your `~/.tmux.conf`; Zellij needs
+no additional mouse configuration.
 
 ## Keybindings
 
 These keys belong to the sidebar pane, so they work while it has focus. Move to
-it the way you move to any tmux pane, or click it.
+it the way you move to any multiplexer pane, or click it.
 
 | Key     | Action                    |
 | ------- | ------------------------- |
@@ -344,7 +356,7 @@ need to monitor. Press `z` again to wake them up.
 
 ## Agent navigation hotkeys
 
-You can switch between agents from any tmux pane using subcommands. These work
+You can switch between agents from any pane using subcommands. These work
 in the same order shown in the sidebar:
 
 | Command                    | Action                               |
@@ -368,6 +380,8 @@ bind -n M-3 run-shell "workmux sidebar jump 3"
 ```
 
 ## How it works
+
+### tmux
 
 The sidebar is a bit of a hack on top of tmux's pane system, but it works quite
 well. It uses a daemon + client architecture with event-driven rendering:
@@ -407,10 +421,23 @@ well. It uses a daemon + client architecture with event-driven rendering:
 6. **Toggle off**: kills all sidebar panes, reflows content panes to fill the
    freed space, stops the daemon, and removes hooks.
 
+### Zellij
+
+Zellij uses the same daemon and client architecture, scoped to the current
+Zellij session. Stable tab and pane IDs let workmux create one named sidebar
+pane per tab and collect live pane state. To add the sidebar, workmux dumps the
+active tab layout, wraps its complete content tree, and applies one
+`override-layout` operation while retaining running terminal panes. It then
+restores visible pane ordering if Zellij maps anonymous panes by a different
+logical order. Because Zellij has no tmux-style new-window hooks, the daemon
+notices new tabs during its two-second state poll. Zellij restores the
+remaining pane layout when a sidebar closes, so no custom layout-tree reflow is
+needed.
+
 ### Resource usage
 
-Because tmux has no concept of a pane that persists across all windows, each
-window runs its own `_sidebar-run` process. Each one uses roughly 15 MB of
+Because neither backend has a pane that persists across all windows or tabs,
+each window or tab runs its own `_sidebar-run` process. Each one uses roughly 15 MB of
 resident memory, and the shared daemon (`_sidebar-daemon`) uses about 16 MB. With
 five agents running, total memory footprint is around 90 MB. CPU usage is near
 zero when idle thanks to the event-driven architecture.

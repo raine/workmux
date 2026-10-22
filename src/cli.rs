@@ -203,7 +203,7 @@ Worktree lifecycle:
 
 Monitoring:
   dashboard    Show a TUI dashboard of all active workmux agents
-  sidebar      Toggle a live agent status sidebar in tmux
+  sidebar      Toggle a live agent status sidebar in tmux or Zellij
   list         List all worktrees [ls]
   path         Get the filesystem path of a worktree
   status       Query agent status for worktrees
@@ -693,9 +693,9 @@ enum Commands {
     /// Update workmux to the latest version
     Update,
 
-    /// Control a live agent status sidebar in tmux
+    /// Control a live agent status sidebar in tmux or Zellij
     Sidebar {
-        /// Scope sidebar to this session, or toggle this session off when global sidebar is active
+        /// Scope tmux to this session; Zellij is always scoped to its current session
         #[arg(short = 's', long)]
         session: bool,
 
@@ -710,15 +710,15 @@ enum Commands {
     #[command(hide = true, name = "_sidebar-run")]
     SidebarRun,
 
-    /// Sync sidebar into a window (internal use, called by tmux hooks)
+    /// Sync sidebar into a window (internal use)
     #[command(hide = true, name = "_sidebar-sync")]
     SidebarSync {
-        /// Target window ID (from tmux hook context)
+        /// Target window ID
         #[arg(long)]
         window: Option<String>,
     },
 
-    /// Reflow sidebar layout after window resize (internal use, called by tmux hooks)
+    /// Reflow sidebar layout after window resize (internal use)
     #[command(hide = true, name = "_sidebar-reflow")]
     SidebarReflow {
         /// Target window ID

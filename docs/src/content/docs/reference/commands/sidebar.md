@@ -1,11 +1,11 @@
 ---
 title: "sidebar"
-description: Control a live agent status sidebar in tmux
+description: Control a live agent status sidebar in tmux or Zellij
 ---
 
-Controls a live agent status sidebar on the left or top edge of tmux windows. By default, each sidebar pane shows active agents across all tmux
-sessions with live status updates. Use `workmux sidebar filter session` to show
-only agents in the current tmux session.
+Controls a live agent status sidebar on the left or top edge of tmux windows or
+Zellij tabs. On tmux, each sidebar shows active agents across all sessions by
+default. On Zellij, the sidebar is scoped to the current Zellij session.
 
 ```bash
 workmux sidebar                         # Toggle sidebar on/off (all sessions)
@@ -47,12 +47,13 @@ Each agent row displays:
 
 ## Mouse support
 
-With tmux mouse mode enabled (`set -g mouse on`), click an agent row or top-bar
-chip to jump to its pane, or scroll to navigate the list.
+Click an agent row or top-bar chip to jump to its pane, or scroll to navigate
+the list. tmux requires mouse mode (`set -g mouse on`); Zellij needs no extra
+mouse configuration.
 
 ## Navigation commands
 
-Switch between agents from any tmux pane, in the same order shown in the
+Switch between agents from any pane, in the same order shown in the
 sidebar. Navigation uses the same filter mode as the sidebar view, so it cycles
 through all sessions by default:
 
@@ -154,6 +155,20 @@ sidebar panes, the daemon, and removing hooks. `workmux sidebar on` and
 `workmux sidebar off` provide idempotent alternatives for scripts and tmux
 configuration.
 
+On Zellij, the same daemon polls the current session and creates one sidebar
+pane in every tab. New tabs are detected within about two seconds. Zellij
+sidebars are applied with `override-layout`, retaining running terminal panes
+and wrapping the complete nested content tree. workmux also restores the
+visible pane ordering when Zellij's logical pane order differs from its layout
+order, including when enabled after multiple `workmux add` commands. Temporary
+layout slots are removed without closing the original running panes. Closing
+the sidebar reapplies the content-only layout so the original panes retain
+their order and fill the tab. Layout changes are serialized with background
+synchronization, and pane observations are shared across tabs to keep toggles
+responsive. Snapshots taken during a layout change use Zellij's plain pane
+table, which skips the per-pane command lookups that JSON output performs.
+workmux does not install Zellij hooks.
+
 ### Session-scoped mode
 
 By default, the sidebar appears in all tmux sessions. Use `--session` to scope
@@ -176,7 +191,10 @@ Starting global mode still replaces any session-scoped sidebars.
 
 ## Limitations
 
-- tmux only (other backends are not supported yet)
+- Zellij sidebars are experimental and limited to the current Zellij session.
+- `--session` is equivalent to the default command on Zellij.
+- Fixed sidebar sizes follow Zellij's layout behavior when the terminal itself
+  is resized.
 
 ## Example tmux binding
 

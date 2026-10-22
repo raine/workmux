@@ -63,6 +63,9 @@ pub fn run_sidebar() -> Result<()> {
         tracing::info!("sidebar-run exiting: mux not running");
         return Ok(());
     }
+    if mux.name() == "zellij" {
+        drop(super::session_state::lock_layout(&mux.instance_id())?);
+    }
 
     // Create app BEFORE entering raw mode: terminal_light::luma() queries
     // the terminal via stdin, which would race with the input reader thread.
@@ -179,7 +182,9 @@ pub fn run_sidebar() -> Result<()> {
         }
 
         if last_pane_check.grace_expired(Instant::now())
-            && last_pane_check.should_exit(app.host_identity(), sidebar_is_only_pane)
+            && last_pane_check.should_exit(app.host_identity(), |window_id, pane_id| {
+                sidebar_is_only_pane(app.mux.as_ref(), window_id, pane_id)
+            })
         {
             quit_for_last_pane(&mut app);
         }
@@ -200,7 +205,7 @@ pub fn run_sidebar() -> Result<()> {
                 "sidebar-run quitting"
             );
             if app.quit_silent {
-                schedule_pane_kill(&host_identity.pane_id);
+                schedule_pane_kill(app.mux.as_ref(), &host_identity.pane_id);
             } else {
                 shutdown_all_sidebars(&host_identity);
             }
@@ -248,7 +253,10 @@ fn pane_kill_command(pane_id: &str) -> String {
     )
 }
 
-fn schedule_pane_kill(pane_id: &str) {
+fn schedule_pane_kill(mux: &dyn crate::multiplexer::Multiplexer, pane_id: &str) {
+    if mux.name() == "zellij" {
+        return;
+    }
     let cmd = pane_kill_command(pane_id);
     let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
 }
@@ -261,7 +269,14 @@ fn sole_pane_is_sidebar(output: &str, pane_id: &str) -> bool {
     panes.next() == Some(pane_id) && panes.next().is_none()
 }
 
-fn sidebar_is_only_pane(window_id: &str, pane_id: &str) -> bool {
+fn sidebar_is_only_pane(
+    mux: &dyn crate::multiplexer::Multiplexer,
+    window_id: &str,
+    pane_id: &str,
+) -> bool {
+    if mux.name() == "zellij" {
+        return super::zellij_panes::sidebar_is_only_pane(&mux.instance_id(), window_id, pane_id);
+    }
     Cmd::new("tmux")
         .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
         .run_and_capture_stdout()
@@ -336,7 +351,9 @@ fn process_event(
                     .host_window_id()
                     .and_then(|window_id| snapshot.window_pane_counts.get(window_id))
                     .copied();
-                if last_pane_check.should_exit(app.host_identity(), sidebar_is_only_pane) {
+                if last_pane_check.should_exit(app.host_identity(), |window_id, pane_id| {
+                    sidebar_is_only_pane(app.mux.as_ref(), window_id, pane_id)
+                }) {
                     quit_for_last_pane(app);
                 }
                 app.apply_snapshot(snapshot);

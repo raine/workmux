@@ -67,6 +67,7 @@ unicode-width = "0.2"
 signal-hook = "0.4"
 notify = "9.0.0-rc.3"
 ignore = "0.4"
+kdl = { version = "6.7.1", features = ["v1"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1", features = ["fs"] }
