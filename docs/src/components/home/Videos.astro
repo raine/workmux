@@ -1,0 +1,119 @@
+---
+import { Image } from 'astro:assets';
+import sethPhaeno from '../../assets/videos/0RGyt3EDP-E.webp';
+import samNatale from '../../assets/videos/ww1wykxJps8.webp';
+import devopsToolbox from '../../assets/videos/7uumknh43rM.webp';
+
+const videos = [
+  {
+    title: 'Tmux is Still Better Than Herdr (Here’s Why)',
+    author: 'Sam Natale',
+    href: 'https://www.youtube.com/watch?v=ww1wykxJps8&t=28s',
+    thumbnail: samNatale,
+  },
+  {
+    title: 'I Don’t Want a New Terminal. I Want THIS for Tmux.',
+    author: 'DevOps Toolbox',
+    href: 'https://www.youtube.com/watch?v=7uumknh43rM&t=573s',
+    thumbnail: devopsToolbox,
+  },
+  {
+    title: 'Tmux Didn’t Need a Replacement, It Needed Workmux',
+    author: 'Seth Phaeno',
+    href: 'https://www.youtube.com/watch?v=0RGyt3EDP-E&t=10s',
+    thumbnail: sethPhaeno,
+  },
+];
+---
+
+<section class="ed-section">
+  <div class="ed-container">
+    <div class="ed-accent-rule" aria-hidden="true"></div>
+    <h2 class="ed-section-label">Community videos</h2>
+    <p class="ed-section-desc">
+      Some kind people have made videos about workmux on YouTube. If you're
+      looking for a demo, check them out.
+    </p>
+    <ul class="grid">
+      {
+        videos.map(({ title, author, href, thumbnail }) => (
+          <li>
+            <a href={href}>
+              <Image
+                src={thumbnail}
+                alt=""
+                layout="constrained"
+                widths={[320, 480, 640, 960]}
+                sizes="(max-width: 48rem) calc(100vw - 2.5rem), 18rem"
+              />
+              <span class="title">{title}</span>
+            </a>
+            <span class="author">{author} on YouTube</span>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+    padding: 0;
+    margin: 0;
+    list-style: none;
+  }
+
+  li {
+    margin: 0;
+  }
+
+  a {
+    display: block;
+    color: var(--ed-text-1);
+    text-decoration: none;
+  }
+
+  img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    margin-bottom: 0.75rem;
+    border-radius: 0.375rem;
+    transition: opacity 0.15s ease;
+  }
+
+  a:hover img,
+  a:focus-visible img {
+    opacity: 0.85;
+  }
+
+  a:hover .title,
+  a:focus-visible .title {
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .title {
+    display: block;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .author {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--ed-text-2);
+    font-family: var(--ed-font-mono);
+    font-size: 0.8125rem;
+  }
+
+  @media (max-width: 48rem) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

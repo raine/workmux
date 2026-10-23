@@ -129,6 +129,31 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
   Here is how to keep Tmux and boost your workflow using Workmux."* -
   [Sam Natale on YouTube](https://www.youtube.com/watch?v=ww1wykxJps8)
 
+## Community videos
+
+Some kind people have made videos about workmux on YouTube. If you're looking
+for a demo, check them out.
+
+<table>
+  <tr>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=ww1wykxJps8&t=28s"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/ww1wykxJps8.webp" alt="Tmux is Still Better Than Herdr (Here's Why)"></a><br>
+      <a href="https://www.youtube.com/watch?v=ww1wykxJps8&t=28s">Tmux is Still Better Than Herdr (Here's Why)</a><br>
+      Sam Natale
+    </td>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=7uumknh43rM&t=573s"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/7uumknh43rM.webp" alt="I Don't Want a New Terminal. I Want THIS for Tmux."></a><br>
+      <a href="https://www.youtube.com/watch?v=7uumknh43rM&t=573s">I Don't Want a New Terminal. I Want THIS for Tmux.</a><br>
+      DevOps Toolbox
+    </td>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=0RGyt3EDP-E&t=10s"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/0RGyt3EDP-E.webp" alt="Tmux Didn't Need a Replacement, It Needed Workmux"></a><br>
+      <a href="https://www.youtube.com/watch?v=0RGyt3EDP-E&t=10s">Tmux Didn't Need a Replacement, It Needed Workmux</a><br>
+      Seth Phaeno
+    </td>
+  </tr>
+</table>
+
 ## Installation
 
 **Official sources:** [github.com/raine/workmux](https://github.com/raine/workmux)
