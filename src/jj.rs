@@ -109,10 +109,15 @@ fn working_copy(workspace: &str) -> String {
     format!("{}@", quoted(workspace))
 }
 
+/// A jj command in `dir`. A workspace whose commits were rewritten from another
+/// workspace is stale; jj updates it first, snapshotting its files so no work
+/// is lost.
 fn jj<'a>(dir: &'a Path) -> Cmd<'a> {
-    Cmd::new("jj")
-        .workdir(dir)
-        .args(&["--no-pager", "--color=never"])
+    Cmd::new("jj").workdir(dir).args(&[
+        "--no-pager",
+        "--color=never",
+        "--config=snapshot.auto-update-stale=true",
+    ])
 }
 
 /// Evaluate a template for each commit in a revset, one output line per line
@@ -139,6 +144,24 @@ fn commit_id(dir: &Path, revset: &str) -> Result<String> {
         [] => bail!("Revision '{revset}' does not exist"),
         _ => bail!("Revision '{revset}' resolves to more than one commit"),
     }
+}
+
+/// Fail when a local bookmark points at more than one commit, which revsets
+/// naming it cannot resolve.
+fn ensure_not_conflicted(dir: &Path, bookmark: &str) -> Result<()> {
+    let targets = log(
+        dir,
+        &format!("bookmarks(exact:{})", quoted(bookmark)),
+        r#"commit_id.short() ++ "\n""#,
+    )?;
+    if targets.len() > 1 {
+        bail!(
+            "Bookmark '{bookmark}' is conflicted ({}). Choose its target with \
+             'jj bookmark set {bookmark} -r <revision>' and retry.",
+            targets.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn bookmark_names(dir: &Path, revset: &str) -> Result<Vec<String>> {
@@ -205,9 +228,10 @@ fn workspace_bookmarks(dir: &Path) -> HashSet<String> {
 /// Bookmark to use as the default base for a new workspace created from `dir`.
 ///
 /// Inside a workmux workspace this is the workspace's own bookmark. Elsewhere
-/// it is the single bookmark on `@`, or on `@-` when `@` is an empty,
-/// undescribed working-copy commit. Bookmarks of workmux workspaces are not
-/// candidates there, since they start out on their base commit.
+/// it is the single bookmark on `@`, or on `@-` when `@` is an undescribed
+/// working-copy commit, whose changes count as uncommitted. Bookmarks of
+/// workmux workspaces are not candidates there, since they start out on their
+/// base commit.
 pub fn default_base(dir: &Path) -> Result<String> {
     if let Some(bookmark) = git::get_workspace_bookmark_in(dir) {
         return Ok(bookmark);
@@ -223,14 +247,16 @@ pub fn default_base(dir: &Path) -> Result<String> {
 
     let mut checked = "@";
     let mut names = candidates("@")?;
-    if names.is_empty() && non_empty(dir, "@ & empty() & description(exact:\"\")")? {
+    if names.is_empty() && non_empty(dir, "@ & description(exact:\"\")")? {
         checked = "@ or @-";
         names = candidates("@-")?;
     }
     match names.as_slice() {
         [name] => Ok(name.clone()),
         [] => {
-            let nearby = candidates("heads(::@ & bookmarks())")?;
+            // Closest bookmarks behind @, and ahead of @- when the base moved
+            // on after @ was created.
+            let nearby = candidates("heads(::@ & bookmarks()) | roots(@-:: & bookmarks())")?;
             let hint = if nearby.is_empty() {
                 String::new()
             } else {
@@ -248,23 +274,31 @@ pub fn default_base(dir: &Path) -> Result<String> {
 /// When `base` is the bookmark of a workmux workspace, move it to that
 /// workspace's tip so a workspace created from it includes the latest work.
 pub fn advance_base(dir: &Path, base: &str) -> Result<()> {
-    let bookmarks = git::get_all_worktree_meta_key_in(Some(dir), BOOKMARK_META_KEY);
-    let Some(handle) = bookmarks
-        .iter()
-        .find_map(|(handle, bookmark)| (bookmark == base).then_some(handle))
-    else {
-        return Ok(());
-    };
-    match git::find_worktree_in(handle, Some(dir)) {
-        Ok((path, _)) if path.exists() => advance_workspace_bookmark(&path, base),
-        _ => Ok(()),
+    match bookmark_workspace(dir, base) {
+        Some(path) => advance_workspace_bookmark(&path, base),
+        None => Ok(()),
     }
 }
 
-/// The latest commit of a workspace: its working-copy commit when it has
-/// changes and a description, otherwise the parent of the working-copy commit.
-/// An undescribed working-copy commit with changes is the jj counterpart of
-/// uncommitted changes.
+/// Root of the existing workmux workspace whose bookmark is `bookmark`.
+fn bookmark_workspace(dir: &Path, bookmark: &str) -> Option<PathBuf> {
+    let bookmarks = git::get_all_worktree_meta_key_in(Some(dir), BOOKMARK_META_KEY);
+    let handle = bookmarks
+        .iter()
+        .find_map(|(handle, name)| (name == bookmark).then_some(handle))?;
+    git::find_worktree_in(handle, Some(dir))
+        .ok()
+        .map(|(path, _)| path)
+        .filter(|path| path.exists())
+}
+
+/// The latest commit of a workspace.
+///
+/// Commits stacked on top of the working-copy commit, as left by `jj edit` on
+/// an earlier commit, are part of the workspace's work, so the tip is the head
+/// of that stack. Otherwise it is the working-copy commit when it has changes
+/// and a description, and its parent when not. An undescribed working-copy
+/// commit with changes is the jj counterpart of uncommitted changes.
 fn workspace_tip(workspace_root: &Path) -> Result<WorkspaceTip> {
     let state = log(
         workspace_root,
@@ -273,13 +307,31 @@ fn workspace_tip(workspace_root: &Path) -> Result<WorkspaceTip> {
     )?;
     let state = state.first().map(String::as_str).unwrap_or_default();
     let uncommitted = state == "changed undescribed";
-    let revision = if state == "changed described" {
-        "@"
-    } else {
-        "@-"
+
+    // Descendants of @ that are not shared with another workspace's working
+    // copy, ignoring empty undescribed commits.
+    let stacked = log(
+        workspace_root,
+        r#"heads((@:: ~ @) ~ ::(working_copies() ~ @) ~ (empty() & description(exact:"")))"#,
+        r#"commit_id ++ "\n""#,
+    )?;
+    let commit = match stacked.as_slice() {
+        [] if state == "changed described" => commit_id(workspace_root, "@")?,
+        [] => commit_id(workspace_root, "@-")?,
+        [head] => head.clone(),
+        heads => bail!(
+            "The workspace at '{}' has several stacks on top of its working-copy commit \
+             (heads {}). Abandon or rebase all but one and retry.",
+            workspace_root.display(),
+            heads
+                .iter()
+                .map(|id| &id[..12.min(id.len())])
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     };
     Ok(WorkspaceTip {
-        commit: commit_id(workspace_root, revision)?,
+        commit,
         uncommitted,
     })
 }
@@ -351,6 +403,19 @@ pub fn prepare_merge(request: &MergeRequest<'_>) -> Result<()> {
     } = *request;
 
     let tip = workspace_tip(workspace_root)?;
+    let divergent = log(
+        workspace_root,
+        &format!("(::{} | @) & divergent()", tip.commit),
+        r#"commit_id.short() ++ "\n""#,
+    )?;
+    if !divergent.is_empty() {
+        bail!(
+            "Workspace for '{bookmark}' has divergent changes ({}), for example left by \
+             updating a stale working copy that had unsaved edits. Keep one version (see \
+             'jj log', 'jj abandon' and 'jj squash') and retry.",
+            divergent.join(", ")
+        );
+    }
     if tip.uncommitted && !ignore_uncommitted && !keep {
         bail!(
             "Workspace for '{bookmark}' has uncommitted changes: its working-copy commit has \
@@ -358,9 +423,15 @@ pub fn prepare_merge(request: &MergeRequest<'_>) -> Result<()> {
              or use --ignore-uncommitted."
         );
     }
-    if !non_empty(workspace_root, &format!("present({})", quoted(target)))? {
+    ensure_not_conflicted(workspace_root, target)?;
+    ensure_not_conflicted(workspace_root, bookmark)?;
+    let target_rev = quoted(target);
+    if !non_empty(workspace_root, &format!("present({target_rev})"))? {
         bail!("Target bookmark '{target}' does not exist");
     }
+    // A target owned by another workspace first takes in that workspace's
+    // latest work, as when it is used as a base.
+    advance_base(workspace_root, target)?;
 
     let bookmark_rev = quoted(bookmark);
     if !non_empty(workspace_root, &format!("present({bookmark_rev})"))? {
@@ -374,11 +445,30 @@ pub fn prepare_merge(request: &MergeRequest<'_>) -> Result<()> {
         set_bookmark(workspace_root, bookmark, &tip.commit, true)?;
     } else if !non_empty(
         workspace_root,
-        &format!("{} & ::{bookmark_rev}", working_copy(workspace)),
+        &format!(
+            "({} | {}) & ::{bookmark_rev}",
+            tip.commit,
+            working_copy(workspace)
+        ),
     )? {
         bail!(
             "Bookmark '{bookmark}' is not on the history of workspace '{workspace}'. \
-             Move it with 'jj bookmark set {bookmark} -r <revision>' and retry."
+             Rebase the workspace onto it with 'jj rebase -b @ -d {bookmark}', or move it \
+             with 'jj bookmark set {bookmark} -r <revision>', and retry."
+        );
+    }
+
+    let conflicted = log(
+        workspace_root,
+        &format!("(::{bookmark_rev} ~ ::{target_rev}) & conflicts()"),
+        r#"change_id.short() ++ "\n""#,
+    )?;
+    if !conflicted.is_empty() {
+        bail!(
+            "Bookmark '{bookmark}' has unresolved conflicts in {}. Resolve them in the \
+             workspace at '{}' (see 'jj status'), then retry the merge.",
+            conflicted.join(", "),
+            workspace_root.display()
         );
     }
     Ok(())
@@ -419,11 +509,12 @@ pub fn merge(request: &MergeRequest<'_>) -> Result<()> {
         }
         MergeStrategy::Rebase => {
             println!("Rebasing '{bookmark}' onto '{target}'...");
-            jj(main_root)
+            // Rebasing from the workspace snapshots its files first and
+            // updates them in place, so it is never left stale.
+            jj(workspace_root)
                 .args(&["rebase", "-b", &source, "-d", &target_rev])
                 .run()
                 .with_context(|| format!("Failed to rebase '{bookmark}' onto '{target}'"))?;
-            update_stale(workspace_root)?;
             if non_empty(
                 main_root,
                 &format!("({target_rev}..{source}) & conflicts()"),
@@ -474,7 +565,19 @@ pub fn merge(request: &MergeRequest<'_>) -> Result<()> {
     };
 
     set_bookmark(main_root, target, &new_target, false)?;
-    follow_target_in_main_workspace(main_root, &old_target, target)?;
+    match bookmark_workspace(main_root, target) {
+        Some(owner) => {
+            follow_target(&owner, &old_target, target)?;
+            if !non_empty(&owner, &format!("{target_rev} & ::@"))? {
+                println!(
+                    "Note: the workspace at '{}' is not on top of '{target}' anymore; rebase it \
+                     with 'jj rebase -b @ -d {target}' there before continuing.",
+                    owner.display()
+                );
+            }
+        }
+        None => follow_target(main_root, &old_target, target)?,
+    }
     if keep && strategy == MergeStrategy::Squash {
         // The squashed changes are not on the workspace's history, so later
         // work in the kept workspace is rebased onto the target explicitly.
@@ -548,29 +651,99 @@ fn new_commit(dir: &Path, parents: &[&str], message: &str) -> Result<String> {
     }
 }
 
-/// When the main workspace sits on an empty, undescribed commit directly on the
-/// old target, move it onto the new target so its files show the merge.
-fn follow_target_in_main_workspace(main_root: &Path, old_target: &str, target: &str) -> Result<()> {
+/// When the workspace owning the target (the workmux workspace whose bookmark
+/// it is, otherwise the main workspace) sits on an empty, undescribed commit
+/// directly on the old target, move it onto the new target so its files show
+/// the merge.
+fn follow_target(workspace_root: &Path, old_target: &str, target: &str) -> Result<()> {
     if non_empty(
-        main_root,
+        workspace_root,
         &format!("@ & children({old_target}) & empty() & description(exact:\"\") ~ merges()"),
     )? {
-        jj(main_root)
+        jj(workspace_root)
             .args(&["rebase", "-r", "@", "-d", &quoted(target)])
             .run()
-            .context("Failed to move the main workspace onto the merged target")?;
+            .with_context(|| {
+                format!(
+                    "Failed to move the workspace at '{}' onto the merged target",
+                    workspace_root.display()
+                )
+            })?;
     }
     Ok(())
 }
 
-fn update_stale(workspace_root: &Path) -> Result<()> {
-    if workspace_root.exists() {
-        jj(workspace_root)
-            .args(&["workspace", "update-stale"])
-            .run()
-            .context("Failed to update the workspace working copy")?;
+/// Keep symlinks created by file operations out of a jj workspace's commits.
+///
+/// jj snapshots untracked files, and a directory-only ignore pattern such as
+/// `node_modules/` does not match a symlink to that directory. Each
+/// `(source, link)` whose source is ignored under `source_root` while the link
+/// is not is added to the repository's exclude file. Does nothing outside jj
+/// repositories.
+pub fn exclude_ignored_symlinks(source_root: &Path, links: &[(PathBuf, PathBuf)]) -> Result<()> {
+    let Some(link_dir) = links.first().and_then(|(_, link)| link.parent()) else {
+        return Ok(());
+    };
+    let common_dir = git::get_git_common_dir_in(Some(link_dir))?;
+    if repo_root_for_common_dir(&common_dir).is_none() {
+        return Ok(());
     }
-    Ok(())
+    let worktree_root = git::get_repo_root_in(Some(link_dir))?.canonicalize()?;
+
+    let mut patterns = Vec::new();
+    for (source, link) in links {
+        let (Some(link_parent), Some(link_name)) = (link.parent(), link.file_name()) else {
+            continue;
+        };
+        let Ok(relative) = link_parent
+            .canonicalize()
+            .map(|parent| parent.join(link_name))
+            .and_then(|path| {
+                path.strip_prefix(&worktree_root)
+                    .map(Path::to_path_buf)
+                    .map_err(std::io::Error::other)
+            })
+        else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let source_relative = source
+            .strip_prefix(source_root)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !source_relative.is_empty()
+            && git::is_path_ignored(source_root, &source_relative)
+            && !git::is_path_ignored(&worktree_root, &relative)
+        {
+            patterns.push(format!("/{relative}"));
+        }
+    }
+    if patterns.is_empty() {
+        return Ok(());
+    }
+
+    let exclude = common_dir.join("info").join("exclude");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let missing: Vec<&String> = patterns
+        .iter()
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == pattern.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    for pattern in missing {
+        content.push_str(pattern);
+        content.push('\n');
+    }
+    std::fs::write(&exclude, content)
+        .with_context(|| format!("Failed to update '{}'", exclude.display()))
 }
 
 /// Rebase all work of a workspace onto `base`.

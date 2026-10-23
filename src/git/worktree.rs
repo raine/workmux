@@ -188,8 +188,10 @@ pub fn linked_worktree_registration_in(
         if admin_dir.parent() != Some(registrations_dir.as_path()) {
             continue;
         }
+        // With `worktree.useRelativePaths` (which jj uses), the backlink is
+        // relative to the admin directory.
         let backlink = match std::fs::read_to_string(admin_dir.join("gitdir")) {
-            Ok(backlink) => PathBuf::from(backlink.trim()),
+            Ok(backlink) => crate::util::normalize_path(&admin_dir.join(backlink.trim())),
             Err(_) => continue,
         };
         if backlink == expected_gitdir {

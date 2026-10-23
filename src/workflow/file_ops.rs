@@ -68,7 +68,7 @@ pub fn handle_file_operations(
     );
 
     let mut copy_count = 0;
-    let mut symlink_count = 0;
+    let mut symlinks = Vec::new();
 
     // Handle copies
     if let Some(copy_patterns) = &file_config.copy {
@@ -172,15 +172,16 @@ pub fn handle_file_operations(
                         )
                     })?;
                 }
-                symlink_count += 1;
+                symlinks.push((source_path, dest_path));
             }
         }
     }
+    crate::jj::exclude_ignored_symlinks(repo_root, &symlinks)?;
 
-    if copy_count > 0 || symlink_count > 0 {
+    if copy_count > 0 || !symlinks.is_empty() {
         info!(
             copied = copy_count,
-            symlinked = symlink_count,
+            symlinked = symlinks.len(),
             "file_operations:completed"
         );
     }

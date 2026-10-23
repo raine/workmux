@@ -582,8 +582,11 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
         // Format: "gitdir: /path/to/main/.git/worktrees/name"
         let content = fs::read_to_string(&git_path).ok()?;
         let gitdir = content.strip_prefix("gitdir: ")?.trim();
+        // A relative gitdir (`worktree.useRelativePaths`, which jj uses) is
+        // relative to the worktree.
+        let gitdir = crate::util::normalize_path(&dir.join(gitdir));
         // Go up two levels from worktrees/<name> to get to .git/
-        let main_git = Path::new(gitdir).ancestors().nth(2)?;
+        let main_git = gitdir.ancestors().nth(2)?;
         Some(main_git.join("info/exclude"))
     } else {
         None

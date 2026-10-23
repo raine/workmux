@@ -259,3 +259,173 @@ def test_non_colocated_repo_is_rejected(mux_server, jj_repo, wm):
     result = wm("add feature --background", cwd=path, expect_fail=True)
     assert "colocat" in result.stderr.lower()
     assert not get_worktree_path(path, "feature").exists()
+
+
+def test_add_with_undescribed_changes_in_main(mux_server, jj_repo, wm):
+    (jj_repo / "wip").write_text("wip\n")
+    jj(mux_server, jj_repo, "status")
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    assert revision(mux_server, workspace, "@-") == revision(
+        mux_server, jj_repo, "main"
+    )
+    assert (jj_repo / "wip").read_text() == "wip\n"
+
+
+def test_merge_includes_commits_above_edited_commit(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    commit(mux_server, workspace, "first")
+    commit(mux_server, workspace, "second")
+    jj(mux_server, workspace, "edit", "@--")
+    (workspace / "first").write_text("edited\n")
+    wm("merge feature")
+    assert jj(mux_server, jj_repo, "file", "show", "-r", "main", "first") == "edited"
+    assert jj(mux_server, jj_repo, "file", "show", "-r", "main", "second") == "second"
+    assert_cleaned(mux_server, jj_repo, "feature")
+
+
+def test_merge_rejects_several_stacks(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    commit(mux_server, workspace, "shared")
+    shared = revision(mux_server, workspace, "@-")
+    for name in ("one", "two"):
+        jj(mux_server, workspace, "new", shared, "-m", name)
+        (workspace / name).write_text(name + "\n")
+    jj(mux_server, workspace, "edit", shared)
+    target = revision(mux_server, jj_repo, "main")
+    result = wm("merge feature", expect_fail=True)
+    assert "several stacks" in result.stderr
+    assert revision(mux_server, jj_repo, "main") == target
+
+
+def test_merge_rejects_conflicted_commits(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    (workspace / "conflict").write_text("feature\n")
+    jj(mux_server, workspace, "commit", "-m", "feature change")
+    (jj_repo / "conflict").write_text("target\n")
+    jj(mux_server, jj_repo, "commit", "-m", "target change")
+    jj(mux_server, jj_repo, "bookmark", "set", "main", "-r", "@-")
+    jj(mux_server, workspace, "rebase", "-b", "@", "-d", "main")
+    target = revision(mux_server, jj_repo, "main")
+    result = wm("merge feature", expect_fail=True)
+    assert "unresolved conflicts" in result.stderr
+    assert revision(mux_server, jj_repo, "main") == target
+
+
+def test_merge_rejects_conflicted_target_bookmark(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    commit(mux_server, get_worktree_path(jj_repo, "feature"), "feature-change")
+    commit(mux_server, jj_repo, "one")
+    one = revision(mux_server, jj_repo, "@-")
+    jj(mux_server, jj_repo, "new", "main")
+    commit(mux_server, jj_repo, "two")
+    two = revision(mux_server, jj_repo, "@-")
+    operation = jj(mux_server, jj_repo, "op", "log", "-n1", "--no-graph", "-T", "id")
+    for rev in (one, two):
+        jj(
+            mux_server,
+            jj_repo,
+            "--at-op",
+            operation,
+            "bookmark",
+            "set",
+            "main",
+            "-r",
+            rev,
+        )
+    result = wm("merge feature", expect_fail=True)
+    assert "Bookmark 'main' is conflicted" in result.stderr
+    assert get_worktree_path(jj_repo, "feature").exists()
+
+
+def test_merge_into_workspace_bookmark(mux_server, jj_repo, wm):
+    wm("add parent --background")
+    parent = get_worktree_path(jj_repo, "parent")
+    commit(mux_server, parent, "parent-one")
+    wm("add child --background --base parent")
+    child = get_worktree_path(jj_repo, "child")
+    commit(mux_server, child, "child-change")
+    # The parent bookmark lags behind work committed after the child started.
+    commit(mux_server, parent, "parent-two")
+    wm("merge child --into parent")
+    for name in ("parent-one", "parent-two", "child-change"):
+        assert jj(mux_server, jj_repo, "file", "show", "-r", "parent", name) == name
+    assert revision(mux_server, parent, "@-") == revision(mux_server, jj_repo, "parent")
+    assert_cleaned(mux_server, jj_repo, "child")
+    wm("merge parent")
+    for name in ("parent-one", "parent-two", "child-change"):
+        assert jj(mux_server, jj_repo, "file", "show", "-r", "main", name) == name
+
+
+def make_stale(env: MuxEnvironment, repo: Path, workspace: Path):
+    commit(env, workspace, "feature-change")
+    commit(env, repo, "target-change")
+    jj(env, repo, "bookmark", "set", "main", "-r", "@-")
+    jj(env, repo, "rebase", "-b", "feature@", "-d", "main")
+
+
+def test_merge_updates_stale_workspace(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    make_stale(mux_server, jj_repo, workspace)
+    wm("merge feature")
+    for name in ("feature-change", "target-change"):
+        assert jj(mux_server, jj_repo, "file", "show", "-r", "main", name) == name
+    assert_cleaned(mux_server, jj_repo, "feature")
+
+
+def test_merge_rejects_divergent_workspace(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    workspace = get_worktree_path(jj_repo, "feature")
+    (workspace / "snapshotted").write_text("snapshotted\n")
+    make_stale(mux_server, jj_repo, workspace)
+    # Edits made while stale make updating the working copy divergent.
+    (workspace / "late").write_text("late\n")
+    target = revision(mux_server, jj_repo, "main")
+    result = wm("merge feature", expect_fail=True)
+    assert "divergent" in result.stderr
+    assert revision(mux_server, jj_repo, "main") == target
+    # Updating the stale working copy keeps those edits in a divergent commit.
+    assert jj(
+        mux_server, workspace, "log", "--no-graph", "-r", "divergent() & files(late)"
+    )
+
+
+def test_symlinked_ignored_directory_is_not_snapshotted(mux_server, jj_repo, wm):
+    write_workmux_config(
+        jj_repo, panes=[{"command": "sleep 600"}], files={"symlink": ["node_modules"]}
+    )
+    (jj_repo / ".gitignore").write_text("node_modules/\n")
+    jj(mux_server, jj_repo, "commit", "-m", "ignore")
+    jj(mux_server, jj_repo, "bookmark", "set", "main", "-r", "@-")
+    (jj_repo / "node_modules").mkdir()
+    (jj_repo / "node_modules" / "module.js").write_text("module\n")
+    wm("add feature --background --base main")
+    workspace = get_worktree_path(jj_repo, "feature")
+    assert (workspace / "node_modules").is_symlink()
+    assert "node_modules" not in jj(mux_server, workspace, "file", "list", "-r", "@")
+
+
+def test_prompt_file_is_not_snapshotted(mux_server, jj_repo, wm):
+    write_workmux_config(jj_repo, panes=[{"command": "<agent>"}], agent="cat")
+    wm("add feature --background --base main -p 'inline prompt'")
+    workspace = get_worktree_path(jj_repo, "feature")
+    assert list((workspace / ".workmux").iterdir())
+    assert ".workmux/" not in jj(mux_server, workspace, "file", "list", "-r", "@")
+
+
+def test_remove_after_workspace_directory_deleted(mux_server, jj_repo, wm):
+    wm("add feature --background")
+    shutil.rmtree(get_worktree_path(jj_repo, "feature"))
+    wm("remove feature --force")
+    assert_cleaned(mux_server, jj_repo, "feature")
+
+
+def test_remote_branch_is_rejected_without_fetching(mux_server, jj_repo, wm):
+    jj(mux_server, jj_repo, "git", "remote", "add", "origin", "/nonexistent")
+    result = wm("add origin/feature --background", expect_fail=True)
+    assert "not supported in jj" in result.stderr
+    assert "Failed to fetch" not in result.stderr
