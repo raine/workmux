@@ -145,6 +145,40 @@ pub fn get_remote_url_in(remote: &str, workdir: Option<&Path>) -> Result<String>
         .with_context(|| format!("Failed to get URL for remote '{}'", remote))
 }
 
+/// Extract a display name without requiring a hosting provider or an owner.
+/// In particular, nested GitLab groups and local remotes use the last component.
+pub fn repository_name_from_remote(url: &str) -> Option<&str> {
+    let url = url.trim();
+    if url.is_empty() || url.chars().any(char::is_control) {
+        return None;
+    }
+    let path = if let Some((scheme, rest)) = url.split_once("://") {
+        if !matches!(scheme, "http" | "https" | "ssh" | "git" | "file") {
+            return None;
+        }
+        let (host, path) = rest.split_once('/')?;
+        if host.is_empty() && scheme != "file" {
+            return None;
+        }
+        path.split(['?', '#']).next()?
+    } else if let Some((host, path)) = url.split_once(':') {
+        if !host.contains('/') {
+            // SCP-style remote, including SSH host aliases.
+            if host.is_empty() || path.starts_with(':') {
+                return None;
+            }
+            path
+        } else {
+            url
+        }
+    } else {
+        url
+    };
+    let name = path.trim_end_matches('/').rsplit('/').next()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
 /// Find an existing remote that matches the given repository identity.
 /// Returns the remote name if found, None otherwise.
 #[allow(dead_code)]
@@ -358,6 +392,51 @@ pub fn get_repo_owner_in(workdir: Option<&Path>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::parse_owner_from_git_url;
+    use super::repository_name_from_remote;
+
+    #[test]
+    fn origin_name_supports_remote_formats() {
+        for url in [
+            "https://github.com/org/example-repo.git",
+            "https://gitlab.com/group/subgroup/example-repo.git/",
+            "ssh://user@host:2222/group/example-repo.git",
+            "ssh://user@[::1]:2222/group/example-repo.git",
+            "git@host:group/example-repo.git",
+            "host-alias:example-repo.git",
+            "git://host/example-repo",
+            "file:///tmp/example-repo.git",
+            "/tmp/example-repo.git/",
+            "../example-repo",
+            "example-repo.git",
+            " https://host/group/example-repo.git \n",
+        ] {
+            assert_eq!(
+                repository_name_from_remote(url),
+                Some("example-repo"),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            repository_name_from_remote("https://host/group/repo.name.git"),
+            Some("repo.name")
+        );
+        for url in [
+            "",
+            " ",
+            "/",
+            ".",
+            "..",
+            ".git",
+            "https://host",
+            "ssh://host/",
+            "https:///repo.git",
+            ":repo.git",
+            "ext::command",
+            "/tmp/repo\nname",
+        ] {
+            assert_eq!(repository_name_from_remote(url), None, "{url}");
+        }
+    }
 
     #[test]
     fn test_parse_repo_owner_https_github_com() {

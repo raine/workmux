@@ -143,6 +143,26 @@ fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> PathBuf {
 
 /// Placeholder replaced with the project directory name in config templates.
 pub const PROJECT_PLACEHOLDER: &str = "{project}";
+pub const ORIGIN_NAME_PLACEHOLDER: &str = "{origin_name}";
+
+/// Expand naming templates without changing filesystem template semantics.
+pub fn expand_window_prefix(
+    template: &str,
+    project_root: &Path,
+    origin_url: Option<&str>,
+) -> Result<String> {
+    let project_name = expand_project_placeholder(PROJECT_PLACEHOLDER, project_root)?;
+    let origin_name = origin_url
+        .and_then(crate::git::repository_name_from_remote)
+        .unwrap_or(&project_name);
+    // Split on the original template so placeholder-like text in a repository
+    // name is never expanded recursively.
+    Ok(template
+        .split(PROJECT_PLACEHOLDER)
+        .map(|part| part.replace(ORIGIN_NAME_PLACEHOLDER, origin_name))
+        .collect::<Vec<_>>()
+        .join(&project_name))
+}
 
 /// Replace `{project}` in a template with `project_root`'s directory name.
 pub fn expand_project_placeholder(template: &str, project_root: &Path) -> Result<String> {
@@ -306,6 +326,39 @@ pub fn format_elapsed_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_name_prefix_expansion_preserves_project_and_paths() {
+        let project = Path::new("/repos/local-name/.bare");
+        assert_eq!(
+            expand_window_prefix(
+                "{project}-{origin_name}-",
+                project,
+                Some("git@host:group/example-repo.git"),
+            )
+            .unwrap(),
+            ".bare-example-repo-"
+        );
+        for origin in [None, Some("https://host/")] {
+            assert_eq!(
+                expand_window_prefix("{origin_name}-", project, origin).unwrap(),
+                ".bare-"
+            );
+        }
+        assert_eq!(
+            expand_project_placeholder("{project}-", project).unwrap(),
+            ".bare-"
+        );
+        assert_eq!(
+            expand_worktree_dir("/worktrees/{project}", project).unwrap(),
+            PathBuf::from("/worktrees/.bare")
+        );
+        assert!(expand_worktree_dir("/worktrees/{origin_name}", project).is_err());
+        assert_eq!(
+            expand_window_prefix("{origin_name}", project, Some("/repos/{project}.git")).unwrap(),
+            "{project}"
+        );
+    }
 
     #[test]
     fn write_atomic_replaces_target_and_removes_temp() {
