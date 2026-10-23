@@ -70,15 +70,29 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
         .with_context(|| format!("Copilot hooks file is not valid JSON: {}", path.display()))?;
 
     let required = [
-        ("sessionStart", "workmux register-agent"),
-        ("userPromptSubmitted", "workmux set-window-status working"),
-        ("postToolUse", "workmux set-window-status working"),
-        ("agentStop", "workmux set-window-status done"),
+        ("sessionStart", "workmux register-agent", None),
+        (
+            "userPromptSubmitted",
+            "workmux set-window-status working",
+            None,
+        ),
+        ("postToolUse", "workmux set-window-status working", None),
+        (
+            "postToolUseFailure",
+            "workmux set-window-status working",
+            None,
+        ),
+        (
+            "preToolUse",
+            "workmux set-window-status waiting",
+            Some("ask_user"),
+        ),
+        ("agentStop", "workmux set-window-status done", None),
     ];
     if config.get("version").and_then(Value::as_u64) == Some(1)
         && required
             .iter()
-            .all(|(event, command)| has_command_hook(&config, event, command))
+            .all(|(event, command, matcher)| has_command_hook(&config, event, command, *matcher))
     {
         Ok(StatusCheck::Installed)
     } else if has_workmux_hook(&config) {
@@ -88,7 +102,7 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
     }
 }
 
-fn has_command_hook(config: &Value, event: &str, expected: &str) -> bool {
+fn has_command_hook(config: &Value, event: &str, expected: &str, matcher: Option<&str>) -> bool {
     config["hooks"][event]
         .as_array()
         .into_iter()
@@ -96,6 +110,7 @@ fn has_command_hook(config: &Value, event: &str, expected: &str) -> bool {
         .any(|hook| {
             hook.get("type").and_then(Value::as_str) == Some("command")
                 && hook.get("bash").and_then(Value::as_str) == Some(expected)
+                && hook.get("matcher").and_then(Value::as_str) == matcher
         })
 }
 
@@ -248,6 +263,98 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), HOOKS_JSON);
         assert!(matches!(check_at(&path).unwrap(), StatusCheck::Installed));
+    }
+
+    #[test]
+    fn ask_user_hook_waits_until_tool_completion() {
+        let config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        assert_eq!(
+            run_hooks(&config, "preToolUse", "ask_user"),
+            "set-window-status waiting\n"
+        );
+        for tool in ["bash", "view", "task", "glob", "custom_ask_user"] {
+            assert_eq!(run_hooks(&config, "preToolUse", tool), "");
+        }
+        assert_eq!(
+            run_hooks(&config, "postToolUse", "ask_user"),
+            "set-window-status working\n"
+        );
+        assert_eq!(
+            run_hooks(&config, "postToolUseFailure", "ask_user"),
+            "set-window-status working\n"
+        );
+        assert_eq!(
+            run_hooks(&config, "userPromptSubmitted", ""),
+            "set-window-status working\n"
+        );
+    }
+
+    fn run_hooks(config: &Value, event: &str, match_value: &str) -> String {
+        let mut output = String::new();
+        for hook in config["hooks"][event].as_array().into_iter().flatten() {
+            if let Some(matcher) = hook["matcher"].as_str()
+                && !regex::Regex::new(&format!("^(?:{matcher})$"))
+                    .unwrap()
+                    .is_match(match_value)
+            {
+                continue;
+            }
+            let command = hook["bash"].as_str().unwrap();
+            let result = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &format!("workmux() {{ printf '%s\\n' \"$*\"; }}; {command}"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            output.push_str(&String::from_utf8(result.stdout).unwrap());
+        }
+        output
+    }
+
+    #[test]
+    fn hooks_without_ask_user_waiting_need_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("preToolUse");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn ask_user_hook_with_missing_or_incorrect_matcher_needs_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for matcher in [None, Some("bash"), Some(".*")] {
+            let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+            config["hooks"]["preToolUse"] = serde_json::json!([{
+                "type": "command",
+                "bash": "workmux set-window-status waiting",
+            }]);
+            if let Some(matcher) = matcher {
+                config["hooks"]["preToolUse"][0]["matcher"] = Value::from(matcher);
+            }
+            fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+            assert!(matches!(
+                check_at(&path).unwrap(),
+                StatusCheck::UpdateAvailable
+            ));
+        }
     }
 
     #[test]

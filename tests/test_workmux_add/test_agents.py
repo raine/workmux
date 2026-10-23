@@ -258,6 +258,63 @@ printf '%s' "$1" > omp_prompt.txt
         )
         assert agent_output.read_text() == prompt_text
 
+    def test_add_passes_prompt_to_named_copilot_agent_with_interactive_flag(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+    ):
+        """Copilot receives configured flags followed by -i and the prompt."""
+        env = mux_server
+        branch_name = "feature-config-copilot-agent"
+        window_name = get_window_name(branch_name)
+        prompt_text = "Using configured Copilot agent"
+        output_filename = "copilot_prompt.txt"
+
+        fake_agent_installer.install(
+            "copilot",
+            f"""#!/bin/sh
+set -e
+if [ "$1" != "--yolo" ] || [ "$2" != "-i" ] || [ "$#" -ne 3 ]; then
+    printf '%s\n' "$@" > copilot_args.txt
+    exit 1
+fi
+printf '%s' "$3" > "{output_filename}"
+""",
+        )
+
+        write_global_workmux_config(
+            env,
+            agent="copilot-yolo",
+            agents={
+                "copilot-yolo": {
+                    "type": "copilot",
+                    "command": "copilot",
+                    "args": ["--yolo"],
+                }
+            },
+        )
+        write_workmux_config(mux_repo_path, panes=[{"command": "<agent>"}])
+
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            branch_name,
+            extra_args=f"--prompt {shlex.quote(prompt_text)}",
+        )
+
+        agent_output = worktree_path / output_filename
+        wait_for_file(
+            env,
+            agent_output,
+            timeout=5.0,
+            window_name=window_name,
+            worktree_path=worktree_path,
+        )
+        assert agent_output.read_text() == prompt_text
+
     def test_add_with_agent_flag_overrides_default(
         self,
         mux_server: MuxEnvironment,
