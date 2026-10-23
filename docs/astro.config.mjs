@@ -168,6 +168,7 @@ export default defineConfig({
             { label: "Session mode", slug: "guide/session-mode" },
             { label: "direnv", slug: "guide/direnv" },
             { label: "Monorepos", slug: "guide/monorepos" },
+            { label: "Jujutsu (jj)", slug: "guide/jj" },
             {
               label: "Git worktree caveats",
               slug: "guide/git-worktree-caveats",
