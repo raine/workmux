@@ -123,24 +123,29 @@ fn validate_repository_control_files(common_dir: &Path, admin_dir: &Path) -> Res
     Ok(())
 }
 
+fn is_bare_repository_dir(dir: &Path) -> bool {
+    dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("config").is_file()
+}
+
 impl RepositoryIdentity {
+    fn bare(dir: PathBuf, dot_git: PathBuf) -> Result<Self> {
+        validate_repository_control_files(&dir, &dir)?;
+        Ok(Self {
+            worktree: dir.clone(),
+            admin_dir: dir.clone(),
+            common_dir: dir,
+            dot_git,
+            is_bare: true,
+        })
+    }
+
     /// Resolve and cross-check the worktree, linked-worktree admin directory, and common directory.
     pub fn discover(path: &Path) -> Result<Self> {
         let start = path
             .canonicalize()
             .with_context(|| format!("Failed to resolve repository path {}", path.display()))?;
-        if start.join("HEAD").is_file()
-            && start.join("objects").is_dir()
-            && start.join("config").is_file()
-        {
-            validate_repository_control_files(&start, &start)?;
-            return Ok(Self {
-                worktree: start.clone(),
-                admin_dir: start.clone(),
-                common_dir: start.clone(),
-                dot_git: start,
-                is_bare: true,
-            });
+        if is_bare_repository_dir(&start) {
+            return Self::bare(start.clone(), start);
         }
         let mut candidate = Some(start.as_path());
         let worktree = loop {
@@ -176,6 +181,11 @@ impl RepositoryIdentity {
                 "Linked-worktree admin directory is not a directory: {}",
                 admin_dir.display()
             );
+        }
+        // `gitdir: ./.bare` from the project root of a bare-repo layout: the pointer names the
+        // bare repository itself, not a linked-worktree admin dir, so there is no commondir.
+        if is_bare_repository_dir(&admin_dir) {
+            return Self::bare(admin_dir, dot_git);
         }
 
         let commondir_file = admin_dir.join("commondir");
@@ -566,6 +576,29 @@ mod tests {
         ] {
             assert!(arguments.iter().any(|argument| argument == expected));
         }
+    }
+
+    #[test]
+    fn identity_accepts_bare_root_with_gitdir_file() {
+        // <project>/.git = "gitdir: ./.bare", worktrees live beside it (<project>/main, ...).
+        let (temp, _worktree) = linked_repo();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        Command::new("git")
+            .args(["clone", "-q", "--bare"])
+            .arg(temp.path().join("main"))
+            .arg(root.join(".bare"))
+            .status()
+            .unwrap();
+        std::fs::write(root.join(".git"), "gitdir: ./.bare\n").unwrap();
+
+        let identity = RepositoryIdentity::discover(&root).unwrap();
+        assert!(identity.is_bare);
+        assert_eq!(
+            identity.common_dir,
+            root.join(".bare").canonicalize().unwrap()
+        );
+        assert_eq!(identity.admin_dir, identity.common_dir);
     }
 
     #[test]
