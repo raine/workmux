@@ -108,10 +108,12 @@ pub fn list_in(
 
     // Get all unmerged branches in one go for efficiency
     // Prefer checking against remote tracking branch for more accurate results
-    let unmerged_branches = main_branch
+    let merge_base = main_branch
         .as_deref()
-        .and_then(|main| git::get_merge_base_in(repo, main).ok())
-        .and_then(|base| git::get_unmerged_branches_in(repo, &base).ok())
+        .and_then(|main| git::get_merge_base_in(repo, main).ok());
+    let unmerged_branches = merge_base
+        .as_deref()
+        .and_then(|base| git::get_unmerged_branches_in(repo, base).ok())
         .unwrap_or_default(); // Use an empty set on failure
 
     // Batch fetch all PRs if requested (single API call)
@@ -146,6 +148,7 @@ pub fn list_in(
     let window_sessions = git::get_all_worktree_meta_key_in(repo, "window-session");
     let window_tokens = git::get_all_worktree_meta_key_in(repo, "window-token");
     let attachments = git::get_all_worktree_meta_key_in(repo, "attachment");
+    let jj_bookmarks = git::get_all_worktree_meta_key_in(repo, crate::jj::BOOKMARK_META_KEY);
     let active_window_tokens = if mux_running {
         mux.owned_window_tokens().unwrap_or_default()
     } else {
@@ -208,6 +211,12 @@ pub fn list_in(
             let has_unmerged = if let Some(ref main) = main_branch {
                 if branch == *main || branch == "(detached)" {
                     false
+                } else if jj_bookmarks.contains_key(&handle) {
+                    // A jj workspace's bookmark trails its work until merged,
+                    // so judge the work by the worktree's HEAD.
+                    merge_base
+                        .as_deref()
+                        .is_some_and(|base| !git::is_ancestor_in(&path, "HEAD", base))
                 } else {
                     unmerged_branches.contains(&branch)
                 }

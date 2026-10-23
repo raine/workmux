@@ -263,7 +263,9 @@ fn parse_worktree_branches(output: &str) -> Vec<(PathBuf, Option<String>)> {
                 path = Some(PathBuf::from(p));
             } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
                 branch = Some(b.to_string());
-            } else if line.trim() == "detached" {
+            } else if line.trim() == "detached" || line.starts_with("branch ") {
+                // HEAD symbolically referencing something other than a local
+                // branch (e.g. `refs/jj/root`) has no branch either.
                 detached = true;
             }
         }
@@ -374,7 +376,31 @@ pub fn list_worktrees_with_main_in(workdir: Option<&Path>) -> Result<WorktreeLis
     let list = cmd
         .run_and_capture_stdout()
         .context("Failed to list worktrees")?;
-    parse_worktree_listing(&list)
+    let mut listing = parse_worktree_listing(&list)?;
+    resolve_workspace_bookmarks(&listing.main_path, &mut listing.worktrees, workdir);
+    Ok(listing)
+}
+
+/// Report the bookmark of each jj workspace in place of its detached HEAD.
+fn resolve_workspace_bookmarks(
+    main_path: &Path,
+    worktrees: &mut [(PathBuf, String)],
+    workdir: Option<&Path>,
+) {
+    if !worktrees.iter().any(|(_, branch)| branch == "(detached)") {
+        return;
+    }
+    let bookmarks = get_all_worktree_meta_key_in(workdir, crate::jj::BOOKMARK_META_KEY);
+    for (path, branch) in worktrees.iter_mut() {
+        if branch == "(detached)"
+            && path != main_path
+            && let Some(bookmark) = path
+                .file_name()
+                .and_then(|name| bookmarks.get(name.to_string_lossy().as_ref()))
+        {
+            *branch = bookmark.clone();
+        }
+    }
 }
 
 /// Store per-worktree metadata in git config.
@@ -810,6 +836,19 @@ mod tests {
         assert_eq!(listing.worktrees[0].1, "feature");
         assert_eq!(listing.worktrees[1].1, "main");
         assert_eq!(listing.worktrees[2].1, "(detached)");
+    }
+
+    #[test]
+    fn listing_treats_non_branch_symbolic_head_as_detached() {
+        let listing = parse_worktree_listing(
+            "worktree /repo\nHEAD 0000000000000000000000000000000000000000\nbranch refs/jj/root\n",
+        )
+        .unwrap();
+        assert_eq!(listing.main_path, PathBuf::from("/repo"));
+        assert_eq!(
+            listing.worktrees,
+            vec![(PathBuf::from("/repo"), "(detached)".to_string())]
+        );
     }
 
     #[test]

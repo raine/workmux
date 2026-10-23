@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 
-use crate::{cmd, git};
+use std::path::Path;
+
+use crate::{cmd, git, jj};
 use tracing::{debug, info};
 
 use super::cleanup::{self, get_worktree_mode};
@@ -133,6 +135,64 @@ pub fn merge(
         .unwrap_or_else(|| context.main_branch.clone());
     let target_branch = target_branch.as_str();
 
+    if branch_to_merge == target_branch {
+        return Err(anyhow!(
+            "Cannot merge branch '{}' into itself.",
+            branch_to_merge
+        ));
+    }
+
+    let run_hooks = || {
+        run_pre_merge_hooks(
+            context,
+            handle,
+            &branch_to_merge,
+            target_branch,
+            &worktree_path,
+            no_verify || no_hooks,
+        )
+    };
+
+    if context.jj {
+        let strategy = if rebase {
+            jj::MergeStrategy::Rebase
+        } else if squash {
+            jj::MergeStrategy::Squash
+        } else {
+            jj::MergeStrategy::Merge
+        };
+        let request = jj::MergeRequest {
+            main_root: &context.main_worktree_root,
+            workspace_root: &worktree_path,
+            workspace: handle,
+            bookmark: &branch_to_merge,
+            target: target_branch,
+            strategy,
+            ignore_uncommitted,
+            keep,
+        };
+        jj::prepare_merge(&request)?;
+        run_hooks()?;
+        jj::merge(&request)?;
+        info!(branch = %branch_to_merge, ?strategy, "merge:jj merge complete");
+        return finish(
+            context,
+            &branch_to_merge,
+            target_branch,
+            handle,
+            &worktree_path,
+            context.main_branch.clone(),
+            false,
+            FinishOptions {
+                keep,
+                no_hooks,
+                notification,
+                mode,
+                attachment,
+            },
+        );
+    }
+
     // Resolve the worktree path and window handle for the TARGET branch.
     // We prioritize finding an existing worktree for the target branch to support
     // workflows where 'main' is checked out in a linked worktree (issue #29).
@@ -194,12 +254,6 @@ pub fn merge(
         git::commit_with_editor(&worktree_path).context("Failed to commit staged changes")?;
     }
 
-    if branch_to_merge == target_branch {
-        return Err(anyhow!(
-            "Cannot merge branch '{}' into itself.",
-            branch_to_merge
-        ));
-    }
     debug!(
         branch = %branch_to_merge,
         target = target_branch,
@@ -221,43 +275,7 @@ pub fn merge(
     git::switch_branch_in_worktree(&target_worktree_path, target_branch)?;
 
     // Run pre-merge hooks after all validations pass but before any merge operations begin.
-    // Skip hooks if --no-verify or --no-hooks flag is passed.
-    if !no_verify
-        && !no_hooks
-        && let Some(hooks) = &context.config.pre_merge
-        && !hooks.is_empty()
-    {
-        info!(count = hooks.len(), "merge:running pre-merge hooks");
-
-        let abs_worktree_path = worktree_path
-            .canonicalize()
-            .unwrap_or_else(|_| worktree_path.clone());
-        let abs_project_root = context
-            .main_worktree_root
-            .canonicalize()
-            .unwrap_or_else(|_| context.main_worktree_root.clone());
-        let worktree_path_str = abs_worktree_path.to_string_lossy();
-        let project_root_str = abs_project_root.to_string_lossy();
-
-        let hook_env = [
-            ("WORKMUX_HANDLE", handle),
-            ("WM_BRANCH_NAME", branch_to_merge.as_str()),
-            ("WM_TARGET_BRANCH", target_branch),
-            ("WM_WORKTREE_PATH", worktree_path_str.as_ref()),
-            ("WM_PROJECT_ROOT", project_root_str.as_ref()),
-            ("WM_HANDLE", handle),
-        ];
-
-        for command in hooks {
-            cmd::shell_command_with_env(
-                context.config.hook_shell.as_deref(),
-                command,
-                &worktree_path,
-                &hook_env,
-            )
-            .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
-        }
-    }
+    run_hooks()?;
 
     // Helper closure to generate the error message for merge conflicts
     let conflict_err = |branch: &str| -> anyhow::Error {
@@ -327,6 +345,52 @@ pub fn merge(
         info!(branch = %branch_to_merge, "merge:standard merge complete");
     }
 
+    finish(
+        context,
+        &branch_to_merge,
+        target_branch,
+        handle,
+        &worktree_path,
+        target_window_name,
+        had_staged_changes,
+        FinishOptions {
+            keep,
+            no_hooks,
+            notification,
+            mode,
+            attachment,
+        },
+    )
+}
+
+struct FinishOptions {
+    keep: bool,
+    no_hooks: bool,
+    notification: bool,
+    mode: crate::config::MuxMode,
+    attachment: git::WorktreeAttachment,
+}
+
+/// Notify, then clean up the merged worktree unless it is kept.
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    context: &WorkflowContext,
+    branch_to_merge: &str,
+    target_branch: &str,
+    handle: &str,
+    worktree_path: &Path,
+    target_window_name: String,
+    had_staged_changes: bool,
+    options: FinishOptions,
+) -> Result<MergeResult> {
+    let FinishOptions {
+        keep,
+        no_hooks,
+        notification,
+        mode,
+        attachment,
+    } = options;
+    let branch_to_merge = branch_to_merge.to_string();
     // Show notification before cleanup or early return (--keep),
     // since cleanup may kill the window and terminate this process
     if notification {
@@ -354,7 +418,7 @@ pub fn merge(
         context,
         &branch_to_merge,
         handle,
-        &worktree_path,
+        worktree_path,
         cleanup::CleanupOptions {
             force: true,
             keep_branch: false,
@@ -397,6 +461,59 @@ pub fn merge(
         cleanup_scheduled,
         cleanup_error,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pre_merge_hooks(
+    context: &WorkflowContext,
+    handle: &str,
+    branch_to_merge: &str,
+    target_branch: &str,
+    worktree_path: &Path,
+    skip: bool,
+) -> Result<()> {
+    let Some(hooks) = context
+        .config
+        .pre_merge
+        .as_ref()
+        .filter(|hooks| !hooks.is_empty())
+    else {
+        return Ok(());
+    };
+    if skip {
+        return Ok(());
+    }
+    info!(count = hooks.len(), "merge:running pre-merge hooks");
+
+    let abs_worktree_path = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let abs_project_root = context
+        .main_worktree_root
+        .canonicalize()
+        .unwrap_or_else(|_| context.main_worktree_root.clone());
+    let worktree_path_str = abs_worktree_path.to_string_lossy();
+    let project_root_str = abs_project_root.to_string_lossy();
+
+    let hook_env = [
+        ("WORKMUX_HANDLE", handle),
+        ("WM_BRANCH_NAME", branch_to_merge),
+        ("WM_TARGET_BRANCH", target_branch),
+        ("WM_WORKTREE_PATH", worktree_path_str.as_ref()),
+        ("WM_PROJECT_ROOT", project_root_str.as_ref()),
+        ("WM_HANDLE", handle),
+    ];
+
+    for command in hooks {
+        cmd::shell_command_with_env(
+            context.config.hook_shell.as_deref(),
+            command,
+            worktree_path,
+            &hook_env,
+        )
+        .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
+    }
+    Ok(())
 }
 
 /// Shows a system notification on macOS or Linux

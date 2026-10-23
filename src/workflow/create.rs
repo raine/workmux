@@ -127,6 +127,12 @@ fn create_impl(
         rescue,
     } = args;
 
+    if rescue.is_some() && context.jj {
+        return Err(anyhow!(
+            "--with-changes is not supported in jj repositories. Create the workspace, then move the changes with 'jj squash --from <revision> --into <workspace>@'."
+        ));
+    }
+
     if rescue.is_some() && headless {
         return Err(anyhow!(
             "Moving uncommitted changes is not supported for headless worktrees"
@@ -140,6 +146,13 @@ fn create_impl(
         remote = ?remote_branch,
         "create:start"
     );
+
+    if context.jj && (remote_branch.is_some() || checkout_ref.is_some()) {
+        return Err(anyhow!(
+            "Creating a workspace from a remote branch or pull request is not supported in jj \
+             repositories. Fetch with 'jj git fetch' and use --base <bookmark>@<remote> instead."
+        ));
+    }
 
     let worktree_exists = git::worktree_exists_in(branch_name, Some(&context.execution_dir))?;
     let mut current_handle = handle.to_string();
@@ -377,6 +390,8 @@ fn create_impl(
         if let Some(base) = base_branch.filter(|base| !base.trim().is_empty()) {
             // Use the explicitly provided base branch/commit/tag
             Some(base.to_string())
+        } else if context.jj {
+            Some(crate::jj::default_base(&context.execution_dir)?)
         } else {
             // Default to the current branch when no explicit base was provided
             let current_branch = git::get_current_branch_in(&context.execution_dir)
@@ -531,15 +546,25 @@ fn create_impl(
             );
         }
 
-        git::create_worktree_in(
-            &worktree_path,
-            branch_name,
-            create_new,
-            base_branch_for_creation.as_deref(),
-            track_upstream,
-            Some(&context.execution_dir),
-        )
-        .context("Failed to create git worktree")?;
+        if context.jj {
+            create_jj_workspace(
+                context,
+                &worktree_path,
+                &current_handle,
+                branch_name,
+                base_branch_for_creation.as_deref(),
+            )?;
+        } else {
+            git::create_worktree_in(
+                &worktree_path,
+                branch_name,
+                create_new,
+                base_branch_for_creation.as_deref(),
+                track_upstream,
+                Some(&context.execution_dir),
+            )
+            .context("Failed to create git worktree")?;
+        }
         worktree_created = true;
 
         if headless {
@@ -806,6 +831,34 @@ fn create_impl(
         "create:completed"
     );
     Ok(CreateOutcome::Attached(result))
+}
+
+/// Create a jj workspace and its bookmark. A new bookmark starts on the base
+/// commit, like a Git branch created for a worktree; an existing one is used
+/// as the parent of the workspace's working-copy commit.
+fn create_jj_workspace(
+    context: &WorkflowContext,
+    worktree_path: &Path,
+    handle: &str,
+    bookmark: &str,
+    base: Option<&str>,
+) -> Result<()> {
+    let main_root = &context.main_worktree_root;
+    match base {
+        Some(base) => {
+            crate::jj::advance_base(&context.execution_dir, base)?;
+            crate::jj::add_workspace(main_root, worktree_path, handle, base)?;
+            crate::jj::create_bookmark(worktree_path, bookmark, "@-")?;
+        }
+        None => crate::jj::add_workspace(main_root, worktree_path, handle, bookmark)?,
+    }
+    git::set_worktree_meta_in(
+        handle,
+        crate::jj::BOOKMARK_META_KEY,
+        bookmark,
+        Some(&context.execution_dir),
+    )
+    .with_context(|| format!("Failed to record bookmark for workspace '{handle}'"))
 }
 
 /// A stash entry holding the changes that one `create` call is moving.

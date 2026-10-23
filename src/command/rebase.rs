@@ -42,6 +42,13 @@ pub fn run(name: Option<&str>) -> Result<()> {
     }
 
     println!("Rebasing '{}' onto '{}'...", branch_to_rebase, base_branch);
+    let main_root = git::get_main_worktree_root_in(Some(&worktree_path))?;
+    let common_dir = git::get_git_common_dir_in(Some(&worktree_path))?;
+    if crate::jj::detect(&main_root, &common_dir)? {
+        crate::jj::rebase_workspace(&worktree_path, &base_branch)?;
+        println!("✓ Rebased '{}' onto '{}'", branch_to_rebase, base_branch);
+        return Ok(());
+    }
     git::rebase_branch_onto_base(&worktree_path, &base_branch).with_context(|| {
         format!(
             "Rebase failed, likely due to conflicts.\n\n\

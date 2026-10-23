@@ -173,7 +173,8 @@ fn check_preconditions(headless: bool) -> Result<()> {
         errors.push(format!("{} is not running.", mux.name()));
     }
     if !is_git {
-        errors.push("Current directory is not a git repository.".to_string());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        errors.push(format!("{}.", crate::jj::not_a_git_repository_error(&cwd)));
     }
 
     // Add blank line before suggestions
@@ -678,6 +679,14 @@ pub fn run(
                 (generated, Some(prompt), None, false)
             }
         } else if let Some(pr_reference) = pr {
+            let main_root = git::get_main_worktree_root()?;
+            let common_dir = git::get_git_common_dir()?;
+            if crate::jj::detect(&main_root, &common_dir)? {
+                bail!(
+                    "Creating a workspace from a pull request is not supported in jj repositories. \
+                     Fetch with 'jj git fetch' and use --base <bookmark>@<remote> instead."
+                );
+            }
             let result = pr_reference.resolve(forge, branch_name, dry_run)?;
             checkout_ref = Some(result.checkout_ref);
             pr_base_branch = result.base_branch;
@@ -1392,6 +1401,8 @@ fn print_dry_run(
         "existing branch".to_string()
     } else if let Some(base) = base_branch.filter(|base| !base.trim().is_empty()) {
         base.to_string()
+    } else if context.jj {
+        crate::jj::default_base(&context.execution_dir)?
     } else {
         git::get_current_branch_in(&context.execution_dir)
             .context("Failed to determine the current branch to use as the base")?

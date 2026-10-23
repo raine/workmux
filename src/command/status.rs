@@ -284,12 +284,10 @@ fn compute_git_info(wt_path: &std::path::Path, branch: &str) -> Result<GitInfo> 
     let has_unstaged = git::has_unstaged_changes(wt_path)?;
     let main = git::get_default_branch_in(Some(wt_path))?;
     let base = git::get_merge_base_in(Some(wt_path), &main)?;
-    let unmerged = git::get_unmerged_branches_in(Some(wt_path), &base)?;
-
     Ok(GitInfo {
         has_staged,
         has_unstaged,
-        has_unmerged_commits: unmerged.contains(branch),
+        has_unmerged_commits: branch != base && !git::is_ancestor_in(wt_path, "HEAD", &base),
     })
 }
 
@@ -362,12 +360,11 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                 !workflow::match_agents_to_worktree(&agent_panes, wt_path, &worktree_paths)
                     .is_empty()
             });
-            let unmerged_branches = if show_git && has_scoped_agents {
+            let merge_base = if show_git && has_scoped_agents {
                 let main = git::get_default_branch()?;
-                let base = git::get_merge_base(&main)?;
-                git::get_unmerged_branches(&base)?
+                Some(git::get_merge_base(&main)?)
             } else {
-                std::collections::HashSet::new()
+                None
             };
 
             for (wt_path, branch) in &all_worktrees {
@@ -385,7 +382,9 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                     Some(GitInfo {
                         has_staged: git::has_staged_changes(wt_path)?,
                         has_unstaged: git::has_unstaged_changes(wt_path)?,
-                        has_unmerged_commits: unmerged_branches.contains(branch),
+                        has_unmerged_commits: merge_base.as_deref().is_some_and(|base| {
+                            branch != base && !git::is_ancestor_in(wt_path, "HEAD", base)
+                        }),
                     })
                 } else {
                     None
@@ -614,6 +613,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         assert!(compute_git_info(dir.path(), "feature").is_err());
+    }
+
+    #[test]
+    fn git_info_uses_detached_workspace_head_instead_of_trailing_bookmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let git = |path: &std::path::Path, args: &[&str]| {
+            crate::cmd::Cmd::new("git")
+                .workdir(path)
+                .args(args)
+                .run()
+                .unwrap();
+        };
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        git(&root, &["branch", "feature"]);
+        git(
+            &root,
+            &["worktree", "add", "--detach", workspace.to_str().unwrap()],
+        );
+        git(
+            &root,
+            &["config", "workmux.worktree.workspace.bookmark", "feature"],
+        );
+
+        assert_eq!(git::get_branch_for_worktree(&workspace).unwrap(), "feature");
+        assert!(
+            !compute_git_info(&workspace, "feature")
+                .unwrap()
+                .has_unmerged_commits
+        );
+        git(
+            &workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "work",
+            ],
+        );
+        assert!(
+            compute_git_info(&workspace, "feature")
+                .unwrap()
+                .has_unmerged_commits
+        );
     }
 
     fn entry(project_path: &str) -> StatusEntry {

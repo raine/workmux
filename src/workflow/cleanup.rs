@@ -421,6 +421,11 @@ fn perform_destructive_cleanup(
         git::delete_branch_in(branch_name, force, git_common_dir)
             .context("Failed to delete local branch")?;
     }
+    // Forgetting the workspace also imports the branch deletion as a deleted
+    // bookmark.
+    if let Some(jj_root) = crate::jj::repo_root_for_common_dir(git_common_dir) {
+        crate::jj::forget_workspace(&jj_root, handle)?;
+    }
     git::remove_worktree_meta_at(handle, git_common_dir)
         .context("Failed to remove Workmux metadata after Git cleanup")?;
     if let Some(pending) = quarantine {

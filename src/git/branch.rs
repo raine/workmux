@@ -134,17 +134,34 @@ pub fn parse_fork_branch_spec(input: &str) -> Option<ForkBranchSpec> {
 
 /// Get the current branch name
 pub fn get_current_branch() -> Result<String> {
-    Cmd::new("git")
-        .args(&["branch", "--show-current"])
-        .run_and_capture_stdout()
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    get_current_branch_in(&cwd)
 }
 
-/// Get the current branch in a specific workdir
+/// Get the current branch in a specific workdir.
+///
+/// A jj workspace's worktree is always detached, so its recorded bookmark
+/// stands in for the branch.
 pub fn get_current_branch_in(workdir: &Path) -> Result<String> {
-    Cmd::new("git")
+    let branch = Cmd::new("git")
         .workdir(workdir)
         .args(&["branch", "--show-current"])
-        .run_and_capture_stdout()
+        .run_and_capture_stdout()?;
+    if !branch.is_empty() {
+        return Ok(branch);
+    }
+    Ok(get_workspace_bookmark_in(workdir).unwrap_or_default())
+}
+
+/// The recorded jj bookmark of a workmux-managed workspace, if any.
+pub fn get_workspace_bookmark_in(workdir: &Path) -> Option<String> {
+    let root = super::get_repo_root_in(Some(workdir)).ok()?;
+    if !root.join(".git").is_file() {
+        return None;
+    }
+    let handle = root.file_name()?.to_str()?;
+    super::get_worktree_meta_in(handle, crate::jj::BOOKMARK_META_KEY, Some(workdir))
+        .filter(|bookmark| !bookmark.is_empty())
 }
 
 /// List all checkout-able branches (local and remote) for shell completion.
@@ -294,14 +311,21 @@ pub fn get_unmerged_branches_in(
     }
 }
 
+/// Whether `ancestor` is reachable from `descendant`, evaluated in `workdir`.
+/// Errors count as not reachable.
+pub fn is_ancestor_in(workdir: &Path, ancestor: &str, descendant: &str) -> bool {
+    Cmd::new("git")
+        .workdir(workdir)
+        .args(&["merge-base", "--is-ancestor", ancestor, descendant])
+        .run_as_check()
+        .unwrap_or(false)
+}
+
 /// Get the branch name for a worktree at a specific path.
 ///
-/// Runs `git branch --show-current` in the worktree's directory.
+/// Uses the recorded bookmark for detached jj workspaces.
 pub fn get_branch_for_worktree(worktree_path: &Path) -> Result<String> {
-    Cmd::new("git")
-        .workdir(worktree_path)
-        .args(&["branch", "--show-current"])
-        .run_and_capture_stdout()
+    get_current_branch_in(worktree_path)
 }
 
 /// Get a set of branches whose upstream remote-tracking branch has been deleted.

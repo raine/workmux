@@ -223,6 +223,11 @@ fn remove_local(
     let mut safe: Vec<String> = Vec::new();
 
     for (handle, path, branch) in candidates {
+        if context.jj && path.exists() && !branch.is_empty() {
+            // Unmerged checks below read the bookmark, which trails the
+            // workspace's commits until moved.
+            crate::jj::advance_workspace_bookmark(&path, &branch)?;
+        }
         // Check uncommitted (blocking)
         if path.exists()
             && !git::has_missing_admin_dir(&path)

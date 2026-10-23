@@ -307,6 +307,16 @@ fn observe_status(bytes: &[u8]) -> Result<Observation> {
     Ok(observation)
 }
 
+/// Bookmark recorded for a jj workspace, whose worktree is always detached.
+fn workspace_bookmark(root: &Path) -> Option<String> {
+    let handle = root.file_name()?.to_str()?;
+    let key = format!("workmux.worktree.{handle}.{}", crate::jj::BOOKMARK_META_KEY);
+    let output = super::status_cache::output(root, &["config", "--local", "--get", &key]).ok()?;
+    let bookmark = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !bookmark.is_empty() && root.join(".git").is_file())
+        .then_some(bookmark)
+}
+
 fn predict_conflict(path: &Path, base: &str, head: &str) -> Result<bool> {
     let mut command = super::pinned_git(path)?;
     let status = command
@@ -477,9 +487,10 @@ fn collect_status(
         cached_at: now,
         ..Default::default()
     };
-    let Some(branch) = observation.branch else {
+    let Some(branch) = observation.branch.or_else(|| workspace_bookmark(&root)) else {
         return status;
     };
+    status.branch = Some(branch.clone());
     let dependencies = cache.as_ref().and_then(|cache| {
         Dependencies::observe(
             identity,

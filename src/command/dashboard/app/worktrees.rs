@@ -62,6 +62,14 @@ fn default_add_worktree_base(repo_path: &Path) -> String {
                 .map(|branch| branch.trim().to_string())
                 .filter(|branch| !branch.is_empty())
         })
+        .or_else(|| {
+            let main_root = git::get_main_worktree_root_in(Some(repo_path)).ok()?;
+            let common_dir = git::get_git_common_dir_in(Some(repo_path)).ok()?;
+            crate::jj::detect(&main_root, &common_dir)
+                .ok()?
+                .then(|| crate::jj::default_base(repo_path).ok())
+                .flatten()
+        })
         .or_else(|| git::get_default_branch_in(Some(repo_path)).ok())
         .unwrap_or_else(|| "main".to_string())
 }

@@ -16,6 +16,8 @@ pub struct WorkflowContext {
     pub execution_dir: PathBuf,
     pub main_worktree_root: PathBuf,
     pub git_common_dir: PathBuf,
+    /// Whether the repository is a colocated jj repository.
+    pub jj: bool,
     pub main_branch: String,
     pub prefix: String,
     pub config: config::Config,
@@ -119,7 +121,7 @@ impl WorkflowContext {
         })?;
 
         if !git::is_git_repo_in(Some(&execution_dir))? {
-            return Err(anyhow!("Not in a git repository"));
+            return Err(crate::jj::not_a_git_repository_error(&execution_dir));
         }
 
         let main_worktree_root = git::get_main_worktree_root_in(Some(&execution_dir))
@@ -127,6 +129,8 @@ impl WorkflowContext {
 
         let git_common_dir = git::get_git_common_dir_in(Some(&execution_dir))
             .context("Could not find the git common directory")?;
+
+        let jj = crate::jj::detect(&main_worktree_root, &git_common_dir)?;
 
         let main_branch = resolve_main_branch(&config, &execution_dir)?;
 
@@ -141,6 +145,7 @@ impl WorkflowContext {
             execution_dir = %execution_dir.display(),
             main_worktree_root = %main_worktree_root.display(),
             git_common_dir = %git_common_dir.display(),
+            jj,
             main_branch = %main_branch,
             prefix = %prefix,
             backend = mux.name(),
@@ -153,6 +158,7 @@ impl WorkflowContext {
             execution_dir,
             main_worktree_root,
             git_common_dir,
+            jj,
             main_branch,
             prefix,
             config,

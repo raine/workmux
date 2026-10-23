@@ -45,6 +45,12 @@ pub fn rename(
     if old_path == context.main_worktree_root {
         return Err(anyhow!("Cannot rename the main worktree"));
     }
+    if context.jj {
+        return Err(anyhow!(
+            "Renaming is not supported in jj repositories, where workmux identifies a \
+             workspace by its name, path and bookmark."
+        ));
+    }
 
     // 3. Derive new handle (slugify + validate). Treat new_name as an explicit
     //    handle override, matching `add --name` semantics: prefix is bypassed,
