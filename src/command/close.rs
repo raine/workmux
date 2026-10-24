@@ -254,18 +254,28 @@ fn run_via_rpc_impl(name: &str, client: &mut crate::sandbox::rpc::RpcClient) -> 
 }
 
 /// The remote workspace whose window the command runs in. Its panes run
-/// in the laptop's checkout, so the directory does not name it.
+/// in the laptop's checkout, so the directory does not name it, and a
+/// local worktree of another project can have the same window name. Each
+/// relay pane is registered with the workspace it relays.
 fn current_remote_window() -> Option<crate::remote::cache::WorkspaceRecord> {
     let records = crate::remote::cache::all();
     if records.is_empty() {
         return None;
     }
-    let window = create_backend(detect_backend())
-        .current_window_name()
-        .ok()??;
+    let mux = create_backend(detect_backend());
+    let key = crate::state::PaneKey {
+        backend: mux.name().to_string(),
+        instance: mux.instance_id(),
+        pane_id: mux.current_pane_id().or_else(|| mux.active_pane_id())?,
+    };
+    let at = crate::state::StateStore::new()
+        .ok()?
+        .get_agent(&key)
+        .ok()??
+        .remote?;
     records
         .into_iter()
-        .find(|record| record.window_name == window)
+        .find(|record| record.remote == at.remote && record.ws_id == at.ws_id)
 }
 
 #[cfg(test)]
