@@ -48,6 +48,18 @@ enum Removal {
 /// `workmux merge` of a remote workspace.
 pub fn merge(
     context: &WorkflowContext,
+    record: WorkspaceRecord,
+    options: MergeOptions,
+) -> Result<()> {
+    let result = merge_inner(context, record.clone(), options);
+    if result.is_ok() && cache::find_here(&record.handle).is_none() {
+        super::lifecycle::close_relay(context.mux.as_ref(), &record);
+    }
+    result
+}
+
+fn merge_inner(
+    context: &WorkflowContext,
     mut record: WorkspaceRecord,
     options: MergeOptions,
 ) -> Result<()> {
@@ -186,8 +198,6 @@ pub fn merge(
             record.local_path.display()
         );
     }
-    super::lifecycle::close_relay(context.mux.as_ref(), &record);
-
     let node = match node {
         Some(node) => node,
         None => connect_for_cleanup(&spec, &record)?,
