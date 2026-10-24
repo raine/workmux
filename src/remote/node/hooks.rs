@@ -143,6 +143,11 @@ fn version_in(image: &str) -> Result<String, String> {
         .map_err(|err| format!("cannot run docker: {err}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("executable file not found") {
+            return Err(format!(
+                "{image} has no OpenCode; its hooks need the OpenCode sandbox image"
+            ));
+        }
         return Err(format!(
             "`opencode --version` failed in {image}: {}",
             stderr.lines().next().unwrap_or("").trim()

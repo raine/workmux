@@ -1196,8 +1196,8 @@ impl<'a> CreationPlan<'a> {
                 )
                 .with_context(|| {
                     format!(
-                        "Failed to create remote workspace for branch '{}'",
-                        final_branch_name
+                        "Failed to create remote workspace for branch '{}' on '{}'",
+                        final_branch_name, remote.name
                     )
                 })?;
                 if self.wait {
