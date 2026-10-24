@@ -534,10 +534,14 @@ pub(super) fn open_window_after(
     after: Option<&str>,
 ) -> Result<()> {
     let mux = context.mux.as_ref();
-    let execution = record
-        .execution
-        .as_ref()
-        .ok_or_else(|| anyhow!("remote workspace '{}' has no execution", record.handle))?;
+    let execution = record.execution.as_ref().ok_or_else(|| {
+        anyhow!(
+            "remote workspace '{}' on '{}' has no running agent; run `workmux open {}`",
+            record.handle,
+            record.remote,
+            record.handle
+        )
+    })?;
     let layout: Vec<&LayoutPane> = record
         .layout
         .iter()
@@ -646,7 +650,12 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
             tracing::debug!(remote = %spec.name, "open: remote not reachable: {err:#}");
             return switch(&record);
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            return Err(err.context(format!(
+                "Cannot reach '{}' to open '{}'",
+                spec.name, record.handle
+            )));
+        }
     };
     super::homecoming::finish_pending(&node, &record.ws_id);
     // Observing adopts siblings, which may open this window meanwhile.
@@ -703,7 +712,11 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
 /// sessions keep running.
 pub fn close(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
     if !mux.window_exists_by_full_name(&record.window_name)? {
-        bail!("No open window for remote workspace '{}'", record.handle);
+        bail!(
+            "No open window for remote workspace '{}' on '{}'",
+            record.handle,
+            record.remote
+        );
     }
     mux.kill_window(&record.window_name)
         .context("Failed to close window")?;
@@ -775,8 +788,9 @@ pub fn remove(
         Err(err) if options.force => return forget(&record, err),
         Err(err) => {
             return Err(err.context(format!(
-                "Nothing was removed; pass --force to forget '{}' locally",
-                record.handle
+                "Cannot reach '{}' to remove '{}'; nothing was removed (pass --force to forget \
+                 it locally)",
+                record.remote, record.handle
             )));
         }
     };
