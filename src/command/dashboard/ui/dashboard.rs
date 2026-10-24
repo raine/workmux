@@ -419,20 +419,19 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 25usize.saturating_sub(pane_suffix.chars().count()),
             );
             let worktree_suffix = pane_suffix;
-            let connectivity = agent
+            let title = agent
+                .pane_title
+                .as_ref()
+                .map(|t| {
+                    let t = strip_oc_title_prefix(t);
+                    t.strip_prefix("... ").unwrap_or(t).to_string()
+                })
+                .unwrap_or_default();
+            let title = agent
                 .remote
                 .as_ref()
-                .and_then(|remote| crate::remote::agents::connectivity(remote, now));
-            let title = connectivity.unwrap_or_else(|| {
-                agent
-                    .pane_title
-                    .as_ref()
-                    .map(|t| {
-                        let t = strip_oc_title_prefix(t);
-                        t.strip_prefix("... ").unwrap_or(t).to_string()
-                    })
-                    .unwrap_or_default()
-            });
+                .and_then(|remote| crate::remote::agents::row_title(remote, now, Some(&title)))
+                .unwrap_or(title);
             let status_spans = app.get_status_display(agent);
             let elapsed = app.get_elapsed(agent);
             let duration = elapsed

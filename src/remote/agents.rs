@@ -262,6 +262,26 @@ pub fn connectivity(remote: &RemoteAgent, now: u64) -> Option<String> {
     })
 }
 
+/// The short form of [`connectivity`] that rows show ahead of the agent's
+/// last title, which they keep.
+pub fn row_title(remote: &RemoteAgent, now: u64, title: Option<&str>) -> Option<String> {
+    let state = if remote.connected {
+        remote.ended?.label().to_string()
+    } else {
+        match remote.last_seen {
+            Some(seen) => format!(
+                "disconnected {}",
+                crate::util::format_elapsed_secs(now.saturating_sub(seen))
+            ),
+            None => "disconnected".to_string(),
+        }
+    };
+    Some(match title.filter(|title| !title.is_empty()) {
+        Some(title) => format!("{state} · {title}"),
+        None => state,
+    })
+}
+
 /// Open a window relaying the workspace of `remote` with `workmux open`,
 /// which attaches to its running agents.
 pub fn open_window(remote: &RemoteAgent) -> Result<()> {
@@ -605,5 +625,28 @@ mod tests {
         let mut ended = record();
         ended.execution = None;
         assert!(rows(&[ended], &[], &HashMap::new(), &hosts(), 5).is_empty());
+    }
+
+    #[test]
+    fn rows_keep_the_title_beside_connectivity() {
+        let rows = rows(&[record()], &[], &HashMap::new(), &hosts(), 5);
+        let mut remote = rows[0].remote.clone().unwrap();
+        remote.last_seen = Some(1000);
+        assert_eq!(
+            row_title(&remote, 1120, Some("Fixing")).as_deref(),
+            Some("disconnected 2m · Fixing")
+        );
+        remote.last_seen = None;
+        assert_eq!(
+            row_title(&remote, 5, Some("")).as_deref(),
+            Some("disconnected")
+        );
+        remote.connected = true;
+        assert_eq!(row_title(&remote, 5, Some("Fixing")), None);
+        remote.ended = Some(EndReason::HostReboot);
+        assert_eq!(
+            row_title(&remote, 5, None).as_deref(),
+            Some("exited (host rebooted)")
+        );
     }
 }

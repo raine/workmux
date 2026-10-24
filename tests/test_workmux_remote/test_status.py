@@ -42,6 +42,7 @@ while :; do
     rm -f "$control"
     case $command in
       exit) exit 0 ;;
+      title) printf '\033]2;fake-title-42\007' && echo applied-title ;;
       *) workmux set-window-status "$command" </dev/null && echo "applied-$command" ;;
     esac
   fi
@@ -320,6 +321,8 @@ def test_views_list_remote_agents_beside_local_ones(
     window = get_window_name("vw")
     wm(env, exe, repo, "add vw --remote lo")
     wait_for_pane_output(env, window, "FAKE-AGENT-READY", timeout=20)
+    agent.do("title")
+    wait_for_pane_output(env, window, "applied-title", timeout=10)
     agent.do("working")
     wait_for_pane_output(env, window, "applied-working", timeout=10)
 
@@ -331,6 +334,7 @@ def test_views_list_remote_agents_beside_local_ones(
     env.run_command([str(exe), "set-window-status", "done"], cwd=repo)
 
     env.tmux(["new-window", "-d", "-n", "dash", "-c", str(repo), f"{exe} dashboard"])
+    env.tmux(["resize-window", "-t", "dash", "-x", "160"])
 
     def dashboard() -> str:
         return env.tmux(["capture-pane", "-p", "-t", "dash"]).stdout
@@ -359,6 +363,8 @@ def test_views_list_remote_agents_beside_local_ones(
         assert poll_until(
             lambda: "disconnected" in row(dashboard(), "vw@lo"), timeout=30
         ), dashboard()
+        # The row keeps the agent's title beside the connectivity.
+        assert "fake-title-42" in row(dashboard(), "vw@lo"), dashboard()
     finally:
         hidden.rename(bin_dir)
     assert poll_until(
