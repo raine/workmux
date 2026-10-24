@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use crate::config::Config;
 use crate::git;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
-use crate::remote::{self, cache::WorkspaceRecord};
+use crate::remote::{self, cache::WorkspaceRecord, node::observe::ObservedAgent};
 use crate::state::StateStore;
 use crate::util;
 use crate::workflow;
@@ -228,12 +228,23 @@ fn remote_progress(record: &WorkspaceRecord, target: AgentStatus) -> RemoteProgr
     let Some(workspace) = observation.execution(&current.ws_id, &execution.ex_id) else {
         return RemoteProgress::Unknown;
     };
+    // After a send, only the agent sent to counts, and until the fence
+    // lapses only the turn the send started.
+    let sent = remote::cache::sent_turn(&current.remote, &current.ws_id)
+        .filter(|turn| turn.ex_id == execution.ex_id);
+    let fence = sent
+        .as_ref()
+        .filter(|turn| !turn.lapsed(remote::cache::now()));
     let agents: Vec<_> = workspace
         .panes
         .iter()
+        .filter(|pane| sent.as_ref().is_none_or(|turn| turn.pane == pane.index))
         .filter_map(|pane| pane.agent.as_ref())
         .collect();
-    if agents.iter().any(|agent| agent.status == Some(target)) {
+    let reached = |agent: &ObservedAgent| {
+        agent.status == Some(target) && fence.is_none_or(|turn| turn.admits(agent))
+    };
+    if agents.iter().any(|agent| reached(agent)) {
         RemoteProgress::Reached
     } else if agents.is_empty() {
         RemoteProgress::Gone
