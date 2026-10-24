@@ -16,7 +16,7 @@ from ..conftest import (
     poll_until,
     wait_for_pane_output,
 )
-from .conftest import Node, commit_project, git, local_records, wm
+from .conftest import Node, commit_project, git, local_records, observation_path, wm
 
 pytestmark = pytest.mark.tmux_only
 
@@ -182,7 +182,7 @@ def test_agent_spawns_sibling(
     assert_window_not_exists(mux_server, window)
     opened = wm(mux_server, workmux_exe_path, repo, "open sib")
     assert "Attached to the running agent" in opened.stdout, opened.stderr
-    observed = mux_server.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
+    observed = observation_path(mux_server)
     before = json.loads(observed.read_text())
     assert any(ws.get("sibling") for ws in before["workspaces"])
     removed = wm(mux_server, workmux_exe_path, repo, "remove --force sib")
@@ -259,18 +259,12 @@ def test_sibling_refuses_symlinks_from_the_parent(
     assert [ws["branch"] for ws in node.workspaces()] == ["feat"]
 
 
-def session_windows(env: TmuxEnvironment, session: str) -> list:
-    """`(name, active)` of the windows of `session`, in order."""
+def session_windows(
+    env: TmuxEnvironment, session: str, field: str = "window_name"
+) -> list:
+    """`(<field>, active)` of the windows of `session`, in order."""
     out = env.tmux(
-        ["list-windows", "-t", session, "-F", "#{window_name} #{window_active}"]
-    ).stdout
-    return [(line.split()[0], line.split()[1] == "1") for line in out.splitlines()]
-
-
-def window_ids(env: TmuxEnvironment, session: str) -> list:
-    """`(id, active)` of the windows of `session`, in order."""
-    out = env.tmux(
-        ["list-windows", "-t", session, "-F", "#{window_id} #{window_active}"]
+        ["list-windows", "-t", session, "-F", f"#{{{field}}} #{{window_active}}"]
     ).stdout
     return [(line.split()[0], line.split()[1] == "1") for line in out.splitlines()]
 
@@ -308,7 +302,7 @@ def test_sibling_opens_next_to_its_parent_in_another_session(
     ).stdout.strip()
     mux_server.tmux(["move-window", "-s", feat_id, "-t", "other:"])
     # Ids, not names: tmux renames the runner window after its command.
-    before = window_ids(mux_server, "test")
+    before = session_windows(mux_server, "test", "window_id")
 
     tell(Path(parent["worktree_path"]), "spawn sib -p elsewhere")
     window = get_window_name("sib")
@@ -319,5 +313,5 @@ def test_sibling_opens_next_to_its_parent_in_another_session(
     names = [name for name, _ in session_windows(mux_server, "other")]
     assert names.index(window) == names.index(get_window_name("feat")) + 1
     # Opened where its parent is, without taking focus from another session.
-    assert window_ids(mux_server, "test") == before
+    assert session_windows(mux_server, "test", "window_id") == before
     assert (window, False) in session_windows(mux_server, "other")
