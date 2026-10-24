@@ -138,7 +138,7 @@ The agent CLI installed depends on your `agent` configuration:
 | Agent              | What gets installed                        |
 | ------------------ | ------------------------------------------ |
 | `claude` (default) | Claude Code CLI via `claude.ai/install.sh` |
-| `codex`            | Codex CLI binary from GitHub releases      |
+| `codex`            | Codex package from GitHub releases         |
 | `gemini`           | Node.js + Gemini CLI via npm               |
 | `opencode`         | OpenCode binary via `opencode.ai/install`  |
 | `pi`               | Pi CLI via npm                             |
