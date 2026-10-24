@@ -1,7 +1,9 @@
 //! Test-only helpers shared across modules.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const ISOLATED_TEST_ENV: &str = "WM_ISOLATED_TEST";
 pub const ISOLATED_TEST_CANARY: &str = "WM_ISOLATED_TEST_EXECUTED";
@@ -11,6 +13,25 @@ pub fn is_isolated_child(test_name: &str) -> bool {
 }
 
 pub fn run_isolated_test(test_name: &str, cwd: &Path, envs: &[(&str, &Path)]) {
+    run_isolated_test_inner(test_name, cwd, envs, None);
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_isolated_test_with_timeout(
+    test_name: &str,
+    cwd: &Path,
+    envs: &[(&str, &Path)],
+    timeout: Duration,
+) {
+    run_isolated_test_inner(test_name, cwd, envs, Some(timeout));
+}
+
+fn run_isolated_test_inner(
+    test_name: &str,
+    cwd: &Path,
+    envs: &[(&str, &Path)],
+    timeout: Option<Duration>,
+) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .arg(test_name)
@@ -24,21 +45,42 @@ pub fn run_isolated_test(test_name: &str, cwd: &Path, envs: &[(&str, &Path)]) {
         command.env(key, value);
     }
 
-    let output = command.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // File-backed output cannot fill a pipe while the parent waits for exit.
+    let mut stdout = tempfile::tempfile().unwrap();
+    let mut stderr = tempfile::tempfile().unwrap();
+    let mut child = command
+        .stdout(Stdio::from(stdout.try_clone().unwrap()))
+        .stderr(Stdio::from(stderr.try_clone().unwrap()))
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let read_output = |file: &mut std::fs::File| {
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let stdout = read_output(&mut stdout);
+    let stderr = read_output(&mut stderr);
     assert!(
-        output.status.success(),
-        "isolated test {test_name} failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        stdout,
-        stderr
+        !timed_out && status.success(),
+        "isolated test {test_name} failed (timed out: {timed_out})\nstatus: {status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains(ISOLATED_TEST_CANARY),
-        "isolated test {test_name} did not execute\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
+        "isolated test {test_name} did not execute\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 

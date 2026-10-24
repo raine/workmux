@@ -1,7 +1,11 @@
 //! Sidebar daemon: single process that polls tmux and pushes snapshots to clients.
 
+#[cfg(target_os = "macos")]
+use super::fsevent::FsEventWatcher as SidebarWatcher;
 use anyhow::Result;
 use ignore::gitignore::Gitignore;
+#[cfg(not(target_os = "macos"))]
+use notify::RecommendedWatcher as SidebarWatcher;
 use notify::{EventKindMask, RecursiveMode, Watcher};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::{HashMap, HashSet};
@@ -569,7 +573,7 @@ fn find_worktrees_for_path(
 /// If the path is already watched by another worktree, just adds the mapping.
 /// Only records the mapping after the OS watch succeeds (or was already active).
 fn add_watch(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     path: &Path,
     mode: RecursiveMode,
     worktree: &Path,
@@ -591,7 +595,7 @@ fn add_watch(
 
 /// Remove watch association for a worktree. Unwatches the path if no other worktree needs it.
 fn remove_worktree_watch(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     watch_path: &Path,
     worktree: &Path,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
@@ -675,7 +679,7 @@ fn worktree_watch_specs(worktree: &Path, watch_worktree_files: bool) -> Vec<Work
 /// Git metadata watches detect commits, staging, and branch changes. macOS also
 /// watches worktree files recursively, while Linux detects them through polling.
 fn setup_worktree_watches(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     worktree: &Path,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
 ) -> (Vec<PathBuf>, bool) {
@@ -693,7 +697,7 @@ fn setup_worktree_watches(
 }
 
 fn detach_worktree_watches(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     worktree: &Path,
     worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
@@ -706,7 +710,7 @@ fn detach_worktree_watches(
 }
 
 fn replace_worktree_watches(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     worktree: &Path,
     worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
     watch_complete: &mut HashMap<PathBuf, bool>,
@@ -721,7 +725,7 @@ fn replace_worktree_watches(
 /// Reconcile root watches, preserving watches for repositories that remain active.
 /// Returns the roots whose watches were added.
 fn reconcile_worktree_watches(
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut SidebarWatcher,
     active_roots: &[PathBuf],
     worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
     watch_complete: &mut HashMap<PathBuf, bool>,
@@ -1315,7 +1319,7 @@ fn spawn_git_worker(
         let (fs_tx, fs_rx) = std::sync::mpsc::sync_channel(256);
         let fs_overflow = Arc::new(AtomicBool::new(false));
         let fs_overflow_clone = fs_overflow.clone();
-        let mut watcher: Option<notify::RecommendedWatcher> = match notify::RecommendedWatcher::new(
+        let mut watcher: Option<SidebarWatcher> = match SidebarWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(ref e) = event {
                     // Filter out .git internal traffic that doesn't affect status.
@@ -1763,7 +1767,7 @@ fn spawn_config_watcher(
         let (fs_tx, fs_rx) = mpsc::sync_channel::<notify::Result<notify::Event>>(64);
         let overflow = Arc::new(AtomicBool::new(false));
         let overflow_clone = overflow.clone();
-        let mut watcher: notify::RecommendedWatcher = match notify::RecommendedWatcher::new(
+        let mut watcher: SidebarWatcher = match SidebarWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if event
                     .as_ref()
@@ -2804,6 +2808,71 @@ mod tests {
         run_git(path, &["init", "-q"]);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn git_watch_churn_delivers_events_and_stops() {
+        const TEST: &str =
+            "command::sidebar::daemon::tests::git_watch_churn_delivers_events_and_stops";
+        let temp = tempfile::tempdir().unwrap();
+        if !crate::test_support::is_isolated_child(TEST) {
+            crate::test_support::run_isolated_test_with_timeout(
+                TEST,
+                temp.path(),
+                &[],
+                Duration::from_secs(180),
+            );
+            return;
+        }
+        let root = temp.path().canonicalize().unwrap();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = SidebarWatcher::new(
+            move |event| {
+                let _ = tx.send(event);
+            },
+            mutation_watcher_config(),
+        )
+        .unwrap();
+        let mut reverse = HashMap::new();
+        assert!(add_watch(
+            &mut watcher,
+            &a,
+            RecursiveMode::Recursive,
+            &a,
+            &mut reverse
+        ));
+        // Sibling roots require stream restarts even on backends that coalesce
+        // nested watches. Each registration immediately follows a fresh start.
+        for _ in 0..10_000 {
+            assert!(add_watch(
+                &mut watcher,
+                &b,
+                RecursiveMode::NonRecursive,
+                &b,
+                &mut reverse
+            ));
+            remove_worktree_watch(&mut watcher, &b, &b, &mut reverse);
+        }
+        let changed = a.join("changed");
+        std::fs::write(&changed, "mutation").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("watcher did not deliver a mutation after churn")
+                .expect("watcher reported an error");
+            if event.paths.contains(&changed) {
+                break;
+            }
+        }
+        // Destruction must finish before the child can report success.
+        drop(watcher);
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
+    }
+
     #[test]
     fn project_config_watcher_recovers_registration_and_directory_replacement() {
         const TEST: &str = "command::sidebar::daemon::tests::project_config_watcher_recovers_registration_and_directory_replacement";
@@ -3786,7 +3855,7 @@ mod tests {
                 Some("parent")
             );
 
-            let mut watcher = notify::RecommendedWatcher::new(
+            let mut watcher = SidebarWatcher::new(
                 |_: notify::Result<notify::Event>| {},
                 mutation_watcher_config(),
             )

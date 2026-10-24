@@ -22,6 +22,8 @@ mod app;
 mod client;
 mod daemon;
 mod daemon_ctrl;
+#[cfg(target_os = "macos")]
+mod fsevent;
 mod hooks;
 mod layout_tree;
 mod panes;

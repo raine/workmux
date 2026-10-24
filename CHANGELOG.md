@@ -22,6 +22,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix sidebar Git diff stats disappearing or stopping updates on macOS.
+
 ## v0.1.277 (2026-10-23)
 
 <!-- highlight: Sidebar views -->
