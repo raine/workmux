@@ -157,7 +157,7 @@ impl Transport {
                 // The master answers; prove its connection still carries sessions.
                 Some(check) if check.success() => {
                     let probe = run_bounded(
-                        self.ssh(socket, host, &remote_command("exit 0")),
+                        self.ssh(socket, host, &remote_command("exit 0"), None),
                         Stdio::null(),
                         Some(PROBE_TIMEOUT),
                     )?;
@@ -192,7 +192,7 @@ impl Transport {
             }
         }
         let output = run_bounded(
-            self.ssh(socket, host, &remote_command("exit 0")),
+            self.ssh(socket, host, &remote_command("exit 0"), None),
             Stdio::null(),
             Some(CONNECT_TIMEOUT),
         )?
@@ -223,7 +223,7 @@ impl Transport {
     /// Start `script` with `input` on stdin and stdout and stderr piped, for
     /// a verb that streams until the caller kills it.
     pub fn spawn(&self, script: &str, input: Vec<u8>) -> Result<Child> {
-        let mut cmd = self.command(&remote_command(script));
+        let mut cmd = self.command(&remote_command(script), None);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -241,7 +241,7 @@ impl Transport {
     /// Run `script` with this process's stdin, stdout and stderr, returning
     /// its exit status (a helper that git drives over stdio).
     pub fn exec_inherit(&self, script: &str) -> Result<i32> {
-        let mut cmd = self.command(&remote_command(script));
+        let mut cmd = self.command(&remote_command(script), None);
         let status = cmd
             .status()
             .with_context(|| format!("Failed to run {}", cmd.get_program().to_string_lossy()))?;
@@ -289,9 +289,10 @@ impl Transport {
         })
     }
 
-    fn command(&self, remote_command: &str) -> Command {
+    /// `log` takes ssh's own diagnostics; see [`ssh_args`].
+    fn command(&self, remote_command: &str, log: Option<&Path>) -> Command {
         match &self.kind {
-            Kind::Ssh { host, socket, .. } => self.ssh(socket, host, remote_command),
+            Kind::Ssh { host, socket, .. } => self.ssh(socket, host, remote_command, log),
             Kind::Loopback => {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(remote_command);
@@ -318,13 +319,37 @@ impl Transport {
             ),
             Input::Bytes(bytes) => (Stdio::piped(), Some(bytes)),
         };
-        let cmd = self.command(&remote_command(script));
-        let output = run_bounded_with(cmd, stdin, bytes, timeout, stderr)?.ok_or_else(|| {
-            anyhow!(
-                "remote command timed out after {}s",
-                timeout.unwrap_or_default().as_secs()
-            )
-        })?;
+        // Streamed stderr is the script's own (hook output); ssh's
+        // diagnostics go to a file instead, for classification and the log.
+        let ssh_log = match (&self.kind, stderr) {
+            (Kind::Ssh { .. }, Stderr::Tee) => {
+                Some(tempfile::NamedTempFile::new().context("Failed to create the ssh log file")?)
+            }
+            _ => None,
+        };
+        let cmd = self.command(
+            &remote_command(script),
+            ssh_log.as_ref().map(|log| log.path()),
+        );
+        let mut output =
+            run_bounded_with(cmd, stdin, bytes, timeout, stderr)?.ok_or_else(|| {
+                anyhow!(
+                    "remote command timed out after {}s",
+                    timeout.unwrap_or_default().as_secs()
+                )
+            })?;
+        if let Some(log) = ssh_log {
+            let diagnostics = fs::read(log.path()).unwrap_or_default();
+            if !diagnostics.is_empty() {
+                tracing::debug!(
+                    "ssh diagnostics: {}",
+                    String::from_utf8_lossy(&diagnostics).trim_end()
+                );
+                if output.status == Some(SSH_ERROR_STATUS) {
+                    output.stderr = [diagnostics, output.stderr].concat();
+                }
+            }
+        }
         if let Kind::Ssh { name, host, .. } = &self.kind
             && output.status == Some(SSH_ERROR_STATUS)
         {
@@ -346,9 +371,9 @@ impl Transport {
         }
     }
 
-    fn ssh(&self, socket: &Path, host: &str, remote_command: &str) -> Command {
+    fn ssh(&self, socket: &Path, host: &str, remote_command: &str, log: Option<&Path>) -> Command {
         let mut cmd = Command::new("ssh");
-        cmd.args(ssh_args(socket, host, remote_command));
+        cmd.args(ssh_args(socket, host, remote_command, log));
         cmd
     }
 
@@ -366,8 +391,13 @@ impl Transport {
     }
 }
 
-fn ssh_args(socket: &Path, host: &str, remote_command: &str) -> Vec<String> {
+/// `log` receives ssh's own diagnostics (`-E`) instead of stderr.
+fn ssh_args(socket: &Path, host: &str, remote_command: &str, log: Option<&Path>) -> Vec<String> {
     let mut args = vec!["-T".to_string()];
+    if let Some(log) = log {
+        args.push("-E".to_string());
+        args.push(log.to_string_lossy().into_owned());
+    }
     for option in [
         "BatchMode=yes",
         "ConnectTimeout=10",
@@ -667,7 +697,7 @@ mod tests {
 
     #[test]
     fn ssh_args_end_with_separator_host_command() {
-        let args = ssh_args(Path::new("/s/abc"), "-oProxyCommand=x", "cmd");
+        let args = ssh_args(Path::new("/s/abc"), "-oProxyCommand=x", "cmd", None);
         let n = args.len();
         assert_eq!(&args[n - 3..], ["--", "-oProxyCommand=x", "cmd"]);
         assert_eq!(args[0], "-T");
@@ -681,6 +711,15 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == option), "missing {option}");
         }
+    }
+
+    #[test]
+    fn ssh_log_goes_before_the_separator() {
+        let args = ssh_args(Path::new("/s/abc"), "h", "cmd", Some(Path::new("/t/log")));
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let flag = args.iter().position(|arg| arg == "-E").unwrap();
+        assert!(flag < separator);
+        assert_eq!(args[flag + 1], "/t/log");
     }
 
     #[test]
