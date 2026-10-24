@@ -17,7 +17,9 @@ const MIN_TMUX: (u32, u32) = (3, 3);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Prints one `key=value` line per fact; values are first lines only.
-const FACTS_SCRIPT: &str = r#"fact() { printf '%s=%s\n' "$1" "$(printf '%s\n' "$2" | head -n 1)"; }
+// Each fact keeps the first non-blank line: docker 29 starts its
+// permission error with an empty line.
+const FACTS_SCRIPT: &str = r#"fact() { printf '%s=%s\n' "$1" "$(printf '%s\n' "$2" | grep -m 1 '[^[:space:]]')"; }
 fact os "$(uname -s)"
 fact arch "$(uname -m)"
 fact user "$(id -un)"
@@ -651,6 +653,20 @@ mod tests {
         assert!(!fact(&facts, "os").is_empty());
         assert!(!fact(&facts, "user").is_empty());
         assert!(facts.contains_key("linger"));
+    }
+
+    #[test]
+    fn facts_skip_leading_blank_lines() {
+        let fact_fn = FACTS_SCRIPT.lines().next().unwrap();
+        let script =
+            format!("{fact_fn}\nfact docker_out \"$(printf '\\npermission denied\\nmore')\"");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        let facts = parse_facts(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(fact(&facts, "docker_out"), "permission denied");
     }
 
     #[test]
