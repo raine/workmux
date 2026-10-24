@@ -66,7 +66,7 @@ This uploads the workmux binary that matches your local version into the node ro
 workmux remote doctor devbox
 ```
 
-Doctor checks SSH, the architecture, the installed node, Git, tmux, linger, Docker, the status hooks, the agents' logins and the sandbox image, and prints a fix for each failing row. It pulls the image, so the first run can take a while. It exits non-zero when any check fails.
+Doctor checks SSH, the architecture, the installed node, Git, tmux, linger, Docker, the status hooks, the logins of the agents your config can start (plus any other agent already logged in on the host) and the sandbox image, and prints a fix for each failing row. It pulls the image, so the first run can take a while. It exits non-zero when any check fails.
 
 ```bash
 workmux remote
