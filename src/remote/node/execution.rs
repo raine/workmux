@@ -205,9 +205,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         crate::util::write_atomic(&conf, TMUX_CONF.as_bytes())?;
     }
 
-    if workspace.agent_kind(&config) == Some("claude") {
-        super::trust::ensure_for_execution(root, &workspace, &config);
-    }
+    super::trust::ensure_for_execution(root, &workspace, &config);
 
     let supervisor = format!(
         "{} sandbox run --node-root {} --node-workspace {}",
