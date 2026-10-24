@@ -211,6 +211,14 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
     content = mux_server.capture_pane(window) or ""
     assert "echo droppedecho" not in content
 
+    # Exit messages of earlier attaches don't pile up and scroll the screen.
+    node.tmux("detach-client", "-s", f"={ex_id}-0")
+    wait_for_pane_output(mux_server, window, "r reconnect", timeout=10)
+    content = mux_server.capture_pane(window) or ""
+    assert content.count("[detached") == 1, content
+    mux_server.tmux(["send-keys", "-t", window, "r"])
+    assert poll_until(lambda: len(client_pids()) == 1, timeout=15)
+
     # When the remote session ends, its local pane closes.
     def local_panes() -> int:
         result = mux_server.tmux(["list-panes", "-t", window], check=False)
