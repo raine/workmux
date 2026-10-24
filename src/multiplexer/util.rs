@@ -820,9 +820,7 @@ mod tests {
         )
         .unwrap();
         let agent = resolved.selected_agent.as_mut().unwrap();
-        agent
-            .command
-            .prepend_args_fragment("--dangerously-skip-permissions");
+        agent.add_sandbox_flags();
         assert_eq!(
             resolved.render_command(),
             " env FOO='bar baz' claude --dangerously-skip-permissions -- \"$(cat PROMPT.md)\""

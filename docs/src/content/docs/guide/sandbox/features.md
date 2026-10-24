@@ -96,6 +96,14 @@ This means git commits inside the sandbox use your identity without exposing the
 
 No configuration is needed. If the host has no `user.name` or `user.email` configured, the injection is silently skipped.
 
+## Agent flags
+
+Inside a sandbox the sandbox is the security boundary, so workmux starts agents without their own permission prompts: Claude with `--dangerously-skip-permissions`, Codex and Gemini with `--yolo`, and other agents with their equivalent. Flags your agent command already sets are not added a second time.
+
+Codex also gets `--no-daemon`. The sandbox mounts the host's `~/.codex`, where Codex installs and tracks its shared background server, but a sandboxed Codex can't reach a server running outside the sandbox. Without the flag, it fails to start once Codex on the host has installed the server ("daemon executable not found"), or installs a server of its own into the host's `~/.codex`.
+
+`--no-daemon` needs Codex 0.156 or newer. The workmux image installs the latest release. A custom image (`sandbox.image`) or a Lima VM with an older Codex fails to start Codex with "unexpected argument '--no-daemon'": update Codex in the image, or recreate the VM with `workmux sandbox prune`.
+
 ## Credentials
 
 Both sandbox backends mount agent-specific credential directories from the host. The mounted directory depends on the configured `agent`:

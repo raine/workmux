@@ -45,6 +45,17 @@ pub trait AgentProfile: Send + Sync {
         None
     }
 
+    /// Other CLI flags every sandboxed launch of this agent needs.
+    fn sandbox_flags(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Other spellings the agent accepts for `flag`, so a command that
+    /// already sets it under one of them doesn't get it twice.
+    fn flag_aliases(&self, _flag: &str) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Format the prompt injection argument for this agent.
     ///
     /// Returns the CLI fragment to append (e.g., `-- "$(cat PROMPT.md)"`).
@@ -200,6 +211,22 @@ impl AgentProfile for CodexProfile {
 
     fn skip_permissions_flag(&self) -> Option<&'static str> {
         Some("--yolo")
+    }
+
+    /// The sandbox mounts the host's codex home, which holds the install
+    /// and control state of codex's shared background server. A sandboxed
+    /// codex can't reach a server outside the sandbox, so it would fail on
+    /// a server the host installed there, or install its own into the
+    /// host's codex home.
+    fn sandbox_flags(&self) -> &'static [&'static str] {
+        &["--no-daemon"]
+    }
+
+    fn flag_aliases(&self, flag: &str) -> &'static [&'static str] {
+        match flag {
+            "--yolo" => &["--dangerously-bypass-approvals-and-sandbox"],
+            _ => &[],
+        }
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
@@ -521,10 +548,25 @@ impl AgentCommand {
         parts.join(" ")
     }
 
-    pub fn prepend_args_fragment(&mut self, fragment: &str) {
-        if let Some(mut args) = shlex::split(fragment) {
-            args.extend(std::mem::take(&mut self.args));
-            self.args = args;
+    /// Prepend `fragment` unless the options (the arguments before any
+    /// `--`) already contain it, or one of `aliases`. Agents reject a flag
+    /// given twice.
+    pub fn prepend_missing_args_fragment(&mut self, fragment: &str, aliases: &[&str]) {
+        let Some(mut tokens) = shlex::split(fragment) else {
+            return;
+        };
+        let options = match self.args.iter().position(|arg| arg == "--") {
+            Some(end) => &self.args[..end],
+            None => &self.args[..],
+        };
+        let present = (!tokens.is_empty()
+            && options
+                .windows(tokens.len())
+                .any(|window| window == tokens.as_slice()))
+            || options.iter().any(|arg| aliases.contains(&arg.as_str()));
+        if !present {
+            tokens.extend(std::mem::take(&mut self.args));
+            self.args = tokens;
         }
     }
 
@@ -562,6 +604,20 @@ pub struct SelectedAgent {
 impl SelectedAgent {
     pub fn kind(&self) -> &'static str {
         self.profile.name()
+    }
+
+    /// Add the skip-permissions flag and the other flags a sandboxed launch
+    /// needs, skipping any the command already sets.
+    pub fn add_sandbox_flags(&mut self) {
+        let profile = self.profile;
+        let flags = profile
+            .skip_permissions_flag()
+            .into_iter()
+            .chain(profile.sandbox_flags().iter().copied());
+        for flag in flags.rev() {
+            self.command
+                .prepend_missing_args_fragment(flag, profile.flag_aliases(flag));
+        }
     }
 
     pub fn shell_command(&self) -> String {
@@ -721,6 +777,62 @@ mod tests {
         );
         assert_eq!(profile.auto_name_command(), Some("opencode run"));
         assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    fn sandboxed(profile: &'static dyn AgentProfile, command: &str) -> String {
+        let mut agent = SelectedAgent {
+            command: AgentCommand::parse(command).unwrap(),
+            profile,
+        };
+        agent.add_sandbox_flags();
+        agent.shell_command()
+    }
+
+    #[test]
+    fn sandbox_flags_are_added_once() {
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex"),
+            "codex --yolo --no-daemon"
+        );
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex --no-daemon -m o3"),
+            "codex --yolo --no-daemon -m o3"
+        );
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex --yolo"),
+            "codex --no-daemon --yolo"
+        );
+        assert_eq!(
+            sandboxed(
+                &CodexProfile,
+                "codex --dangerously-bypass-approvals-and-sandbox"
+            ),
+            "codex --no-daemon --dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(
+            sandboxed(&ClaudeProfile, "claude --dangerously-skip-permissions"),
+            "claude --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn sandbox_flags_ignore_arguments_after_the_terminator() {
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex -- --no-daemon"),
+            "codex --yolo --no-daemon -- --no-daemon"
+        );
+    }
+
+    #[test]
+    fn multi_token_sandbox_flags_match_as_a_whole() {
+        assert_eq!(
+            sandboxed(&VibeProfile, "vibe --agent myagent"),
+            "vibe --agent auto-approve --agent myagent"
+        );
+        assert_eq!(
+            sandboxed(&VibeProfile, "vibe --model x --agent auto-approve"),
+            "vibe --model x --agent auto-approve"
+        );
     }
 
     #[test]
