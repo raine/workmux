@@ -187,7 +187,7 @@ Non-agent panes are shells on the remote host (or in the container with `sandbox
 Remote workspaces use the usual commands. Name them by handle; the commands find them from the project's repository.
 
 - [`workmux add --remote`](/reference/commands/add/) creates the workspace, runs its hooks and starts its panes.
-- [`workmux close`](/reference/commands/close/) closes the laptop window only. The agent keeps running on the remote.
+- [`workmux close`](/reference/commands/close/) closes the laptop window only, the current one when run without a name inside it. The agent keeps running on the remote.
 - [`workmux open`](/reference/commands/open/) reattaches to the running agent, or starts the workspace's panes again if they have ended.
 - [`workmux remove`](/reference/commands/remove/) stops the agent and removes the remote worktree, branch and window, with the same checks as a local remove (see [Git](#git)).
 - [`workmux resurrect`](/reference/commands/resurrect/) reopens the windows of remote agents that are still running after the laptop's tmux server restarted. The agents are not restarted.
@@ -286,7 +286,7 @@ A reboot stops the remote tmux server and containers, but the worktrees, branche
 workmux open my-feature
 ```
 
-to start the workspace again. The agent starts with its continue flag (as `workmux open --continue` does locally), so agents that keep their conversations on disk pick up where they left off. The original prompt is not sent again. workmux doesn't restart agents automatically at boot.
+to start the workspace again. The agent starts with its continue flag (as `workmux open --continue` does locally), so agents that keep their conversations on disk pick up where they left off; `open` says whether the agent continued its conversation. The original prompt is not sent again. workmux doesn't restart agents automatically at boot.
 
 ## Cleaning up a remote
 
@@ -340,8 +340,6 @@ With `isolation: none`, there is no sandbox: agents run directly as the SSH user
 **No status icons for a remote agent.** Run `workmux remote setup <remote>` again to install the status hooks, and check doctor's `hooks` row. OpenCode's hooks need the OpenCode sandbox image on the remote.
 
 **Protocol mismatch.** The node runs a binary that matches your local workmux: the release of the same version, or the `binary` you configured, identified by its content. After an upgrade, the next remote command installs the new version next to the old one, and running agents keep the binary they started with. A mismatch means the local workmux is not the release it claims to be (for example, built from source), or `binary` was built from different source. Point `binary` at a Linux build of the same source.
-
-**The views look out of date after upgrading workmux.** One background process per remote keeps the views' copy of the remote state current. A long-running dashboard or sidebar from before the upgrade can keep that role; restart it.
 
 **Something is left over on the remote.** Run `workmux remote gc <remote> --dry-run`.
 

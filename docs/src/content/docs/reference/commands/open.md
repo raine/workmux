@@ -49,9 +49,9 @@ Git repository and only provides conservative evidence for tmux placement.
 
 ## Remote workspaces
 
-For a workspace on a [remote host](/guide/sandbox/remote/), `open` reopens the local window and reattaches it to the remote session. The agent was never stopped by `close`, so nothing restarts. If the remote session has ended, `open` starts the workspace's panes again. After a remote host reboot, agents resume their most recent conversation.
+For a workspace on a [remote host](/guide/sandbox/remote/), `open` reopens the local window and reattaches it to the remote session. The agent was never stopped by `close`, so nothing restarts. If the remote session has ended, `open` starts the workspace's panes again. After a remote host reboot, agents resume their most recent conversation, and `open` says whether the agent continued its conversation or started a new one.
 
-Prompts, `--continue`, `--new`, `--run-hooks`, `--force-files`, `--target-name`, `--parent-session` and session mode aren't available for remote workspaces.
+Prompts, `--continue`, `--new`, `--run-hooks`, `--force-files`, `--target-name`, `--parent-session` and session mode aren't available for remote workspaces. With `mode: session` in the config, pass `--mode window` to open a remote workspace.
 
 ## Examples
 
