@@ -161,6 +161,7 @@ fn parse_bridge_gateway(text: &str) -> Result<Ipv4Addr> {
 /// Start RPC server and return (server, port, token, context).
 /// Shared setup between Lima and Container backends. Only a node binds a
 /// specific address, so `bind_ip` also marks the agent as remote.
+#[allow(clippy::too_many_arguments)]
 fn start_rpc(
     config: &Config,
     frozen_config_path: &Path,
@@ -169,6 +170,7 @@ fn start_rpc(
     detected_toolchain: toolchain::DetectedToolchain,
     allow_unsandboxed_host_exec: bool,
     bind_ip: Option<IpAddr>,
+    node: Option<(&NodeRoot, &str)>,
 ) -> Result<(RpcServer, u16, String, Arc<RpcContext>)> {
     let rpc_server = match bind_ip {
         Some(ip) => RpcServer::bind_to(ip)?,
@@ -192,6 +194,7 @@ fn start_rpc(
         detected_toolchain,
         allow_unsandboxed_host_exec,
         on_node: bind_ip.is_some(),
+        node_workspace: node.map(|(root, ws_id)| (root.path.clone(), ws_id.to_string())),
     });
 
     Ok((rpc_server, rpc_port, rpc_token, ctx))
@@ -289,6 +292,7 @@ fn run_lima(
         allowed_commands,
         detected.clone(),
         config.sandbox.allow_unsandboxed_host_exec(),
+        None,
         None,
     )?;
     let _rpc_handle = rpc_server.spawn(ctx);
@@ -449,6 +453,7 @@ fn run_container(
         detected.clone(),
         config.sandbox.allow_unsandboxed_host_exec() && !on_node,
         bind_ip,
+        node,
     )?;
     let _rpc_handle = rpc_server.spawn(ctx);
 

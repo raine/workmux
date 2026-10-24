@@ -57,7 +57,6 @@ pub fn create(
         crate::config::validate_panes_config(panes)?;
     }
     context.ensure_mux_running()?;
-    let mux = context.mux.as_ref();
     let project_root = crate::util::canon_or_self(&context.main_worktree_root);
 
     let resume = match cache::claimed(&project_root, request.handle, request.branch) {
@@ -83,29 +82,16 @@ pub fn create(
         ),
         None => None,
     };
-    if resume.is_none()
-        && crate::git::worktree_exists_in(request.branch, Some(&context.execution_dir))?
-    {
-        bail!(
-            "A local worktree for branch '{}' already exists",
-            request.branch
-        );
-    }
-    if resume.is_none()
-        && crate::git::find_worktree_in(request.handle, Some(&context.execution_dir)).is_ok()
-    {
-        bail!(
-            "A local worktree named '{}' already exists.\n\
-             Hint: use --name to pick another name.",
-            request.handle
-        );
-    }
     let window_name = crate::multiplexer::util::prefixed(&context.prefix, request.handle);
-    if mux.window_exists_by_full_name(&window_name)? {
-        bail!(
-            "A tmux window named '{window_name}' already exists.\n\
-             Hint: use --name to pick another name."
-        );
+    if let Some(conflict) = local_conflict(
+        context,
+        request.branch,
+        request.handle,
+        &window_name,
+        resume.is_none(),
+        "\nHint: use --name to pick another name.",
+    )? {
+        bail!("{conflict}");
     }
 
     let prompt_text = request.prompt.map(Prompt::read_content).transpose()?;
@@ -132,11 +118,10 @@ pub fn create(
         }
         None => {
             let (base_sha, base_label) = resolve_base(context, request.branch, request.base)?;
-            let origin = crate::git::get_remote_url_in("origin", Some(&project_root)).ok();
             WorkspaceRecord::new(
                 cache::new_id('w'),
                 &spec.name,
-                cache::project_id(&project_root, origin.as_deref()),
+                cache::project_id_of(&project_root),
                 project_root.clone(),
                 request.handle,
                 request.branch,
@@ -150,6 +135,7 @@ pub fn create(
 
     let node = Node::connect(spec)?;
     super::homecoming::finish_pending(&node, &record.ws_id);
+    super::observe::current(config, &spec.name);
     record.save()?;
     let (portable, provisioned) = (|| -> Result<(Portable, ProvisionResponse)> {
         let identity = WorkspaceIdentity {
@@ -235,10 +221,7 @@ pub fn create(
     })?;
     record.remote_worktree = Some(provisioned.worktree_path.clone());
     record.state = WorkspaceState::Ready;
-    record.layout = super::node::execution::pane_plan(&portable.config, request.agent)
-        .into_iter()
-        .map(|(index, pane)| LayoutPane { index, pane })
-        .collect();
+    record.layout = super::node::execution::layout(&portable.config, request.agent);
     record.observed();
     record.save()?;
 
@@ -258,6 +241,37 @@ pub fn create(
 
     open_window(context, &record, request.options.focus_window)?;
     Ok(record)
+}
+
+/// Why a new remote workspace cannot take `branch`, `handle` and
+/// `window_name` on this laptop: a local worktree uses them (checked with
+/// `worktrees`) or a window has the name. `hint` follows the messages about
+/// the handle.
+pub(super) fn local_conflict(
+    context: &WorkflowContext,
+    branch: &str,
+    handle: &str,
+    window_name: &str,
+    worktrees: bool,
+    hint: &str,
+) -> Result<Option<String>> {
+    let dir = Some(context.execution_dir.as_path());
+    if worktrees && crate::git::worktree_exists_in(branch, dir)? {
+        return Ok(Some(format!(
+            "A local worktree for branch '{branch}' already exists"
+        )));
+    }
+    if worktrees && crate::git::find_worktree_in(handle, dir).is_ok() {
+        return Ok(Some(format!(
+            "A local worktree named '{handle}' already exists.{hint}"
+        )));
+    }
+    if context.mux.window_exists_by_full_name(window_name)? {
+        return Ok(Some(format!(
+            "A tmux window named '{window_name}' already exists.{hint}"
+        )));
+    }
+    Ok(None)
 }
 
 /// Start the workspace's execution, or rejoin the running one, and record
@@ -506,6 +520,19 @@ fn attach_command_line(remote: &str, ex_id: &str, index: usize) -> Result<String
 /// Create the window for `record`'s execution: one pane per remote session,
 /// split, sized, named and focused as configured.
 pub fn open_window(context: &WorkflowContext, record: &WorkspaceRecord, focus: bool) -> Result<()> {
+    let placement = context
+        .mux
+        .resolve_window_placement_target(context.config.window_placement())?;
+    open_window_after(context, record, focus, placement.as_deref())
+}
+
+/// [`open_window`], placed after the tmux window `after`.
+pub(super) fn open_window_after(
+    context: &WorkflowContext,
+    record: &WorkspaceRecord,
+    focus: bool,
+    after: Option<&str>,
+) -> Result<()> {
     let mux = context.mux.as_ref();
     let execution = record
         .execution
@@ -518,13 +545,12 @@ pub fn open_window(context: &WorkflowContext, record: &WorkspaceRecord, focus: b
         .collect();
 
     let cwd = &context.main_worktree_root;
-    let placement = mux.resolve_window_placement_target(context.config.window_placement())?;
     let first = mux
         .create_window(CreateWindowParams {
             prefix: &context.prefix,
             name: &record.handle,
             cwd,
-            after_window: placement.as_deref(),
+            after_window: after,
         })
         .context("Failed to create window")?;
 
@@ -577,8 +603,10 @@ pub fn open_window(context: &WorkflowContext, record: &WorkspaceRecord, focus: b
 }
 
 /// `workmux open` of a remote workspace: focus its window, or start (or
-/// rejoin) its execution and build the window again. A merged workspace
-/// only has its removal finished.
+/// rejoin) its execution and build the window again. A window whose
+/// execution may have ended (the remote said so, or is not seen) is checked
+/// with the node first, and replaced when the execution starts again. A
+/// merged workspace only has its removal finished.
 pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool) -> Result<()> {
     if record.cleanup_pending() {
         let config = Config::load(None)?;
@@ -586,12 +614,19 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         return super::homecoming::finish_cleanup(&node, record);
     }
     let mux = context.mux.as_ref();
-    if mux.window_exists_by_full_name(&record.window_name)? {
+    let switch = |record: &WorkspaceRecord| -> Result<()> {
         if focus {
             mux.select_window(&context.prefix, &record.handle)?;
         }
         println!("✓ Switched to remote workspace '{}'", record.handle);
-        return Ok(());
+        Ok(())
+    };
+    let window = mux.window_exists_by_full_name(&record.window_name)?;
+    let stale = super::observe::load_connected(&record.remote)
+        .and_then(|observation| Some(observation.of(&record)?.ended.is_some()))
+        .unwrap_or(window);
+    if window && !stale {
+        return switch(&record);
     }
     if record.state != WorkspaceState::Ready {
         bail!(
@@ -605,13 +640,50 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
     }
     let config = Config::load(None)?;
     let spec = RemoteSpec::resolve(&config, &record.remote)?;
-    let node = Node::connect(&spec)?;
+    let node = match Node::connect(&spec) {
+        Ok(node) => node,
+        Err(err) if window => {
+            tracing::debug!(remote = %spec.name, "open: remote not reachable: {err:#}");
+            return switch(&record);
+        }
+        Err(err) => return Err(err),
+    };
     super::homecoming::finish_pending(&node, &record.ws_id);
+    let observation = super::observe::current(&config, &spec.name);
+    // Adoption may have opened the window meanwhile.
+    if !window && mux.window_exists_by_full_name(&record.window_name)? {
+        return switch(&record);
+    }
+    let previous = record
+        .execution
+        .as_ref()
+        .map(|execution| execution.ex_id.clone());
+    let ended = observation
+        .of(&record)
+        .is_some_and(|observed| observed.ended.is_some());
     let rejoined = start_execution(&node, &mut record, false, true)?;
+    if window {
+        let current = record.execution.as_ref().map(|execution| &execution.ex_id);
+        if rejoined && current == previous.as_ref() {
+            return switch(&record);
+        }
+        mux.kill_window(&record.window_name)
+            .context("Failed to close the window of the ended execution")?;
+        forget_attachments(&record);
+    }
     open_window(context, &record, focus)?;
+    if record.window_pending {
+        record.window_pending = false;
+        record.save()?;
+    }
     if rejoined {
         println!(
             "✓ Attached to the running agent of '{}' on '{}'",
+            record.handle, record.remote
+        );
+    } else if ended {
+        println!(
+            "✓ Restarted remote workspace '{}' on '{}' after its execution ended",
             record.handle, record.remote
         );
     } else {
@@ -705,6 +777,7 @@ pub fn remove(
         }
     };
     super::homecoming::finish_pending(&node, &record.ws_id);
+    super::observe::current(&config, &spec.name);
     if record.cleanup_pending() {
         return super::homecoming::finish_cleanup(&node, record);
     }
@@ -936,7 +1009,7 @@ fn keep_branch_locally(record: &WorkspaceRecord, head: &str) -> Result<()> {
     Ok(())
 }
 
-fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
+pub(super) fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
     close_relay(mux, record);
     record.delete()
 }

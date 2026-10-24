@@ -69,7 +69,7 @@ impl Homecoming {
 }
 
 /// A pane of the workspace's window, as the node laid out its sessions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutPane {
     /// Index in the configured pane list.
     pub index: usize,
@@ -107,6 +107,10 @@ pub struct WorkspaceRecord {
     /// Project repository path on the node, once an export reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_repo: Option<String>,
+    /// Adopted from the node while no multiplexer could take its window;
+    /// a later adoption pass opens it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub window_pending: bool,
 }
 
 impl WorkspaceRecord {
@@ -144,6 +148,7 @@ impl WorkspaceRecord {
             local_path,
             homecoming: None,
             remote_repo: None,
+            window_pending: false,
         }
     }
 
@@ -195,9 +200,57 @@ impl WorkspaceRecord {
         }
         let path = record_path(&root()?, &self.remote, &self.ws_id);
         match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err).with_context(|| format!("Failed to remove {}", path.display())),
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to remove {}", path.display()));
+            }
+        }
+        if let Err(err) = forget(&self.remote, &self.ws_id) {
+            tracing::warn!(handle = %self.handle, "failed to mark record as forgotten: {err:#}");
+        }
+        Ok(())
+    }
+}
+
+fn forgotten_path(remote: &str, ws_id: &str) -> Result<PathBuf> {
+    Ok(remote_dir(remote)?.join("forgotten").join(ws_id))
+}
+
+/// Note when the record of `ws_id` went, so observations from before then
+/// cannot bring it back (see `remote::siblings`).
+fn forget(remote: &str, ws_id: &str) -> Result<()> {
+    let path = forgotten_path(remote, ws_id)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    }
+    fs::write(&path, now().to_string())
+        .with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// When the laptop last deleted its record of `ws_id` on `remote`, if it
+/// did and the node has not been seen without the workspace since.
+pub fn forgotten_at(remote: &str, ws_id: &str) -> Option<u64> {
+    let text = fs::read_to_string(forgotten_path(remote, ws_id).ok()?).ok()?;
+    text.trim().parse().ok()
+}
+
+/// Drop the notes of forgotten workspaces on `remote` that an observation
+/// taken at `seen`, after they went, no longer lists in `present`.
+pub fn prune_forgotten(remote: &str, present: &[&str], seen: u64) {
+    let Ok(dir) = remote_dir(remote).map(|dir| dir.join("forgotten")) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(ws_id) = name.to_str() else {
+            continue;
+        };
+        if !present.contains(&ws_id) && forgotten_at(remote, ws_id).is_none_or(|at| seen > at) {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -227,6 +280,20 @@ fn root() -> Result<PathBuf> {
 /// Directory of the laptop's files about remote `name`.
 pub fn remote_dir(name: &str) -> Result<PathBuf> {
     Ok(root()?.join(name))
+}
+
+/// Lock file `file` of remote `name`, created if missing and not locked
+/// yet.
+pub fn lock_file(name: &str, file: &str) -> Result<fs::File> {
+    let dir = remote_dir(name)?;
+    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let path = dir.join(file);
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))
 }
 
 fn record_path(root: &Path, remote: &str, ws_id: &str) -> PathBuf {
@@ -385,6 +452,12 @@ pub fn project_id(main_worktree: &Path, origin_url: Option<&str>) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "project".to_string());
     format!("{name}-{}", &hash[..12])
+}
+
+/// [`project_id`] of the repository whose main worktree is `main_worktree`.
+pub fn project_id_of(main_worktree: &Path) -> String {
+    let origin = crate::git::get_remote_url_in("origin", Some(main_worktree)).ok();
+    project_id(main_worktree, origin.as_deref())
 }
 
 #[cfg(test)]

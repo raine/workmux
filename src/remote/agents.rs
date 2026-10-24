@@ -18,7 +18,7 @@ use super::node::observe::{
 use super::observe::{self, Observation};
 use super::protocol::{self, DiffMode, DiffRequest, DiffResponse};
 use crate::config::Config;
-use crate::multiplexer::{AgentPane, RemoteAgent, RemoteRef};
+use crate::multiplexer::{AgentPane, EndReason, RemoteAgent, RemoteRef};
 
 /// The remote workspace `target` names: a handle or branch of this
 /// repository (local worktrees win), or `project:handle`.
@@ -85,6 +85,7 @@ pub fn rows(
             connected: observation.is_some_and(|o| o.is_connected(now)),
             last_seen: observation.and_then(|o| o.last_seen),
             git: git.clone(),
+            ended: observed.and_then(|o| o.ended),
         };
         let local = |pane: usize| {
             attached.iter().find(|row| {
@@ -121,6 +122,19 @@ pub fn rows(
             }
             continue;
         };
+        // An execution that ended has no agents left; one row says so.
+        if observed.ended.is_some() {
+            let pane = execution.panes.first().copied().unwrap_or(0);
+            rows.push(match local(pane) {
+                Some(row) => AgentPane {
+                    remote: Some(remote(pane, true)),
+                    status: None,
+                    ..row.clone()
+                },
+                None => detached_row(record, None, observation, remote(pane, false)),
+            });
+            continue;
+        }
         for pane in &observed.panes {
             let Some(agent) = &pane.agent else {
                 continue;
@@ -231,11 +245,13 @@ pub fn label(worktree: &str, remote: &str) -> String {
     format!("{worktree}@{remote}")
 }
 
-/// What views say about a remote they cannot reach, or `None` while
-/// connected.
+/// What views say about a remote they cannot reach or an execution that
+/// ended under its agent; `None` while it runs and the remote answers.
 pub fn connectivity(remote: &RemoteAgent, now: u64) -> Option<String> {
     if remote.connected {
-        return None;
+        return remote.ended.map(|reason| match reason {
+            EndReason::HostReboot => "exited · host rebooted · `workmux open` resumes".to_string(),
+        });
     }
     Some(match remote.last_seen {
         Some(seen) => format!(
@@ -463,6 +479,8 @@ mod tests {
                 ex_id: "x1".into(),
                 panes,
                 git: None,
+                sibling: None,
+                ended: None,
             }],
         }
     }

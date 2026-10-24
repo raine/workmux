@@ -7,7 +7,7 @@
 //! panes and views look at it.
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::RemoteSpec;
-use super::cache::now;
+use super::cache::{WorkspaceRecord, now};
 use super::client::Node;
 use super::node::observe::{ObservedPane, ObservedWorkspace, Snapshot, WatchFrame, WatchRequest};
 use super::protocol::{self, ErrorEnvelope};
@@ -64,6 +64,11 @@ impl Observation {
         self.workspaces
             .iter()
             .find(|ws| ws.ws_id == ws_id && ws.ex_id == ex_id)
+    }
+
+    /// The current execution of `record`, as observed.
+    pub fn of(&self, record: &WorkspaceRecord) -> Option<&ObservedWorkspace> {
+        self.execution(&record.ws_id, &record.execution.as_ref()?.ex_id)
     }
 
     /// Pane `index` of execution `ex_id` of `ws_id`.
@@ -213,15 +218,7 @@ fn observe(spec: RemoteSpec, lock: Option<File>) {
 }
 
 fn take_lock(name: &str) -> Result<Option<File>> {
-    let dir = super::cache::remote_dir(name)?;
-    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    let path = dir.join("observer.lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = super::cache::lock_file(name, "observer.lock")?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -273,8 +270,12 @@ fn stream(spec: &RemoteSpec, observation: &mut Observation) -> Result<String> {
                     if let WatchFrame::Error { message } = &frame {
                         tracing::info!(remote = %spec.name, message, "remote observation failed");
                     }
+                    let snapshot = matches!(frame, WatchFrame::Snapshot(_));
                     observation.apply(frame, now());
                     save(&spec.name, observation)?;
+                    if snapshot {
+                        super::siblings::adopt(&spec.name, observation, false);
+                    }
                     deadline = now() + STALE_AFTER.as_secs();
                 } else if let Ok(envelope) = serde_json::from_str::<ErrorEnvelope>(&line) {
                     return Ok(envelope.error.message);
@@ -308,8 +309,17 @@ fn stream(spec: &RemoteSpec, observation: &mut Observation) -> Result<String> {
 
 /// A current observation of `name`: the file while an observer keeps it
 /// current, else one `node watch` call. Disconnected (keeping the last
-/// known workspaces) when the node cannot be reached.
+/// known workspaces) when the node cannot be reached. Adopts the siblings a
+/// connected observation reports.
 pub fn current(config: &Config, name: &str) -> Observation {
+    let observation = fetch(config, name);
+    if observation.is_connected(now()) {
+        super::siblings::adopt(name, &observation, true);
+    }
+    observation
+}
+
+fn fetch(config: &Config, name: &str) -> Observation {
     let now = now();
     let mut observation = load(name).unwrap_or_default();
     let observed = matches!(take_lock(name), Ok(None));
@@ -354,6 +364,8 @@ mod tests {
                     }),
                 }],
                 git: None,
+                sibling: None,
+                ended: None,
             }],
         })
     }

@@ -120,6 +120,18 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Create a sibling of a workspace for its agent (run by its supervisor)
+    Spawn {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// List, and on request remove, what no workspace accounts for
+    Gc {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
@@ -184,6 +196,10 @@ pub fn run(args: NodeArgs) -> Result<()> {
             serve(request, |root, request| node::git::rebase(&root, request))
         }
         NodeVerb::Diff { .. } => serve(request, |root, request| node::git::diff(&root, request)),
+        NodeVerb::Spawn { .. } => {
+            serve(request, |root, request| node::spawn::spawn(&root, request))
+        }
+        NodeVerb::Gc { .. } => serve(request, |root, request| node::gc::gc(&root, request)),
         NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
     });
     match response {
