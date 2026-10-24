@@ -364,8 +364,13 @@ fn build_snapshot(
                                 .and_then(clean_text)
                                 .filter(|title| Some(title.as_str()) != host),
                             // With container isolation the pane runs the
-                            // supervisor, which names no agent.
-                            agent_kind: agent.agent_kind.clone().or_else(|| ws.agent.clone()),
+                            // supervisor, which names no agent. An execution
+                            // with no recorded kind has the agent as named.
+                            agent_kind: agent
+                                .agent_kind
+                                .clone()
+                                .or_else(|| execution.agent_kind.clone())
+                                .or_else(|| ws.agent.clone()),
                             prompt: agent.prompt.as_deref().and_then(clean_text),
                         });
                     ObservedPane {
@@ -530,14 +535,22 @@ pub fn send(root: &NodeRoot, request: SendRequest) -> Result<SendResponse> {
         return Err(refuse(code::BAD_REQUEST, "text is too long"));
     }
     let (mux, pane_id, agent) = target(root, &request.ws_id, request.pane)?;
-    // As local `send`: the agent's kind, else the configured agent.
-    let identity = agent.agent_kind.or_else(|| {
-        crate::frozen_config::load(&root.config_path(&request.ws_id))
-            .ok()
-            .and_then(|(config, _)| config.agent)
-    });
-    mux.send_prompt_to_agent(&pane_id, &request.text, identity.as_deref())?;
+    let kind = send_kind(root, &request.ws_id, agent.agent_kind);
+    mux.send_prompt_to_agent(&pane_id, &request.text, kind.as_deref())?;
     Ok(SendResponse {})
+}
+
+/// The kind of agent a prompt goes to: the observed one, else the
+/// configured agent, resolved through the workspace's frozen config so an
+/// alias names its type.
+fn send_kind(root: &NodeRoot, ws_id: &str, observed: Option<String>) -> Option<String> {
+    crate::frozen_config::load(&root.config_path(ws_id))
+        .ok()
+        .and_then(|(config, _)| {
+            crate::multiplexer::agent::resolve_selected_agent(&config, observed.as_deref())
+        })
+        .map(|agent| agent.kind().to_string())
+        .or(observed)
 }
 
 pub fn capture(root: &NodeRoot, request: CaptureRequest) -> Result<CaptureResponse> {
@@ -577,6 +590,7 @@ mod tests {
             boot_id: None,
             pin: None,
             continues: false,
+            agent_kind: None,
         });
         ws
     }
@@ -635,6 +649,46 @@ mod tests {
         assert_eq!(observed.title, None);
         assert_eq!(observed.prompt.as_deref(), Some("fixit"));
         assert!(panes[1].agent.is_none());
+    }
+
+    #[test]
+    fn an_agent_alias_is_observed_as_its_execution_kind() {
+        let mut ws = workspace("w0123456789ab", "x0123456789ab", &[0], Some("cxnd"));
+        ws.execution.as_mut().unwrap().agent_kind = Some("codex".into());
+        let live = HashMap::from([("%3".to_string(), live("x0123456789ab-0"))]);
+        let agents = [agent("%3", AgentStatus::Working)];
+        let snapshot = build_snapshot(7, &[ws], &live, &agents, None, None);
+        let observed = snapshot.workspaces[0].panes[0].agent.as_ref().unwrap();
+        assert_eq!(observed.agent_kind.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn send_resolves_the_configured_agent_through_the_frozen_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = NodeRoot {
+            path: dir.path().to_path_buf(),
+        };
+        let ws_id = "w0123456789ab";
+        let config: crate::config::Config = serde_yaml::from_str(
+            "agent: cxnd\nagents:\n  cxnd:\n    command: codex --no-daemon\n    type: codex\n",
+        )
+        .unwrap();
+        let path = root.config_path(ws_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::frozen_config::write_document(
+            &path,
+            &crate::frozen_config::snapshot_document(&config, None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(send_kind(&root, ws_id, None).as_deref(), Some("codex"));
+        assert_eq!(
+            send_kind(&root, ws_id, Some("cxnd".into())).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            send_kind(&root, ws_id, Some("claude".into())).as_deref(),
+            Some("claude")
+        );
     }
 
     #[test]
