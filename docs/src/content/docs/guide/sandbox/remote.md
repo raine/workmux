@@ -58,7 +58,7 @@ Remote names may contain letters, digits, `.`, `_` and `-`, and must start with 
 workmux remote setup devbox
 ```
 
-This uploads the workmux binary that matches your local version into the node root and installs workmux's [status hooks](/guide/status-tracking/) for every supported agent in the remote user's agent directories. It is idempotent: running it again does nothing when the node is already installed. Commands that need the node, such as `add --remote` and `remote login`, also install it on first use, but running `setup` first shows any problem early.
+This uploads the workmux binary that matches your local version into the node root and installs workmux's [status hooks](/guide/status-tracking/) for the supported agents in the remote user's agent directories. OpenCode's hooks need the OpenCode sandbox image on the remote, so run `setup` again after its first agent or login there. Running `setup` again is safe: it only installs what is missing. Commands that need the node, such as `add --remote` and `remote login`, also install it on first use, but running `setup` first shows any problem early.
 
 ### 3. Check the host
 
@@ -125,7 +125,7 @@ This runs the agent's own login flow on the remote, attached to your terminal. W
 | ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `claude`   | `claude auth login`   | Open the printed URL on the laptop and paste the code back. See also [`--setup-token`](#claude-setup-token). |
 | `codex`    | `codex login`         | The browser returns through a forwarded port. Without a browser, pass `-- --device-auth`.                    |
-| `gemini`   | `gemini`              | Choose "Sign in with Google", open the URL and paste the code back. Leave with `/quit`.                      |
+| `gemini`   | `gemini`              | Trust the folder, choose "Sign in with Google", open the URL and paste the code back. Leave with `/quit`.    |
 | `opencode` | `opencode auth login` | Pick a provider; browser logins return through a forwarded port.                                             |
 | `pi`       | `pi`                  | Type `/login` and pick a provider. Leave with `/quit`.                                                       |
 | `omp`      | `omp login`           | Pick a provider, or name one: `-- anthropic`.                                                                |
@@ -206,7 +206,7 @@ The agent, its container and its tmux session run entirely on the remote, so the
 - Keystrokes typed while the pane is disconnected are dropped, never delivered late.
 - The dashboard, sidebar and `workmux status` keep listing the agent with its last known state, marked as disconnected with the time it was last seen. A remote counts as disconnected once it hasn't answered for about 15 seconds.
 
-Short network interruptions are absorbed by SSH keepalives without any visible change. When the connection comes back, the relay reattaches, and the views catch up with the node's current state within a few seconds. Transitions that happened in between are not replayed.
+Interruptions shorter than about 15 seconds pass without any visible change. When the connection comes back, the relay reattaches, and the views catch up with the node's current state within a few seconds. Transitions that happened in between are not replayed.
 
 A relay doesn't retry on its own after an authentication or host key failure, or when the remote session was attached from somewhere else. Retry with the key the status line shows once the cause is fixed. When the remote session ends, its pane closes.
 
