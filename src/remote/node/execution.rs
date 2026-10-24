@@ -160,6 +160,8 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                     ex_id: execution.ex_id.clone(),
                     panes: execution.panes.iter().map(|pane| pane.index).collect(),
                     reused: true,
+                    after_reboot: false,
+                    continued: false,
                 });
             }
             false
@@ -285,6 +287,9 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         root.save(&workspace)?;
     }
 
+    let continue_flag = crate::multiplexer::agent::resolve_profile(workspace.agent_kind(&config))
+        .continue_flag()
+        .is_some();
     let execution = workspace.execution.as_mut().expect("execution recorded");
     execution.state = ExecutionState::Running;
     execution.panes.sort_by_key(|pane| pane.index);
@@ -292,6 +297,8 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         ex_id: execution.ex_id.clone(),
         panes: execution.panes.iter().map(|pane| pane.index).collect(),
         reused: false,
+        after_reboot: execution.continues,
+        continued: execution.continues && request.run_commands && continue_flag,
     };
     root.save(&workspace)?;
     Ok(response)

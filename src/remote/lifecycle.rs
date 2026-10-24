@@ -281,7 +281,7 @@ fn start_execution(
     record: &mut WorkspaceRecord,
     use_prompt: bool,
     run_commands: bool,
-) -> Result<bool> {
+) -> Result<StartResponse> {
     let started: StartResponse = node
         .call(
             protocol::START_EXECUTION,
@@ -295,13 +295,13 @@ fn start_execution(
         )
         .map_err(|err| explain(&node.spec, err))?;
     record.execution = Some(ExecutionRecord {
-        ex_id: started.ex_id,
-        panes: started.panes,
+        ex_id: started.ex_id.clone(),
+        panes: started.panes.clone(),
         node_bin: node.pin.name.clone(),
     });
     record.observed();
     record.save()?;
-    Ok(started.reused)
+    Ok(started)
 }
 
 /// The commit a new remote branch starts from and how it was named: the
@@ -649,8 +649,8 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         Err(err) => return Err(err),
     };
     super::homecoming::finish_pending(&node, &record.ws_id);
-    let observation = super::observe::current(&config, &spec.name);
-    // Adoption may have opened the window meanwhile.
+    // Observing adopts siblings, which may open this window meanwhile.
+    super::observe::current(&config, &spec.name);
     if !window && mux.window_exists_by_full_name(&record.window_name)? {
         return switch(&record);
     }
@@ -658,13 +658,10 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         .execution
         .as_ref()
         .map(|execution| execution.ex_id.clone());
-    let ended = observation
-        .of(&record)
-        .is_some_and(|observed| observed.ended.is_some());
-    let rejoined = start_execution(&node, &mut record, false, true)?;
+    let started = start_execution(&node, &mut record, false, true)?;
     if window {
         let current = record.execution.as_ref().map(|execution| &execution.ex_id);
-        if rejoined && current == previous.as_ref() {
+        if started.reused && current == previous.as_ref() {
             return switch(&record);
         }
         mux.kill_window(&record.window_name)
@@ -676,14 +673,21 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         record.window_pending = false;
         record.save()?;
     }
-    if rejoined {
+    if started.reused {
         println!(
             "✓ Attached to the running agent of '{}' on '{}'",
             record.handle, record.remote
         );
-    } else if ended {
+    } else if started.continued {
         println!(
-            "✓ Restarted remote workspace '{}' on '{}' after its execution ended",
+            "✓ Resumed '{}' on '{}' after the host rebooted; the agent continues its \
+             last conversation",
+            record.handle, record.remote
+        );
+    } else if started.after_reboot {
+        println!(
+            "✓ Restarted '{}' on '{}' after the host rebooted; its agent starts a new \
+             conversation",
             record.handle, record.remote
         );
     } else {

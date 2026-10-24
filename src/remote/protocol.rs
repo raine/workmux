@@ -191,6 +191,12 @@ pub struct StartResponse {
     pub panes: Vec<usize>,
     /// Whether an existing execution was returned.
     pub reused: bool,
+    /// Whether the host rebooted under the execution this one replaces.
+    #[serde(default)]
+    pub after_reboot: bool,
+    /// Whether the agent was started to continue its last conversation.
+    #[serde(default)]
+    pub continued: bool,
 }
 
 /// `remove-workspace`: stops the execution and deletes the worktree, branch,
