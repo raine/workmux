@@ -56,6 +56,7 @@ fn run_specified(
             force,
             keep_branch,
             run_hooks: true,
+            confirm_unmerged,
         };
         if let Err(err) = crate::remote::lifecycle::remove(mux.as_ref(), record, options) {
             eprintln!("✗ {err:#}");

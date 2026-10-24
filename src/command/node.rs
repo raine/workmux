@@ -96,6 +96,30 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Snapshot a workspace's HEAD, index and files for the laptop to fetch
+    Export {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Move a workspace's branch to a pushed commit, keeping its changes
+    Checkout {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Rebase a workspace's branch onto a pushed commit
+    Rebase {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Return a workspace's diff
+    Diff {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
@@ -150,6 +174,16 @@ pub fn run(args: NodeArgs) -> Result<()> {
             serve(request, |root, request| observe::capture(&root, request))
         }
         NodeVerb::StatusHooks { .. } => serve(request, |_, request| hooks::status_hooks(request)),
+        NodeVerb::Export { .. } => {
+            serve(request, |root, request| node::git::export(&root, request))
+        }
+        NodeVerb::Checkout { .. } => {
+            serve(request, |root, request| node::git::checkout(&root, request))
+        }
+        NodeVerb::Rebase { .. } => {
+            serve(request, |root, request| node::git::rebase(&root, request))
+        }
+        NodeVerb::Diff { .. } => serve(request, |root, request| node::git::diff(&root, request)),
         NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
     });
     match response {

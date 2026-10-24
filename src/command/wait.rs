@@ -215,7 +215,7 @@ enum RemoteProgress {
 fn remote_progress(record: &WorkspaceRecord, target: AgentStatus) -> RemoteProgress {
     let current = remote::cache::all()
         .into_iter()
-        .find(|r| r.remote == record.remote && r.ws_id == record.ws_id);
+        .find(|r| r.remote == record.remote && r.ws_id == record.ws_id && !r.cleanup_pending());
     let Some(current) = current else {
         return RemoteProgress::Removed;
     };

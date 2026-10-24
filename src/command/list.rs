@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config;
 use crate::config::MuxMode;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
-use crate::remote::cache::{self, WorkspaceRecord, WorkspaceState};
+use crate::remote::cache::{self, Homecoming, WorkspaceRecord, WorkspaceState};
 use crate::util::format_compact_age;
 use crate::workflow::types::AgentStatusSummary;
 use crate::{git, nerdfont, workflow};
@@ -366,9 +366,16 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
                 "-".to_string()
             },
             unmerged_status: "-".to_string(),
-            path_str: match record.state {
-                WorkspaceState::Ready => format!("remote:{}", record.remote),
-                WorkspaceState::Provisioning => {
+            path_str: match (&record.homecoming, record.state) {
+                (Some(Homecoming::Merged { .. }), _) => {
+                    format!("remote:{} (merged, cleanup pending)", record.remote)
+                }
+                (Some(Homecoming::Pulled { .. }), _) => {
+                    format!("remote:{} (pulled, cleanup pending)", record.remote)
+                }
+                (Some(_), _) => format!("remote:{} (merge in progress)", record.remote),
+                (None, WorkspaceState::Ready) => format!("remote:{}", record.remote),
+                (None, WorkspaceState::Provisioning) => {
                     format!("remote:{} (provisioning)", record.remote)
                 }
             },

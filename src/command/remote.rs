@@ -6,10 +6,12 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 
 use crate::config::Config;
+use crate::multiplexer::{create_backend, detect_backend};
 use crate::remote::RemoteSpec;
 use crate::remote::install::{self, NodeStatus, Pin};
 use crate::remote::transport::Transport;
 use crate::remote::{Placement, client, credentials, doctor, resolve_placement};
+use crate::workflow::WorkflowContext;
 
 #[derive(Debug, Args)]
 pub struct RemoteArgs {
@@ -46,6 +48,15 @@ pub enum RemoteCommand {
         /// Extra arguments for the agent's login command
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Bring a remote workspace home: stop its agent, make its work a local
+    /// worktree with a window, and remove it from the remote
+    Pull {
+        /// Handle of the remote workspace
+        handle: String,
+        /// Skip post_create hooks for the local worktree
+        #[arg(long)]
+        no_hooks: bool,
     },
     /// Relay one pane of a remote execution into this terminal
     #[command(hide = true)]
@@ -97,6 +108,7 @@ pub fn run(args: RemoteArgs) -> Result<()> {
             }
             Ok(())
         }
+        Some(RemoteCommand::Pull { handle, no_hooks }) => pull(config, &handle, !no_hooks),
         Some(RemoteCommand::Attach { name, ex_id, pane }) => {
             crate::remote::attach::run(&config, &name, &ex_id, pane)
         }
@@ -105,6 +117,24 @@ pub fn run(args: RemoteArgs) -> Result<()> {
             std::process::exit(status)
         }
     }
+}
+
+fn pull(config: Config, handle: &str, run_hooks: bool) -> Result<()> {
+    use crate::remote::cache::{self, Homecoming};
+    // A pulled workspace whose remote cleanup is pending is found too, so
+    // pulling it again finishes that cleanup.
+    let pulled = || {
+        let root = crate::git::get_main_worktree_root().ok()?;
+        cache::for_project(&root).into_iter().find(|record| {
+            record.handle == handle && matches!(record.homecoming, Some(Homecoming::Pulled { .. }))
+        })
+    };
+    let Some(record) = cache::find_here(handle).or_else(pulled) else {
+        bail!("No remote workspace '{handle}' in this repository");
+    };
+    let mux = create_backend(detect_backend());
+    let context = WorkflowContext::new(config, mux, None)?;
+    crate::remote::homecoming::pull(&context, record, run_hooks)
 }
 
 fn list(config: &Config) -> Result<()> {

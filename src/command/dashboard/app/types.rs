@@ -38,6 +38,13 @@ pub enum AppEvent {
     SweepComplete(Result<SweepOutcome, String>),
     /// Capture of a remote agent's pane fetched from its node, by row pane id
     RemotePreview(String, Result<String, String>),
+    /// Diff of a remote workspace fetched from its node: workspace id and
+    /// whether it is the branch diff
+    RemoteDiff(
+        String,
+        bool,
+        Result<crate::remote::agents::CachedDiff, String>,
+    ),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

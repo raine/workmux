@@ -441,12 +441,16 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
             let duration_line = format::elapsed_time_line(duration, elapsed, &app.palette);
 
             // Get git status for this worktree (may be None if not yet fetched).
-            // Remote worktrees live on the node, so they have none.
-            let git_spans = if agent.remote.is_some() {
-                Vec::new()
-            } else {
-                let git_status = app.git_statuses.get(&agent.path);
-                format_git_status(git_status, app.spinner_frame, &app.palette)
+            // A remote worktree's comes from the node with its agents.
+            let git_spans = match &agent.remote {
+                Some(remote) if remote.git.is_none() => Vec::new(),
+                Some(remote) => {
+                    format_git_status(remote.git.as_ref(), app.spinner_frame, &app.palette)
+                }
+                None => {
+                    let git_status = app.git_statuses.get(&agent.path);
+                    format_git_status(git_status, app.spinner_frame, &app.palette)
+                }
             };
 
             let pr = app.get_pr_for_agent(agent);
