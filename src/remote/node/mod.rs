@@ -410,6 +410,11 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .run_and_capture_stdout()
 }
 
+/// Latest uploaded base, retained for the lifetime of the project repository.
+/// Advertising its history lets subsequent pushes negotiate incremental packs,
+/// even when no workspace refs or branches remain. It is not a workspace base.
+pub const PROJECT_TRANSFER_REF: &str = "refs/workmux/project/transfer";
+
 /// Ref the laptop pushes a workspace's base commit to.
 pub fn base_ref(ws_id: &str) -> String {
     format!("refs/workmux/base/{ws_id}")

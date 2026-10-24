@@ -161,7 +161,10 @@ def test_remote_lifecycle(
     assert node.sessions() == []
     node_repo = Path(workspace["repo_path"])
     assert git(node_repo, "branch", "--list", "feat") == ""
-    assert git(node_repo, "for-each-ref", "refs/workmux") == ""
+    assert git(node_repo, "for-each-ref", "--format=%(refname)", "refs/workmux") == (
+        "refs/workmux/project/transfer"
+    )
+    assert git(node_repo, "rev-parse", "refs/workmux/project/transfer") == head
     assert local_records(mux_server) == []
     assert_window_not_exists(mux_server, window)
 
