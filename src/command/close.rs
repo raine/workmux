@@ -9,6 +9,11 @@ pub fn run(name: Option<&str>) -> Result<()> {
         return run_via_rpc(&name_to_close);
     }
 
+    if let Some(record) = name.and_then(crate::remote::cache::find_here) {
+        let mux = create_backend(detect_backend());
+        return crate::remote::lifecycle::close(mux.as_ref(), &record);
+    }
+
     let config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
     let prefix = config.window_prefix();

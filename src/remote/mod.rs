@@ -5,8 +5,14 @@
 //! detection, installation, doctor checks); everything else goes through the
 //! pinned node binary's `workmux node <verb> --json` entry point.
 
+pub mod attach;
+pub mod cache;
+pub mod client;
 pub mod doctor;
 pub mod install;
+pub mod lifecycle;
+pub mod node;
+pub mod portable;
 pub mod protocol;
 pub mod transport;
 
@@ -221,18 +227,14 @@ pub fn resolve_placement(
     }
 }
 
-/// Fail when a new agent would be placed on a remote. Remote agents are not
-/// implemented yet, so every creation path calls this before side effects.
-pub fn reject_remote_placement(
-    config: &Config,
-    remote_flag: Option<Option<&str>>,
-    local_flag: bool,
-) -> Result<()> {
-    match resolve_placement(config, remote_flag, local_flag)? {
+/// Fail when `placement` sends new agents to a remote, for creation paths
+/// that only make local agents.
+pub fn reject_remote_placement(config: &Config) -> Result<()> {
+    match resolve_placement(config, None, false)? {
         Placement::Local => Ok(()),
         Placement::Remote(name) => bail!(
-            "remote agents are not available yet (remote '{name}'); \
-             pass --local to create a local agent"
+            "the dashboard creates local agents only, and `placement` selects remote \
+             '{name}'; use `workmux add --remote {name}` or `workmux add --local`"
         ),
     }
 }
@@ -386,13 +388,9 @@ mod tests {
     #[test]
     fn reject_remote_placement_names_remote_and_fix() {
         let config = config_with(&["hetzner"], Some("hetzner"));
-        let err = reject_remote_placement(&config, None, false)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not available yet"), "{err}");
-        assert!(err.contains("hetzner"), "{err}");
-        assert!(err.contains("--local"), "{err}");
-        assert!(reject_remote_placement(&config, None, true).is_ok());
+        let err = reject_remote_placement(&config).unwrap_err().to_string();
+        assert!(err.contains("workmux add --remote hetzner"), "{err}");
+        assert!(reject_remote_placement(&config_with(&["hetzner"], None)).is_ok());
     }
 
     #[test]

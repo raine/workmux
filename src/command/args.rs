@@ -115,11 +115,11 @@ pub struct RescueArgs {
 pub struct PlacementArgs {
     /// Create the agent on a configured remote (default: the `placement` remote,
     /// or the only configured remote)
-    #[arg(long, value_name = "REMOTE", num_args = 0..=1, conflicts_with = "local", hide = true)]
+    #[arg(long, value_name = "REMOTE", num_args = 0..=1, conflicts_with = "local")]
     pub remote: Option<Option<String>>,
 
     /// Create the agent locally, overriding a remote `placement`
-    #[arg(long, hide = true)]
+    #[arg(long)]
     pub local: bool,
 }
 

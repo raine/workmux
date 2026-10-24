@@ -44,6 +44,45 @@ fn run_specified(
             .collect::<Result<Vec<_>>>()?
     };
 
+    let mut local_names = Vec::new();
+    let mut remote_failures = 0;
+    for name in resolved_names {
+        let Some(record) = crate::remote::cache::find_here(&name) else {
+            local_names.push(name);
+            continue;
+        };
+        let mux = create_backend(detect_backend());
+        let options = crate::remote::lifecycle::RemoveOptions {
+            force,
+            keep_branch,
+            run_hooks: true,
+        };
+        if let Err(err) = crate::remote::lifecycle::remove(mux.as_ref(), record, options) {
+            eprintln!("✗ {err:#}");
+            remote_failures += 1;
+        }
+    }
+    let local = if local_names.is_empty() {
+        Ok(())
+    } else {
+        remove_local(local_names, force, keep_branch, confirm_unmerged, config)
+    };
+    if remote_failures > 0 {
+        local?;
+        return Err(anyhow!(
+            "{remote_failures} remote workspace(s) could not be removed"
+        ));
+    }
+    local
+}
+
+fn remove_local(
+    resolved_names: Vec<String>,
+    force: bool,
+    keep_branch: bool,
+    confirm_unmerged: bool,
+    config: config::Config,
+) -> Result<()> {
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
 

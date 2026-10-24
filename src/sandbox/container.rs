@@ -1252,13 +1252,18 @@ pub fn deny_mode_run_flags() -> Vec<String> {
 
 use crate::shell::shell_escape;
 
+/// Shell words that start the sandbox supervisor, resolved through `PATH`.
+const DEFAULT_SUPERVISOR: &str = "workmux sandbox run";
+
 /// Wrap a command to run inside a Docker/Podman container via the sandbox supervisor.
 ///
 /// Generates a `workmux sandbox run` command that starts an RPC server, then
 /// runs the command inside a container with RPC connection details as env vars.
+/// `supervisor` replaces the default `workmux sandbox run` words, already
+/// shell-quoted, for callers that must pin a specific binary.
 pub fn wrap_for_container(
     command: &str,
-    _config: &SandboxConfig,
+    supervisor: Option<&str>,
     worktree_root: &Path,
     pane_cwd: &Path,
 ) -> Result<String> {
@@ -1267,7 +1272,8 @@ pub fn wrap_for_container(
     let command = command.strip_prefix(' ').unwrap_or(command);
 
     let mut parts = format!(
-        "workmux sandbox run '{}'",
+        "{} '{}'",
+        supervisor.unwrap_or(DEFAULT_SUPERVISOR),
         shell_escape(&pane_cwd.to_string_lossy()),
     );
 
@@ -2107,10 +2113,9 @@ mod tests {
 
     #[test]
     fn test_wrap_generates_supervisor_command() {
-        let config = make_config();
         let result = wrap_for_container(
             "claude",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2125,10 +2130,9 @@ mod tests {
 
     #[test]
     fn test_wrap_escapes_quotes_in_command() {
-        let config = make_config();
         let result = wrap_for_container(
             "echo 'hello'",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2139,10 +2143,9 @@ mod tests {
 
     #[test]
     fn test_wrap_strips_leading_space() {
-        let config = make_config();
         let result = wrap_for_container(
             " claude -- \"$(cat PROMPT.md)\"",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2153,10 +2156,9 @@ mod tests {
 
     #[test]
     fn test_wrap_with_different_worktree_root() {
-        let config = make_config();
         let result = wrap_for_container(
             "claude",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project/backend"),
         )
@@ -2164,6 +2166,22 @@ mod tests {
 
         assert!(result.contains("--worktree-root '/tmp/project'"));
         assert!(result.contains("'/tmp/project/backend'"));
+    }
+
+    #[test]
+    fn test_wrap_with_pinned_supervisor() {
+        let result = wrap_for_container(
+            "claude",
+            Some("'/n/bin/workmux-x' sandbox run --node-root '/n'"),
+            Path::new("/tmp/project"),
+            Path::new("/tmp/project"),
+        )
+        .unwrap();
+
+        assert!(
+            result.starts_with(" '/n/bin/workmux-x' sandbox run --node-root '/n' '/tmp/project'"),
+            "{result}"
+        );
     }
 
     #[test]

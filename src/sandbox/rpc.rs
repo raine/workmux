@@ -116,6 +116,9 @@ pub struct RpcContext {
     pub detected_toolchain: crate::sandbox::toolchain::DetectedToolchain,
     /// Whether to allow host-exec without bwrap on Linux.
     pub allow_unsandboxed_host_exec: bool,
+    /// The supervisor runs on a remote node, where requests that act on
+    /// the laptop's worktrees, windows or clipboard cannot be served.
+    pub on_node: bool,
 }
 
 /// TCP RPC server that accepts guest connections.
@@ -131,7 +134,13 @@ impl RpcServer {
     /// via `host.lima.internal`, which resolves to the host's gateway IP on
     /// the shared network interface, not the loopback address.
     pub fn bind() -> Result<Self> {
-        let listener = TcpListener::bind("0.0.0.0:0").context("Failed to bind RPC listener")?;
+        Self::bind_to(std::net::Ipv4Addr::UNSPECIFIED.into())
+    }
+
+    /// Listen on an ephemeral port of `ip` only.
+    pub fn bind_to(ip: std::net::IpAddr) -> Result<Self> {
+        let listener = TcpListener::bind((ip, 0))
+            .with_context(|| format!("Failed to bind RPC listener on {ip}"))?;
         let port = listener.local_addr()?.port();
         info!(port, "RPC server bound");
         Ok(Self { listener, port })
@@ -289,6 +298,24 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
             .with_context(|| format!("Failed to parse RPC request: {}", line.trim()))?;
 
         info!(request = request.kind(), "RPC request received");
+
+        if ctx.on_node
+            && matches!(
+                request,
+                RpcRequest::SpawnAgent { .. }
+                    | RpcRequest::Merge { .. }
+                    | RpcRequest::Close { .. }
+                    | RpcRequest::ClipboardRead { .. }
+            )
+        {
+            write_response(
+                &mut writer,
+                &RpcResponse::Error {
+                    message: format!("{} is not available to remote agents", request.kind()),
+                },
+            )?;
+            continue;
+        }
 
         // Exec and Merge require streaming multiple responses, handle separately
         if let RpcRequest::Exec {
@@ -1060,6 +1087,7 @@ mod tests {
             allowed_commands: std::collections::HashSet::new(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
+            on_node: false,
         }
     }
 
@@ -1336,6 +1364,7 @@ mod tests {
             allowed_commands: allowed.iter().map(|s| s.to_string()).collect(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: allow_unsandboxed,
+            on_node: false,
         });
 
         let handle = server.spawn(ctx);
@@ -1917,6 +1946,7 @@ mod tests {
             allowed_commands: std::collections::HashSet::new(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
+            on_node: false,
         });
 
         let _handle = server.spawn(ctx);

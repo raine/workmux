@@ -775,7 +775,7 @@ pub trait Multiplexer: Send + Sync {
                             crate::config::SandboxBackend::Container => {
                                 crate::sandbox::wrap_for_container(
                                     &command_to_wrap,
-                                    &config.sandbox,
+                                    options.sandbox_supervisor,
                                     wt_root,
                                     working_dir,
                                 )
