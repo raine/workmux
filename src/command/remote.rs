@@ -101,7 +101,10 @@ pub fn run(args: RemoteArgs) -> Result<()> {
         Some(RemoteCommand::Doctor { name }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;
             if !doctor::run(&spec, &config)? {
-                bail!("remote {name} is not ready");
+                bail!(
+                    "remote '{name}' is not ready: fix the ✗ rows above, then run \
+                     `workmux remote doctor {name}` again"
+                );
             }
             observe::current(&config, &name);
             Ok(())
