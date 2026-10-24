@@ -160,24 +160,107 @@ impl Node {
         sha: &str,
         ws_id: &str,
     ) -> Result<()> {
+        self.push_ref(project_root, repo_path, sha, &super::node::base_ref(ws_id))
+            .with_context(|| format!("Failed to push the base commit to '{}'", self.spec.name))
+    }
+
+    /// Push `sha` from the local repository to `refname` in the node's
+    /// project repository at `repo_path`.
+    pub fn push_ref(
+        &self,
+        project_root: &Path,
+        repo_path: &str,
+        sha: &str,
+        refname: &str,
+    ) -> Result<()> {
+        let refspec = format!("+{sha}:{refname}");
+        let status = self
+            .git_over_ssh(project_root)?
+            .args([
+                "push",
+                "--no-verify",
+                "--quiet",
+                &self.repo_url(repo_path),
+                &refspec,
+            ])
+            .status()
+            .context("Failed to run git push")?;
+        if !status.success() {
+            bail!("git push to '{}' failed", self.spec.name);
+        }
+        Ok(())
+    }
+
+    /// Fetch the commits `export` stored for `ws_id` into the local
+    /// repository as `refs/workmux/remote/<ws_id>/{index,worktree}`, and
+    /// check they hold `snapshot`.
+    pub fn fetch_export(
+        &self,
+        project_root: &Path,
+        repo_path: &str,
+        ws_id: &str,
+        snapshot: &super::git::Snapshot,
+    ) -> Result<()> {
+        let local = |part: &str| format!("refs/workmux/remote/{ws_id}/{part}");
+        let refspecs = ["index", "worktree"].map(|part| {
+            format!(
+                "+{}:{}",
+                super::node::git::export_ref(ws_id, part),
+                local(part)
+            )
+        });
+        let status = self
+            .git_over_ssh(project_root)?
+            .args([
+                "-c",
+                "transfer.fsckObjects=true",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                &self.repo_url(repo_path),
+            ])
+            .args(&refspecs)
+            .status()
+            .context("Failed to run git fetch")?;
+        if !status.success() {
+            bail!(
+                "Failed to fetch the work of '{ws_id}' from '{}'",
+                self.spec.name
+            );
+        }
+        for (part, tree) in [("index", &snapshot.index), ("worktree", &snapshot.worktree)] {
+            let commit = super::git::run(project_root, &["rev-parse", "--verify", &local(part)])?;
+            if super::git::tree_of(project_root, &commit)? != *tree
+                || super::git::parent_of(project_root, &commit)? != snapshot.head
+            {
+                bail!(
+                    "the work fetched from '{}' does not match its export; try again",
+                    self.spec.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn repo_url(&self, repo_path: &str) -> String {
+        format!("ssh://{PUSH_HOST}{repo_path}")
+    }
+
+    /// Hardened git in `project_root` whose ssh is the git-ssh helper.
+    fn git_over_ssh(&self, project_root: &Path) -> Result<std::process::Command> {
         let exe = std::env::current_exe().context("Failed to locate the workmux binary")?;
         let ssh_command = format!(
             "{} remote git-ssh {}",
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&self.spec.name)
         );
-        let url = format!("ssh://{PUSH_HOST}{repo_path}");
-        let refspec = format!("{sha}:refs/workmux/base/{ws_id}");
-        let status = crate::git::unattended_git(Some(project_root))?
-            .args(["push", "--no-verify", "--quiet", &url, &refspec])
+        let mut command = crate::git::unattended_git(Some(project_root))?;
+        command
             .env("GIT_SSH_COMMAND", ssh_command)
-            .env("GIT_SSH_VARIANT", "simple")
-            .status()
-            .context("Failed to run git push")?;
-        if !status.success() {
-            bail!("Failed to push the base commit to '{}'", self.spec.name);
-        }
-        Ok(())
+            .env("GIT_SSH_VARIANT", "simple");
+        Ok(command)
     }
 
     /// Command that attaches the calling terminal to pane `pane` of
@@ -243,7 +326,8 @@ pub fn error_code(err: &anyhow::Error) -> Option<&str> {
     err.downcast_ref::<NodeError>().map(|err| err.code.as_str())
 }
 
-/// Serve a push into `$path` only when it is `$root/projects/<id>/repo`.
+/// Serve a push into or a fetch from `$path` only when it is
+/// `$root/projects/<id>/repo`.
 const GIT_SSH_SCRIPT: &str = "\
 root=${root%/}
 rest=${path#\"$root/projects/\"}
@@ -252,29 +336,39 @@ if [ \"$rest\" = \"$path\" ] || [ \"$id/repo\" != \"$rest\" ]; then
 \techo \"workmux: refusing to serve $path\" >&2; exit 1
 fi
 case $id in \"\"|*/*|.*) echo \"workmux: refusing to serve $path\" >&2; exit 1 ;; esac
-exec git-receive-pack \"$path\"
+case $service in
+receive-pack) exec git-receive-pack \"$path\" ;;
+upload-pack) exec git -c core.fsmonitor=false -c core.hooksPath=/dev/null upload-pack \"$path\" ;;
+esac
+exit 1
 ";
 
 /// `workmux remote git-ssh <name> <host> <command>`: the `GIT_SSH_COMMAND`
-/// of [`Node::push_base`]. Serves only `git-receive-pack` for a project
-/// repository under the node root.
+/// of [`Node::push_ref`] and [`Node::fetch_export`]. Serves only
+/// `git-receive-pack` and `git-upload-pack` for a project repository under
+/// the node root.
 pub fn git_ssh(spec: &RemoteSpec, args: &[String]) -> Result<i32> {
     let command = args
         .last()
         .ok_or_else(|| anyhow!("git-ssh: missing command"))?;
-    let path = receive_pack_path(command)?;
+    let (service, path) = served_command(command)?;
     let transport = Transport::open(spec)?;
-    transport.exec_inherit(&spec.script(&[("path", &path)], GIT_SSH_SCRIPT))
+    transport.exec_inherit(&spec.script(&[("service", service), ("path", &path)], GIT_SSH_SCRIPT))
 }
 
-fn receive_pack_path(command: &str) -> Result<String> {
-    let rest = command
-        .strip_prefix("git-receive-pack ")
-        .ok_or_else(|| anyhow!("git-ssh only serves pushes, not {command:?}"))?;
+/// The service and repository of a git ssh command line.
+fn served_command(command: &str) -> Result<(&'static str, String)> {
+    let (service, rest) = if let Some(rest) = command.strip_prefix("git-receive-pack ") {
+        ("receive-pack", rest)
+    } else if let Some(rest) = command.strip_prefix("git-upload-pack ") {
+        ("upload-pack", rest)
+    } else {
+        bail!("git-ssh only serves pushes and fetches, not {command:?}");
+    };
     let words = shlex::split(rest).ok_or_else(|| anyhow!("git-ssh: unparsable {command:?}"))?;
     match words.as_slice() {
         [path] if path.starts_with('/') && !path.split('/').any(|part| part == "..") => {
-            Ok(path.clone())
+            Ok((service, path.clone()))
         }
         _ => bail!("git-ssh: unexpected repository in {command:?}"),
     }
@@ -311,28 +405,32 @@ mod tests {
     }
 
     #[test]
-    fn git_ssh_accepts_only_receive_pack_of_absolute_paths() {
+    fn git_ssh_accepts_only_pack_services_of_absolute_paths() {
         assert_eq!(
-            receive_pack_path("git-receive-pack '/n/projects/p/repo'").unwrap(),
-            "/n/projects/p/repo"
+            served_command("git-receive-pack '/n/projects/p/repo'").unwrap(),
+            ("receive-pack", "/n/projects/p/repo".to_string())
         );
         assert_eq!(
-            receive_pack_path("git-receive-pack '/n/it'\\''s/repo'").unwrap(),
-            "/n/it's/repo"
+            served_command("git-upload-pack '/n/projects/p/repo'").unwrap(),
+            ("upload-pack", "/n/projects/p/repo".to_string())
+        );
+        assert_eq!(
+            served_command("git-receive-pack '/n/it'\\''s/repo'").unwrap(),
+            ("receive-pack", "/n/it's/repo".to_string())
         );
         for bad in [
-            "git-upload-pack '/n/projects/p/repo'",
+            "git-upload-archive '/n/projects/p/repo'",
             "git-receive-pack 'relative'",
-            "git-receive-pack '/n/../etc'",
+            "git-upload-pack '/n/../etc'",
             "git-receive-pack '/a' '/b'",
         ] {
-            assert!(receive_pack_path(bad).is_err(), "{bad}");
+            assert!(served_command(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn git_ssh_script_confines_paths_to_project_repos() {
-        let body = GIT_SSH_SCRIPT.replace("exec git-receive-pack \"$path\"", "exit 0");
+        let body = GIT_SSH_SCRIPT.replace("case $service in", "exit 0\ncase $service in");
         let serves = |path: &str| {
             let script = format!("root=/n/\npath='{path}'\n{body}");
             std::process::Command::new("sh")

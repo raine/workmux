@@ -38,7 +38,10 @@ pub fn run(mime: &str) -> Result<i32> {
 
             Ok(0)
         }
-        RpcResponse::Error { .. } => Ok(1),
+        RpcResponse::Error { message } => {
+            eprintln!("workmux: {message}");
+            Ok(1)
+        }
         _ => Ok(1),
     }
 }

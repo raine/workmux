@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::PaneConfig;
+use crate::remote::git::Snapshot;
+use crate::remote::protocol::DiffMode;
 
 const RECORD_VERSION: u32 = 1;
 
@@ -33,6 +35,37 @@ pub struct ExecutionRecord {
     /// Pinned node binary that started the execution; attaching uses it, so
     /// a laptop upgrade does not strand running agents.
     pub node_bin: String,
+}
+
+/// How far bringing the workspace's work to the laptop got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum Homecoming {
+    /// A local copy of `snapshot` is being made at `local_path`; anything
+    /// there belongs to this transfer. `created_branch`: the local branch
+    /// did not exist before.
+    Hydrating {
+        snapshot: Snapshot,
+        created_branch: bool,
+    },
+    /// Merging the local copy stopped on conflicts for the user to resolve
+    /// there.
+    Conflicted {
+        snapshot: Snapshot,
+        created_branch: bool,
+    },
+    /// `snapshot` is merged; only the remote workspace is left to remove.
+    Merged { snapshot: Snapshot },
+    /// `snapshot` is a local worktree now; only the remote workspace is left
+    /// to remove.
+    Pulled { snapshot: Snapshot },
+}
+
+impl Homecoming {
+    /// Whether only the removal of the remote workspace is left.
+    pub fn cleanup_pending(&self) -> bool {
+        matches!(self, Self::Merged { .. } | Self::Pulled { .. })
+    }
 }
 
 /// A pane of the workspace's window, as the node laid out its sessions.
@@ -69,6 +102,11 @@ pub struct WorkspaceRecord {
     /// Where a local worktree of the handle would live. Remote agents show
     /// under this path, so views group and name them like local ones.
     pub local_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homecoming: Option<Homecoming>,
+    /// Project repository path on the node, once an export reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_repo: Option<String>,
 }
 
 impl WorkspaceRecord {
@@ -104,7 +142,38 @@ impl WorkspaceRecord {
             created_at: now,
             observed_at: now,
             local_path,
+            homecoming: None,
+            remote_repo: None,
         }
+    }
+
+    /// Whether only the removal of the remote workspace is left.
+    pub fn cleanup_pending(&self) -> bool {
+        self.homecoming
+            .as_ref()
+            .is_some_and(Homecoming::cleanup_pending)
+    }
+
+    /// The recorded base when it is another local branch, which a local
+    /// worktree of the branch would have stored as its base.
+    pub fn base_label_branch(&self) -> Option<&str> {
+        let dir = Some(self.project_root.as_path());
+        self.base_label.as_deref().filter(|base| {
+            *base != self.branch && crate::git::local_branch_exists_in(base, dir).unwrap_or(false)
+        })
+    }
+
+    /// The branch the workspace's work merges into: its recorded base when
+    /// that is another local branch, else the base the local branch has
+    /// stored, else the default branch.
+    pub fn base_branch(&self) -> String {
+        let dir = Some(self.project_root.as_path());
+        self.base_label_branch()
+            .map(str::to_string)
+            .or_else(|| crate::git::get_branch_base_in(&self.branch, dir).ok())
+            .unwrap_or_else(|| {
+                crate::git::get_default_branch_in(dir).unwrap_or_else(|_| "main".to_string())
+            })
     }
 
     /// Record that the node just answered for this workspace.
@@ -121,6 +190,9 @@ impl WorkspaceRecord {
     }
 
     pub fn delete(&self) -> Result<()> {
+        for mode in [DiffMode::Wip, DiffMode::Branch] {
+            let _ = fs::remove_file(diff_path(&self.remote, &self.ws_id, mode)?);
+        }
         let path = record_path(&root()?, &self.remote, &self.ws_id);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -130,7 +202,18 @@ impl WorkspaceRecord {
     }
 }
 
-pub(super) fn now() -> u64 {
+/// Where the diff of workspace `ws_id` last fetched from `remote` is kept.
+pub fn diff_path(remote: &str, ws_id: &str, mode: DiffMode) -> Result<PathBuf> {
+    let mode = match mode {
+        DiffMode::Wip => "wip",
+        DiffMode::Branch => "branch",
+    };
+    Ok(remote_dir(remote)?
+        .join("diff")
+        .join(format!("{ws_id}-{mode}.json")))
+}
+
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -198,13 +281,8 @@ pub fn for_project(project_root: &Path) -> Vec<WorkspaceRecord> {
         .collect()
 }
 
-/// The workspace of this repository named `name`: by handle first, then by
-/// branch, the way local worktrees resolve.
-pub fn find(project_root: &Path, name: &str) -> Option<WorkspaceRecord> {
-    let records = for_project(project_root);
-    pick(records, name)
-}
-
+/// The workspace named `name`: by handle first, then by branch, the way
+/// local worktrees resolve.
 fn pick(records: Vec<WorkspaceRecord>, name: &str) -> Option<WorkspaceRecord> {
     let mut by_branch = None;
     for record in records {
@@ -249,7 +327,12 @@ pub fn find_here(name: &str) -> Option<WorkspaceRecord> {
         return None;
     }
     let project_root = crate::git::get_main_worktree_root().ok()?;
-    let record = find(&project_root, name)?;
+    // A pulled workspace's handle belongs to its local worktree.
+    let records = for_project(&project_root)
+        .into_iter()
+        .filter(|record| !matches!(record.homecoming, Some(Homecoming::Pulled { .. })))
+        .collect();
+    let record = pick(records, name)?;
     // Handles outrank branches: a local worktree named `name` wins over a
     // remote workspace that only matched by branch.
     if record.handle != name && local_handle_exists(&project_root, name) {

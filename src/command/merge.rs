@@ -62,18 +62,41 @@ pub fn run(
     let name_to_merge = super::resolve_name(name)?;
 
     let mux = create_backend(detect_backend());
+    let remote = crate::remote::cache::find_here(&name_to_merge);
     let context = WorkflowContext::new(config, mux, None)?;
 
     let skip_hooks = no_verify || no_hooks;
+    // A merged remote workspace only has its remote cleanup left, which runs
+    // no local hooks.
+    let merged = remote
+        .as_ref()
+        .is_some_and(|record| record.cleanup_pending());
 
     // Announce pre-merge hooks if any (unless hooks are skipped)
-    if !skip_hooks {
+    if !skip_hooks && !merged {
         super::announce_hooks(&context.config, None, super::HookPhase::PreMerge);
     }
 
     // Only announce pre-remove hooks if we're actually going to run cleanup
-    if !effective_keep && !no_hooks {
+    if !effective_keep && !no_hooks && !merged {
         super::announce_hooks(&context.config, None, super::HookPhase::PreRemove);
+    }
+
+    if let Some(record) = remote {
+        return crate::remote::homecoming::merge(
+            &context,
+            record,
+            crate::remote::homecoming::MergeOptions {
+                into: into_branch,
+                ignore_uncommitted,
+                rebase,
+                squash,
+                keep: effective_keep,
+                no_verify,
+                no_hooks,
+                notification,
+            },
+        );
     }
 
     let result = workflow::merge(

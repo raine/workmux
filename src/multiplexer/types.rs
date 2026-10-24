@@ -165,6 +165,9 @@ pub struct RemoteAgent {
     /// When the remote last answered (laptop clock).
     #[serde(default)]
     pub last_seen: Option<u64>,
+    /// Git status of the workspace on the node, as last observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::git::GitStatus>,
 }
 
 impl RemoteAgent {
@@ -177,6 +180,7 @@ impl RemoteAgent {
             attached: true,
             connected: false,
             last_seen: None,
+            git: None,
         }
     }
 }

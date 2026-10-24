@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::execution::{tmux, tmux_socket};
 use super::{NodeRoot, Workspace, refuse, validate_id};
+use crate::git::{GitStatus, GitStatusCache};
 use crate::multiplexer::{AgentPane, AgentStatus, LivePaneInfo, Multiplexer, tmux::TmuxBackend};
 use crate::remote::protocol::{code, session_name};
 use crate::state::{AgentStateCache, StateStore};
@@ -30,6 +31,8 @@ const MAX_TEXT: usize = 300;
 const MAX_SEND: usize = 1 << 20;
 /// Most lines `capture` returns.
 const MAX_CAPTURE_LINES: u16 = 10_000;
+/// How often a streaming watch looks at a workspace's git status.
+const GIT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// `watch`: one snapshot, or with `stream` NDJSON [`WatchFrame`]s until the
 /// laptop goes away.
@@ -63,6 +66,10 @@ pub struct ObservedWorkspace {
     pub ws_id: String,
     pub ex_id: String,
     pub panes: Vec<ObservedPane>,
+    /// Git status of the worktree. `ahead` counts the commits since the
+    /// workspace's base; `behind` and `base_branch` are the laptop's to fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +163,9 @@ struct Observer {
     cache: AgentStateCache,
     store: StateStore,
     host: Option<String>,
+    git_cache: GitStatusCache,
+    /// Last git status of each workspace and when it was read.
+    git: HashMap<String, (Instant, Option<GitStatus>)>,
 }
 
 impl Observer {
@@ -168,6 +178,8 @@ impl Observer {
             cache: AgentStateCache::default(),
             store: StateStore::new()?,
             host: hostname(),
+            git_cache: GitStatusCache::default(),
+            git: HashMap::new(),
         })
     }
 
@@ -211,14 +223,51 @@ impl Observer {
                 )?
                 .0
         };
-        Ok(build_snapshot(
-            now(),
-            &workspaces,
-            live,
-            &agents,
-            self.host.as_deref(),
-        ))
+        let mut snapshot = build_snapshot(now(), &workspaces, live, &agents, self.host.as_deref());
+        self.git
+            .retain(|ws_id, _| workspaces.iter().any(|ws| ws.identity.ws_id == *ws_id));
+        for observed in &mut snapshot.workspaces {
+            let ws_id = &observed.ws_id;
+            let Some(workspace) = workspaces.iter().find(|ws| ws.identity.ws_id == *ws_id) else {
+                continue;
+            };
+            let fresh = self
+                .git
+                .get(ws_id)
+                .filter(|(read_at, _)| read_at.elapsed() < GIT_INTERVAL);
+            observed.git = match fresh {
+                Some((_, status)) => status.clone(),
+                None => {
+                    let status = git_status(workspace, &mut self.git_cache);
+                    self.git
+                        .insert(ws_id.clone(), (Instant::now(), status.clone()));
+                    status
+                }
+            };
+        }
+        Ok(snapshot)
     }
+}
+
+/// The git status of `workspace`'s worktree, measured against its base.
+fn git_status(workspace: &Workspace, cache: &mut GitStatusCache) -> Option<GitStatus> {
+    let worktree = &workspace.worktree_path;
+    if !worktree.join(".git").exists() {
+        return None;
+    }
+    let base = super::base_ref(&workspace.identity.ws_id);
+    let mut status = crate::git::get_git_status_cached(worktree, Some(&base), cache);
+    let range = format!("{base}..HEAD");
+    status.ahead = crate::remote::git::run(worktree, &["rev-list", "--count", &range])
+        .ok()?
+        .parse()
+        .ok()?;
+    status.behind = 0;
+    status.has_upstream = true;
+    status.base_branch = String::new();
+    // Unchanged statuses must compare equal so the stream stays quiet.
+    status.cached_at = None;
+    Some(status)
 }
 
 /// Whether a tmux server listens on `socket`.
@@ -298,6 +347,7 @@ fn build_snapshot(
                 ws_id: ws.identity.ws_id.clone(),
                 ex_id: execution.ex_id.clone(),
                 panes,
+                git: None,
             })
         })
         .collect();

@@ -30,6 +30,9 @@ impl App {
                 }
                 self.remote_previews.insert(pane_id, text);
             }
+            AppEvent::RemoteDiff(ws_id, branch_diff, result) => {
+                super::super::diff_ops::apply_remote_diff(self, &ws_id, branch_diff, result);
+            }
             AppEvent::GitStatus(path, status) => {
                 self.git_statuses.insert(path, status);
             }

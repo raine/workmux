@@ -6,7 +6,6 @@
 //! `workmux remote attach`; closing that window only detaches.
 
 use std::fs;
-use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -150,6 +149,7 @@ pub fn create(
     };
 
     let node = Node::connect(spec)?;
+    super::homecoming::finish_pending(&node, &record.ws_id);
     record.save()?;
     let (portable, provisioned) = (|| -> Result<(Portable, ProvisionResponse)> {
         let identity = WorkspaceIdentity {
@@ -170,6 +170,7 @@ pub fn create(
                 false,
             )
             .map_err(|err| explain(spec, err))?;
+        record.remote_repo = Some(prepared.repo_path.clone());
         if !prepared.has_base {
             println!("Pushing {} to '{}'...", &record.base_sha[..12], spec.name);
             node.push_base(
@@ -335,7 +336,7 @@ fn git_config(dir: &Path, key: &str) -> Option<String> {
 }
 
 /// Add what the user can do about a node refusal.
-fn explain(spec: &RemoteSpec, err: anyhow::Error) -> anyhow::Error {
+pub(super) fn explain(spec: &RemoteSpec, err: anyhow::Error) -> anyhow::Error {
     match error_code(&err) {
         Some(code::UNSUPPORTED_RUNTIME) => err.context(format!(
             "Install docker on '{}' (and add your user to the docker group), or set \
@@ -576,8 +577,14 @@ pub fn open_window(context: &WorkflowContext, record: &WorkspaceRecord, focus: b
 }
 
 /// `workmux open` of a remote workspace: focus its window, or start (or
-/// rejoin) its execution and build the window again.
+/// rejoin) its execution and build the window again. A merged workspace
+/// only has its removal finished.
 pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool) -> Result<()> {
+    if record.cleanup_pending() {
+        let config = Config::load(None)?;
+        let node = Node::connect(&RemoteSpec::resolve(&config, &record.remote)?)?;
+        return super::homecoming::finish_cleanup(&node, record);
+    }
     let mux = context.mux.as_ref();
     if mux.window_exists_by_full_name(&record.window_name)? {
         if focus {
@@ -599,6 +606,7 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
     let config = Config::load(None)?;
     let spec = RemoteSpec::resolve(&config, &record.remote)?;
     let node = Node::connect(&spec)?;
+    super::homecoming::finish_pending(&node, &record.ws_id);
     let rejoined = start_execution(&node, &mut record, false, true)?;
     open_window(context, &record, focus)?;
     if rejoined {
@@ -636,18 +644,38 @@ pub struct RemoveOptions {
     pub force: bool,
     pub keep_branch: bool,
     pub run_hooks: bool,
+    /// Ask before deleting commits the local base lacks.
+    pub confirm_unmerged: bool,
 }
 
-/// `workmux remove` of a remote workspace. Local state goes only after the
-/// node acknowledges, except that `--force` forgets a workspace whose
-/// remote is unconfigured or unreachable.
+/// `workmux remove` of a remote workspace, with the checks a local remove
+/// makes: uncommitted work refuses and unmerged commits ask, unless
+/// `--force`. `--keep-branch` brings the branch to the laptop. Local state
+/// goes only after the node acknowledges, except that `--force` forgets a
+/// workspace whose remote is unconfigured or unreachable.
 pub fn remove(
     mux: &dyn Multiplexer,
-    record: WorkspaceRecord,
+    mut record: WorkspaceRecord,
     options: RemoveOptions,
 ) -> Result<()> {
-    let forget = |reason: anyhow::Error| -> Result<()> {
-        forget_locally(mux, &record)?;
+    if record
+        .homecoming
+        .as_ref()
+        .is_some_and(|stage| !stage.cleanup_pending())
+    {
+        if !options.force {
+            bail!(
+                "A merge of '{}' is in progress in {}; finish it with `workmux merge {}`, or \
+                 pass --force to remove the remote workspace and keep that copy",
+                record.handle,
+                record.local_path.display(),
+                record.handle
+            );
+        }
+        record.homecoming = None;
+    }
+    let forget = |record: &WorkspaceRecord, reason: anyhow::Error| -> Result<()> {
+        forget_locally(mux, record)?;
         eprintln!(
             "workmux: forgot remote workspace '{}' without contacting '{}' ({reason:#}); \
              its worktree and agent may remain there",
@@ -658,7 +686,7 @@ pub fn remove(
     let config = Config::load(None)?;
     let spec = match RemoteSpec::resolve(&config, &record.remote) {
         Ok(spec) => spec,
-        Err(err) if options.force => return forget(err),
+        Err(err) if options.force => return forget(&record, err),
         Err(err) => {
             return Err(err.context(format!(
                 "Cannot remove '{}'; pass --force to forget it locally",
@@ -668,7 +696,7 @@ pub fn remove(
     };
     let node = match Node::connect(&spec) {
         Ok(node) => node,
-        Err(err) if options.force => return forget(err),
+        Err(err) if options.force => return forget(&record, err),
         Err(err) => {
             return Err(err.context(format!(
                 "Nothing was removed; pass --force to forget '{}' locally",
@@ -676,42 +704,59 @@ pub fn remove(
             )));
         }
     };
+    super::homecoming::finish_pending(&node, &record.ws_id);
+    if record.cleanup_pending() {
+        return super::homecoming::finish_cleanup(&node, record);
+    }
 
-    let call = |force: bool| -> Result<RemoveResponse> {
-        node.call(
-            protocol::REMOVE_WORKSPACE,
-            &RemoveRequest {
-                ws_id: record.ws_id.clone(),
-                force,
-                keep_branch: options.keep_branch,
-                run_hooks: options.run_hooks,
-            },
-            true,
-        )
-    };
-    match call(options.force) {
-        Ok(_) => {}
-        Err(err)
-            if error_code(&err) == Some(code::UNSAVED_WORK) && std::io::stdin().is_terminal() =>
-        {
-            eprintln!("{err}");
-            let prompt = format!(
-                "Remove '{}' on '{}' and discard that work?",
-                record.handle, record.remote
-            );
-            if !crate::ui::confirm::confirm(&prompt, crate::ui::confirm::ConfirmDefault::No)? {
-                bail!("Aborted; nothing was removed");
+    let mut expect = None;
+    if !options.force || options.keep_branch {
+        match check_removable(&node, &mut record, &options) {
+            Ok(Some(snapshot)) => expect = Some(snapshot),
+            Ok(None) => {}
+            Err(err) if err.is::<Declined>() => {
+                println!("Aborted.");
+                return Ok(());
             }
-            call(true).map_err(|err| explain(&spec, err))?;
+            Err(err) if options.force => eprintln!("workmux: {err:#}"),
+            Err(err) => return Err(err),
         }
-        Err(err) if error_code(&err) == Some(code::UNSAVED_WORK) => {
-            return Err(err.context(format!(
-                "Refusing to remove '{}'; pass --force to discard that work",
+    }
+    if options.force {
+        expect = None;
+    }
+    // Under `expect`, a kept branch is home exactly as the node has it, so
+    // the node's copy goes; otherwise the node keeps it.
+    let keep_on_node = options.keep_branch && expect.is_none();
+    let reply: Result<RemoveResponse> = node.call(
+        protocol::REMOVE_WORKSPACE,
+        &RemoveRequest {
+            ws_id: record.ws_id.clone(),
+            keep_branch: keep_on_node,
+            run_hooks: options.run_hooks,
+            expect,
+        },
+        true,
+    );
+    match reply {
+        Ok(_) => {}
+        Err(err) if error_code(&err) == Some(code::DIVERGED) => {
+            bail!(
+                "{}; nothing was removed. Run `workmux remove {}` again",
+                super::homecoming::node_message(&err),
                 record.handle
-            )));
+            );
         }
         Err(err) => return Err(explain(&spec, err)),
     }
+    if record.local_path.join(".git").exists() {
+        println!(
+            "The local copy at {} stays a local worktree (`workmux remove {}` removes it)",
+            record.local_path.display(),
+            record.handle
+        );
+    }
+    super::homecoming::forget_fetched(&record);
     forget_locally(mux, &record)?;
     println!(
         "✓ Removed remote workspace '{}' from '{}'",
@@ -720,7 +765,184 @@ pub fn remove(
     Ok(())
 }
 
+/// The checks before removing `record`: refuses uncommitted work, asks
+/// about commits its base lacks, and with `--keep-branch` brings the
+/// branch to the laptop. Returns the snapshot the removal must still match,
+/// or None when the node has no worktree left.
+fn check_removable(
+    node: &Node,
+    record: &mut WorkspaceRecord,
+    options: &RemoveOptions,
+) -> Result<Option<super::git::Snapshot>> {
+    let export = match super::homecoming::export(node, record, false) {
+        Ok(export) => export,
+        Err(err) if matches!(error_code(&err), Some(code::NOT_FOUND | code::NO_WORKTREE)) => {
+            return Ok(None);
+        }
+        Err(err) if error_code(&err) == Some(code::CONFLICT) => bail!(
+            "Cannot remove '{}': {}. Use --force to override.",
+            record.handle,
+            super::homecoming::node_message(&err)
+        ),
+        Err(err) => return Err(err),
+    };
+    let dirty = locally_unignored(record, &export.changes);
+    // A cut-short listing may hide changes the laptop does not ignore.
+    if !dirty.is_empty() || export.truncated {
+        let mut listing: String = dirty.iter().map(|path| format!("\n  - {path}")).collect();
+        if export.truncated {
+            listing.push_str("\n  - ...");
+        }
+        bail!(
+            "Remote workspace '{}' on '{}' has uncommitted changes:{listing}\nCannot remove it; \
+             use --force to override.",
+            record.handle,
+            record.remote
+        );
+    }
+    let head = &export.snapshot.head;
+    if options.keep_branch {
+        node.fetch_export(
+            &record.project_root,
+            &export.repo_path,
+            &record.ws_id,
+            &export.snapshot,
+        )?;
+        keep_branch_locally(record, head)?;
+    } else if options.confirm_unmerged {
+        let base = record.base_branch();
+        if !is_ancestor(&record.project_root, head, &base) {
+            println!("The following branches have commits not merged into their base:");
+            println!("  - {} (base: {base})", record.branch);
+            println!(
+                "\nThis will delete the remote worktree on '{}', its agent and branch.",
+                record.remote
+            );
+            let prompt = "Are you sure you want to continue?";
+            if !crate::ui::confirm::confirm(prompt, crate::ui::confirm::ConfirmDefault::No)? {
+                return Err(Declined.into());
+            }
+        }
+    }
+    Ok(Some(export.snapshot))
+}
+
+/// The user declined to remove a workspace whose commits its base lacks.
+#[derive(Debug)]
+struct Declined;
+
+impl std::fmt::Display for Declined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("declined to remove unmerged commits")
+    }
+}
+
+impl std::error::Error for Declined {}
+
+/// `changes` without the paths the laptop's ignore rules (global excludes
+/// included) leave out, as a local worktree's status would.
+fn locally_unignored(record: &WorkspaceRecord, changes: &super::git::Changes) -> Vec<String> {
+    let ignored = if changes.untracked.is_empty() {
+        Default::default()
+    } else {
+        locally_ignored(&record.project_root, &changes.untracked).unwrap_or_else(|err| {
+            tracing::debug!("git check-ignore failed: {err:#}");
+            Default::default()
+        })
+    };
+    let dirty: std::collections::BTreeSet<&String> = changes
+        .staged
+        .iter()
+        .chain(&changes.unstaged)
+        .chain(
+            changes
+                .untracked
+                .iter()
+                .filter(|path| !ignored.contains(*path)),
+        )
+        .collect();
+    dirty.into_iter().cloned().collect()
+}
+
+fn locally_ignored(repo: &Path, paths: &[String]) -> Result<std::collections::HashSet<String>> {
+    let mut child = crate::git::unattended_git(Some(repo))?
+        .args(["check-ignore", "--no-index", "-z", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to run git check-ignore")?;
+    let input: Vec<u8> = paths
+        .iter()
+        .flat_map(|path| path.bytes().chain([0]))
+        .collect();
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("git check-ignore has no stdin")?;
+    std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &input));
+    let output = child.wait_with_output()?;
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+/// Whether commit `commit` exists here and is reachable from `rev`.
+fn is_ancestor(repo: &Path, commit: &str, rev: &str) -> bool {
+    crate::git::unattended_git(Some(repo))
+        .and_then(|mut git| {
+            Ok(git
+                .args(["merge-base", "--is-ancestor", commit, rev])
+                .stderr(std::process::Stdio::null())
+                .status()?)
+        })
+        .is_ok_and(|status| status.success())
+}
+
+/// Point local branch `record.branch` at `head`, fetched from the node:
+/// creates it, or fast-forwards it when no worktree has it checked out.
+fn keep_branch_locally(record: &WorkspaceRecord, head: &str) -> Result<()> {
+    let repo = &record.project_root;
+    let local_ref = format!("refs/heads/{}", record.branch);
+    let tip = super::git::run(repo, &["rev-parse", "--verify", "-q", &local_ref]).ok();
+    match tip.as_deref() {
+        Some(tip) if tip == head => {}
+        Some(tip) if is_ancestor(repo, tip, head) => {
+            if crate::git::worktree_exists_in(&record.branch, Some(repo))? {
+                bail!(
+                    "Branch '{}' is checked out locally and behind '{}' on '{}'; nothing was \
+                     removed",
+                    record.branch,
+                    record.handle,
+                    record.remote
+                );
+            }
+            super::git::run(repo, &["update-ref", &local_ref, head, tip])?;
+        }
+        Some(_) => bail!(
+            "Local branch '{}' has diverged from '{}' on '{}'; nothing was removed. Rename it, \
+             or pass --force to keep only the remote branch",
+            record.branch,
+            record.handle,
+            record.remote
+        ),
+        None => {
+            super::git::run(repo, &["update-ref", &local_ref, head, ""])?;
+        }
+    }
+    println!("✓ Kept branch '{}' locally", record.branch);
+    Ok(())
+}
+
 fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
+    close_relay(mux, record);
+    record.delete()
+}
+
+/// Close the workspace's local window and forget its panes.
+pub(super) fn close_relay(mux: &dyn Multiplexer, record: &WorkspaceRecord) {
     if mux
         .window_exists_by_full_name(&record.window_name)
         .unwrap_or(false)
@@ -728,7 +950,6 @@ fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()>
         let _ = mux.kill_window(&record.window_name);
     }
     forget_attachments(record);
-    record.delete()
 }
 
 /// Drop the state of the closed window's panes now, so a later server

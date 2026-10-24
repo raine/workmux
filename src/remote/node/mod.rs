@@ -20,6 +20,7 @@
 pub mod attach;
 pub mod credentials;
 pub mod execution;
+pub mod git;
 pub mod hooks;
 pub mod observe;
 pub mod provision;

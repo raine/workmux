@@ -700,6 +700,7 @@ mod tests {
             staged_hunks: Vec::new(),
             comment_input: None,
             file_list: Vec::new(),
+            remote: None,
         }
     }
 

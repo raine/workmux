@@ -115,7 +115,7 @@ def test_remote_lifecycle(
     assert len(pane_commands(mux_server, window)) == 2
 
     # Commands that cannot act on remote workspaces yet say so.
-    for command in ["merge feat", "path feat"]:
+    for command in ["path feat"]:
         refused = wm(mux_server, workmux_exe_path, repo, command, expect_fail=True)
         assert "is a remote workspace on 'lo'" in refused.stderr, command
 

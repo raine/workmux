@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::config::RemoteIsolation;
+use crate::remote::git::{Changes, Snapshot};
 
 /// Node wire protocol version.
 pub const NODE_PROTOCOL: u32 = 1;
@@ -27,6 +28,10 @@ pub const CAPABILITIES: &[&str] = &[
     SEND,
     CAPTURE,
     STATUS_HOOKS,
+    EXPORT,
+    CHECKOUT,
+    REBASE,
+    DIFF,
 ];
 
 pub const PROVISION_WORKSPACE: &str = "provision-workspace";
@@ -42,6 +47,10 @@ pub const SEND: &str = "send";
 pub const CAPTURE: &str = "capture";
 /// Wire types in `remote::node::hooks`.
 pub const STATUS_HOOKS: &str = "status-hooks";
+pub const EXPORT: &str = "export";
+pub const CHECKOUT: &str = "checkout";
+pub const REBASE: &str = "rebase";
+pub const DIFF: &str = "diff";
 
 /// Error codes a node verb reports in its [`ErrorEnvelope`].
 pub mod code {
@@ -56,8 +65,10 @@ pub mod code {
     pub const NOT_FOUND: &str = "not_found";
     /// Container isolation needs a runtime the node does not support.
     pub const UNSUPPORTED_RUNTIME: &str = "unsupported_runtime";
-    /// Removal would discard work that exists only on the node.
-    pub const UNSAVED_WORK: &str = "unsaved_work";
+    /// The workspace has no worktree (provisioning stopped before it).
+    pub const NO_WORKTREE: &str = "no_worktree";
+    /// The workspace no longer matches the snapshot the request expected.
+    pub const DIVERGED: &str = "diverged";
     /// Anything else.
     pub const FAILED: &str = "failed";
 }
@@ -184,10 +195,13 @@ pub struct StartResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveRequest {
     pub ws_id: String,
-    /// Remove even with uncommitted changes or commits made on the node.
-    pub force: bool,
     pub keep_branch: bool,
     pub run_hooks: bool,
+    /// Remove only if the workspace still matches this snapshot, checked
+    /// before and after its execution stops; otherwise reply
+    /// [`code::DIVERGED`] (with the execution stopped if it changed late).
+    #[serde(default)]
+    pub expect: Option<Snapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,6 +209,89 @@ pub struct RemoveResponse {
     /// The workspace was unknown to the node.
     pub already_removed: bool,
 }
+
+/// `export`: the workspace's [`Snapshot`], stored as commits under
+/// `refs/workmux/export/<ws_id>/{index,worktree}` for the laptop to fetch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRequest {
+    pub ws_id: String,
+    /// Stop the execution first, so the snapshot is final.
+    #[serde(default)]
+    pub stop: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportResponse {
+    pub snapshot: Snapshot,
+    /// Each list holds at most [`MAX_EXPORT_PATHS`] paths.
+    pub changes: Changes,
+    /// Some list of `changes` was cut short.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Absolute path of the project repository on the node.
+    pub repo_path: String,
+}
+
+pub const MAX_EXPORT_PATHS: usize = 1000;
+
+/// `checkout`: move the workspace branch to `head` (pushed to
+/// `refs/workmux/kept/<ws_id>`) the way `git checkout -B` does, keeping
+/// uncommitted work, if the workspace still matches `expect`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutRequest {
+    pub ws_id: String,
+    pub head: String,
+    pub expect: Snapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutResponse {}
+
+/// `rebase`: rebase the workspace branch onto `onto` (pushed to
+/// `refs/workmux/onto/<ws_id>`); success makes `onto` the new base. A
+/// conflict leaves the rebase in progress and replies [`code::CONFLICT`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebaseRequest {
+    pub ws_id: String,
+    pub onto: String,
+    /// Committer of the rebased commits: the laptop user, as for a local
+    /// rebase.
+    #[serde(default)]
+    pub committer: Option<Committer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Committer {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebaseResponse {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffMode {
+    /// Uncommitted changes, untracked files included.
+    Wip,
+    /// The commits since the base.
+    Branch,
+}
+
+/// `diff`: a unified diff of the workspace, at most [`MAX_DIFF_BYTES`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffRequest {
+    pub ws_id: String,
+    pub mode: DiffMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffResponse {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub const MAX_DIFF_BYTES: usize = 4 << 20;
 
 /// `credentials`: which of `agents` have a login on the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
