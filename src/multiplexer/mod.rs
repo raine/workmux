@@ -822,6 +822,17 @@ pub trait Multiplexer: Send + Sync {
                     _ => final_command,
                 };
 
+                // Only a node passes a supervisor. Its command lines name
+                // pinned binaries and supervisor arguments; clear the screen
+                // and scrollback they were typed into so the pane starts
+                // clean. The leading space keeps the line out of shell
+                // history where the shell honors that.
+                let final_command = if options.sandbox_supervisor.is_some() {
+                    format!(" printf '\\033[H\\033[2J\\033[3J'; {final_command}")
+                } else {
+                    final_command
+                };
+
                 let final_command = if is_agent_pane && self.name() == "zellij" {
                     command_with_status_target(
                         &final_command,
