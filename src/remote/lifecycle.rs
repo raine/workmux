@@ -852,12 +852,9 @@ pub struct RemoveOptions {
 /// makes: uncommitted work refuses and unmerged commits ask, unless
 /// `--force`. `--keep-branch` brings the branch to the laptop. Local state
 /// goes only after the node acknowledges, except that `--force` forgets a
-/// workspace whose remote is unconfigured or unreachable.
-pub fn remove(
-    mux: &dyn Multiplexer,
-    mut record: WorkspaceRecord,
-    options: RemoveOptions,
-) -> Result<()> {
+/// workspace whose remote is unconfigured or unreachable. The caller closes
+/// the relay after all removals and their output have finished.
+pub fn remove(mut record: WorkspaceRecord, options: RemoveOptions) -> Result<()> {
     if record
         .homecoming
         .as_ref()
@@ -875,7 +872,8 @@ pub fn remove(
         record.homecoming = None;
     }
     let forget = |record: &WorkspaceRecord, reason: anyhow::Error| -> Result<()> {
-        forget_locally(mux, record)?;
+        record.delete()?;
+        forget_attachments(record);
         eprintln!(
             "workmux: forgot remote workspace '{}' without contacting '{}' ({reason:#}); \
              its worktree and agent may remain there (`workmux remote gc {}` removes them)",
@@ -959,7 +957,8 @@ pub fn remove(
         );
     }
     super::homecoming::forget_fetched(&record);
-    forget_locally(mux, &record)?;
+    record.delete()?;
+    forget_attachments(&record);
     println!(
         "✓ Removed remote workspace '{}' from '{}'",
         record.handle, record.remote
@@ -1139,19 +1138,24 @@ fn keep_branch_locally(record: &WorkspaceRecord, head: &str) -> Result<()> {
 }
 
 pub(super) fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
+    record.delete()?;
     close_relay(mux, record);
-    record.delete()
+    Ok(())
 }
 
 /// Close the workspace's local window and forget its panes.
-pub(super) fn close_relay(mux: &dyn Multiplexer, record: &WorkspaceRecord) {
+pub(crate) fn close_relay(mux: &dyn Multiplexer, record: &WorkspaceRecord) {
+    use std::io::Write;
+
+    forget_attachments(record);
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
     if mux
         .window_exists_by_full_name(&record.window_name)
         .unwrap_or(false)
     {
         let _ = mux.kill_window(&record.window_name);
     }
-    forget_attachments(record);
 }
 
 /// Drop the state of the closed window's panes now, so a later server
