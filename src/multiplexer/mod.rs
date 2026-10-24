@@ -759,12 +759,11 @@ pub trait Multiplexer: Send + Sync {
 
                         // Inject skip-permissions flag for agent panes only
                         // (sandbox provides the security boundary, so permission
-                        // prompts are unnecessary and break autonomous workflow)
+                        // prompts are unnecessary and break autonomous workflow),
+                        // plus any other flags sandboxed launches need.
                         let command_to_wrap =
                             if let Some(selected_agent) = resolved.selected_agent.as_mut() {
-                                if let Some(flag) = selected_agent.profile.skip_permissions_flag() {
-                                    selected_agent.command.prepend_args_fragment(flag);
-                                }
+                                selected_agent.add_sandbox_flags();
                                 resolved.render_command()
                             } else {
                                 resolved.command.clone()
