@@ -485,6 +485,11 @@ impl Relay {
         self.generation += 1;
         tracing::info!(ex_id = %self.ex_id, pane = self.pane, attempt = self.attempt, "remote attach connecting");
         let generation = self.generation;
+        // The remote tmux client restores this cursor when it leaves and
+        // prints its exit message there. Left wherever the last one ended,
+        // the messages creep down until they scroll the screen, carrying
+        // painted status lines up with them.
+        write_out("\x1b[r\x1b[H");
         let size = window_size(libc::STDOUT_FILENO);
         let (master, slave) = open_pty(&size)?;
         let mut cmd = self.node.attach_command(&self.ex_id, self.pane);
