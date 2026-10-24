@@ -276,7 +276,7 @@ workmux add parser-tests -b -P task.md
 - The sibling starts from the tip of the agent's branch, with the same project, isolation, frozen config, files and environment snapshot. No `post_create` hooks run.
 - The next time the laptop talks to the remote, its window opens next to the parent's window. Without `-b`, it takes focus if this happens within a minute of the spawn.
 
-A sibling's window opens on its own when the laptop has a workspace of the same project. Otherwise run `workmux list` or `workmux status` from the project's repository to pick it up.
+A sibling's window opens on its own when the laptop has a workspace of the same project. Otherwise run `workmux list` or `workmux status` from the project's repository to pick it up. These only ask remotes where the laptop has a workspace of that project; when it has none left there, run `workmux remote` or `workmux open <branch>` instead.
 
 ## When the remote host reboots
 
