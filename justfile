@@ -64,6 +64,10 @@ install-release:
 install-dev:
     cargo build && ln -sf $(pwd)/target/debug/workmux ~/.cargo/bin/workmux
 
+# Build this tree on a Linux remote for `remotes.<name>.binary` (HANDLE: ~/src/HANDLE)
+remote-dev-binary host handle="dev":
+    scripts/remote-dev-binary "$1" "$2"
+
 # Run unit tests through checkle
 unit-tests:
     checkle run unit-tests

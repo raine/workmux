@@ -1049,6 +1049,15 @@ pub struct Config {
     /// Container sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+
+    /// SSH remotes that can run agents, keyed by remote name. Global-only:
+    /// a project config must not be able to point workmux at a host.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, RemoteConfig>,
+
+    /// Where new agents run: `local` (default) or a remote name.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 /// A named agent environment value.
@@ -1487,6 +1496,35 @@ pub enum WindowPlacement {
     AfterCurrent,
     /// Place the new window after the rightmost window in the current session.
     Rightmost,
+}
+
+/// An SSH-reachable host that can run agents, defined under `remotes:` in the
+/// global config.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// SSH destination: an alias from `~/.ssh/config` or `user@host`.
+    pub host: String,
+    /// Node root on the remote (default: `~/.workmux-node`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// How agents are isolated on the remote (default: container).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<RemoteIsolation>,
+    /// Local path of a Linux workmux binary to upload instead of downloading
+    /// the release matching this workmux version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteIsolation {
+    /// Run agents in a docker or podman container on the remote.
+    #[default]
+    Container,
+    /// Run agents directly on the remote host.
+    None,
 }
 
 /// Mode for multiplexer operations: create windows within the current session or create new sessions
@@ -3134,6 +3172,7 @@ impl Config {
             auto_update_check,
             prompt_file_only,
             stale_after_secs,
+            placement,
         );
 
         // Layouts: merge maps by key so project layouts extend global ones
@@ -3472,6 +3511,17 @@ impl Config {
         } else {
             self.agents
         };
+
+        // Security: remotes is global-only. Project config cannot define
+        // hosts -- this prevents a malicious repo from pointing workmux at
+        // an attacker-controlled SSH destination via .workmux.yaml.
+        if !project.remotes.is_empty() {
+            tracing::warn!(
+                "remotes in project config (.workmux.yaml) is ignored -- \
+                move it to your global config (~/.config/workmux/config.yaml)"
+            );
+        }
+        merged.remotes = self.remotes;
 
         merged
     }
@@ -4003,7 +4053,7 @@ mod tests {
         ToolchainMode, WindowPlacement, WorktreeColumn, is_agent_command, validate_domain,
         validate_group_add_entry, validate_layouts_config,
     };
-    use super::{DashboardConfig, InputExitKey};
+    use super::{DashboardConfig, InputExitKey, RemoteConfig, RemoteIsolation};
     use crate::test_support;
     use tempfile::TempDir;
 
@@ -5678,6 +5728,82 @@ agents:
     fn test_sandbox_host_commands_default_empty() {
         let config = SandboxConfig::default();
         assert!(config.host_commands().is_empty());
+    }
+
+    #[test]
+    fn remotes_parse_from_yaml() {
+        let config: Config = serde_yaml::from_str(
+            "remotes:\n  hetzner:\n    host: wm-remote-test\n    path: ~/.workmux-node-x\n    \
+             isolation: none\n    binary: /tmp/workmux\n  box:\n    host: dev@box\nplacement: hetzner\n",
+        )
+        .unwrap();
+        let hetzner = &config.remotes["hetzner"];
+        assert_eq!(hetzner.host, "wm-remote-test");
+        assert_eq!(hetzner.path.as_deref(), Some("~/.workmux-node-x"));
+        assert_eq!(hetzner.isolation, Some(RemoteIsolation::None));
+        assert_eq!(hetzner.binary.as_deref(), Some("/tmp/workmux"));
+        assert_eq!(config.remotes["box"].isolation, None);
+        assert_eq!(config.placement.as_deref(), Some("hetzner"));
+    }
+
+    #[test]
+    fn remotes_reject_unknown_keys_and_isolation() {
+        assert!(
+            serde_yaml::from_str::<Config>("remotes:\n  r:\n    host: h\n    hots: x\n").is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<Config>("remotes:\n  r:\n    host: h\n    isolation: vm\n")
+                .is_err()
+        );
+        assert!(serde_yaml::from_str::<Config>("remotes:\n  r:\n    path: ~/n\n").is_err());
+    }
+
+    #[test]
+    fn remotes_are_global_only() {
+        let remote = |host: &str| RemoteConfig {
+            host: host.into(),
+            path: None,
+            isolation: None,
+            binary: None,
+        };
+        let global = Config {
+            remotes: [("hetzner".to_string(), remote("trusted"))]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let project = Config {
+            remotes: [
+                ("hetzner".to_string(), remote("attacker")),
+                ("evil".to_string(), remote("attacker")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(merged.remotes.len(), 1);
+        assert_eq!(merged.remotes["hetzner"].host, "trusted");
+    }
+
+    #[test]
+    fn placement_project_overrides_global() {
+        let global = Config {
+            placement: Some("hetzner".into()),
+            ..Config::default()
+        };
+        let project = Config {
+            placement: Some("local".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            global.clone().merge(project).placement.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            global.merge(Config::default()).placement.as_deref(),
+            Some("hetzner")
+        );
     }
 
     #[test]
