@@ -134,6 +134,11 @@ def test_remote_status_reaches_the_attach_pane(
     wait_for_pane_output(mux_server, window, "FAKE-AGENT-READY", timeout=20)
     [record] = local_records(mux_server)
 
+    # The node's command line was cleared before the agent started.
+    screen = mux_server.tmux(["capture-pane", "-p", "-S", "-", "-t", window]).stdout
+    assert "PATH=" not in screen, screen
+    assert screen.lstrip().startswith("FAKE-AGENT-READY"), screen
+
     # The relay registers its pane before any status arrives.
     assert poll_until(lambda: remote_state(mux_server) is not None, timeout=10)
     state = remote_state(mux_server)
