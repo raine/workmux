@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 
 use super::{NodeRoot, Workspace, base_ref, git, hook_env, refuse, run_hook, validate_identity};
 use crate::cmd::Cmd;
@@ -74,7 +75,7 @@ fn response(workspace: &Workspace, has_base: bool) -> ProvisionResponse {
 
 /// Record a new workspace after checking the runtime and that no other
 /// workspace of the project uses its handle or branch.
-fn claim(
+pub(super) fn claim(
     root: &NodeRoot,
     identity: &WorkspaceIdentity,
     isolation: RemoteIsolation,
@@ -158,7 +159,7 @@ fn base_matches(workspace: &Workspace) -> Result<bool> {
     Ok(sha.as_deref() == Some(workspace.identity.base_sha.as_str()))
 }
 
-fn provision_worktree(
+pub(super) fn provision_worktree(
     root: &NodeRoot,
     workspace: &mut Workspace,
     payload: ProvisionPayload,
@@ -183,9 +184,17 @@ fn provision_worktree(
     let rel_dir = location
         .map(|location| location.rel_dir)
         .unwrap_or_default();
+    // A spawned workspace checks out a commit a remote agent made, which
+    // may hold symlinks aimed at paths outside the worktree.
+    if workspace.origin.is_some() {
+        refuse_symlinks(workspace, &rel_dir, &payload)?;
+    }
     let subdir = workspace.worktree_path.join(&rel_dir);
     workspace.working_dir = (!rel_dir.as_os_str().is_empty() && subdir.is_dir()).then_some(subdir);
 
+    if payload.run_file_ops {
+        save_recipe(root, &ws_id, &payload)?;
+    }
     if !workspace.progress.files {
         if payload.run_file_ops {
             let seed_root = workspace.repo_path.join(&rel_dir);
@@ -227,6 +236,86 @@ fn provision_worktree(
     }
     workspace.progress.ready = true;
     root.save(workspace)
+}
+
+/// What the laptop sent for `files`, kept so workspaces a remote agent
+/// spawns from this one get the same files without reading the agent's
+/// worktree.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct FileRecipe {
+    pub copies: Vec<FileEntry>,
+    pub symlink_patterns: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+fn save_recipe(root: &NodeRoot, ws_id: &str, payload: &ProvisionPayload) -> Result<()> {
+    let recipe = FileRecipe {
+        copies: payload.copies.clone(),
+        symlink_patterns: payload.symlink_patterns.clone(),
+        ignored: payload.ignored.clone(),
+    };
+    crate::util::write_atomic(&root.files_path(ws_id), &serde_json::to_vec(&recipe)?)
+}
+
+/// The recipe workspace `ws_id` was provisioned with, if it ran file
+/// operations.
+pub(super) fn load_recipe(root: &NodeRoot, ws_id: &str) -> Result<Option<FileRecipe>> {
+    let path = root.files_path(ws_id);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                format!("Corrupt file recipe {}", path.display())
+            })?))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("Failed to read {}", path.display())),
+    }
+}
+
+/// Refuse to provision when a path the node writes into the worktree goes
+/// through a symlink: the config directory, the prompt file and the
+/// destinations of `files.symlink`. `files.copy` results are confined by
+/// [`write_entries`].
+fn refuse_symlinks(
+    workspace: &Workspace,
+    rel_dir: &Path,
+    payload: &ProvisionPayload,
+) -> Result<()> {
+    let worktree = &workspace.worktree_path;
+    let prompt = Path::new(".workmux").join(crate::workflow::prompt_file_name(
+        &workspace.identity.branch,
+    ));
+    let mut paths = vec![rel_dir.to_path_buf(), prompt];
+    let seed_root = workspace.repo_path.join(rel_dir);
+    for pattern in &payload.symlink_patterns {
+        let full = seed_root.join(pattern).to_string_lossy().into_owned();
+        for source in glob::glob(&full).into_iter().flatten().flatten() {
+            if let Ok(relative) = source.strip_prefix(&seed_root) {
+                paths.push(rel_dir.join(relative));
+            }
+        }
+    }
+    for path in paths {
+        let mut current = worktree.clone();
+        for component in path.components() {
+            current.push(component);
+            match current.symlink_metadata() {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(refuse(
+                        code::CONFLICT,
+                        format!(
+                            "{} is a symlink in the checkout of '{}'; not writing through it",
+                            current.display(),
+                            workspace.identity.branch
+                        ),
+                    ));
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Check out the workspace branch, adopting what an interrupted call left.

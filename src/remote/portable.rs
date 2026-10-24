@@ -29,6 +29,21 @@ pub struct Portable {
     pub secrets: Secrets,
 }
 
+/// `location` of a project config moved onto the worktree `worktree`.
+pub fn rebase_location(location: &ConfigLocation, worktree: &Path) -> ConfigLocation {
+    let config_dir = worktree.join(&location.rel_dir);
+    let file_name = location
+        .config_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| ".workmux.yaml".into());
+    ConfigLocation {
+        config_path: config_dir.join(file_name),
+        config_dir,
+        rel_dir: location.rel_dir.clone(),
+    }
+}
+
 /// Build the node config from the laptop's effective `config`.
 ///
 /// `remote_worktree` is the workspace's worktree on the node; the location
@@ -63,6 +78,8 @@ fn portable_config_with_env(
         status_format: config.status_format,
         status_icons: config.status_icons.clone(),
         prompt_file_only: config.prompt_file_only,
+        worktree_naming: config.worktree_naming.clone(),
+        worktree_prefix: config.worktree_prefix.clone(),
         ..Config::default()
     };
 
@@ -92,19 +109,7 @@ fn portable_config_with_env(
         }
     };
 
-    let location = location.map(|location| {
-        let config_dir = remote_worktree.join(&location.rel_dir);
-        let file_name = location
-            .config_path
-            .file_name()
-            .map(|name| name.to_os_string())
-            .unwrap_or_else(|| ".workmux.yaml".into());
-        ConfigLocation {
-            config_path: config_dir.join(file_name),
-            config_dir,
-            rel_dir: location.rel_dir.clone(),
-        }
-    });
+    let location = location.map(|location| rebase_location(location, remote_worktree));
 
     Portable {
         config: portable,

@@ -1180,7 +1180,7 @@ impl<'de> Deserialize<'de> for AgentEntry {
 }
 
 /// Configuration for a single multiplexer pane
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub struct PaneConfig {
     /// Optional display name for the pane.
     ///
@@ -1234,7 +1234,7 @@ pub struct LayoutConfig {
     pub panes: Vec<PaneConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
     Horizontal,

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,10 @@ struct RemoteStatus {
     connected: bool,
     /// When the remote last answered.
     last_seen: Option<u64>,
+    /// Why the execution ended under the agent (`host_reboot`); `workmux
+    /// open` starts it again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended: Option<crate::multiplexer::EndReason>,
 }
 
 #[derive(Serialize)]
@@ -231,6 +236,7 @@ fn remote_entry(agent: &AgentPane, record: &WorkspaceRecord, now: u64) -> Status
             attached: remote.attached,
             connected: remote.connected,
             last_seen: remote.last_seen,
+            ended: remote.ended,
         }),
         ..status_entry(
             agent,
@@ -243,26 +249,22 @@ fn remote_entry(agent: &AgentPane, record: &WorkspaceRecord, now: u64) -> Status
     }
 }
 
-/// Status entries of the agents of remote workspaces `records`, asking
-/// nodes whose observation is stale.
+/// Status entries of the agents of remote workspaces `records`.
 fn remote_entries(
+    config: &crate::config::Config,
     records: &[WorkspaceRecord],
+    observations: &HashMap<String, remote::observe::Observation>,
     attached: &[AgentPane],
     now: u64,
 ) -> Vec<StatusEntry> {
-    if records.is_empty() {
-        return Vec::new();
-    }
-    let config = crate::config::Config::load(None).unwrap_or_default();
-    let observations = remote::agents::observations(&config, records, true);
-    let hosts = remote::agents::hosts(&config);
+    let hosts = remote::agents::hosts(config);
     records
         .iter()
         .flat_map(|record| {
             remote::agents::rows(
                 std::slice::from_ref(record),
                 attached,
-                &observations,
+                observations,
                 &hosts,
                 now,
             )
@@ -329,6 +331,17 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+
+    // Nodes are asked before records are read: they report the workspaces
+    // their agents spawned, which become records.
+    let config = crate::config::Config::load(None).unwrap_or_default();
+    let in_repo = git::get_repo_root_if_present()?.is_some();
+    let remote_scope = if worktrees.is_empty() && !all && in_repo {
+        remote::cache::for_project(&git::get_main_worktree_root()?)
+    } else {
+        remote::cache::all()
+    };
+    let observations = remote::agents::observations(&config, &remote_scope, true);
 
     let reconciled_agent_count = agent_panes.len();
     let mut entries: Vec<StatusEntry> = Vec::new();
@@ -472,7 +485,13 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
         }
     }
 
-    entries.extend(remote_entries(&remote_records, &attached, now));
+    entries.extend(remote_entries(
+        &config,
+        &remote_records,
+        &observations,
+        &attached,
+        now,
+    ));
 
     let target_failure_count = target_errors.len();
     if json {
@@ -530,6 +549,10 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                         Some(remote) if !remote.connected => {
                             format!("{} (disconnected)", e.status)
                         }
+                        Some(RemoteStatus {
+                            ended: Some(reason),
+                            ..
+                        }) => reason.label().to_string(),
                         _ => e.status.clone(),
                     };
                     StatusRow {

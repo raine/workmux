@@ -460,8 +460,11 @@ pub fn run(
         );
     }
 
-    // Inside a sandbox guest, route through RPC to the host supervisor
-    if crate::sandbox::guest::is_sandbox_guest() {
+    // Inside a sandbox guest, route through RPC to the host supervisor; an
+    // agent on a node without a sandbox asks the node directly.
+    if crate::sandbox::guest::is_sandbox_guest()
+        || crate::remote::node::spawn::session_parent().is_some()
+    {
         if dry_run {
             bail!("--dry-run is not supported from inside a sandbox");
         }
@@ -1488,6 +1491,21 @@ fn run_add_via_rpc(
     } else {
         branch_name.map(|s| s.to_string())
     };
+
+    if let Some((root, parent)) = crate::remote::node::spawn::session_parent() {
+        use crate::remote::node::{NodeRoot, spawn};
+        let spawned = spawn::spawn(
+            &NodeRoot::at(root)?,
+            spawn::SpawnRequest {
+                parent,
+                branch: rpc_branch,
+                prompt: prompt_text,
+                background: setup.background,
+            },
+        )?;
+        println!("✓ Spawned agent: {}", spawned.branch);
+        return Ok(());
+    }
 
     let mut client = RpcClient::from_env().context(
         "Failed to connect to host RPC server. Is this running inside a workmux sandbox?",

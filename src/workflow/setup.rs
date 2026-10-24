@@ -503,6 +503,12 @@ pub fn resolve_pane_configuration(
     panes
 }
 
+/// Name of the file `write_prompt_file` writes under a worktree's
+/// `.workmux/` for `branch_name`.
+pub fn prompt_file_name(branch_name: &str) -> String {
+    format!("PROMPT-{}.md", branch_name.replace(['/', '\\', ':'], "-"))
+}
+
 /// Write a prompt file for agent consumption.
 ///
 /// When `working_dir` is provided, writes to `<working_dir>/.workmux/PROMPT-<branch>.md`
@@ -545,8 +551,7 @@ pub fn write_prompt_file(
             let _ = writeln!(file, "\n# workmux prompt files\n.workmux/");
         }
 
-        let prompt_filename = format!("PROMPT-{}.md", safe_branch_name);
-        workmux_dir.join(prompt_filename)
+        workmux_dir.join(prompt_file_name(branch_name))
     } else {
         // Legacy: write to temp directory for open command
         let prompt_filename = format!("workmux-prompt-{}.md", safe_branch_name);

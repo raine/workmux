@@ -6,6 +6,7 @@
 //! status line, and mouse, clipboard, titles and focus pass through to the
 //! laptop's terminal.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,6 +19,7 @@ use super::{
     stop_containers_mounting, validate_id,
 };
 use crate::config::{Config, PaneConfig, RemoteIsolation};
+use crate::multiplexer::types::ResumeMode;
 use crate::multiplexer::{Multiplexer, PaneSetupOptions, tmux::TmuxBackend};
 use crate::remote::protocol::{Secrets, StartRequest, StartResponse, code, session_name};
 use crate::shell::shell_quote;
@@ -76,16 +78,26 @@ pub fn session_alive(socket: &Path, name: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// Kill the sessions of execution `ex_id`, live or not.
-pub fn kill_execution(socket: &Path, ex_id: &str) {
-    let Ok(output) = tmux(socket)
+/// Sessions on the node tmux server; none when no server runs.
+pub fn sessions(socket: &Path) -> HashSet<String> {
+    tmux(socket)
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()
-    else {
-        return;
-    };
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Kill the sessions of execution `ex_id`, live or not.
+pub fn kill_execution(socket: &Path, ex_id: &str) {
     let prefix = format!("{ex_id}-");
-    for name in String::from_utf8_lossy(&output.stdout).lines() {
+    for name in sessions(socket) {
         if name.starts_with(&prefix) {
             let _ = tmux(socket)
                 .args(["kill-session", "-t", &format!("={name}")])
@@ -110,6 +122,14 @@ pub fn pane_plan(config: &Config, agent: Option<&str>) -> Vec<(usize, PaneConfig
         .collect()
 }
 
+/// [`pane_plan`] as the laptop records it to lay out the window.
+pub fn layout(config: &Config, agent: Option<&str>) -> Vec<crate::remote::cache::LayoutPane> {
+    pane_plan(config, agent)
+        .into_iter()
+        .map(|(index, pane)| crate::remote::cache::LayoutPane { index, pane })
+        .collect()
+}
+
 pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
     validate_id(&request.ws_id, 'w', "workspace id")?;
     validate_id(&request.ex_id, 'x', "execution id")?;
@@ -128,6 +148,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
     }
     let socket = tmux_socket(root)?;
 
+    let boot_id = super::boot_id();
     let resume = match &workspace.execution {
         Some(execution) if execution.state == ExecutionState::Running => {
             let live = execution
@@ -146,8 +167,11 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         Some(execution) => execution.ex_id == request.ex_id,
         None => false,
     };
+    let pin = std::env::current_exe().context("Failed to locate the node binary")?;
     if !resume {
+        let mut continues = false;
         if let Some(previous) = workspace.execution.take() {
+            continues = previous.ended_by_reboot(boot_id.as_deref());
             kill_execution(&socket, &previous.ex_id);
         }
         if workspace.isolation == RemoteIsolation::Container {
@@ -157,9 +181,19 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
             ex_id: request.ex_id.clone(),
             state: ExecutionState::Starting,
             panes: Vec::new(),
+            boot_id: boot_id.clone(),
+            pin: pin
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            continues,
         });
         root.save(&workspace)?;
     }
+    // An agent the host rebooted under picks up its conversation again.
+    let resume_mode = match &workspace.execution {
+        Some(execution) if execution.continues => ResumeMode::Continue,
+        _ => ResumeMode::None,
+    };
 
     let config_path = root.config_path(&request.ws_id);
     let (config, _) = crate::frozen_config::load(&config_path)?;
@@ -169,7 +203,10 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         crate::util::write_atomic(&conf, TMUX_CONF.as_bytes())?;
     }
 
-    let pin = std::env::current_exe().context("Failed to locate the node binary")?;
+    if workspace.agent_kind(&config) == Some("claude") {
+        super::trust::ensure_for_execution(root, &workspace, &config);
+    }
+
     let supervisor = format!(
         "{} sandbox run --node-root {} --node-workspace {}",
         shell_quote(&pin.to_string_lossy()),
@@ -211,7 +248,9 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         let _ = tmux(&socket)
             .args(["kill-session", "-t", &format!("={name}")])
             .output();
-        let pane_id = new_session(&socket, &conf, &name, &working_dir, &config_path)?;
+        let spawn_env = (workspace.isolation == RemoteIsolation::None)
+            .then_some((root.path.as_path(), request.ws_id.as_str()));
+        let pane_id = new_session(&socket, &conf, &name, &working_dir, &config_path, spawn_env)?;
         if !session_secrets.0.is_empty() {
             set_session_env(root, &socket, &name, &session_secrets)?;
         }
@@ -232,7 +271,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                     prompt_file_path: prompt.as_deref(),
                     worktree_root: Some(&worktree),
                     lima_vm_name: None,
-                    resume_mode: Default::default(),
+                    resume_mode: resume_mode.clone(),
                     sandbox_supervisor: Some(&supervisor),
                     agent_path_prefix: status_bin.as_deref(),
                 },
@@ -280,13 +319,15 @@ fn write_status_wrapper(root: &NodeRoot, pin: &Path) -> Result<PathBuf> {
 
 /// Create a detached session and return its pane. The variables that steer
 /// node verbs are kept out of the server's global environment; the session
-/// gets its workspace config explicitly.
+/// gets its workspace config explicitly, and with `spawn_env` the node root
+/// and workspace its agent spawns siblings from.
 fn new_session(
     socket: &Path,
     conf: &Path,
     name: &str,
     cwd: &Path,
     config_path: &Path,
+    spawn_env: Option<(&Path, &str)>,
 ) -> Result<String> {
     let mut cmd = tmux(socket);
     cmd.arg("-f")
@@ -301,9 +342,21 @@ fn new_session(
             config_path.display()
         ))
         .env_remove(crate::frozen_config::FROZEN_CONFIG_ENV)
+        .env_remove(super::spawn::SESSION_ROOT_ENV)
+        .env_remove(super::spawn::SESSION_WORKSPACE_ENV)
         .env_remove(NODE_ROOT_ENV)
         .env_remove("XDG_STATE_HOME")
         .env_remove("TMUX");
+    if let Some((root, ws_id)) = spawn_env {
+        cmd.arg("-e")
+            .arg(format!(
+                "{}={}",
+                super::spawn::SESSION_ROOT_ENV,
+                root.display()
+            ))
+            .arg("-e")
+            .arg(format!("{}={ws_id}", super::spawn::SESSION_WORKSPACE_ENV));
+    }
     let output = cmd.output().context("Failed to run tmux")?;
     if !output.status.success() {
         return Err(anyhow!(

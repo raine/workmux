@@ -168,6 +168,26 @@ pub struct RemoteAgent {
     /// Git status of the workspace on the node, as last observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<crate::git::GitStatus>,
+    /// Why the execution ended under the agent, as the remote last said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<EndReason>,
+}
+
+/// Why a remote execution ended without anyone stopping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    /// The remote host rebooted.
+    HostReboot,
+}
+
+impl EndReason {
+    /// How `list` and `status` show the agent of an ended execution.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HostReboot => "exited (host rebooted)",
+        }
+    }
 }
 
 impl RemoteAgent {
@@ -181,6 +201,7 @@ impl RemoteAgent {
             connected: false,
             last_seen: None,
             git: None,
+            ended: None,
         }
     }
 }

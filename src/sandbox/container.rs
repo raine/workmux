@@ -49,7 +49,7 @@ pub struct SandboxPaths {
     pub config_dir: PathBuf,
 }
 
-const CLAUDE_ONBOARDING_JSON: &str =
+pub const CLAUDE_ONBOARDING_JSON: &str =
     r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#;
 
 impl SandboxPaths {

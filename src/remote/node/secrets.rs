@@ -87,11 +87,16 @@ pub fn save_workspace(root: &NodeRoot, ws_id: &str, secrets: &Secrets) -> Result
     save(root, &root.workspace_secrets_path(ws_id), secrets)
 }
 
+/// The workspace's snapshot alone.
+pub fn workspace(root: &NodeRoot, ws_id: &str) -> Result<Secrets> {
+    load(&root.workspace_secrets_path(ws_id))
+}
+
 /// What an execution of the workspace gets: its snapshot, with the
 /// node-wide token on top for Claude. The token wins because it is the
 /// value `remote login` manages.
 pub fn for_execution(root: &NodeRoot, ws_id: &str, agent: Option<&str>) -> Result<Secrets> {
-    let mut secrets = load(&root.workspace_secrets_path(ws_id))?;
+    let mut secrets = workspace(root, ws_id)?;
     if agent == Some("claude")
         && let Some(token) = node_secrets(root)?.0.remove(CLAUDE_TOKEN)
     {

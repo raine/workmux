@@ -127,7 +127,7 @@ class Node:
         return [
             json.loads(path.read_text())
             for path in sorted(directory.glob("w*.json"))
-            if not path.name.endswith(".config.json")
+            if "." not in path.stem
         ]
 
 
@@ -159,6 +159,13 @@ def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+def commit_project(repo: Path, project: Dict[str, Any]) -> None:
+    """Commit `project` as the repository's `.workmux.yaml`."""
+    (repo / ".workmux.yaml").write_text(yaml.dump(project))
+    git(repo, "add", ".workmux.yaml")
+    git(repo, "commit", "-m", "configure the project")
 
 
 def local_records(env: TmuxEnvironment) -> List[dict]:

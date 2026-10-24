@@ -10,7 +10,7 @@ use crate::multiplexer::{create_backend, detect_backend};
 use crate::remote::RemoteSpec;
 use crate::remote::install::{self, NodeStatus, Pin};
 use crate::remote::transport::Transport;
-use crate::remote::{Placement, client, credentials, doctor, resolve_placement};
+use crate::remote::{Placement, client, credentials, doctor, observe, resolve_placement};
 use crate::workflow::WorkflowContext;
 
 #[derive(Debug, Args)]
@@ -58,6 +58,18 @@ pub enum RemoteCommand {
         #[arg(long)]
         no_hooks: bool,
     },
+    /// List what a remote holds that no workspace uses, and remove it
+    Gc {
+        /// Remote name from `remotes:` in the global config
+        name: String,
+        /// Only list what would be removed
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove without asking, including workspaces whose work exists only
+        /// on the remote
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+    },
     /// Relay one pane of a remote execution into this terminal
     #[command(hide = true)]
     Attach {
@@ -82,13 +94,16 @@ pub fn run(args: RemoteArgs) -> Result<()> {
         Some(RemoteCommand::Setup { name }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;
             install::setup(&spec)?;
-            crate::remote::hooks::setup(&spec, &config)
+            crate::remote::hooks::setup(&spec, &config)?;
+            observe::current(&config, &name);
+            Ok(())
         }
         Some(RemoteCommand::Doctor { name }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;
             if !doctor::run(&spec, &config)? {
                 bail!("remote {name} is not ready");
             }
+            observe::current(&config, &name);
             Ok(())
         }
         Some(RemoteCommand::Login {
@@ -100,15 +115,22 @@ pub fn run(args: RemoteArgs) -> Result<()> {
         }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;
             if import {
-                return credentials::import(&spec, &config, &agent);
+                credentials::import(&spec, &config, &agent)?;
+            } else {
+                let status = credentials::login(&spec, &config, &agent, setup_token, &args)?;
+                if status != 0 {
+                    std::process::exit(status);
+                }
             }
-            let status = credentials::login(&spec, &config, &agent, setup_token, &args)?;
-            if status != 0 {
-                std::process::exit(status);
-            }
+            observe::current(&config, &name);
             Ok(())
         }
         Some(RemoteCommand::Pull { handle, no_hooks }) => pull(config, &handle, !no_hooks),
+        Some(RemoteCommand::Gc {
+            name,
+            dry_run,
+            force,
+        }) => crate::remote::gc::run(&config, &name, dry_run, force),
         Some(RemoteCommand::Attach { name, ex_id, pane }) => {
             crate::remote::attach::run(&config, &name, &ex_id, pane)
         }
@@ -194,6 +216,7 @@ fn status(config: &Config, name: &str) -> String {
         let pin = Pin::for_spec(&spec)?;
         Ok(match install::node_status(&transport, &spec, &pin)? {
             NodeStatus::Ready(hello) => {
+                observe::current(config, name);
                 format!(
                     "ready (workmux {}, protocol {})",
                     hello.version, hello.protocol
