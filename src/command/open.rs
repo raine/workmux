@@ -61,10 +61,29 @@ pub fn run(
         .map(crate::naming::validate_parent_session)
         .transpose()?;
 
-    let remote_records: Vec<Option<WorkspaceRecord>> = resolved_names
+    let mut remote_records: Vec<Option<WorkspaceRecord>> = resolved_names
         .iter()
         .map(|name| crate::remote::cache::find_here(name))
         .collect();
+    // A name that is neither a local worktree nor a known remote workspace
+    // may belong to a workspace a remote agent spawned; ask the remotes.
+    let unknown: Vec<usize> = (0..resolved_names.len())
+        .filter(|&i| {
+            remote_records[i].is_none()
+                && crate::git::find_worktree_in(&resolved_names[i], None).is_err()
+        })
+        .collect();
+    if !unknown.is_empty()
+        && let Ok(config) = config::Config::load(None)
+        && !config.remotes.is_empty()
+    {
+        for name in config.remotes.keys() {
+            crate::remote::observe::current(&config, name);
+        }
+        for i in unknown {
+            remote_records[i] = crate::remote::cache::find_here(&resolved_names[i]);
+        }
+    }
     if let Some(record) = remote_records.iter().flatten().next() {
         let unsupported = [
             (prompt_args.has_any(), "Prompt arguments (-p, -P, -e)"),

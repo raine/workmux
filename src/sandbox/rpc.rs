@@ -145,6 +145,9 @@ pub struct RpcContext {
     /// The supervisor runs on a remote node, where requests that act on
     /// the laptop's worktrees, windows or clipboard cannot be served.
     pub on_node: bool,
+    /// Node root and workspace id of a node supervisor, from its own
+    /// arguments; the guest never names them.
+    pub node_workspace: Option<(PathBuf, String)>,
 }
 
 /// TCP RPC server that accepts guest connections.
@@ -324,6 +327,21 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
             .with_context(|| format!("Failed to parse RPC request: {}", line.trim()))?;
 
         info!(request = request.kind(), "RPC request received");
+
+        if let (
+            RpcRequest::SpawnAgent {
+                prompt,
+                branch_name,
+                background,
+            },
+            Some((root, ws_id)),
+        ) = (&request, &ctx.node_workspace)
+        {
+            let response =
+                handle_node_spawn(root, ws_id, prompt, branch_name.as_deref(), *background);
+            write_response(&mut writer, &response)?;
+            continue;
+        }
 
         if ctx.on_node
             && matches!(
@@ -716,6 +734,63 @@ fn handle_spawn_agent(
         }
         Err(e) => RpcResponse::Error {
             message: format!("Failed to run workmux add: {}", e),
+        },
+    }
+}
+
+/// `node spawn` for the guest's workspace: the sibling is created and
+/// started on this node, and the laptop opens its window when it next
+/// looks at the node.
+fn node_spawn_command(root: &Path) -> std::process::Command {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("workmux"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["node", "spawn", "--json"])
+        .env(crate::remote::node::NODE_ROOT_ENV, root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env_remove(crate::frozen_config::FROZEN_CONFIG_ENV)
+        .env_remove("WM_SANDBOX_GUEST")
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    disable_git_hooks(&mut cmd);
+    cmd
+}
+
+fn handle_node_spawn(
+    root: &Path,
+    ws_id: &str,
+    prompt: &str,
+    branch_name: Option<&str>,
+    background: Option<bool>,
+) -> RpcResponse {
+    let request = crate::remote::node::spawn::SpawnRequest {
+        parent: ws_id.to_string(),
+        branch: branch_name.map(str::to_string),
+        prompt: (!prompt.is_empty()).then(|| prompt.to_string()),
+        background: background.unwrap_or(false),
+    };
+    let output = (|| -> Result<std::process::Output> {
+        let mut child = node_spawn_command(root).spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        stdin.write_all(&serde_json::to_vec(&request)?)?;
+        drop(stdin);
+        Ok(child.wait_with_output()?)
+    })();
+    match output {
+        Ok(output) if output.status.success() => RpcResponse::Ok,
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let message =
+                serde_json::from_str::<crate::remote::protocol::ErrorEnvelope>(stdout.trim())
+                    .map(|envelope| envelope.error.message)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&output.stderr).trim().to_string());
+            RpcResponse::Error {
+                message: format!("workmux add failed: {message}"),
+            }
+        }
+        Err(e) => RpcResponse::Error {
+            message: format!("Failed to run workmux node spawn: {e:#}"),
         },
     }
 }
@@ -1130,6 +1205,7 @@ mod tests {
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
             on_node: false,
+            node_workspace: None,
         }
     }
 
@@ -1407,6 +1483,7 @@ mod tests {
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: allow_unsandboxed,
             on_node: false,
+            node_workspace: None,
         });
 
         let handle = server.spawn(ctx);
@@ -1989,6 +2066,7 @@ mod tests {
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
             on_node: false,
+            node_workspace: None,
         });
 
         let _handle = server.spawn(ctx);

@@ -15,10 +15,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::execution::{tmux, tmux_socket};
-use super::{NodeRoot, Workspace, refuse, validate_id};
+use super::{ExecutionState, NodeRoot, Origin, Workspace, refuse, validate_id};
 use crate::git::{GitStatus, GitStatusCache};
-use crate::multiplexer::{AgentPane, AgentStatus, LivePaneInfo, Multiplexer, tmux::TmuxBackend};
-use crate::remote::protocol::{code, session_name};
+use crate::multiplexer::{
+    AgentPane, AgentStatus, EndReason, LivePaneInfo, Multiplexer, tmux::TmuxBackend,
+};
+use crate::remote::protocol::{WorkspaceIdentity, code, session_name};
 use crate::state::{AgentStateCache, StateStore};
 
 /// How often a streaming watch looks at the node.
@@ -70,6 +72,25 @@ pub struct ObservedWorkspace {
     /// workspace's base; `behind` and `base_branch` are the laptop's to fill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitStatus>,
+    /// Set while a workspace that a remote agent spawned runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling: Option<Sibling>,
+    /// Set when the execution ended without being stopped; `start-execution`
+    /// starts it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<EndReason>,
+}
+
+/// What the laptop needs to adopt a workspace a remote agent spawned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sibling {
+    pub identity: WorkspaceIdentity,
+    /// Worktree path on the node.
+    pub worktree: String,
+    /// Node binary that started the execution, under `bin/`.
+    pub pin: String,
+    #[serde(flatten)]
+    pub origin: Origin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +187,8 @@ struct Observer {
     git_cache: GitStatusCache,
     /// Last git status of each workspace and when it was read.
     git: HashMap<String, (Instant, Option<GitStatus>)>,
+    /// Kernel boot this process runs in.
+    boot: Option<String>,
 }
 
 impl Observer {
@@ -180,6 +203,7 @@ impl Observer {
             host: hostname(),
             git_cache: GitStatusCache::default(),
             git: HashMap::new(),
+            boot: super::boot_id(),
         })
     }
 
@@ -223,7 +247,14 @@ impl Observer {
                 )?
                 .0
         };
-        let mut snapshot = build_snapshot(now(), &workspaces, live, &agents, self.host.as_deref());
+        let mut snapshot = build_snapshot(
+            now(),
+            &workspaces,
+            live,
+            &agents,
+            self.host.as_deref(),
+            self.boot.as_deref(),
+        );
         self.git
             .retain(|ws_id, _| workspaces.iter().any(|ws| ws.identity.ws_id == *ws_id));
         for observed in &mut snapshot.workspaces {
@@ -302,13 +333,14 @@ fn hostname() -> Option<String> {
 }
 
 /// `host` is the title tmux gives untitled panes, which says nothing about
-/// the agent.
+/// the agent; `boot` is the current kernel boot.
 fn build_snapshot(
     now: u64,
     workspaces: &[Workspace],
     live: &HashMap<String, LivePaneInfo>,
     agents: &[AgentPane],
     host: Option<&str>,
+    boot: Option<&str>,
 ) -> Snapshot {
     let session_panes = session_panes(live);
     let workspaces = workspaces
@@ -342,16 +374,35 @@ fn build_snapshot(
                         agent,
                     }
                 })
-                .collect();
+                .collect::<Vec<ObservedPane>>();
+            let ended = (execution.ended_by_reboot(boot) && !panes.iter().any(|pane| pane.alive))
+                .then_some(EndReason::HostReboot);
             Some(ObservedWorkspace {
                 ws_id: ws.identity.ws_id.clone(),
                 ex_id: execution.ex_id.clone(),
                 panes,
                 git: None,
+                sibling: sibling(ws),
+                ended,
             })
         })
         .collect();
     Snapshot { now, workspaces }
+}
+
+/// The adoption details of a spawned workspace whose execution runs.
+fn sibling(ws: &Workspace) -> Option<Sibling> {
+    let origin = ws.origin.as_ref()?;
+    let execution = ws.execution.as_ref()?;
+    if execution.state != ExecutionState::Running {
+        return None;
+    }
+    Some(Sibling {
+        identity: ws.identity.clone(),
+        worktree: ws.worktree_path.to_string_lossy().into_owned(),
+        pin: execution.pin.clone()?,
+        origin: origin.clone(),
+    })
 }
 
 /// The pane of each node session. Each has one; the lowest id wins if a
@@ -523,6 +574,9 @@ mod tests {
             ex_id: ex_id.into(),
             state: ExecutionState::Running,
             panes: panes.iter().map(|&index| PaneProgress { index }).collect(),
+            boot_id: None,
+            pin: None,
+            continues: false,
         });
         ws
     }
@@ -570,7 +624,7 @@ mod tests {
             ("%4".to_string(), live("x0123456789ab-1")),
         ]);
         let agents = [agent("%3", AgentStatus::Done)];
-        let snapshot = build_snapshot(7, &[ws], &live, &agents, Some("node-1"));
+        let snapshot = build_snapshot(7, &[ws], &live, &agents, Some("node-1"), None);
         let panes = &snapshot.workspaces[0].panes;
         assert_eq!(snapshot.now, 7);
         assert!(panes[0].alive && panes[1].alive);
@@ -589,7 +643,7 @@ mod tests {
         let live = HashMap::from([("%3".to_string(), live("x0123456789ab-0"))]);
         let mut untitled = agent("%3", AgentStatus::Working);
         untitled.pane_title = Some("node-1".into());
-        let snapshot = build_snapshot(7, &[ws], &live, &[untitled], Some("node-1"));
+        let snapshot = build_snapshot(7, &[ws], &live, &[untitled], Some("node-1"), None);
         let observed = snapshot.workspaces[0].panes[0].agent.as_ref().unwrap();
         assert_eq!(observed.title, None);
     }
@@ -597,10 +651,38 @@ mod tests {
     #[test]
     fn snapshot_without_server_marks_panes_dead() {
         let ws = workspace("w0123456789ab", "x0123456789ab", &[0], None);
-        let snapshot = build_snapshot(7, &[ws], &HashMap::new(), &[], None);
+        let snapshot = build_snapshot(7, &[ws], &HashMap::new(), &[], None, None);
         let pane = &snapshot.workspaces[0].panes[0];
         assert!(!pane.alive);
         assert!(pane.agent.is_none());
+    }
+
+    #[test]
+    fn a_reboot_ends_executions_until_one_starts() {
+        let mut ws = workspace("w0123456789ab", "x0123456789ab", &[0], None);
+        let execution = ws.execution.as_mut().unwrap();
+        execution.boot_id = Some("boot-1".into());
+        let ended = |ws: &Workspace, live: &HashMap<String, LivePaneInfo>| {
+            build_snapshot(7, std::slice::from_ref(ws), live, &[], None, Some("boot-2")).workspaces
+                [0]
+            .ended
+        };
+        let none = HashMap::new();
+        assert_eq!(ended(&ws, &none), Some(EndReason::HostReboot));
+        let session = HashMap::from([("%3".to_string(), live("x0123456789ab-0"))]);
+        assert_eq!(ended(&ws, &session), None);
+
+        // The same boot: the session died for another reason.
+        ws.execution.as_mut().unwrap().boot_id = Some("boot-2".into());
+        assert_eq!(ended(&ws, &none), None);
+
+        // A resume that failed before its agents started.
+        let execution = ws.execution.as_mut().unwrap();
+        execution.continues = true;
+        execution.state = ExecutionState::Starting;
+        assert_eq!(ended(&ws, &none), Some(EndReason::HostReboot));
+        ws.execution.as_mut().unwrap().state = ExecutionState::Running;
+        assert_eq!(ended(&ws, &none), None);
     }
 
     #[test]

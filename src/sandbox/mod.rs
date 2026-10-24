@@ -14,9 +14,11 @@ pub mod rpc;
 pub(crate) mod shims;
 pub(crate) mod toolchain;
 
+pub use container::CLAUDE_ONBOARDING_JSON;
 pub use container::DEFAULT_IMAGE_REGISTRY;
 pub use container::DOCKERFILE_BASE;
 pub use container::KNOWN_AGENTS;
+pub use container::SandboxPaths;
 pub(crate) use container::build_docker_run_args;
 pub use container::build_image;
 pub use container::dockerfile_for_agent;

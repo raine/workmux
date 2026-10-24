@@ -11,6 +11,7 @@ pub mod cache;
 pub mod client;
 pub mod credentials;
 pub mod doctor;
+pub mod gc;
 pub mod git;
 pub mod homecoming;
 pub mod hooks;
@@ -20,6 +21,7 @@ pub mod node;
 pub mod observe;
 pub mod portable;
 pub mod protocol;
+pub mod siblings;
 pub mod transport;
 
 use std::path::PathBuf;

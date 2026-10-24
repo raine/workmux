@@ -31,8 +31,8 @@ pub use open::open;
 pub use remove::{fallback_worktree_path, remove, remove_quiet};
 pub use rename::rename;
 pub use setup::{
-    provision_environment, resolve_pane_configuration, validate_prompt_consumption,
-    write_prompt_file,
+    prompt_file_name, provision_environment, resolve_pane_configuration,
+    validate_prompt_consumption, write_prompt_file,
 };
 
 // Re-export commonly used types for convenience

@@ -1,11 +1,11 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::config::MuxMode;
-use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
+use crate::multiplexer::{AgentStatus, EndReason, create_backend, detect_backend};
 use crate::remote::cache::{self, Homecoming, WorkspaceRecord, WorkspaceState};
 use crate::util::format_compact_age;
 use crate::workflow::types::AgentStatusSummary;
@@ -159,20 +159,36 @@ struct JsonWorktree {
     remote: Option<String>,
 }
 
-/// Remote workspaces from the local cache; listing never contacts a node.
-fn remote_records(project_root: Option<&Path>, filter: &[String]) -> Vec<WorkspaceRecord> {
-    match project_root {
+/// Remote workspaces of `project_root` (all without one), after asking
+/// their nodes for the workspaces their agents spawned, and the workspaces
+/// whose execution ended under their agent.
+fn remote_records(
+    config: &config::Config,
+    project_root: Option<&Path>,
+    filter: &[String],
+) -> (Vec<WorkspaceRecord>, HashMap<String, EndReason>) {
+    let records = || match project_root {
         Some(root) => cache::for_project(root),
         None => cache::all(),
-    }
-    .into_iter()
-    .filter(|record| {
-        filter.is_empty()
-            || filter
-                .iter()
-                .any(|token| *token == record.handle || *token == record.branch)
-    })
-    .collect()
+    };
+    let observations = crate::remote::agents::observations(config, &records(), true);
+    let records: Vec<WorkspaceRecord> = records()
+        .into_iter()
+        .filter(|record| {
+            filter.is_empty()
+                || filter
+                    .iter()
+                    .any(|token| *token == record.handle || *token == record.branch)
+        })
+        .collect();
+    let ended = records
+        .iter()
+        .filter_map(|record| {
+            let reason = observations.get(&record.remote)?.of(record)?.ended?;
+            Some((record.ws_id.clone(), reason))
+        })
+        .collect();
+    (records, ended)
 }
 
 struct ProjectWorktree {
@@ -221,14 +237,15 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
     let mux = create_backend(detect_backend());
     let mut worktrees = Vec::new();
     let remotes;
+    let ended;
     if all {
         for root in discover_project_roots(mux.as_ref())? {
             worktrees.extend(list_project(&root, mux.as_ref(), show_pr && !json, filter)?);
         }
-        remotes = remote_records(None, filter);
+        (remotes, ended) = remote_records(&display_config, None, filter);
     } else {
         let root = git::get_main_worktree_root()?;
-        remotes = remote_records(Some(&root), filter);
+        (remotes, ended) = remote_records(&display_config, Some(&root), filter);
         let project = project_name(&root);
         worktrees.extend(
             workflow::list(&display_config, mux.as_ref(), show_pr && !json, filter)?
@@ -354,31 +371,36 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
                 path_str,
             }
         })
-        .chain(remotes.iter().map(|record| WorktreeRow {
-            project: project_name(&record.project_root),
-            branch: record.branch.clone(),
-            age: format_compact_age(now.saturating_sub(record.created_at)),
-            pr_status: "-".to_string(),
-            agent_status: "-".to_string(),
-            mux_status: if remote_open(record) {
-                "✓".to_string()
-            } else {
-                "-".to_string()
-            },
-            unmerged_status: "-".to_string(),
-            path_str: match (&record.homecoming, record.state) {
-                (Some(Homecoming::Merged { .. }), _) => {
-                    format!("remote:{} (merged, cleanup pending)", record.remote)
-                }
-                (Some(Homecoming::Pulled { .. }), _) => {
-                    format!("remote:{} (pulled, cleanup pending)", record.remote)
-                }
-                (Some(_), _) => format!("remote:{} (merge in progress)", record.remote),
-                (None, WorkspaceState::Ready) => format!("remote:{}", record.remote),
-                (None, WorkspaceState::Provisioning) => {
-                    format!("remote:{} (provisioning)", record.remote)
-                }
-            },
+        .chain(remotes.iter().map(|record| {
+            WorktreeRow {
+                project: project_name(&record.project_root),
+                branch: record.branch.clone(),
+                age: format_compact_age(now.saturating_sub(record.created_at)),
+                pr_status: "-".to_string(),
+                agent_status: ended
+                    .get(&record.ws_id)
+                    .map_or("-", |reason| reason.label())
+                    .to_string(),
+                mux_status: if remote_open(record) {
+                    "✓".to_string()
+                } else {
+                    "-".to_string()
+                },
+                unmerged_status: "-".to_string(),
+                path_str: match (&record.homecoming, record.state) {
+                    (Some(Homecoming::Merged { .. }), _) => {
+                        format!("remote:{} (merged, cleanup pending)", record.remote)
+                    }
+                    (Some(Homecoming::Pulled { .. }), _) => {
+                        format!("remote:{} (pulled, cleanup pending)", record.remote)
+                    }
+                    (Some(_), _) => format!("remote:{} (merge in progress)", record.remote),
+                    (None, WorkspaceState::Ready) => format!("remote:{}", record.remote),
+                    (None, WorkspaceState::Provisioning) => {
+                        format!("remote:{} (provisioning)", record.remote)
+                    }
+                },
+            }
         }))
         .collect();
 
