@@ -469,8 +469,10 @@ fn classify_ssh_failure(name: &str, host: &str, output: &Output) -> SshFailure {
     } else if stderr.contains("timed out") {
         (SshFailureKind::Other, "connection timed out".to_string())
     } else {
+        // ssh reports a keepalive timeout only at a log level below the
+        // relay's LogLevel=ERROR, so a dropped connection exits silently.
         let reason = match output.stderr_line() {
-            line if line.is_empty() => "ssh failed without an error message".to_string(),
+            line if line.is_empty() => "connection lost".to_string(),
             line => line,
         };
         (SshFailureKind::Other, reason)
@@ -803,6 +805,7 @@ mod tests {
                 "kex_exchange_identification: read: Connection reset",
                 "kex_exchange",
             ),
+            ("", "connection lost"),
         ];
         for (stderr, expected) in cases {
             let message = classify_ssh_failure("r", "h", &output(stderr)).to_string();
