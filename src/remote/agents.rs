@@ -2,8 +2,12 @@
 //! the node reports, whether or not a local window relays it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
 
 use super::RemoteSpec;
 use super::cache::{self, WorkspaceRecord};
@@ -12,7 +16,7 @@ use super::node::observe::{
     CaptureRequest, CaptureResponse, ObservedAgent, SendRequest, SendResponse,
 };
 use super::observe::{self, Observation};
-use super::protocol;
+use super::protocol::{self, DiffMode, DiffRequest, DiffResponse};
 use crate::config::Config;
 use crate::multiplexer::{AgentPane, RemoteAgent, RemoteRef};
 
@@ -60,6 +64,13 @@ pub fn rows(
             continue;
         };
         let observation = observations.get(&record.remote);
+        let observed = observation.and_then(|o| o.execution(&record.ws_id, &execution.ex_id));
+        let git = observed.and_then(|o| o.git.clone()).map(|mut status| {
+            let base = record.base_branch();
+            status.behind = behind(record, &base);
+            status.base_branch = base;
+            status
+        });
         let remote = |pane: usize, attached: bool| RemoteAgent {
             at: RemoteRef {
                 remote: record.remote.clone(),
@@ -73,6 +84,7 @@ pub fn rows(
             attached,
             connected: observation.is_some_and(|o| o.is_connected(now)),
             last_seen: observation.and_then(|o| o.last_seen),
+            git: git.clone(),
         };
         let local = |pane: usize| {
             attached.iter().find(|row| {
@@ -84,7 +96,6 @@ pub fn rows(
                 })
             })
         };
-        let observed = observation.and_then(|o| o.execution(&record.ws_id, &execution.ex_id));
         let Some(observed) = observed else {
             let mut panes: Vec<&AgentPane> = execution
                 .panes
@@ -129,6 +140,37 @@ pub fn rows(
     rows
 }
 
+/// How long a [`behind`] count is reused.
+const BEHIND_TTL: Duration = Duration::from_secs(10);
+
+/// Commits `base` gained since `record`'s workspace was created from it.
+/// Views ask on every refresh, so counts are reused for a while.
+fn behind(record: &WorkspaceRecord, base: &str) -> usize {
+    type Key = (PathBuf, String, String);
+    static COUNTS: OnceLock<Mutex<HashMap<Key, (Instant, usize)>>> = OnceLock::new();
+    let key = (
+        record.project_root.clone(),
+        record.base_sha.clone(),
+        base.to_string(),
+    );
+    let mut counts = COUNTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((at, count)) = counts.get(&key)
+        && at.elapsed() < BEHIND_TTL
+    {
+        return *count;
+    }
+    let range = format!("{}..{base}", record.base_sha);
+    let count = super::git::run(&record.project_root, &["rev-list", "--count", &range])
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0);
+    counts.insert(key, (Instant::now(), count));
+    count
+}
+
 fn detached_row(
     record: &WorkspaceRecord,
     agent: Option<&ObservedAgent>,
@@ -162,7 +204,8 @@ fn detached_row(
 /// remotes of those workspaces.
 pub fn for_views(config: &Config, agents: Vec<AgentPane>, now: u64) -> Vec<AgentPane> {
     let (mut local, attached) = crate::state::store::split_remote(agents);
-    let records = cache::all();
+    let mut records = cache::all();
+    records.retain(|record| !record.cleanup_pending());
     if records.is_empty() {
         return local;
     }
@@ -322,6 +365,57 @@ pub fn capture_from(
     Ok(response.text)
 }
 
+/// A workspace's diff as its node last returned it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedDiff {
+    pub text: String,
+    pub truncated: bool,
+    /// When it was fetched (laptop clock).
+    pub fetched_at: u64,
+}
+
+/// The diff of workspace `ws_id` last fetched from `remote`.
+pub fn cached_diff(remote: &str, ws_id: &str, mode: DiffMode) -> Option<CachedDiff> {
+    let bytes = std::fs::read(cache::diff_path(remote, ws_id, mode).ok()?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Fetch the diff of workspace `ws_id` from `remote` and keep it for
+/// [`cached_diff`].
+pub fn fetch_diff(
+    config: &Config,
+    remote: &str,
+    ws_id: &str,
+    mode: DiffMode,
+) -> Result<CachedDiff> {
+    let spec = RemoteSpec::resolve(config, remote)?;
+    let node = Node::connect_reader(&spec, protocol::DIFF)?;
+    let response: DiffResponse = node.call(
+        protocol::DIFF,
+        &DiffRequest {
+            ws_id: ws_id.to_string(),
+            mode,
+        },
+        false,
+    )?;
+    let diff = CachedDiff {
+        text: response.text,
+        truncated: response.truncated,
+        fetched_at: cache::now(),
+    };
+    let path = cache::diff_path(remote, ws_id, mode)?;
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(serde_json::to_vec(&diff)?))
+        .and_then(|bytes| crate::util::write_atomic(&path, &bytes));
+    if let Err(err) = saved {
+        tracing::debug!(path = %path.display(), "failed to cache a remote diff: {err:#}");
+    }
+    Ok(diff)
+}
+
 fn no_execution(record: &WorkspaceRecord) -> anyhow::Error {
     anyhow!(
         "remote workspace '{}' has no running agent; `workmux open {}` starts it",
@@ -368,6 +462,7 @@ mod tests {
                 ws_id: "w1".into(),
                 ex_id: "x1".into(),
                 panes,
+                git: None,
             }],
         }
     }

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -78,6 +78,32 @@ impl RpcRequest {
             RpcRequest::Close { .. } => "Close",
             RpcRequest::ClipboardRead { .. } => "ClipboardRead",
         }
+    }
+}
+
+/// Why a remote agent cannot make `request`, and what works instead. The
+/// node names a workspace's worktree after its handle.
+fn node_refusal(request: &RpcRequest, worktree: &Path) -> String {
+    let handle = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<handle>".to_string());
+    match request {
+        RpcRequest::Merge { .. } => format!(
+            "merging runs on the laptop for remote workspaces: run `workmux merge {handle}` \
+             there; it brings this workspace's work home and merges it"
+        ),
+        RpcRequest::ClipboardRead { .. } => "the clipboard is on the laptop, which remote \
+             agents cannot read; copy the image into the worktree instead"
+            .to_string(),
+        RpcRequest::SpawnAgent { .. } => {
+            "remote agents cannot start agents; run `workmux add --remote <name>` on the laptop"
+                .to_string()
+        }
+        RpcRequest::Close { .. } => {
+            format!("the window is on the laptop: run `workmux close {handle}` there")
+        }
+        _ => format!("{} is not available to remote agents", request.kind()),
     }
 }
 
@@ -311,7 +337,7 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
             write_response(
                 &mut writer,
                 &RpcResponse::Error {
-                    message: format!("{} is not available to remote agents", request.kind()),
+                    message: node_refusal(&request, &ctx.worktree_path),
                 },
             )?;
             continue;
@@ -1075,6 +1101,22 @@ impl RpcClient {
 mod tests {
     use super::*;
     use crate::multiplexer;
+
+    #[test]
+    fn node_refusals_say_what_to_run_on_the_laptop() {
+        let worktree = Path::new("/node/projects/p1/worktrees/feat");
+        let merge: RpcRequest = serde_json::from_str(
+            r#"{"type":"Merge","name":"feat","into":null,"rebase":false,"squash":false,
+                "ignore_uncommitted":false,"keep":false,"no_verify":false,"no_hooks":false,
+                "notification":false}"#,
+        )
+        .unwrap();
+        assert!(node_refusal(&merge, worktree).contains("`workmux merge feat`"));
+        let paste = RpcRequest::ClipboardRead {
+            mime: "image/png".into(),
+        };
+        assert!(node_refusal(&paste, worktree).contains("clipboard is on the laptop"));
+    }
 
     fn test_context(worktree_path: &std::path::Path) -> RpcContext {
         RpcContext {

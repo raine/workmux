@@ -4,45 +4,41 @@
 
 use anyhow::{Context, Result};
 
-use super::execution::{kill_execution, tmux_socket};
-use super::{
-    NodeRoot, base_ref, git, hook_env, refuse, run_hook, stop_containers_mounting, validate_id,
-};
-use crate::config::RemoteIsolation;
+use super::git::{matches, quiesce, workspace_refs};
+use super::{NodeRoot, git, hook_env, refuse, run_hook, validate_id};
 use crate::remote::protocol::{RemoveRequest, RemoveResponse, code};
 
 pub fn remove(root: &NodeRoot, request: RemoveRequest) -> Result<RemoveResponse> {
     validate_id(&request.ws_id, 'w', "workspace id")?;
     let _lock = root.lock_workspace(&request.ws_id)?;
-    let Some(workspace) = root.load(&request.ws_id)? else {
+    let Some(mut workspace) = root.load(&request.ws_id)? else {
         root.forget(&request.ws_id)?;
         return Ok(RemoveResponse {
             already_removed: true,
         });
     };
-    let worktree = &workspace.worktree_path;
+    let worktree = &workspace.worktree_path.clone();
     let has_worktree = worktree.join(".git").exists();
 
-    if !request.force && has_worktree {
-        let status = git(worktree, &["status", "--porcelain"])?;
-        if !status.trim().is_empty() {
+    // An expected snapshot is checked again once the agent has stopped, so
+    // nothing it wrote in between is deleted; hooks run only after that.
+    if let Some(expect) = &request.expect
+        && has_worktree
+    {
+        let handle = workspace.identity.handle.clone();
+        if !matches(&workspace, expect)? {
             return Err(refuse(
-                code::UNSAVED_WORK,
-                format!(
-                    "the worktree on the node has uncommitted changes:\n{}",
-                    status.trim_end()
-                ),
+                code::DIVERGED,
+                format!("'{handle}' changed on the node after it was exported"),
             ));
         }
-        let range = format!("{}..HEAD", workspace.identity.base_sha);
-        let commits = git(worktree, &["rev-list", "--count", &range])?;
-        if commits.trim() != "0" {
+        quiesce(root, &mut workspace)?;
+        if !matches(&workspace, expect)? {
             return Err(refuse(
-                code::UNSAVED_WORK,
+                code::DIVERGED,
                 format!(
-                    "branch '{}' has {} commit(s) that exist only on the node",
-                    workspace.identity.branch,
-                    commits.trim()
+                    "'{handle}' changed on the node after it was exported; its agent is \
+                     stopped"
                 ),
             ));
         }
@@ -61,12 +57,7 @@ pub fn remove(root: &NodeRoot, request: RemoveRequest) -> Result<RemoveResponse>
         }
     }
 
-    if let Some(execution) = &workspace.execution {
-        kill_execution(&tmux_socket(root)?, &execution.ex_id);
-    }
-    if workspace.isolation == RemoteIsolation::Container {
-        stop_containers_mounting(worktree)?;
-    }
+    quiesce(root, &mut workspace)?;
 
     let repo = &workspace.repo_path;
     if repo.join(".git").is_dir() {
@@ -87,7 +78,9 @@ pub fn remove(root: &NodeRoot, request: RemoveRequest) -> Result<RemoveResponse>
             git(repo, &["branch", "-D", &workspace.identity.branch])
                 .context("Failed to delete the branch")?;
         }
-        let _ = git(repo, &["update-ref", "-d", &base_ref(&request.ws_id)]);
+        for name in workspace_refs(&request.ws_id) {
+            let _ = git(repo, &["update-ref", "-d", &name]);
+        }
     }
     root.forget(&request.ws_id)?;
     Ok(RemoveResponse {

@@ -141,7 +141,10 @@ impl<'a> RowContext<'a> {
 
         let pane_title = connectivity
             .or_else(|| build_pane_title(agent, &primary, &secondary, &label_worktree, &project));
-        let git_status = app.git_statuses.get(&agent.path);
+        let git_status = match &agent.remote {
+            Some(remote) => remote.git.as_ref(),
+            None => app.git_statuses.get(&agent.path),
+        };
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
         let kind =

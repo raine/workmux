@@ -353,6 +353,7 @@ mod tests {
                         prompt: None,
                     }),
                 }],
+                git: None,
             }],
         })
     }

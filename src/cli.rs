@@ -1184,24 +1184,19 @@ pub fn run() -> Result<()> {
             no_verify,
             no_hooks,
             notification,
-        } => reject_remote("merge", name.iter()).and_then(|()| {
-            command::merge::run(
-                name.as_deref(),
-                into.as_deref(),
-                ignore_uncommitted,
-                rebase,
-                squash,
-                keep,
-                cleanup,
-                no_verify,
-                no_hooks,
-                notification,
-            )
-        }),
-        Commands::Rebase { name } => {
-            reject_remote("rebase", name.iter())?;
-            command::rebase::run(name.as_deref())
-        }
+        } => command::merge::run(
+            name.as_deref(),
+            into.as_deref(),
+            ignore_uncommitted,
+            rebase,
+            squash,
+            keep,
+            cleanup,
+            no_verify,
+            no_hooks,
+            notification,
+        ),
+        Commands::Rebase { name } => command::rebase::run(name.as_deref()),
         Commands::Remove {
             names,
             gone,
