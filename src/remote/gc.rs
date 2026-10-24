@@ -23,7 +23,7 @@ const GRACE_SECS: u64 = 10 * 60;
 pub fn run(config: &Config, name: &str, dry_run: bool, force: bool) -> Result<()> {
     let spec = RemoteSpec::resolve(config, name)?;
     let node = Node::connect_reader(&spec, protocol::GC)?;
-    super::observe::current(config, name);
+    super::observe::current_on(&node);
     let records: Vec<WorkspaceRecord> = cache::all()
         .into_iter()
         .filter(|record| record.remote == name)
