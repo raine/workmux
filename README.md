@@ -90,6 +90,8 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 - Copy or symlink configuration files (`.env`, `node_modules`) into new
   worktrees
 - [Sandbox agents](#sandbox) in containers or VMs for enhanced security
+- [Run agents on a remote host](https://workmux.raine.dev/guide/sandbox/remote/)
+  over SSH while others stay local
 - [Automatic branch name generation](#automatic-branch-name-generation) from
   prompts using LLM
 - Shell completions
@@ -679,6 +681,11 @@ immediately. If the branch doesn't exist, it will be created automatically.
   `--agent`).
 - `-b, --background`: Create the tmux window in the background without switching
   to it. Useful with `--prompt-editor`.
+- `--remote [<name>]`: Create the workspace on a
+  [remote host](https://workmux.raine.dev/guide/sandbox/remote/). The name is
+  optional when `placement` names a remote or only one is configured. Put the
+  branch name first: `workmux add my-branch --remote`.
+- `--local`: Create the workspace locally even when `placement` names a remote.
 - `-w, --with-changes`: Move uncommitted changes from the current worktree to
   the new worktree, then reset the original worktree to a clean state. Useful
   when you've started working on main and want to move your branches to a new

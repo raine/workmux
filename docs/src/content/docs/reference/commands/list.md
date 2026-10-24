@@ -42,6 +42,10 @@ workmux list my-feature
 workmux list feature-auth feature-api
 ```
 
+## Remote workspaces
+
+Workspaces on [remote hosts](/guide/sandbox/remote/) are listed alongside local worktrees. Their path names the remote instead of a local directory, with a note while a workspace is still being set up or has a merge or cleanup in progress. In JSON output, they carry a `remote` field with the remote's name, and `path` is the worktree's path on the remote. Local worktrees have no `remote` field.
+
 ## Example output
 
 ```
