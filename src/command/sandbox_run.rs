@@ -20,7 +20,7 @@ use crate::sandbox::build_docker_run_args;
 use crate::sandbox::ensure_sandbox_config_dirs;
 use crate::sandbox::lima;
 use crate::sandbox::network_proxy::NetworkProxy;
-use crate::sandbox::rpc::{RpcContext, RpcServer, generate_token};
+use crate::sandbox::rpc::{NodeWorkspace, RpcContext, RpcServer, generate_token};
 use crate::sandbox::shims;
 use crate::sandbox::toolchain;
 use crate::state::StateStore;
@@ -159,8 +159,7 @@ fn parse_bridge_gateway(text: &str) -> Result<Ipv4Addr> {
 }
 
 /// Start RPC server and return (server, port, token, context).
-/// Shared setup between Lima and Container backends. Only a node binds a
-/// specific address, so `bind_ip` also marks the agent as remote.
+/// Shared setup between Lima and Container backends.
 #[allow(clippy::too_many_arguments)]
 fn start_rpc(
     config: &Config,
@@ -193,8 +192,10 @@ fn start_rpc(
         allowed_commands,
         detected_toolchain,
         allow_unsandboxed_host_exec,
-        on_node: bind_ip.is_some(),
-        node_workspace: node.map(|(root, ws_id)| (root.path.clone(), ws_id.to_string())),
+        node: node.map(|(root, ws_id)| NodeWorkspace {
+            root: root.path.clone(),
+            ws_id: ws_id.to_string(),
+        }),
     });
 
     Ok((rpc_server, rpc_port, rpc_token, ctx))
