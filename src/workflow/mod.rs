@@ -24,7 +24,9 @@ pub use agent_resolve::{
     resolve_worktree_agents, resolve_worktree_agents_from_snapshot,
 };
 pub use cleanup::run_deferred_cleanup_worker;
-pub use create::{create, create_headless, create_with_changes};
+pub use create::{
+    create, create_headless, create_with_changes, project_suffixed_handle, suffix_taken_handle,
+};
 pub use list::{list, list_in};
 pub use merge::{MergeConflict, merge};
 pub use open::open;

@@ -21,7 +21,7 @@ use super::protocol::{
     RemoveRequest, RemoveResponse, StartRequest, StartResponse, WorkspaceIdentity, code,
 };
 use crate::cmd::Cmd;
-use crate::config::{Config, ConfigLocation};
+use crate::config::{Config, ConfigLocation, MuxMode};
 use crate::multiplexer::{CreateWindowParams, Multiplexer};
 use crate::prompt::Prompt;
 use crate::shell::shell_quote;
@@ -34,6 +34,8 @@ const TRANSFER_LIMIT: u64 = 64 * 1024 * 1024;
 pub struct CreateRequest<'a> {
     pub branch: &'a str,
     pub handle: &'a str,
+    /// The handle came from `--name`, so it is never suffixed.
+    pub explicit_name: bool,
     pub base: Option<&'a str>,
     pub prompt: Option<&'a Prompt>,
     pub agent: Option<&'a str>,
@@ -59,16 +61,20 @@ pub fn create(
     context.ensure_mux_running()?;
     let project_root = crate::util::canon_or_self(&context.main_worktree_root);
 
-    let resume = match cache::claimed(&project_root, request.handle, request.branch) {
+    let mut handle = request.handle.to_string();
+    let resume = match cache::claimed(&project_root, &handle, request.branch) {
         Some(record)
-            if record.handle == request.handle
-                && record.branch == request.branch
+            if record.branch == request.branch
                 && record.state == WorkspaceState::Provisioning
-                && record.remote == spec.name =>
+                && record.remote == spec.name
+                && (record.handle == handle
+                    || (!request.explicit_name
+                        && record.handle
+                            == crate::workflow::project_suffixed_handle(context, &handle))) =>
         {
             Some(record)
         }
-        Some(record) if record.handle == request.handle => bail!(
+        Some(record) if record.handle == handle => bail!(
             "'{}' already exists as a remote workspace on '{}'. Use `workmux open {}`",
             record.handle,
             record.remote,
@@ -80,13 +86,36 @@ pub fn create(
             record.handle,
             record.remote
         ),
-        None => None,
+        None => {
+            // Local add's rule for a window name another repository holds:
+            // an implicit name gets this project's suffix.
+            if !request.explicit_name
+                && context.mux.window_exists(&context.prefix, &handle)?
+                && !crate::git::worktree_exists_in(request.branch, Some(&context.execution_dir))?
+            {
+                (handle, _) =
+                    crate::workflow::suffix_taken_handle(context, MuxMode::Window, &handle)?;
+                if let Some(record) = cache::claimed(&project_root, &handle, request.branch) {
+                    bail!(
+                        "'{}' already exists as a remote workspace on '{}'. Use `workmux open \
+                         {}`, or pick another name with --name",
+                        record.handle,
+                        record.remote,
+                        record.handle
+                    );
+                }
+            }
+            None
+        }
     };
-    let window_name = crate::multiplexer::util::prefixed(&context.prefix, request.handle);
+    let window_name = match &resume {
+        Some(record) => record.window_name.clone(),
+        None => crate::multiplexer::util::prefixed(&context.prefix, &handle),
+    };
     if let Some(conflict) = local_conflict(
         context,
         request.branch,
-        request.handle,
+        &handle,
         &window_name,
         resume.is_none(),
         "\nHint: use --name to pick another name.",
@@ -123,12 +152,12 @@ pub fn create(
                 &spec.name,
                 cache::project_id_of(&project_root),
                 project_root.clone(),
-                request.handle,
+                &handle,
                 request.branch,
                 base_sha,
                 Some(base_label),
                 window_name.clone(),
-                context.worktree_base_dir()?.join(request.handle),
+                context.worktree_base_dir()?.join(&handle),
             )
         }
     };
