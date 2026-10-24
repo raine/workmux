@@ -62,6 +62,49 @@ pub fn create_headless(
     }
 }
 
+/// `handle` with this project's slug, the name a new workspace takes when
+/// another repository's workspace holds `handle`.
+pub fn project_suffixed_handle(context: &WorkflowContext, handle: &str) -> String {
+    let project_name = context
+        .main_worktree_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+    let mut project_slug = slug::slugify(project_name);
+    if project_slug.is_empty() || project_slug.chars().all(|c| c.is_ascii_digit()) {
+        project_slug = format!(
+            "repo-{}",
+            if project_slug.is_empty() {
+                "unnamed"
+            } else {
+                &project_slug
+            }
+        );
+    }
+    format!("{}-{}", handle, project_slug)
+}
+
+/// Switch to [`project_suffixed_handle`] because the target named after
+/// `handle` exists while no worktree has the branch. Says so on stderr, and
+/// returns the handle and whether its target exists too.
+pub fn suffix_taken_handle(
+    context: &WorkflowContext,
+    mode: MuxMode,
+    handle: &str,
+) -> Result<(String, bool)> {
+    let taken = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, handle);
+    let suffixed = project_suffixed_handle(context, handle);
+    let suffixed_target = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, &suffixed);
+    eprintln!(
+        "workmux: {} '{}' exists in another repository, using '{}'",
+        taken.kind(),
+        taken.full_name(),
+        suffixed_target.full_name()
+    );
+    let exists = suffixed_target.exists()?;
+    Ok((suffixed, exists))
+}
+
 fn create_impl(
     context: &WorkflowContext,
     args: CreateArgs,
@@ -133,41 +176,11 @@ fn create_impl(
             &context.prefix,
             requested_target_name,
         );
-        let full_target_name = target.full_name();
         let mut target_exists = target.exists()?;
         let mut current_target_name = requested_target_name.to_string();
         if target_exists && !worktree_exists && !is_explicit_name && !explicit_target_name {
-            let project_name = context
-                .main_worktree_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("repo");
-            let mut project_slug = slug::slugify(project_name);
-            if project_slug.is_empty() || project_slug.chars().all(|c| c.is_ascii_digit()) {
-                project_slug = format!(
-                    "repo-{}",
-                    if project_slug.is_empty() {
-                        "unnamed"
-                    } else {
-                        &project_slug
-                    }
-                );
-            }
-            current_handle = format!("{}-{}", handle, project_slug);
+            (current_handle, target_exists) = suffix_taken_handle(context, options.mode, handle)?;
             current_target_name = current_handle.clone();
-            let suffixed_target = MuxHandle::new(
-                context.mux.as_ref(),
-                options.mode,
-                &context.prefix,
-                &current_target_name,
-            );
-            eprintln!(
-                "workmux: {} '{}' exists in another repository, using '{}'",
-                target.kind(),
-                full_target_name,
-                suffixed_target.full_name()
-            );
-            target_exists = suffixed_target.exists()?;
         }
 
         if options.open_if_exists && (target_exists || worktree_exists) {

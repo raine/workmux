@@ -20,7 +20,10 @@ from ..conftest import (
     get_window_name,
     get_worktree_path,
     poll_until,
+    setup_git_repo,
+    slugify,
     wait_for_pane_output,
+    write_workmux_config,
 )
 from .conftest import LOOPBACK, Node, git, local_records, wm
 
@@ -274,6 +277,85 @@ def test_add_resumes_interrupted_provisioning(
     assert node.sessions() == [f"{ex_id}-0", f"{ex_id}-1"]
     assert len(pane_commands(mux_server, get_window_name("feat"))) == 2
     wait_for_pane_output(mux_server, get_window_name("feat"), "AGENT-READY", timeout=20)
+
+
+def test_add_suffixes_a_name_another_repository_holds(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    """Like a local add, `add --remote` whose window name another
+    repository's workspace holds takes the project-suffixed name, and a rerun
+    of an interrupted add resumes that name. An explicit or taken suffixed
+    name is refused."""
+    repo = mux_repo_path
+    other = mux_server.tmp_path.parent / "other-repo"
+    other.mkdir(parents=True, exist_ok=True)
+    setup_git_repo(other, mux_server.env)
+    write_workmux_config(other)
+    for branch in ["dup", "named", "twice"]:
+        wm(mux_server, workmux_exe_path, other, f"add {branch}", working_dir=other)
+
+    allow = node.root / "allow-hook"
+    project = {
+        "nerdfont": False,
+        "panes": [{"command": "echo AGENT-READY"}],
+        "post_create": [f"test -e {allow}"],
+    }
+    (repo / ".workmux.yaml").write_text(yaml.dump(project))
+    git(repo, "add", ".workmux.yaml")
+    git(repo, "commit", "-m", "configure hooks")
+    suffixed = f"dup-{slugify(repo.name)}"
+
+    failed = wm(
+        mux_server, workmux_exe_path, repo, "add dup --remote lo", expect_fail=True
+    )
+    assert (
+        f"window '{get_window_name('dup')}' exists in another repository, using "
+        f"'{get_window_name(suffixed)}'" in failed.stderr
+    ), failed.stderr
+    [record] = local_records(mux_server)
+    assert (record["handle"], record["state"]) == (suffixed, "provisioning")
+
+    allow.touch()
+    resumed = wm(mux_server, workmux_exe_path, repo, "add dup --remote lo")
+    assert f"Resuming remote workspace '{suffixed}'" in resumed.stdout, resumed.stderr
+    [workspace] = node.workspaces()
+    assert (workspace["ws_id"], workspace["handle"]) == (record["ws_id"], suffixed)
+    wait_for_pane_output(
+        mux_server, get_window_name(suffixed), "AGENT-READY", timeout=20
+    )
+    assert_window_exists(mux_server, get_window_name("dup"))
+
+    refused = wm(
+        mux_server,
+        workmux_exe_path,
+        repo,
+        "add named --name named --remote lo",
+        expect_fail=True,
+    )
+    assert (
+        f"A tmux window named '{get_window_name('named')}' already exists"
+        in refused.stderr
+    ), refused.stderr
+
+    mux_server.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            get_window_name(f"twice-{slugify(repo.name)}"),
+        ]
+    )
+    refused = wm(
+        mux_server, workmux_exe_path, repo, "add twice --remote lo", expect_fail=True
+    )
+    assert (
+        f"A tmux window named '{get_window_name(f'twice-{slugify(repo.name)}')}' "
+        "already exists" in refused.stderr
+    ), refused.stderr
+    assert [record["handle"] for record in local_records(mux_server)] == [suffixed]
 
 
 def test_names_resolve_to_one_side(

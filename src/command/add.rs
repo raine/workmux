@@ -1186,6 +1186,7 @@ impl<'a> CreationPlan<'a> {
                     crate::remote::lifecycle::CreateRequest {
                         branch: &final_branch_name,
                         handle: &handle,
+                        explicit_name: self.explicit_name.is_some(),
                         base: resolved_base,
                         prompt: prompt_for_spec.as_ref(),
                         agent: spec.agent.as_deref(),
