@@ -204,7 +204,13 @@ def test_keep_then_cleanup_pending_never_merges_twice(
     commit_on_node(worktree, "two.txt", "two\n")
     block.touch()
     pending = wm(mux_server, workmux_exe_path, repo, "merge feat", expect_fail=True)
-    assert "merged; remote cleanup pending" in pending.stderr, pending.stderr
+    [message] = [line for line in pending.stderr.splitlines() if "pending" in line]
+    assert "merged; remote cleanup pending on 'lo' (" in message, pending.stderr
+    assert message.endswith(
+        "`workmux merge feat`, or the next merge, remove, open, add, rebase or "
+        "`remote pull` that reaches 'lo', finishes it"
+    ), message
+    assert "Caused by" not in pending.stderr
     assert stage_of(mux_server, "feat") == "merged"
     merges = git(repo, "rev-list", "--count", "main")
     assert git(repo, "show", "main:two.txt") == "two"
@@ -212,6 +218,8 @@ def test_keep_then_cleanup_pending_never_merges_twice(
     assert "cleanup pending" in listing.stdout
     reopened = wm(mux_server, workmux_exe_path, repo, "open feat", expect_fail=True)
     assert "remote cleanup pending" in reopened.stderr, reopened.stderr
+    rebased = wm(mux_server, workmux_exe_path, repo, "rebase feat", expect_fail=True)
+    assert "`workmux merge feat` finishes removing" in rebased.stderr, rebased.stderr
     assert git(repo, "rev-list", "--count", "main") == merges
 
     # A retry only cleans up.
@@ -280,7 +288,8 @@ def test_remote_pull_brings_the_workspace_home(
         mux_server, workmux_exe_path, repo, "remote pull feat", expect_fail=True
     )
     assert "Brought 'feat' home" in pulled.stdout, pulled.stderr
-    assert "pulled; remote cleanup pending" in pulled.stderr
+    assert "pulled; remote cleanup pending on 'lo' (" in pulled.stderr, pulled.stderr
+    assert "`workmux remote pull feat`, or the next merge" in pulled.stderr
     assert stage_of(mux_server, "feat") == "pulled"
     block.unlink()
     again = wm(mux_server, workmux_exe_path, repo, "remote pull feat")

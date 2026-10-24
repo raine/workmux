@@ -643,7 +643,8 @@ pub(super) fn open_window_after(
 pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool) -> Result<()> {
     if record.cleanup_pending() {
         let config = Config::load(None)?;
-        let node = Node::connect(&RemoteSpec::resolve(&config, &record.remote)?)?;
+        let spec = RemoteSpec::resolve(&config, &record.remote)?;
+        let node = super::homecoming::connect_for_cleanup(&spec, &record)?;
         return super::homecoming::finish_cleanup(&node, record);
     }
     let mux = context.mux.as_ref();
