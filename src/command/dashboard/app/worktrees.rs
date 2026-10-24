@@ -88,6 +88,7 @@ fn run_add_worktree_job(
         AddWorktreeJob::CreateBranch { name, base_branch } => {
             let (config, config_location) =
                 crate::config::Config::load_with_location_from(&repo_path, None)?;
+            crate::remote::reject_remote_placement(&config, None, false)?;
             let ctx = workflow::WorkflowContext::new_in(
                 &repo_path,
                 config.clone(),
@@ -121,6 +122,7 @@ fn run_add_worktree_job(
         AddWorktreeJob::CheckoutPr { pr_number } => {
             let (config, config_location) =
                 crate::config::Config::load_with_location_from(&repo_path, None)?;
+            crate::remote::reject_remote_placement(&config, None, false)?;
 
             let pr_details = crate::github::get_pr_details_in(Some(&repo_path), pr_number)
                 .with_context(|| format!("Failed to fetch PR #{}", pr_number))?;

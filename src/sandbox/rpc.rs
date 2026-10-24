@@ -619,7 +619,9 @@ fn spawn_agent_command(
     ctx: &RpcContext,
 ) -> std::process::Command {
     let mut cmd = host_workmux_command(ctx);
-    cmd.arg("add");
+    // The guest runs on this host, so its siblings do too, whatever the
+    // configured placement.
+    cmd.args(["add", "--local"]);
 
     if branch_name.is_none() {
         cmd.arg("--auto-name");
@@ -1640,7 +1642,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--prompt"));
         assert_eq!(
             args,
-            ["add", "--no-hooks", "--", "test-branch"]
+            ["add", "--local", "--no-hooks", "--", "test-branch"]
                 .map(str::to_string)
                 .to_vec()
         );
@@ -1656,6 +1658,7 @@ mod tests {
             command_args(&cmd),
             [
                 "add",
+                "--local",
                 "--prompt",
                 "do stuff",
                 "--background",
@@ -1676,9 +1679,16 @@ mod tests {
 
         assert_eq!(
             command_args(&cmd),
-            ["add", "--auto-name", "--prompt", "fix bug", "--no-hooks"]
-                .map(str::to_string)
-                .to_vec()
+            [
+                "add",
+                "--local",
+                "--auto-name",
+                "--prompt",
+                "fix bug",
+                "--no-hooks"
+            ]
+            .map(str::to_string)
+            .to_vec()
         );
     }
 

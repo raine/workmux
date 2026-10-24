@@ -9,9 +9,15 @@ const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const NOTIFY_COOLDOWN_SECS: u64 = 7 * 24 * 60 * 60;
 const NOTIFY_BURST_COUNT: u64 = 3;
 
-/// Map OS/arch to the release artifact suffix used in GitHub releases.
+/// Release artifact suffix of the running binary's platform.
 fn platform_suffix() -> Result<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    release_platform(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Map an OS/arch pair, spelled like `std::env::consts`, to the release
+/// artifact suffix used in GitHub releases.
+pub(crate) fn release_platform(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
         ("macos", "aarch64") => Ok("darwin-arm64"),
         ("macos", "x86_64") => Ok("darwin-amd64"),
         ("linux", "x86_64") => Ok("linux-amd64"),
@@ -106,34 +112,14 @@ fn extract_tar(archive: &std::path::Path, dest: &std::path::Path) -> Result<()> 
     Ok(())
 }
 
-/// Compute SHA-256 hash of a file using system tools.
-fn sha256_of(path: &std::path::Path) -> Result<String> {
-    // Try sha256sum first (common on Linux)
-    if let Ok(output) = Command::new("sha256sum").arg(path).output()
-        && output.status.success()
-    {
-        let out = String::from_utf8_lossy(&output.stdout);
-        if let Some(hash) = out.split_whitespace().next() {
-            return Ok(hash.to_string());
-        }
-    }
+/// Lowercase hex SHA-256 of a file's contents.
+pub(crate) fn sha256_of(path: &std::path::Path) -> Result<String> {
+    use sha2::Digest;
 
-    // Fall back to shasum -a 256 (macOS)
-    let output = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output()
-        .context("Neither sha256sum nor shasum found. Cannot verify checksum.")?;
-
-    if !output.status.success() {
-        bail!("Checksum command failed");
-    }
-
-    let out = String::from_utf8_lossy(&output.stdout);
-    out.split_whitespace()
-        .next()
-        .map(|s| s.to_string())
-        .context("Could not parse checksum output")
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Verify SHA-256 checksum of a file against the expected checksum line.
@@ -149,6 +135,37 @@ fn verify_checksum(file: &std::path::Path, expected_line: &str) -> Result<()> {
         bail!("Checksum mismatch!\n  Expected: {expected_hash}\n  Got:      {actual_hash}");
     }
     Ok(())
+}
+
+/// Download release `version` of `artifact_name` (e.g. `workmux-linux-arm64`)
+/// into `dir`, verify its published sha256, and return the extracted binary.
+pub(crate) fn fetch_release_binary(
+    version: &str,
+    artifact_name: &str,
+    dir: &std::path::Path,
+    on_step: &dyn Fn(&str),
+) -> Result<std::path::PathBuf> {
+    let tar_path = dir.join(format!("{artifact_name}.tar.gz"));
+    let sha_path = dir.join(format!("{artifact_name}.sha256"));
+
+    let base_url = format!("https://github.com/{REPO}/releases/download/v{version}");
+
+    download(&format!("{base_url}/{artifact_name}.tar.gz"), &tar_path)?;
+    download(&format!("{base_url}/{artifact_name}.sha256"), &sha_path)?;
+
+    on_step("Verifying checksum...");
+    let sha_content = std::fs::read_to_string(&sha_path).context("Failed to read checksum file")?;
+    verify_checksum(&tar_path, &sha_content)?;
+
+    let extract_dir = dir.join("extract");
+    std::fs::create_dir(&extract_dir)?;
+    extract_tar(&tar_path, &extract_dir)?;
+
+    let binary = extract_dir.join("workmux");
+    if !binary.exists() {
+        bail!("Extracted archive does not contain 'workmux' binary");
+    }
+    Ok(binary)
 }
 
 /// Replace the current binary with the new one, with rollback on failure.
@@ -193,28 +210,11 @@ fn do_update(
     pb.set_message(format!("Downloading v{latest_version}..."));
 
     let tmp = tempfile::tempdir().context("Failed to create temp directory")?;
-    let tar_path = tmp.path().join(format!("{artifact_name}.tar.gz"));
-    let sha_path = tmp.path().join(format!("{artifact_name}.sha256"));
-
-    let base_url = format!("https://github.com/{REPO}/releases/download/v{latest_version}");
-
-    download(&format!("{base_url}/{artifact_name}.tar.gz"), &tar_path)?;
-    download(&format!("{base_url}/{artifact_name}.sha256"), &sha_path)?;
-
-    pb.set_message("Verifying checksum...");
-    let sha_content = std::fs::read_to_string(&sha_path).context("Failed to read checksum file")?;
-    verify_checksum(&tar_path, &sha_content)?;
+    let new_binary = fetch_release_binary(&latest_version, artifact_name, tmp.path(), &|step| {
+        pb.set_message(step.to_string())
+    })?;
 
     pb.set_message("Installing...");
-    let extract_dir = tmp.path().join("extract");
-    std::fs::create_dir(&extract_dir)?;
-    extract_tar(&tar_path, &extract_dir)?;
-
-    let new_binary = extract_dir.join("workmux");
-    if !new_binary.exists() {
-        bail!("Extracted archive does not contain 'workmux' binary");
-    }
-
     replace_binary(&new_binary, current_exe)?;
 
     Ok(format!(
@@ -416,6 +416,18 @@ mod tests {
         // Should succeed on any supported CI/dev platform
         let suffix = platform_suffix().unwrap();
         assert!(["darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64"].contains(&suffix));
+    }
+
+    #[test]
+    fn test_verify_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workmux.tar.gz");
+        std::fs::write(&file, b"abc").unwrap();
+        let line =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  workmux.tar.gz\n";
+        verify_checksum(&file, line).unwrap();
+        let err = verify_checksum(&file, &line.replacen("ba78", "0000", 1)).unwrap_err();
+        assert!(err.to_string().contains("Checksum mismatch"));
     }
 
     #[test]
