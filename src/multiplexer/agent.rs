@@ -213,13 +213,18 @@ impl AgentProfile for CodexProfile {
         Some("--yolo")
     }
 
-    /// The sandbox mounts the host's codex home, which holds the install
-    /// and control state of codex's shared background server. A sandboxed
-    /// codex can't reach a server outside the sandbox, so it would fail on
-    /// a server the host installed there, or install its own into the
-    /// host's codex home.
+    /// `--no-daemon`: the sandbox mounts the host's codex home, which holds
+    /// the install and control state of codex's shared background server.
+    /// A sandboxed codex can't reach a server outside the sandbox, so it
+    /// would fail on a server the host installed there, or install its own
+    /// into the host's codex home.
+    ///
+    /// `--dangerously-bypass-hook-trust`: hooks run inside the sandbox like
+    /// any command the agent runs under `--yolo`, so reviewing them guards
+    /// nothing, and nobody is there to answer the review that would
+    /// otherwise hold back the status hooks.
     fn sandbox_flags(&self) -> &'static [&'static str] {
-        &["--no-daemon"]
+        &["--no-daemon", "--dangerously-bypass-hook-trust"]
     }
 
     fn flag_aliases(&self, flag: &str) -> &'static [&'static str] {
@@ -790,24 +795,25 @@ mod tests {
 
     #[test]
     fn sandbox_flags_are_added_once() {
+        let flags = "--no-daemon --dangerously-bypass-hook-trust";
         assert_eq!(
             sandboxed(&CodexProfile, "codex"),
-            "codex --yolo --no-daemon"
+            format!("codex --yolo {flags}")
         );
         assert_eq!(
             sandboxed(&CodexProfile, "codex --no-daemon -m o3"),
-            "codex --yolo --no-daemon -m o3"
+            "codex --yolo --dangerously-bypass-hook-trust --no-daemon -m o3"
         );
         assert_eq!(
             sandboxed(&CodexProfile, "codex --yolo"),
-            "codex --no-daemon --yolo"
+            format!("codex {flags} --yolo")
         );
         assert_eq!(
             sandboxed(
                 &CodexProfile,
                 "codex --dangerously-bypass-approvals-and-sandbox"
             ),
-            "codex --no-daemon --dangerously-bypass-approvals-and-sandbox"
+            format!("codex {flags} --dangerously-bypass-approvals-and-sandbox")
         );
         assert_eq!(
             sandboxed(&ClaudeProfile, "claude --dangerously-skip-permissions"),
@@ -819,7 +825,7 @@ mod tests {
     fn sandbox_flags_ignore_arguments_after_the_terminator() {
         assert_eq!(
             sandboxed(&CodexProfile, "codex -- --no-daemon"),
-            "codex --yolo --no-daemon -- --no-daemon"
+            "codex --yolo --no-daemon --dangerously-bypass-hook-trust -- --no-daemon"
         );
     }
 

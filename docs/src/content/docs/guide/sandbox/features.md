@@ -102,6 +102,8 @@ Inside a sandbox the sandbox is the security boundary, so workmux starts agents 
 
 Codex also gets `--no-daemon`. The sandbox mounts the host's `~/.codex`, where Codex installs and tracks its shared background server, but a sandboxed Codex can't reach a server running outside the sandbox. Without the flag, it fails to start once Codex on the host has installed the server ("daemon executable not found"), or installs a server of its own into the host's `~/.codex`.
 
+Codex also gets `--dangerously-bypass-hook-trust`. Codex otherwise asks you to review every new or changed hook before it runs, including the hooks workmux installs for [status tracking](/guide/status-tracking/), and the sandbox path of `~/.codex/hooks.json` differs from the host's, so approvals given on the host don't apply. Hooks run inside the sandbox, the same as any command the agent runs with `--yolo`, so the review adds no protection there. Hooks you disabled in Codex stay disabled. The flag applies to that launch only and records no approval.
+
 `--no-daemon` needs Codex 0.156 or newer. The workmux image installs the latest release. A custom image (`sandbox.image`) or a Lima VM with an older Codex fails to start Codex with "unexpected argument '--no-daemon'": update Codex in the image, or recreate the VM with `workmux sandbox prune`.
 
 ## Credentials
