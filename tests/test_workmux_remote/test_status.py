@@ -81,7 +81,7 @@ def remote_state(env: TmuxEnvironment) -> Optional[dict]:
 
 
 def observation_path(env: TmuxEnvironment) -> Path:
-    return env.home_path / ".local/state/workmux/remote/lo/observed.json"
+    return env.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
 
 
 def observed_since(env: TmuxEnvironment, since: float) -> bool:
@@ -196,6 +196,28 @@ def test_commands_reach_remote_agents_with_or_without_a_window(
     assert row["status"] == "working"
     assert row["remote"]["attached"] is False
     assert row["pane_id"].startswith("%remote-")
+
+    # list reports the agent and the node's git state from the observation.
+    [workspace] = node.workspaces()
+    worktree = Path(workspace["worktree_path"])
+    (worktree / "node.txt").write_text("node\n")
+    git(worktree, "add", "node.txt")
+    git(worktree, "-c", "user.name=A", "-c", "user.email=a@x", "commit", "-m", "n")
+    (worktree / "dirty.txt").write_text("dirty\n")
+
+    def listed() -> dict:
+        rows = json.loads(wm(mux_server, exe, repo, "list --json").stdout)
+        [listed] = [row for row in rows if row.get("remote") == "lo"]
+        return listed
+
+    assert poll_until(lambda: listed()["has_uncommitted_changes"], timeout=15)
+    assert listed()["agent_statuses"] == ["working"]
+    [line] = [
+        line
+        for line in wm(mux_server, exe, repo, "list").stdout.splitlines()
+        if "remote:lo" in line
+    ]
+    assert "working" in line and "●" in line, line
 
     # send and capture go through the node.
     wm(mux_server, exe, repo, "send cmd remote-hello-42")
@@ -326,7 +348,8 @@ def test_views_list_remote_agents_beside_local_ones(
     bin_dir = node.root / "bin"
     hidden = node.root / "bin-hidden"
     bin_dir.rename(hidden)
-    subprocess.run(["pkill", "-f", f"{hidden}/.* node watch"], check=False)
+    # The running stream keeps the path it was started with.
+    subprocess.run(["pkill", "-f", f"{bin_dir}/.* node watch"], check=False)
     try:
         assert poll_until(
             lambda: "disconnected" in row(dashboard(), "vw@lo"), timeout=30
@@ -444,3 +467,54 @@ def test_resurrect_reattaches_without_restarting_the_agent(
     result = wm(env, exe, repo, "resurrect")
     assert "rs@lo" not in result.stdout, result.stdout
     assert agent_pid() == pid
+
+
+def test_an_older_observer_does_not_hide_the_node(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    tmp_path: Path,
+):
+    repo = mux_repo_path
+    exe = workmux_exe_path
+    agent = FakeAgent(tmp_path)
+    setup_agent_project(repo, agent)
+    window = get_window_name("mix")
+    wm(mux_server, exe, repo, "add mix --remote lo")
+    wait_for_pane_output(mux_server, window, "FAKE-AGENT-READY", timeout=20)
+    wm(mux_server, exe, repo, "close mix")
+
+    # An older build observes the remote: it holds its lock and keeps writing
+    # a connected observation in its own format that lists no agents.
+    directory = mux_server.home_path / ".local/state/workmux/remote/lo"
+    legacy = directory / "observed.json"
+    holder = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            "import fcntl, json, sys, time\n"
+            "lock = open(sys.argv[1], 'a')\n"
+            "fcntl.flock(lock, fcntl.LOCK_EX)\n"
+            "while True:\n"
+            "    data = {'connected': True, 'last_seen': int(time.time()),"
+            " 'skew': 0, 'workspaces': [], 'retired': 1}\n"
+            "    open(sys.argv[2], 'w').write(json.dumps(data))\n"
+            "    time.sleep(0.5)\n",
+            str(directory / "observer.lock"),
+            str(legacy),
+        ]
+    )
+    try:
+        assert poll_until(legacy.exists, timeout=5)
+        agent.do("working")
+        assert poll_until(
+            lambda: [r["status"] for r in status_rows(mux_server, exe, repo)]
+            == ["working"],
+            timeout=15,
+        )
+        [row] = status_rows(mux_server, exe, repo)
+        assert row["remote"]["connected"] is True
+    finally:
+        holder.kill()
+        holder.wait()
