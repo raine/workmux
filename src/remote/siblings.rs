@@ -43,15 +43,16 @@ fn adopt_all(remote: &str, observation: &Observation, foreground: bool) -> Resul
         .iter()
         .map(|ws| ws.ws_id.as_str())
         .collect();
-    // A workspace whose record went after this observation was taken was
-    // removed or forgotten on purpose; only a later look at the node can
-    // show that it still runs.
+    // A workspace whose record went was removed or forgotten on purpose.
+    // `remove --force` can forget one the node still has; it stays
+    // unadopted for as long as the node lists it, and `remote gc` removes
+    // it.
     let seen = observation.last_seen.unwrap_or(0);
     cache::prune_forgotten(remote, &present, seen);
     let running: Vec<(&ObservedWorkspace, &Sibling)> = observation
         .workspaces
         .iter()
-        .filter(|ws| cache::forgotten_at(remote, &ws.ws_id).is_none_or(|at| seen > at + 1))
+        .filter(|ws| cache::forgotten_at(remote, &ws.ws_id).is_none())
         .filter_map(|ws| Some((ws, ws.sibling.as_ref()?)))
         .collect();
     if running.is_empty() {
