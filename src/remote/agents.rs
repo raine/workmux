@@ -140,8 +140,11 @@ pub fn rows(
                 continue;
             };
             let row = match local(pane.index) {
+                // The relay pane carries the remote pane's title, which is the
+                // node's hostname until the agent sets one; the observation
+                // has the agent's title without it.
                 Some(row) => AgentPane {
-                    pane_title: agent.title.clone().or_else(|| row.pane_title.clone()),
+                    pane_title: agent.title.clone(),
                     agent_kind: agent.agent_kind.clone().or_else(|| row.agent_kind.clone()),
                     remote: Some(remote(pane.index, true)),
                     ..row.clone()
@@ -607,6 +610,15 @@ mod tests {
         assert_eq!(row.pane_title.as_deref(), Some("Fixing"));
         assert_eq!(row.agent_kind.as_deref(), Some("claude"));
         assert!(row.remote.as_ref().unwrap().attached);
+
+        // An untitled agent's relay pane carries the node's hostname.
+        let mut untitled = agent_pane(0, AgentStatus::Done);
+        untitled.agent.as_mut().unwrap().title = None;
+        let observations = HashMap::from([("box".to_string(), observation(1000, vec![untitled]))]);
+        let mut relay = attach_row(0);
+        relay.pane_title = Some("node-1".into());
+        let rows = super::rows(&[record()], &[relay], &observations, &hosts(), 1001);
+        assert_eq!(rows[0].pane_title, None);
     }
 
     #[test]
