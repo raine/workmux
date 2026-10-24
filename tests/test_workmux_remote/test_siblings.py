@@ -227,6 +227,44 @@ def test_sibling_spawned_while_nobody_watches(
     wait_for_pane_output(mux_server, window, "AGENT-READY", timeout=20)
 
 
+def test_forced_remove_of_a_sibling_stays_forgotten(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    repo = mux_repo_path
+    setup_project(repo)
+    wm(mux_server, workmux_exe_path, repo, "add feat --remote lo")
+    [record] = local_records(mux_server)
+    ex_id = record["execution"]["ex_id"]
+    wait_for_pane_output(mux_server, get_window_name("feat"), "AGENT-READY", timeout=20)
+    wm(mux_server, workmux_exe_path, repo, "close feat")
+    spawn(node, ex_id, "gone -b -p 'left behind'")
+    assert poll_until(lambda: running(node, "gone"), timeout=20), node_pane(node, ex_id)
+    wm(mux_server, workmux_exe_path, repo, "list")
+    assert any(r["branch"] == "gone" for r in local_records(mux_server))
+
+    # Without the remote's config the node cannot be reached, and --force
+    # forgets the workspace on the laptop only.
+    config = mux_server.home_path / ".config" / "workmux" / "config.yaml"
+    saved = config.read_text()
+    config.write_text("nerdfont: false\n")
+    removed = wm(mux_server, workmux_exe_path, repo, "remove --force gone")
+    assert "forgot remote workspace 'gone'" in removed.stderr, removed.stderr
+    config.write_text(saved)
+
+    # Later looks at the node, which still runs it, leave it for gc.
+    time.sleep(2)
+    for _ in range(2):
+        listing = wm(mux_server, workmux_exe_path, repo, "list")
+        assert "adopted" not in listing.stderr, listing.stderr
+    assert [r["branch"] for r in local_records(mux_server)] == ["feat"]
+    assert running(node, "gone")
+    gc = wm(mux_server, workmux_exe_path, repo, "remote gc lo --dry-run")
+    assert "workspace 'gone'" in gc.stdout, gc.stdout + gc.stderr
+
+
 def test_sibling_refuses_symlinks_from_the_parent(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,
