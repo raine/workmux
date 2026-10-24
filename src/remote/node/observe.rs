@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::execution::{tmux, tmux_socket};
 use super::{ExecutionState, NodeRoot, Origin, Workspace, refuse, validate_id};
+use crate::config::RemoteIsolation;
 use crate::git::{GitStatus, GitStatusCache};
 use crate::multiplexer::{
     AgentPane, AgentStatus, EndReason, LivePaneInfo, Multiplexer, tmux::TmuxBackend,
@@ -33,6 +34,9 @@ const MAX_TEXT: usize = 300;
 const MAX_SEND: usize = 1 << 20;
 /// Most lines `capture` returns.
 const MAX_CAPTURE_LINES: u16 = 10_000;
+/// How long an agent that has not reported yet gets to start before text
+/// is typed into it.
+const AGENT_STARTUP: Duration = Duration::from_secs(5);
 /// How often a streaming watch looks at a workspace's git status.
 const GIT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -103,7 +107,7 @@ pub struct ObservedPane {
     pub agent: Option<ObservedAgent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedAgent {
     pub status: Option<AgentStatus>,
     /// Node clock.
@@ -114,7 +118,8 @@ pub struct ObservedAgent {
 }
 
 /// `send`: type `text` into an agent. Without `pane`, the lowest pane of
-/// the workspace that has an agent.
+/// the workspace that has an agent, else its agent pane while a container
+/// agent starts up and has not reported yet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendRequest {
     pub ws_id: String,
@@ -122,8 +127,19 @@ pub struct SendRequest {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendResponse {}
+/// Where the text went and the state of the agent there just before it,
+/// which later states of the turn it starts are newer than. Nodes before
+/// this answered `{}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SendResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AgentStatus>,
+    /// Node clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_ts: Option<u64>,
+}
 
 /// `capture`: the last `lines` of an agent pane, chosen as for `send`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,13 +497,25 @@ pub fn stream(root: &NodeRoot) -> Result<()> {
     }
 }
 
-/// The pane of `ws_id` a request targets, with its tmux pane id and agent,
-/// and the node's tmux.
-fn target(
-    root: &NodeRoot,
-    ws_id: &str,
-    pane: Option<usize>,
-) -> Result<(TmuxBackend, String, ObservedAgent)> {
+/// The pane a request targets.
+struct Target {
+    mux: TmuxBackend,
+    /// Index of the configured pane.
+    index: usize,
+    /// Its tmux pane id.
+    pane_id: String,
+    /// The agent registered in it; none when the agent has not reported
+    /// yet (see [`unregistered_agent_pane`]).
+    agent: Option<ObservedAgent>,
+    /// For an agent that has not reported yet, when its container runtime
+    /// started (node clock).
+    started: Option<u64>,
+}
+
+/// The pane of `ws_id` a request targets: `pane`, else the lowest pane with
+/// an agent, else the agent pane of a container agent that has not
+/// reported yet.
+fn target(root: &NodeRoot, ws_id: &str, pane: Option<usize>) -> Result<Target> {
     validate_id(ws_id, 'w', "workspace id")?;
     let workspace = root.load(ws_id)?.ok_or_else(|| {
         refuse(
@@ -507,10 +535,6 @@ fn target(
             ),
         )
     })?;
-    let chosen = match pane {
-        Some(index) => observed.panes.into_iter().find(|p| p.index == index),
-        None => observed.panes.into_iter().find(|p| p.agent.is_some()),
-    };
     let not_running = || {
         refuse(
             code::NOT_FOUND,
@@ -520,24 +544,158 @@ fn target(
             ),
         )
     };
-    let chosen = chosen.ok_or_else(not_running)?;
-    let agent = chosen.agent.ok_or_else(not_running)?;
-    let session = session_name(&observed.ex_id, chosen.index);
-    let pane_id = session_panes(&live)
-        .get(session.as_str())
-        .map(|id| id.to_string())
-        .ok_or_else(not_running)?;
-    Ok((observer.mux, pane_id, agent))
+    let session_panes = session_panes(&live);
+    let pane_id = |index: usize| {
+        session_panes
+            .get(session_name(&observed.ex_id, index).as_str())
+            .map(|id| id.to_string())
+    };
+    let chosen = match pane {
+        Some(index) => observed.panes.iter().find(|p| p.index == index),
+        None => observed.panes.iter().find(|p| p.agent.is_some()),
+    };
+    let target = match chosen {
+        Some(chosen) => {
+            let agent = chosen.agent.clone().ok_or_else(not_running)?;
+            pane_id(chosen.index).map(|id| (chosen.index, id, Some(agent), None))
+        }
+        None if pane.is_none() => {
+            unregistered_agent_pane(root, &workspace, &observer.socket, &live, pane_id)
+                .map(|(index, id, started)| (index, id, None, Some(started)))
+        }
+        None => None,
+    };
+    let (index, pane_id, agent, started) = target.ok_or_else(not_running)?;
+    Ok(Target {
+        mux: observer.mux,
+        index,
+        pane_id,
+        agent,
+        started,
+    })
 }
 
+/// The agent pane of a container workspace whose agent has not reported
+/// yet (Codex registers only at its first turn), with when its container
+/// runtime started: the configured agent pane, while the supervisor the
+/// node typed into it runs the runtime, which reads the pane's input. Text
+/// typed before the runtime runs would wait in the terminal for whoever
+/// reads next, which is the shell if the supervisor fails. The supervisor
+/// ends with its container, which hands the pane back to its shell, so a
+/// pane whose agent ended, or one that runs anything else, is never chosen.
+/// Without a container the agent is the pane's own program, which nothing
+/// but its hook tells apart from whatever runs after it.
+fn unregistered_agent_pane(
+    root: &NodeRoot,
+    workspace: &Workspace,
+    socket: &Path,
+    live: &HashMap<String, LivePaneInfo>,
+    pane_id: impl Fn(usize) -> Option<String>,
+) -> Option<(usize, String, u64)> {
+    if workspace.isolation != RemoteIsolation::Container {
+        return None;
+    }
+    let execution = workspace.execution.as_ref()?;
+    if execution.state != ExecutionState::Running {
+        return None;
+    }
+    let pin = execution.pin.as_deref()?;
+    let (config, _) =
+        crate::frozen_config::load(&root.config_path(&workspace.identity.ws_id)).ok()?;
+    let index =
+        super::execution::agent_pane(&config, workspace.agent.as_deref(), workspace.working_dir())?;
+    let id = pane_id(index)?;
+    let command = live.get(&id)?.current_command.as_deref()?;
+    if !runs_pin(command, pin) {
+        return None;
+    }
+    // A marker older than the session belongs to a pane of an earlier
+    // server that had the same id.
+    let started = super::execution::AgentMarker::read(root, &id)?;
+    (started >= session_created(socket, &id)?).then_some((index, id, started))
+}
+
+/// When the session of `pane_id` was created (node clock).
+fn session_created(socket: &Path, pane_id: &str) -> Option<u64> {
+    let output = tmux(socket)
+        .args(["display-message", "-p", "-t", pane_id, "#{session_created}"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Whether tmux's name for a pane's foreground program, `command`, is the
+/// node binary `pin`. Platforms that report the kernel's process name cut it
+/// to 15 bytes.
+fn runs_pin(command: &str, pin: &str) -> bool {
+    const COMM_LEN: usize = 15;
+    command == pin || (command.len() == COMM_LEN && pin.starts_with(command))
+}
+
+/// Whether a prompt typed now could leave a status change in the same
+/// second as `baseline`, the agent's state before it, which would make the
+/// change indistinguishable from it in whole-second timestamps.
+fn same_second(baseline: &ObservedAgent, now: u64) -> bool {
+    matches!(
+        baseline.status,
+        Some(AgentStatus::Done | AgentStatus::Waiting)
+    ) && baseline.status_ts.is_some_and(|ts| ts >= now)
+}
+
+/// Sleep until the next whole second of the clock.
+fn sleep_to_next_second() {
+    let into = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    std::thread::sleep(Duration::from_nanos(u64::from(1_000_000_000 - into)));
+}
+
+/// Type the text into the agent and report the agent's state just before,
+/// which `wait` holds later states against. An agent that has not reported
+/// yet first gets [`AGENT_STARTUP`] from its start: text typed before it
+/// reads its terminal can land unsubmitted (Codex takes a fast burst ending
+/// in Enter for a paste). A `done` or `waiting` state from the current
+/// second is left behind first, so every status the prompt causes carries
+/// a later timestamp; a state that stays in the current second is not
+/// reported.
 pub fn send(root: &NodeRoot, request: SendRequest) -> Result<SendResponse> {
     if request.text.len() > MAX_SEND {
         return Err(refuse(code::BAD_REQUEST, "text is too long"));
     }
-    let (mux, pane_id, agent) = target(root, &request.ws_id, request.pane)?;
+    let mut target = target(root, &request.ws_id, request.pane)?;
+    let ready = target
+        .started
+        .map(|started| started + AGENT_STARTUP.as_secs());
+    if let Some(left) = ready
+        .and_then(|ready| ready.checked_sub(now()))
+        .filter(|&s| s > 0)
+    {
+        std::thread::sleep(Duration::from_secs(left));
+        target = self::target(root, &request.ws_id, request.pane)?;
+    }
+    for _ in 0..3 {
+        if !target
+            .agent
+            .as_ref()
+            .is_some_and(|agent| same_second(agent, now()))
+        {
+            break;
+        }
+        sleep_to_next_second();
+        target = self::target(root, &request.ws_id, request.pane)?;
+    }
+    let agent = target.agent.unwrap_or_default();
+    let baseline = !same_second(&agent, now());
     let kind = send_kind(root, &request.ws_id, agent.agent_kind);
-    mux.send_prompt_to_agent(&pane_id, &request.text, kind.as_deref())?;
-    Ok(SendResponse {})
+    target
+        .mux
+        .send_prompt_to_agent(&target.pane_id, &request.text, kind.as_deref())?;
+    Ok(SendResponse {
+        pane: Some(target.index),
+        status: agent.status.filter(|_| baseline),
+        status_ts: agent.status_ts.filter(|_| baseline),
+    })
 }
 
 /// The kind of agent a prompt goes to: the observed one, else the
@@ -554,9 +712,10 @@ fn send_kind(root: &NodeRoot, ws_id: &str, observed: Option<String>) -> Option<S
 }
 
 pub fn capture(root: &NodeRoot, request: CaptureRequest) -> Result<CaptureResponse> {
-    let (mux, pane_id, _) = target(root, &request.ws_id, request.pane)?;
-    let text = mux
-        .capture_pane(&pane_id, request.lines.min(MAX_CAPTURE_LINES))
+    let target = target(root, &request.ws_id, request.pane)?;
+    let text = target
+        .mux
+        .capture_pane(&target.pane_id, request.lines.min(MAX_CAPTURE_LINES))
         .ok_or_else(|| refuse(code::FAILED, "failed to capture the pane"))?;
     Ok(CaptureResponse { text })
 }
@@ -737,6 +896,47 @@ mod tests {
         assert_eq!(ended(&ws, &none), Some(EndReason::HostReboot));
         ws.execution.as_mut().unwrap().state = ExecutionState::Running;
         assert_eq!(ended(&ws, &none), None);
+    }
+
+    #[test]
+    fn send_responses_parse_across_versions() {
+        // A node from before the turn baseline.
+        let old: SendResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!((old.pane, old.status, old.status_ts), (None, None, None));
+        let new = SendResponse {
+            pane: Some(1),
+            status: Some(AgentStatus::Done),
+            status_ts: Some(100),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(json, r#"{"pane":1,"status":"done","status_ts":100}"#);
+        #[derive(Deserialize)]
+        struct Before {}
+        serde_json::from_str::<Before>(&json).unwrap();
+    }
+
+    #[test]
+    fn only_done_or_waiting_states_of_this_second_wait_for_the_next() {
+        let state = |status, ts| ObservedAgent {
+            status,
+            status_ts: ts,
+            ..Default::default()
+        };
+        assert!(same_second(&state(Some(AgentStatus::Done), Some(7)), 7));
+        assert!(same_second(&state(Some(AgentStatus::Waiting), Some(8)), 7));
+        assert!(!same_second(&state(Some(AgentStatus::Done), Some(6)), 7));
+        assert!(!same_second(&state(Some(AgentStatus::Working), Some(7)), 7));
+        assert!(!same_second(&state(None, None), 7));
+    }
+
+    #[test]
+    fn a_pane_runs_the_pin_by_full_or_kernel_name() {
+        let pin = "workmux-dev-0123456789ab";
+        assert!(runs_pin(pin, pin));
+        assert!(runs_pin("workmux-dev-012", pin));
+        assert!(!runs_pin("workmux", pin));
+        assert!(!runs_pin("bash", pin));
+        assert!(!runs_pin("workmux-dev-999", pin));
     }
 
     #[test]
