@@ -9,7 +9,11 @@ pub fn run(name: Option<&str>) -> Result<()> {
         return run_via_rpc(&name_to_close);
     }
 
-    if let Some(record) = name.and_then(crate::remote::cache::find_here) {
+    let remote = match name {
+        Some(name) => crate::remote::cache::find_here(name),
+        None => current_remote_window(),
+    };
+    if let Some(record) = remote {
         let mux = create_backend(detect_backend());
         return crate::remote::lifecycle::close(mux.as_ref(), &record);
     }
@@ -247,6 +251,21 @@ fn run_via_rpc_impl(name: &str, client: &mut crate::sandbox::rpc::RpcClient) -> 
             other => anyhow::bail!("Unexpected RPC response: {:?}", other),
         }
     }
+}
+
+/// The remote workspace whose window the command runs in. Its panes run
+/// in the laptop's checkout, so the directory does not name it.
+fn current_remote_window() -> Option<crate::remote::cache::WorkspaceRecord> {
+    let records = crate::remote::cache::all();
+    if records.is_empty() {
+        return None;
+    }
+    let window = create_backend(detect_backend())
+        .current_window_name()
+        .ok()??;
+    records
+        .into_iter()
+        .find(|record| record.window_name == window)
 }
 
 #[cfg(test)]
