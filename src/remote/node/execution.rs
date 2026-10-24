@@ -188,6 +188,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
             continues,
+            agent_kind: None,
         });
         root.save(&workspace)?;
     }
@@ -199,6 +200,12 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
 
     let config_path = root.config_path(&request.ws_id);
     let (config, _) = crate::frozen_config::load(&config_path)?;
+    let agent_kind = workspace.agent_kind(&config);
+    workspace
+        .execution
+        .as_mut()
+        .expect("execution recorded")
+        .agent_kind = agent_kind.map(str::to_string);
     let plan = pane_plan(&config, workspace.agent.as_deref());
     let conf = root.path.join("tmux.conf");
     if fs::read_to_string(&conf).ok().as_deref() != Some(TMUX_CONF) {
@@ -229,9 +236,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
     // Containers get the workspace's secrets from their supervisor; panes
     // without one get them in their session's environment.
     let session_secrets = match workspace.isolation {
-        RemoteIsolation::None => {
-            secrets::for_execution(root, &request.ws_id, workspace.agent_kind(&config))?
-        }
+        RemoteIsolation::None => secrets::for_execution(root, &request.ws_id, agent_kind)?,
         RemoteIsolation::Container => Default::default(),
     };
 
@@ -285,7 +290,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         root.save(&workspace)?;
     }
 
-    let continue_flag = crate::multiplexer::agent::resolve_profile(workspace.agent_kind(&config))
+    let continue_flag = crate::multiplexer::agent::resolve_profile(agent_kind)
         .continue_flag()
         .is_some();
     let execution = workspace.execution.as_mut().expect("execution recorded");
