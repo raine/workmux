@@ -105,3 +105,8 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-amd64.{ archi
 
 [package.metadata.binstall.overrides.aarch64-apple-darwin]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-arm64.{ archive-format }"
+
+# Dev pins hash the configured binary (a debug build is ~70 MB) on every
+# remote command; unoptimized SHA-256 takes seconds for that.
+[profile.dev.package.sha2]
+opt-level = 3
