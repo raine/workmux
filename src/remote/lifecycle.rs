@@ -767,8 +767,8 @@ pub fn remove(
         forget_locally(mux, record)?;
         eprintln!(
             "workmux: forgot remote workspace '{}' without contacting '{}' ({reason:#}); \
-             its worktree and agent may remain there",
-            record.handle, record.remote
+             its worktree and agent may remain there (`workmux remote gc {}` removes them)",
+            record.handle, record.remote, record.remote
         );
         Ok(())
     };
