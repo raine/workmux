@@ -46,21 +46,34 @@ fn run_specified(
 
     let mut local_names = Vec::new();
     let mut remote_failures = 0;
-    for name in resolved_names {
-        let Some(record) = crate::remote::cache::find_here(&name) else {
+    let mux = create_backend(detect_backend());
+    let current_window = mux.current_window_name()?;
+    let mut removed = Vec::new();
+    // Reaching a node can finish other pending cleanups. Resolve all targets
+    // first so those records are not subsequently mistaken for local worktrees.
+    let targets: Vec<_> = resolved_names
+        .into_iter()
+        .map(|name| {
+            let record = crate::remote::cache::find_here(&name);
+            (name, record)
+        })
+        .collect();
+    for (name, remote) in targets {
+        let Some(record) = remote else {
             local_names.push(name);
             continue;
         };
-        let mux = create_backend(detect_backend());
         let options = crate::remote::lifecycle::RemoveOptions {
             force,
             keep_branch,
             run_hooks: true,
             confirm_unmerged,
         };
-        if let Err(err) = crate::remote::lifecycle::remove(mux.as_ref(), record, options) {
+        if let Err(err) = crate::remote::lifecycle::remove(record.clone(), options) {
             eprintln!("✗ {err:#}");
             remote_failures += 1;
+        } else if crate::remote::cache::find_here(&record.handle).is_none() {
+            removed.push(record);
         }
     }
     let local = if local_names.is_empty() {
@@ -68,13 +81,29 @@ fn run_specified(
     } else {
         remove_local(local_names, force, keep_branch, confirm_unmerged, config)
     };
-    if remote_failures > 0 {
-        local?;
-        return Err(anyhow!(
-            "{remote_failures} remote workspace(s) could not be removed"
-        ));
+    let result = local.and_then(|()| {
+        if remote_failures > 0 {
+            Err(anyhow!(
+                "{remote_failures} remote workspace(s) could not be removed"
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    // Closing the invoking window can terminate this process. Finish every
+    // target and report failures before closing it, after all other windows.
+    if removed
+        .iter()
+        .any(|record| current_window.as_deref() == Some(&record.window_name))
+        && let Err(err) = &result
+    {
+        eprintln!("✗ {err:#}");
     }
-    local
+    removed.sort_by_key(|record| current_window.as_deref() == Some(&record.window_name));
+    for record in removed {
+        crate::remote::lifecycle::close_relay(mux.as_ref(), &record);
+    }
+    result
 }
 
 fn remove_local(
