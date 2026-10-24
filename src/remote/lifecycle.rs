@@ -135,7 +135,7 @@ pub fn create(
 
     let node = Node::connect(spec)?;
     super::homecoming::finish_pending(&node, &record.ws_id);
-    super::observe::current(config, &spec.name);
+    super::observe::current_on(&node);
     record.save()?;
     let (portable, provisioned) = (|| -> Result<(Portable, ProvisionResponse)> {
         let identity = WorkspaceIdentity {
@@ -650,7 +650,7 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
     };
     super::homecoming::finish_pending(&node, &record.ws_id);
     // Observing adopts siblings, which may open this window meanwhile.
-    super::observe::current(&config, &spec.name);
+    super::observe::current_on(&node);
     if !window && mux.window_exists_by_full_name(&record.window_name)? {
         return switch(&record);
     }
@@ -781,7 +781,7 @@ pub fn remove(
         }
     };
     super::homecoming::finish_pending(&node, &record.ws_id);
-    super::observe::current(&config, &spec.name);
+    super::observe::current_on(&node);
     if record.cleanup_pending() {
         return super::homecoming::finish_cleanup(&node, record);
     }
