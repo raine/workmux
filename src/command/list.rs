@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config;
 use crate::config::MuxMode;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
+use crate::remote::cache::{self, WorkspaceRecord, WorkspaceState};
 use crate::util::format_compact_age;
 use crate::workflow::types::AgentStatusSummary;
 use crate::{git, nerdfont, workflow};
@@ -153,6 +154,25 @@ struct JsonWorktree {
     is_open: bool,
     agent_statuses: Vec<AgentStatus>,
     created_at: Option<u64>,
+    /// The remote a remote workspace lives on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
+}
+
+/// Remote workspaces from the local cache; listing never contacts a node.
+fn remote_records(project_root: Option<&Path>, filter: &[String]) -> Vec<WorkspaceRecord> {
+    match project_root {
+        Some(root) => cache::for_project(root),
+        None => cache::all(),
+    }
+    .into_iter()
+    .filter(|record| {
+        filter.is_empty()
+            || filter
+                .iter()
+                .any(|token| *token == record.handle || *token == record.branch)
+    })
+    .collect()
 }
 
 struct ProjectWorktree {
@@ -200,12 +220,15 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
     let display_config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
     let mut worktrees = Vec::new();
+    let remotes;
     if all {
         for root in discover_project_roots(mux.as_ref())? {
             worktrees.extend(list_project(&root, mux.as_ref(), show_pr && !json, filter)?);
         }
+        remotes = remote_records(None, filter);
     } else {
         let root = git::get_main_worktree_root()?;
+        remotes = remote_records(Some(&root), filter);
         let project = project_name(&root);
         worktrees.extend(
             workflow::list(&display_config, mux.as_ref(), show_pr && !json, filter)?
@@ -218,7 +241,12 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
         );
     }
 
-    if worktrees.is_empty() {
+    let remote_open = |record: &WorkspaceRecord| {
+        mux.window_exists_by_full_name(&record.window_name)
+            .unwrap_or(false)
+    };
+
+    if worktrees.is_empty() && remotes.is_empty() {
         if json {
             println!("[]");
         } else {
@@ -250,8 +278,23 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
                         .map(|summary| summary.statuses)
                         .unwrap_or_default(),
                     created_at: wt.created_at,
+                    remote: None,
                 }
             })
+            .chain(remotes.iter().map(|record| JsonWorktree {
+                project: project_name(&record.project_root),
+                project_path: record.project_root.to_string_lossy().into_owned(),
+                handle: record.handle.clone(),
+                branch: record.branch.clone(),
+                path: record.remote_worktree.clone().unwrap_or_default(),
+                is_main: false,
+                mode: "window".to_string(),
+                has_uncommitted_changes: false,
+                is_open: remote_open(record),
+                agent_statuses: Vec::new(),
+                created_at: Some(record.created_at),
+                remote: Some(record.remote.clone()),
+            }))
             .collect();
         println!("{}", serde_json::to_string(&entries)?);
         return Ok(());
@@ -311,6 +354,25 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
                 path_str,
             }
         })
+        .chain(remotes.iter().map(|record| WorktreeRow {
+            project: project_name(&record.project_root),
+            branch: record.branch.clone(),
+            age: format_compact_age(now.saturating_sub(record.created_at)),
+            pr_status: "-".to_string(),
+            agent_status: "-".to_string(),
+            mux_status: if remote_open(record) {
+                "✓".to_string()
+            } else {
+                "-".to_string()
+            },
+            unmerged_status: "-".to_string(),
+            path_str: match record.state {
+                WorkspaceState::Ready => format!("remote:{}", record.remote),
+                WorkspaceState::Provisioning => {
+                    format!("remote:{} (provisioning)", record.remote)
+                }
+            },
+        }))
         .collect();
 
     let mut table = Table::new(display_data);

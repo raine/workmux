@@ -1,6 +1,7 @@
 use crate::command::args::PromptArgs;
 use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::remote::cache::WorkspaceRecord;
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{config, workflow};
@@ -60,6 +61,30 @@ pub fn run(
         .map(crate::naming::validate_parent_session)
         .transpose()?;
 
+    let remote_records: Vec<Option<WorkspaceRecord>> = resolved_names
+        .iter()
+        .map(|name| crate::remote::cache::find_here(name))
+        .collect();
+    if let Some(record) = remote_records.iter().flatten().next() {
+        let unsupported = [
+            (prompt_args.has_any(), "Prompt arguments (-p, -P, -e)"),
+            (continue_session, "--continue"),
+            (new_window, "--new"),
+            (run_hooks, "--run-hooks"),
+            (force_files, "--force-files"),
+            (target_name.is_some(), "--target-name"),
+            (parent_session.is_some(), "--parent-session"),
+            (mode_override == Some(MuxMode::Session), "Session mode"),
+        ];
+        if let Some((_, option)) = unsupported.iter().find(|(set, _)| *set) {
+            bail!(
+                "{option} cannot be used with remote workspace '{}' on '{}'",
+                record.handle,
+                record.remote
+            );
+        }
+    }
+
     let (config, config_location) = config::Config::load_with_location(None, config_override)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
@@ -82,7 +107,15 @@ pub fn run(
 
     let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
 
-    for resolved_name in &resolved_names {
+    for (resolved_name, remote_record) in resolved_names.iter().zip(remote_records) {
+        if let Some(record) = remote_record {
+            if let Err(e) = crate::remote::lifecycle::open(&context, record, true) {
+                eprintln!("✗ {:#}", e);
+                errors.push((resolved_name.clone(), e));
+            }
+            continue;
+        }
+
         // Write prompt to temp file if provided (unique per worktree).
         // In file-only mode, skip writing here; the prompt is passed to
         // workflow::open which writes to the worktree before pane setup.

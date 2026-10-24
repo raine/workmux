@@ -187,44 +187,40 @@ pub fn evaluate(facts: &Facts, cx: &Context) -> (Vec<Row>, Option<&'static str>)
     (rows, runtime)
 }
 
+/// Remote agents run in docker; podman is reported but not used.
 fn runtime_row(facts: &Facts, cx: &Context) -> (Row, Option<&'static str>) {
-    for binary in ["docker", "podman"] {
-        if fact(facts, &format!("{binary}_status")) == "0" {
-            let version = fact(facts, &format!("{binary}_out"));
-            return (
-                Row::new("container", Level::Ok, format!("{binary} {version}")),
-                Some(binary),
-            );
-        }
+    if fact(facts, "docker_status") == "0" {
+        let version = fact(facts, "docker_out");
+        return (
+            Row::new("container", Level::Ok, format!("docker {version}")),
+            Some("docker"),
+        );
     }
     let user = fact(facts, "user");
     let name = &cx.spec.name;
-    let row = match ["docker", "podman"]
-        .into_iter()
-        .find(|binary| facts.contains_key(&format!("{binary}_status")))
-    {
-        None => Row::new(
-            "container",
-            Level::Fail,
-            "neither docker nor podman is installed",
-        )
-        .fix(format!(
-            "install docker or podman, or set remotes.{name}.isolation: none"
-        )),
-        Some(binary) => {
-            let output = fact(facts, &format!("{binary}_out"));
-            let row = Row::new("container", Level::Fail, format!("{binary}: {output}"));
-            if output.contains("permission denied") {
-                let reconnect = cx
-                    .disconnect_hint
-                    .map(|hint| format!(", then reconnect: {hint}"))
-                    .unwrap_or_default();
-                row.fix(format!("sudo usermod -aG docker {user}{reconnect}"))
-            } else {
-                row.fix(format!(
-                    "start the {binary} service (e.g. sudo systemctl start {binary})"
-                ))
-            }
+    let row = if !facts.contains_key("docker_status") {
+        let detail = if fact(facts, "podman_status") == "0" {
+            format!(
+                "podman {} works, but remote agents run in docker",
+                fact(facts, "podman_out")
+            )
+        } else {
+            "docker is not installed".to_string()
+        };
+        Row::new("container", Level::Fail, detail).fix(format!(
+            "install docker, or set remotes.{name}.isolation: none"
+        ))
+    } else {
+        let output = fact(facts, "docker_out");
+        let row = Row::new("container", Level::Fail, format!("docker: {output}"));
+        if output.contains("permission denied") {
+            let reconnect = cx
+                .disconnect_hint
+                .map(|hint| format!(", then reconnect: {hint}"))
+                .unwrap_or_default();
+            row.fix(format!("sudo usermod -aG docker {user}{reconnect}"))
+        } else {
+            row.fix("start the docker service (e.g. sudo systemctl start docker)")
         }
     };
     (row, None)
@@ -487,17 +483,26 @@ mod tests {
     }
 
     #[test]
-    fn podman_is_used_when_docker_fails() {
+    fn podman_alone_fails_with_a_docker_fix() {
         let mut facts = healthy_facts();
-        facts.insert("docker_status".into(), "1".into());
+        facts.remove("docker_status");
+        facts.remove("docker_out");
         facts.insert("podman_status".into(), "0".into());
         facts.insert("podman_out".into(), "5.0.0".into());
-        let (_, runtime) = rows_for(
+        let (rows, runtime) = rows_for(
             &facts,
             RemoteIsolation::Container,
             NodeStatus::Ready(Hello::local()),
         );
-        assert_eq!(runtime, Some("podman"));
+        assert_eq!(runtime, None);
+        let container = row(&rows, "container");
+        assert_eq!(container.level, Level::Fail);
+        assert!(
+            container.detail.contains("podman 5.0.0"),
+            "{}",
+            container.detail
+        );
+        assert!(container.fix.as_deref().unwrap().contains("install docker"));
     }
 
     #[test]

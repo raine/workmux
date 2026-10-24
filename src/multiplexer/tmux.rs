@@ -1474,7 +1474,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
-        Ok(Box::new(TmuxHandshake::new()?))
+        Ok(Box::new(TmuxHandshake::new(self.socket_path.as_deref())?))
     }
 
     // === Status ===

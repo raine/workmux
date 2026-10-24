@@ -53,6 +53,15 @@ impl Pin {
         })
     }
 
+    /// A binary already on the node under `name`, for callers that only run
+    /// it (an execution keeps the binary that started it).
+    pub fn installed(name: String) -> Self {
+        Self {
+            name,
+            source: PinSource::Release,
+        }
+    }
+
     /// Path of the pinned binary on the remote, as shown to users.
     pub fn path(&self, spec: &RemoteSpec) -> String {
         format!("{}/bin/{}", spec.path.trim_end_matches('/'), self.name)

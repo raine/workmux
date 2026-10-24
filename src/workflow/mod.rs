@@ -30,7 +30,7 @@ pub use merge::merge;
 pub use open::open;
 pub use remove::{fallback_worktree_path, remove, remove_quiet};
 pub use rename::rename;
-pub use setup::write_prompt_file;
+pub use setup::{resolve_pane_configuration, validate_prompt_consumption, write_prompt_file};
 
 // Re-export commonly used types for convenience
 pub use context::{WorkflowContext, resolve_configured_base_branch};

@@ -3,7 +3,8 @@
 //! Runs inside a tmux pane. Starts a TCP RPC server and executes the agent
 //! command inside a sandbox (Lima VM or Docker/Podman container).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use std::collections::HashSet;
 
-use crate::config::{Config, SandboxBackend};
+use crate::config::{Config, SandboxBackend, SandboxRuntime};
 use crate::frozen_config::FrozenConfigGuard;
 use crate::multiplexer;
 use crate::sandbox::build_docker_run_args;
@@ -64,9 +65,28 @@ impl Drop for ContainerGuard {
 ///
 /// Detects the sandbox backend from config and dispatches to the
 /// appropriate handler (Lima VM or Docker/Podman container).
-pub fn run(worktree: PathBuf, worktree_root: Option<PathBuf>, command: Vec<String>) -> Result<i32> {
+///
+/// With `node_root`, the supervisor runs on a remote node for an agent the
+/// laptop started: the config is the workspace's frozen snapshot, state
+/// lives under the node root, and listeners bind only to docker's bridge.
+pub fn run(
+    worktree: PathBuf,
+    worktree_root: Option<PathBuf>,
+    command: Vec<String>,
+    node_root: Option<PathBuf>,
+) -> Result<i32> {
     if command.is_empty() {
         bail!("No command specified. Usage: workmux sandbox run <worktree> -- <command...>");
+    }
+    if let Some(root) = &node_root {
+        if std::env::var_os(crate::frozen_config::FROZEN_CONFIG_ENV).is_none() {
+            bail!(
+                "--node-root needs the workspace config in {}",
+                crate::frozen_config::FROZEN_CONFIG_ENV
+            );
+        }
+        // SAFETY: no other threads exist yet.
+        unsafe { std::env::set_var("XDG_STATE_HOME", root.join("state")) };
     }
 
     let worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
@@ -74,18 +94,64 @@ pub fn run(worktree: PathBuf, worktree_root: Option<PathBuf>, command: Vec<Strin
     let frozen_config = FrozenConfigGuard::capture(&config, location.as_ref(), &worktree)?;
 
     match config.sandbox.backend() {
+        SandboxBackend::Lima if node_root.is_some() => {
+            bail!("remote agents run in docker containers, not Lima")
+        }
         SandboxBackend::Lima => run_lima(&config, frozen_config.path(), &worktree, &command),
         SandboxBackend::Container => {
             let wt_root = worktree_root
                 .map(|p| p.canonicalize().unwrap_or(p))
                 .unwrap_or_else(|| worktree.clone());
-            run_container(&config, frozen_config.path(), &worktree, &wt_root, &command)
+            run_container(
+                &config,
+                frozen_config.path(),
+                &worktree,
+                &wt_root,
+                &command,
+                node_root.is_some(),
+            )
         }
     }
 }
 
+/// Docker's bridge gateway: the host's address on the network containers
+/// join by default, reachable from them and not routed from outside.
+fn bridge_gateway() -> Result<Ipv4Addr> {
+    let output = Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}} {{end}}",
+        ])
+        .output()
+        .context("Failed to run docker network inspect")?;
+    if !output.status.success() {
+        bail!(
+            "docker network inspect bridge failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    parse_bridge_gateway(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_bridge_gateway(text: &str) -> Result<Ipv4Addr> {
+    text.split_whitespace()
+        .filter_map(|word| word.parse::<Ipv4Addr>().ok())
+        .find(|ip| ip.is_private())
+        .ok_or_else(|| {
+            anyhow!(
+                "docker's bridge network has no private IPv4 gateway ({:?}); refusing to \
+                 start listeners for the agent",
+                text.trim()
+            )
+        })
+}
+
 /// Start RPC server and return (server, port, token, context).
-/// Shared setup between Lima and Container backends.
+/// Shared setup between Lima and Container backends. Only a node binds a
+/// specific address, so `bind_ip` also marks the agent as remote.
 fn start_rpc(
     config: &Config,
     frozen_config_path: &Path,
@@ -93,8 +159,12 @@ fn start_rpc(
     allowed_commands: HashSet<String>,
     detected_toolchain: toolchain::DetectedToolchain,
     allow_unsandboxed_host_exec: bool,
+    bind_ip: Option<IpAddr>,
 ) -> Result<(RpcServer, u16, String, Arc<RpcContext>)> {
-    let rpc_server = RpcServer::bind()?;
+    let rpc_server = match bind_ip {
+        Some(ip) => RpcServer::bind_to(ip)?,
+        None => RpcServer::bind()?,
+    };
     let rpc_port = rpc_server.port();
     let rpc_token = generate_token();
     info!(port = rpc_port, "RPC server listening");
@@ -112,6 +182,7 @@ fn start_rpc(
         allowed_commands,
         detected_toolchain,
         allow_unsandboxed_host_exec,
+        on_node: bind_ip.is_some(),
     });
 
     Ok((rpc_server, rpc_port, rpc_token, ctx))
@@ -209,6 +280,7 @@ fn run_lima(
         allowed_commands,
         detected.clone(),
         config.sandbox.allow_unsandboxed_host_exec(),
+        None,
     )?;
     let _rpc_handle = rpc_server.spawn(ctx);
 
@@ -280,6 +352,7 @@ fn run_container(
     pane_cwd: &Path,
     worktree_root: &Path,
     command: &[String],
+    on_node: bool,
 ) -> Result<i32> {
     info!(
         pane_cwd = %pane_cwd.display(),
@@ -296,6 +369,17 @@ fn run_container(
         );
     }
 
+    // On a node, listeners bind to docker's bridge only, never to every
+    // interface of a public host.
+    let bind_ip = if on_node {
+        if config.sandbox.runtime() != SandboxRuntime::Docker {
+            bail!("remote agents need docker; podman is not supported on remotes");
+        }
+        Some(IpAddr::V4(bridge_gateway()?))
+    } else {
+        None
+    };
+
     // Ensure sandbox config dirs exist before building container args
     ensure_sandbox_config_dirs()?;
 
@@ -309,8 +393,13 @@ fn run_container(
     let freshness_image = config.sandbox.resolved_image(agent);
     crate::sandbox::ensure_image_ready(&config.sandbox, &freshness_image)?;
 
-    // Merge built-in commands (e.g. afplay, clipboard shims) with user-configured ones
-    let host_commands = shims::effective_host_commands(config.sandbox.host_commands());
+    // Merge built-in commands (e.g. afplay, clipboard shims) with user-configured ones.
+    // A node's host is not the user's machine, so it runs none.
+    let host_commands = if on_node {
+        Vec::new()
+    } else {
+        shims::effective_host_commands(config.sandbox.host_commands())
+    };
     // Clipboard shims use ClipboardRead RPC, not Exec -- exclude from exec allowlist
     let allowed_commands: HashSet<String> = host_commands
         .iter()
@@ -327,7 +416,9 @@ fn run_container(
     // Create shims directory for host-exec (on host, will be bind-mounted into container).
     // Use $XDG_CACHE_HOME/workmux/shims/ instead of system temp (/var/folders/... on macOS)
     // so the path is inside ~ and accessible to VM-based runtimes like Colima.
-    let _shim_dir = {
+    let _shim_dir = if on_node {
+        None
+    } else {
         let shims_base = crate::xdg::cache_dir()?.join("shims");
         std::fs::create_dir_all(&shims_base)
             .with_context(|| format!("Failed to create {}", shims_base.display()))?;
@@ -346,7 +437,8 @@ fn run_container(
         pane_cwd,
         allowed_commands,
         detected.clone(),
-        config.sandbox.allow_unsandboxed_host_exec(),
+        config.sandbox.allow_unsandboxed_host_exec() && !on_node,
+        bind_ip,
     )?;
     let _rpc_handle = rpc_server.spawn(ctx);
 
@@ -355,7 +447,10 @@ fn run_container(
     let proxy = if network_deny {
         let allowed = config.sandbox.network.allowed_domain_rules();
         let max_connections = config.sandbox.network.max_connections();
-        let proxy = NetworkProxy::bind(&allowed, max_connections)?;
+        let proxy = match bind_ip {
+            Some(ip) => NetworkProxy::bind_to(ip, &allowed, max_connections)?,
+            None => NetworkProxy::bind(&allowed, max_connections)?,
+        };
         let proxy_port = proxy.port();
         let proxy_token = proxy.token().to_string();
         let handle = proxy.spawn();
@@ -366,7 +461,10 @@ fn run_container(
     };
 
     // Compute RPC host BEFORE matching on runtime (SandboxRuntime is not Copy)
-    let rpc_host = config.sandbox.resolved_rpc_host();
+    let rpc_host = match bind_ip {
+        Some(ip) => ip.to_string(),
+        None => config.sandbox.resolved_rpc_host(),
+    };
     let runtime = config.sandbox.runtime();
     crate::sandbox::validate_git_metadata_boundary(runtime)?;
     let runtime_bin = runtime.binary_name();
@@ -475,6 +573,21 @@ pub(super) fn redact_env_arg(arg: &str, extra_redact_keys: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_gateway_must_be_private_ipv4() {
+        assert_eq!(
+            parse_bridge_gateway("172.17.0.1 \n").unwrap(),
+            Ipv4Addr::new(172, 17, 0, 1)
+        );
+        assert_eq!(
+            parse_bridge_gateway("fd00::1 10.1.0.1 ").unwrap(),
+            Ipv4Addr::new(10, 1, 0, 1)
+        );
+        for bad in ["", "\n", "0.0.0.0", "203.0.113.5", "fd00::1"] {
+            assert!(parse_bridge_gateway(bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn redact_rpc_token() {
