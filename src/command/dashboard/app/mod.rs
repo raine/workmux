@@ -62,6 +62,12 @@ pub struct App {
     pub preview: Option<String>,
     /// Track which pane_id the preview was captured from (to detect selection changes)
     preview_pane_id: Option<String>,
+    /// Last capture of each remote agent no local pane relays, fetched from
+    /// its node in the background.
+    remote_previews: HashMap<String, String>,
+    /// When the last remote preview fetch started, and whether it is still
+    /// running.
+    remote_preview_fetch: Option<(std::time::Instant, bool)>,
     /// Input mode: keystrokes are sent directly to the selected agent's pane
     pub input_mode: bool,
     /// Manual scroll offset for the preview (None = auto-scroll to bottom)
@@ -241,6 +247,8 @@ impl App {
             view_mode: ViewMode::default(),
             preview: None,
             preview_pane_id: None,
+            remote_previews: HashMap::new(),
+            remote_preview_fetch: None,
             input_mode: false,
             preview_scroll: None,
             preview_line_count: 0,
@@ -321,8 +329,13 @@ impl App {
         self.sleeping_pane_ids = load_sleeping_pane_ids(self.mux.as_ref());
 
         // Load agents from StateStore with reconciliation against live pane state
+        let now_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.all_agents = StateStore::new()
-            .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
+            .and_then(|store| store.load_all_reconciled_agents(self.mux.as_ref()))
+            .map(|agents| crate::remote::agents::for_views(&self.config, agents, now_ts))
             .unwrap_or_default();
 
         // Load interrupted pane IDs from daemon runtime state
@@ -342,10 +355,18 @@ impl App {
             }
         }
 
-        // Cache repo roots for ALL agents before filtering (project picker needs all projects)
+        // Cache repo roots for ALL agents before filtering (project picker needs all projects).
+        // A remote agent's path is not a local checkout.
+        for agent in &self.all_agents {
+            if let Some(remote) = &agent.remote {
+                self.repo_roots
+                    .insert(agent.path.clone(), remote.project_root.clone());
+            }
+        }
         let paths_to_resolve: Vec<PathBuf> = self
             .all_agents
             .iter()
+            .filter(|a| a.remote.is_none())
             .filter(|a| {
                 !self.repo_roots.contains_key(&a.path) || !self.repo_keys.contains_key(&a.path)
             })

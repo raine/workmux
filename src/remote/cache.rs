@@ -66,6 +66,9 @@ pub struct WorkspaceRecord {
     pub created_at: u64,
     /// When the node last answered a lifecycle call for this workspace.
     pub observed_at: u64,
+    /// Where a local worktree of the handle would live. Remote agents show
+    /// under this path, so views group and name them like local ones.
+    pub local_path: PathBuf,
 }
 
 impl WorkspaceRecord {
@@ -80,6 +83,7 @@ impl WorkspaceRecord {
         base_sha: String,
         base_label: Option<String>,
         window_name: String,
+        local_path: PathBuf,
     ) -> Self {
         let now = now();
         Self {
@@ -99,6 +103,7 @@ impl WorkspaceRecord {
             execution: None,
             created_at: now,
             observed_at: now,
+            local_path,
         }
     }
 
@@ -125,7 +130,7 @@ impl WorkspaceRecord {
     }
 }
 
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -134,6 +139,11 @@ fn now() -> u64 {
 
 fn root() -> Result<PathBuf> {
     Ok(crate::xdg::state_dir()?.join("remote"))
+}
+
+/// Directory of the laptop's files about remote `name`.
+pub fn remote_dir(name: &str) -> Result<PathBuf> {
+    Ok(root()?.join(name))
 }
 
 fn record_path(root: &Path, remote: &str, ws_id: &str) -> PathBuf {
@@ -309,6 +319,7 @@ mod tests {
             "0".repeat(40),
             None,
             format!("wm-{handle}"),
+            PathBuf::from("/repo__worktrees").join(handle),
         )
     }
 

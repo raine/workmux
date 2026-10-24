@@ -127,6 +127,58 @@ pub struct AgentPane {
     /// Latest user prompt captured from the agent's hooks.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Set when the agent runs in a remote workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteAgent>,
+}
+
+/// The pane of a remote workspace a local attach pane relays.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RemoteRef {
+    /// Remote name from `remotes:`.
+    pub remote: String,
+    pub ws_id: String,
+    pub ex_id: String,
+    /// Index of the configured pane.
+    pub pane: usize,
+}
+
+/// A remote agent as views show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgent {
+    #[serde(flatten)]
+    pub at: RemoteRef,
+    #[serde(default)]
+    pub handle: String,
+    /// Main worktree of the local repository the workspace belongs to.
+    #[serde(default)]
+    pub project_root: PathBuf,
+    /// ssh destination of the remote, for display.
+    #[serde(default)]
+    pub host: String,
+    /// Whether a local pane relays this agent; detached rows have no pane.
+    #[serde(default)]
+    pub attached: bool,
+    /// Whether the remote answered within the heartbeat deadline.
+    #[serde(default)]
+    pub connected: bool,
+    /// When the remote last answered (laptop clock).
+    #[serde(default)]
+    pub last_seen: Option<u64>,
+}
+
+impl RemoteAgent {
+    pub fn new(at: RemoteRef) -> Self {
+        Self {
+            at,
+            handle: String::new(),
+            project_root: PathBuf::new(),
+            host: String::new(),
+            attached: true,
+            connected: false,
+            last_seen: None,
+        }
+    }
 }
 
 impl AgentPane {
@@ -199,6 +251,8 @@ pub struct PaneSetupOptions<'a> {
     pub resume_mode: ResumeMode,
     /// Shell-quoted words that replace `workmux sandbox run` in wrapped panes.
     pub sandbox_supervisor: Option<&'a str>,
+    /// Directory put first on the agent command's `PATH`.
+    pub agent_path_prefix: Option<&'a std::path::Path>,
 }
 
 /// Backend type for multiplexer selection

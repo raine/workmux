@@ -58,7 +58,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn new(check: &'static str, level: Level, detail: impl Into<String>) -> Self {
+    pub(super) fn new(check: &'static str, level: Level, detail: impl Into<String>) -> Self {
         Self {
             check,
             level,
@@ -67,7 +67,7 @@ impl Row {
         }
     }
 
-    fn fix(mut self, fix: impl Into<String>) -> Self {
+    pub(super) fn fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
         self
     }
@@ -328,6 +328,11 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         disconnect_hint: disconnect_hint.as_deref(),
     };
     let (mut rows, runtime) = evaluate(&facts, &cx);
+    rows.extend(super::hooks::doctor_rows(
+        spec,
+        config,
+        matches!(node, NodeStatus::Ready(_)),
+    ));
     for row in &rows {
         print_row(row);
     }

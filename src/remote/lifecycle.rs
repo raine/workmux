@@ -144,6 +144,7 @@ pub fn create(
                 base_sha,
                 Some(base_label),
                 window_name.clone(),
+                context.worktree_base_dir()?.join(request.handle),
             )
         }
     };
@@ -622,6 +623,7 @@ pub fn close(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
     }
     mux.kill_window(&record.window_name)
         .context("Failed to close window")?;
+    forget_attachments(record);
     println!(
         "✓ Closed the window of '{}'; its agent keeps running on '{}' (`workmux open {}` \
          to return)",
@@ -725,5 +727,16 @@ fn forget_locally(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()>
     {
         let _ = mux.kill_window(&record.window_name);
     }
+    forget_attachments(record);
     record.delete()
+}
+
+/// Drop the state of the closed window's panes now, so a later server
+/// restart cannot bring the window back through `resurrect`.
+fn forget_attachments(record: &WorkspaceRecord) {
+    let result = crate::state::StateStore::new()
+        .and_then(|store| store.delete_remote_attachments(&record.remote, &record.ws_id));
+    if let Err(err) = result {
+        tracing::warn!(handle = %record.handle, "failed to forget attach panes: {err:#}");
+    }
 }

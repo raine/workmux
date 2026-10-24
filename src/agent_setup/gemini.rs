@@ -61,6 +61,11 @@ pub fn check() -> Result<StatusCheck> {
     check_at(&path)
 }
 
+/// [`check`] for the Gemini config directory `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    check_at(&dir.join("settings.json"))
+}
+
 fn check_at(path: &Path) -> Result<StatusCheck> {
     if !path.exists() {
         return Ok(StatusCheck::NotInstalled);
@@ -149,9 +154,13 @@ fn install_at(path: &Path) -> Result<()> {
 /// Merges hook groups into existing hooks without clobbering or creating
 /// duplicates. Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path =
-        settings_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir = gemini_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
+/// [`install`] into the Gemini config directory `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = dir.join("settings.json");
     install_at(&path)?;
 
     Ok(format!("Installed hooks to {}", path.display()))
