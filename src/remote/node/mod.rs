@@ -308,6 +308,10 @@ pub struct Execution {
     /// the execution before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continues: bool,
+    /// Kind of the workspace's agent, resolved through its frozen config,
+    /// so an `agents:` alias names its type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
 }
 
 impl Execution {
@@ -629,5 +633,18 @@ mod tests {
         assert_eq!(listed[0].identity, identity());
         root.forget("w0123456789ab").unwrap();
         assert!(root.load("w0123456789ab").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_agent_alias_resolves_to_its_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = NodeRoot::at(dir.path().to_path_buf()).unwrap();
+        let mut ws = Workspace::new(&root, identity(), RemoteIsolation::Container);
+        ws.agent = Some("cxnd".into());
+        let config: Config = serde_yaml::from_str(
+            "agents:\n  cxnd:\n    command: codex --no-daemon\n    type: codex\n",
+        )
+        .unwrap();
+        assert_eq!(ws.agent_kind(&config), Some("codex"));
     }
 }
