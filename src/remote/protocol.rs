@@ -72,6 +72,8 @@ pub mod code {
     pub const NO_WORKTREE: &str = "no_worktree";
     /// The workspace no longer matches the snapshot the request expected.
     pub const DIVERGED: &str = "diverged";
+    /// A source omitted after prepare disappeared before provisioning.
+    pub const MISSING_SEED: &str = "missing_seed";
     /// Anything else.
     pub const FAILED: &str = "failed";
 }
@@ -97,6 +99,9 @@ pub struct ProvisionRequest {
     pub identity: WorkspaceIdentity,
     pub isolation: RemoteIsolation,
     pub payload: Option<ProvisionPayload>,
+    /// Candidate seed paths relative to the project repository.
+    #[serde(default)]
+    pub seed_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +118,9 @@ pub struct ProvisionPayload {
     /// Sources of `files.symlink` for the node's project directory, applied
     /// only where that directory lacks them.
     pub seeds: Vec<FileEntry>,
+    /// Sources omitted because prepare found them; rechecked before file operations.
+    #[serde(default)]
+    pub cached_seeds: Vec<String>,
     /// `files.symlink` patterns, matched against the node's project directory.
     pub symlink_patterns: Vec<String>,
     /// Transferred paths the laptop's git ignores, through rules the node
@@ -171,6 +179,9 @@ pub struct ProvisionResponse {
     pub worktree_path: String,
     /// Whether `refs/workmux/base/<ws_id>` already holds `base_sha`.
     pub has_base: bool,
+    /// Existing seed paths from the request. Absent on older nodes.
+    #[serde(default)]
+    pub cached_seeds: Vec<String>,
 }
 
 /// `start-execution`: idempotent per `ex_id`; returns the workspace's live
