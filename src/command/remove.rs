@@ -58,6 +58,11 @@ fn run_specified(
             (name, record)
         })
         .collect();
+    let mut batch = crate::remote::lifecycle::RemovalBatch::new(
+        targets
+            .iter()
+            .filter_map(|(_, record)| record.as_ref().map(|r| r.ws_id.clone())),
+    );
     for (name, remote) in targets {
         let Some(record) = remote else {
             local_names.push(name);
@@ -69,7 +74,7 @@ fn run_specified(
             run_hooks: true,
             confirm_unmerged,
         };
-        if let Err(err) = crate::remote::lifecycle::remove(record.clone(), options) {
+        if let Err(err) = batch.remove(record.clone(), options) {
             eprintln!("✗ {err:#}");
             remote_failures += 1;
         } else if crate::remote::cache::find_here(&record.handle).is_none() {
