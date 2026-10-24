@@ -59,7 +59,7 @@ pub fn merge(
                 "'{}' is already merged; removing its remote workspace",
                 record.handle
             );
-            let node = Node::connect(&spec)?;
+            let node = connect_for_cleanup(&spec, &record)?;
             return report_removal(&node, record, &snapshot, !options.no_hooks);
         }
         Some(Homecoming::Pulled { .. }) => bail!(
@@ -154,7 +154,7 @@ pub fn merge(
     if options.keep {
         let node = match node {
             Some(node) => Ok(node),
-            None => Node::connect(&spec),
+            None => Node::connect(&spec).inspect(|node| finish_pending(node, &record.ws_id)),
         };
         keep_branch_in_sync(context, node, &record, &snapshot);
         discard_copy(context, &mut record, created_branch, !options.no_hooks)?;
@@ -190,10 +190,7 @@ pub fn merge(
 
     let node = match node {
         Some(node) => node,
-        None => match Node::connect(&spec) {
-            Ok(node) => node,
-            Err(err) => return Err(pending(&record, err)),
-        },
+        None => connect_for_cleanup(&spec, &record)?,
     };
     report_removal(&node, record, &snapshot, !options.no_hooks)?;
     local.map(|_| ())
@@ -207,7 +204,7 @@ pub fn pull(context: &WorkflowContext, mut record: WorkspaceRecord, run_hooks: b
     match record.homecoming.clone() {
         Some(Homecoming::Pulled { snapshot }) => {
             open_local(context, &record)?;
-            let node = Node::connect(&spec)?;
+            let node = connect_for_cleanup(&spec, &record)?;
             return report_pull(&node, record, &snapshot);
         }
         Some(Homecoming::Merged { .. }) => bail!(
@@ -288,26 +285,27 @@ fn report_pull(node: &Node, mut record: WorkspaceRecord, snapshot: &Snapshot) ->
             );
             Ok(())
         }
-        Err(err) => Err(anyhow!(
-            "pulled; remote cleanup pending ({err:#}). The next `workmux remote pull {}` or a \
-             merge, remove or open that reaches '{}' finishes it",
-            record.handle,
-            record.remote
-        )),
+        Err(err) => Err(pending(&record, err)),
     }
 }
 
 /// `workmux rebase` of a remote workspace: rebase its branch on the node
 /// onto the laptop's base branch, as a local rebase would.
 pub fn rebase(config: &crate::config::Config, mut record: WorkspaceRecord) -> Result<()> {
-    if record.homecoming.is_some() {
-        bail!(
+    match record.homecoming {
+        Some(Homecoming::Merged { .. }) => bail!(
+            "'{}' is already merged; `workmux merge {}` finishes removing its remote workspace",
+            record.handle,
+            record.handle
+        ),
+        Some(_) => bail!(
             "'{}' is being merged or pulled; `workmux merge {}` or `workmux remote pull {}` \
              finishes that first",
             record.handle,
             record.handle,
             record.handle
-        );
+        ),
+        None => {}
     }
     let base = record.base_branch();
     if base == record.branch {
@@ -410,11 +408,34 @@ pub(super) fn finish_cleanup(node: &Node, record: WorkspaceRecord) -> Result<()>
     }
 }
 
+/// Connect to finish `record`'s pending cleanup, and the others on its
+/// remote.
+pub(super) fn connect_for_cleanup(spec: &RemoteSpec, record: &WorkspaceRecord) -> Result<Node> {
+    let node = Node::connect(spec).map_err(|err| pending(record, err))?;
+    finish_pending(&node, &record.ws_id);
+    Ok(node)
+}
+
+/// The error of `record`'s cleanup left pending by `err`: one line with the
+/// cause and what finishes it. The whole error goes to the debug log.
 fn pending(record: &WorkspaceRecord, err: anyhow::Error) -> anyhow::Error {
+    tracing::debug!(handle = %record.handle, "remote cleanup pending: {err:?}");
+    let (done, retry) = match record.homecoming {
+        Some(Homecoming::Pulled { .. }) => ("pulled", "remote pull"),
+        _ => ("merged", "merge"),
+    };
+    let cause = err
+        .chain()
+        .find_map(|err| err.downcast_ref::<super::transport::SshFailure>())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| node_message(&err));
     anyhow!(
-        "merged; remote cleanup pending ({err:#}). The next `workmux merge`, `remove`, \
-         `open` or `remote pull` that reaches '{}' finishes it",
-        record.remote
+        "{done}; remote cleanup pending on '{remote}' ({cause}). `workmux {retry} {handle}`, or \
+         the next merge, remove, open, add, rebase or `remote pull` that reaches '{remote}', \
+         finishes it",
+        cause = cause.lines().next().unwrap_or_default(),
+        remote = record.remote,
+        handle = record.handle,
     )
 }
 
