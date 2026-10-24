@@ -110,3 +110,25 @@ pub struct RescueArgs {
     #[arg(short = 'u', long, requires = "with_changes")]
     pub include_untracked: bool,
 }
+
+#[derive(clap::Args, Debug, Default)]
+pub struct PlacementArgs {
+    /// Create the agent on a configured remote (default: the `placement` remote,
+    /// or the only configured remote)
+    #[arg(long, value_name = "REMOTE", num_args = 0..=1, conflicts_with = "local", hide = true)]
+    pub remote: Option<Option<String>>,
+
+    /// Create the agent locally, overriding a remote `placement`
+    #[arg(long, hide = true)]
+    pub local: bool,
+}
+
+impl PlacementArgs {
+    pub fn is_set(&self) -> bool {
+        self.remote.is_some() || self.local
+    }
+
+    pub fn remote_flag(&self) -> Option<Option<&str>> {
+        self.remote.as_ref().map(|name| name.as_deref())
+    }
+}

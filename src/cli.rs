@@ -1,4 +1,4 @@
-use crate::command::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
+use crate::command::args::{MultiArgs, PlacementArgs, PromptArgs, RescueArgs, SetupFlags};
 use crate::config::{MuxMode, SidebarHeight, SidebarPosition, SidebarWidth};
 use crate::workflow::pr::{Forge, PrReference};
 use crate::{claude, command, config, git, nerdfont};
@@ -338,6 +338,9 @@ enum Commands {
 
         #[command(flatten)]
         multi: MultiArgs,
+
+        #[command(flatten)]
+        placement: PlacementArgs,
 
         /// Use a named pane layout from config instead of default panes
         #[arg(short = 'l', long, conflicts_with = "agent")]
@@ -769,6 +772,14 @@ enum Commands {
     /// Manage sandbox settings
     Sandbox(command::sandbox::SandboxArgs),
 
+    /// Manage SSH remotes that run agents
+    #[command(hide = true)]
+    Remote(command::remote::RemoteArgs),
+
+    /// Remote node entry point (runs on the remote, JSON in and out)
+    #[command(hide = true)]
+    Node(command::node::NodeArgs),
+
     /// Set agent status for the current tmux window (used by hooks)
     #[command(hide = true)]
     SetWindowStatus {
@@ -978,6 +989,13 @@ pub fn run() -> Result<()> {
         }
     };
 
+    // Node verbs speak JSON to another workmux; they must not load config,
+    // prompt, or check for updates.
+    let cli = match cli.command {
+        Commands::Node(args) => return command::node::run(args),
+        command => Cli { command },
+    };
+
     // Extract config override early so the side-effect loads (nerdfont, update
     // check) respect the user's explicit --config choice.
     let config_override = match &cli.command {
@@ -1083,6 +1101,7 @@ pub fn run() -> Result<()> {
             setup,
             rescue,
             multi,
+            placement,
             layout,
             continue_session,
             fork,
@@ -1094,6 +1113,7 @@ pub fn run() -> Result<()> {
             json,
             config,
         } => {
+            command::add::check_placement(&cfg, &placement)?;
             let mode_override = mode
                 .map(MuxMode::from)
                 .or(session.then_some(MuxMode::Session));
@@ -1306,6 +1326,8 @@ pub fn run() -> Result<()> {
             ClaudeCommands::Prune => prune_claude_config(),
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
+        Commands::Remote(args) => command::remote::run(args),
+        Commands::Node(_) => unreachable!("node is dispatched before config load"),
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::RegisterAgent => command::set_window_status::register_agent(),
         Commands::SetBase { base } => command::set_base::run(&base),
@@ -1459,6 +1481,51 @@ mod tests {
             assert!(continue_session);
             assert_eq!(prompt.prompt_file, Some(PathBuf::from("followup.md")));
         }
+    }
+
+    #[test]
+    fn add_placement_flags_parse() {
+        let parse = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Add {
+                branch_name,
+                placement,
+                ..
+            } = cli.command
+            else {
+                panic!("expected add command");
+            };
+            (branch_name, placement.remote, placement.local)
+        };
+        assert_eq!(
+            parse(&["wm", "add", "feat", "--remote"]),
+            (Some("feat".into()), Some(None), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "--remote", "hetzner", "feat"]),
+            (Some("feat".into()), Some(Some("hetzner".into())), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "--remote=hetzner", "feat"]),
+            (Some("feat".into()), Some(Some("hetzner".into())), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "feat", "--local"]),
+            (Some("feat".into()), None, true)
+        );
+        let err = Cli::try_parse_from(["wm", "add", "feat", "--local", "--remote"])
+            .err()
+            .expect("--local and --remote must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn node_and_remote_commands_parse() {
+        assert!(Cli::try_parse_from(["wm", "node", "hello", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "node", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["wm", "remote"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "remote", "setup", "hetzner"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "remote", "doctor", "hetzner"]).is_ok());
     }
 
     #[test]

@@ -22,6 +22,7 @@ use std::io::{IsTerminal, Read};
 use std::os::fd::AsRawFd;
 
 // Re-export the arg types that are used by the CLI
+use super::args::PlacementArgs;
 pub use super::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
 
 /// Variable name exposed to templates for stdin input lines
@@ -354,6 +355,20 @@ fn run_headless(
         );
     }
     Ok(())
+}
+
+/// Refuse placements `add` cannot honour before anything is created.
+///
+/// Inside a sandbox guest, placement is decided by the host that serves the
+/// RPC request, so the guest's own config is never consulted.
+pub fn check_placement(config: &config::Config, placement: &PlacementArgs) -> Result<()> {
+    if crate::sandbox::guest::is_sandbox_guest() {
+        if placement.is_set() {
+            bail!("--remote and --local are not supported from inside a sandbox");
+        }
+        return Ok(());
+    }
+    crate::remote::reject_remote_placement(config, placement.remote_flag(), placement.local)
 }
 
 #[allow(clippy::too_many_arguments)]
