@@ -217,8 +217,8 @@ fn forgotten_path(remote: &str, ws_id: &str) -> Result<PathBuf> {
     Ok(remote_dir(remote)?.join("forgotten").join(ws_id))
 }
 
-/// Note when the record of `ws_id` went, so observations from before then
-/// cannot bring it back (see `remote::siblings`).
+/// Note when the record of `ws_id` went, so no observation brings it back
+/// while the node still lists it (see `remote::siblings`).
 fn forget(remote: &str, ws_id: &str) -> Result<()> {
     let path = forgotten_path(remote, ws_id)?;
     if let Some(dir) = path.parent() {

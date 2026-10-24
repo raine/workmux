@@ -21,10 +21,6 @@ from .conftest import Node, commit_project, local_records, wm
 pytestmark = pytest.mark.tmux_only
 
 
-def list_windows(env: TmuxEnvironment) -> list:
-    return env.tmux(["list-windows", "-a", "-F", "#W"]).stdout.split()
-
-
 def configure(repo: Path, marker: str) -> None:
     commit_project(repo, {"nerdfont": False, "panes": [{"command": f"echo {marker}"}]})
 
@@ -106,7 +102,7 @@ def test_bare_close_of_a_local_window_named_like_a_remote_one(
     )
     assert "keeps running" not in closed.stdout, closed.stdout
     # Closing the current window is scheduled.
-    assert poll_until(lambda: window not in list_windows(mux_server), timeout=5)
+    assert poll_until(lambda: window not in mux_server.list_windows(), timeout=5)
     [record] = local_records(mux_server)
     assert record["handle"] == "feat"
 
