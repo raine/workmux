@@ -114,6 +114,25 @@ def test_remote_lifecycle(
     assert "Switched to remote workspace" in second.stdout
     assert len(pane_commands(mux_server, window)) == 2
 
+    # A bare close inside the window closes it.
+    pane = mux_server.tmux(["list-panes", "-t", window, "-F", "#{pane_id}"])
+    current = {"TMUX_PANE": pane.stdout.split()[0]}
+    closed = wm(mux_server, workmux_exe_path, repo, "close", extra_env=current)
+    assert "Closed the window of 'feat'" in closed.stdout, closed.stderr
+    assert_window_not_exists(mux_server, window)
+    assert node.sessions() == [f"{ex_id}-0", f"{ex_id}-1"]
+
+    # Session mode is refused as add --remote refuses it.
+    config = repo / ".workmux.yaml"
+    window_mode = config.read_text()
+    config.write_text(window_mode + "mode: session\n")
+    refused = wm(mux_server, workmux_exe_path, repo, "open feat", expect_fail=True)
+    assert "Session mode cannot be used with remote workspace 'feat'" in refused.stderr
+    assert "--mode window" in refused.stderr
+    opened = wm(mux_server, workmux_exe_path, repo, "open feat --mode window")
+    assert "Attached to the running agent" in opened.stdout, opened.stderr
+    config.write_text(window_mode)
+
     # Commands that cannot act on remote workspaces yet say so.
     for command in ["path feat"]:
         refused = wm(mux_server, workmux_exe_path, repo, command, expect_fail=True)
