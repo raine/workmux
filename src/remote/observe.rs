@@ -1,10 +1,15 @@
 //! What the laptop knows about the agents on each remote.
 //!
 //! One process per remote at a time runs `node watch` as a stream over the
-//! shared connection and keeps `remote/<name>/observed.json` current; it
-//! holds `remote/<name>/observer.lock` while doing so. Relays, views and
-//! commands read the file, so the remote carries one stream however many
-//! panes and views look at it.
+//! shared connection and keeps `remote/<name>/observed.v<N>.json` current;
+//! it holds `remote/<name>/observer.v<N>.lock` while doing so. Relays, views
+//! and commands read the file, so the remote carries one stream however
+//! many panes and views look at it.
+//!
+//! `N` is [`GENERATION`], the format of the file. Dashboards, sidebars and
+//! relays run for days, so an older build may still be observing when a
+//! newer one starts; each generation elects its own observer and keeps its
+//! own file, and no build reads what another generation writes as current.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -29,8 +34,12 @@ use crate::config::Config;
 pub const STALE_AFTER: Duration = Duration::from_secs(15);
 /// How often a process waiting for another's observer tries to take over.
 const TAKEOVER_INTERVAL: Duration = Duration::from_secs(3);
+/// Format of the observation file and scope of the observer election. Bump
+/// it whenever [`Observation`] or anything it contains changes shape, so
+/// builds that disagree never share a file (`format_is_pinned` checks).
+const GENERATION: u32 = 2;
 
-/// Contents of `observed.json`. Node timestamps in `workspaces` are raw;
+/// Contents of `observed.v<N>.json`. Node timestamps in `workspaces` are raw;
 /// [`Observation::local_ts`] moves them to the laptop clock.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
@@ -107,15 +116,31 @@ impl Observation {
 }
 
 fn path(name: &str) -> Result<PathBuf> {
+    Ok(super::cache::remote_dir(name)?.join(format!("observed.v{GENERATION}.json")))
+}
+
+/// The file the first generation wrote.
+fn legacy_path(name: &str) -> Result<PathBuf> {
     Ok(super::cache::remote_dir(name)?.join("observed.json"))
 }
 
-/// The last observation of remote `name`, if any was ever written.
+/// The last observation of remote `name`, if any was ever written. Before
+/// this generation first wrote one, the first generation's last snapshot
+/// stands in, as of when it was seen and never as connected.
 pub fn load(name: &str) -> Option<Observation> {
-    let bytes = fs::read(path(name).ok()?).ok()?;
-    serde_json::from_slice(&bytes)
-        .map_err(|err| tracing::warn!(remote = name, "unreadable observation: {err}"))
-        .ok()
+    let parse = |bytes: Vec<u8>| {
+        serde_json::from_slice::<Observation>(&bytes)
+            .map_err(|err| tracing::warn!(remote = name, "unreadable observation: {err}"))
+            .ok()
+    };
+    match fs::read(path(name).ok()?) {
+        Ok(bytes) => parse(bytes),
+        Err(_) => {
+            let mut legacy = parse(fs::read(legacy_path(name).ok()?).ok()?)?;
+            legacy.connected = false;
+            Some(legacy)
+        }
+    }
 }
 
 /// The observation of remote `name` while it is connected.
@@ -218,7 +243,7 @@ fn observe(spec: RemoteSpec, lock: Option<File>) {
 }
 
 fn take_lock(name: &str) -> Result<Option<File>> {
-    let file = super::cache::lock_file(name, "observer.lock")?;
+    let file = super::cache::lock_file(name, &format!("observer.v{GENERATION}.lock"))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -411,6 +436,151 @@ mod tests {
         assert_eq!(observation.skew, -10);
         assert_eq!(observation.local_ts(50), 40);
         assert_eq!(observation.local_ts(5), 0);
+    }
+
+    /// Every key path of `value`, arrays looked into through their first
+    /// element.
+    fn key_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    let path = format!("{prefix}.{key}");
+                    out.push(path.clone());
+                    key_paths(value, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                if let Some(first) = items.first() {
+                    key_paths(first, &format!("{prefix}[]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fails when the observation format changes. Readers of one generation
+    /// share a file, so a change needs a new [`GENERATION`]: bump it, then
+    /// update the lists here.
+    #[test]
+    fn format_is_pinned() {
+        use crate::git::GitStatus;
+        use crate::multiplexer::EndReason;
+        use crate::remote::cache::LayoutPane;
+        use crate::remote::node::Origin;
+        use crate::remote::node::observe::Sibling;
+        use crate::remote::protocol::WorkspaceIdentity;
+
+        // Values travel as strings; a variant an older reader lacks makes
+        // it drop the whole file.
+        let variants = |status: AgentStatus, reason: EndReason| {
+            let status = match status {
+                AgentStatus::Working | AgentStatus::Waiting | AgentStatus::Done => 3,
+            };
+            let reason = match reason {
+                EndReason::HostReboot => 1,
+            };
+            (status, reason)
+        };
+        assert_eq!(variants(AgentStatus::Done, EndReason::HostReboot), (3, 1));
+
+        let mut full = snapshot(90, AgentStatus::Done);
+        if let WatchFrame::Snapshot(snapshot) = &mut full {
+            let ws = &mut snapshot.workspaces[0];
+            if let Some(agent) = ws.panes[0].agent.as_mut() {
+                agent.title = Some("t".into());
+                agent.prompt = Some("p".into());
+            }
+            ws.git = Some(GitStatus {
+                cached_at: Some(1),
+                branch: Some("b".into()),
+                ..GitStatus::default()
+            });
+            ws.ended = Some(EndReason::HostReboot);
+            ws.sibling = Some(Sibling {
+                identity: WorkspaceIdentity {
+                    ws_id: "w2".into(),
+                    project_id: "p".into(),
+                    handle: "h".into(),
+                    branch: "b".into(),
+                    base_sha: "0".into(),
+                },
+                worktree: "/w".into(),
+                pin: "workmux-1".into(),
+                origin: Origin {
+                    parent: "w1".into(),
+                    base_label: "main".into(),
+                    background: false,
+                    spawned_at: 1,
+                    layout: vec![LayoutPane {
+                        index: 0,
+                        pane: Default::default(),
+                    }],
+                },
+            });
+        }
+        let mut observation = Observation::default();
+        observation.apply(full, 100);
+        let mut paths = Vec::new();
+        key_paths(&serde_json::to_value(&observation).unwrap(), "", &mut paths);
+        paths.sort();
+        let expected = [
+            ".connected",
+            ".last_seen",
+            ".skew",
+            ".workspaces",
+            ".workspaces[].ended",
+            ".workspaces[].ex_id",
+            ".workspaces[].git",
+            ".workspaces[].git.ahead",
+            ".workspaces[].git.base_branch",
+            ".workspaces[].git.behind",
+            ".workspaces[].git.branch",
+            ".workspaces[].git.cached_at",
+            ".workspaces[].git.has_conflict",
+            ".workspaces[].git.has_upstream",
+            ".workspaces[].git.is_dirty",
+            ".workspaces[].git.is_rebasing",
+            ".workspaces[].git.lines_added",
+            ".workspaces[].git.lines_removed",
+            ".workspaces[].git.uncommitted_added",
+            ".workspaces[].git.uncommitted_removed",
+            ".workspaces[].panes",
+            ".workspaces[].panes[].agent",
+            ".workspaces[].panes[].agent.agent_kind",
+            ".workspaces[].panes[].agent.prompt",
+            ".workspaces[].panes[].agent.status",
+            ".workspaces[].panes[].agent.status_ts",
+            ".workspaces[].panes[].agent.title",
+            ".workspaces[].panes[].alive",
+            ".workspaces[].panes[].index",
+            ".workspaces[].sibling",
+            ".workspaces[].sibling.background",
+            ".workspaces[].sibling.base_label",
+            ".workspaces[].sibling.identity",
+            ".workspaces[].sibling.identity.base_sha",
+            ".workspaces[].sibling.identity.branch",
+            ".workspaces[].sibling.identity.handle",
+            ".workspaces[].sibling.identity.project_id",
+            ".workspaces[].sibling.identity.ws_id",
+            ".workspaces[].sibling.layout",
+            ".workspaces[].sibling.layout[].index",
+            ".workspaces[].sibling.layout[].pane",
+            ".workspaces[].sibling.layout[].pane.command",
+            ".workspaces[].sibling.layout[].pane.focus",
+            ".workspaces[].sibling.layout[].pane.name",
+            ".workspaces[].sibling.layout[].pane.percentage",
+            ".workspaces[].sibling.layout[].pane.size",
+            ".workspaces[].sibling.layout[].pane.split",
+            ".workspaces[].sibling.layout[].pane.target",
+            ".workspaces[].sibling.layout[].pane.zoom",
+            ".workspaces[].sibling.parent",
+            ".workspaces[].sibling.pin",
+            ".workspaces[].sibling.spawned_at",
+            ".workspaces[].sibling.worktree",
+            ".workspaces[].ws_id",
+        ];
+        assert_eq!(paths, expected, "bump GENERATION, then update this list");
+        assert_eq!(GENERATION, 2);
     }
 
     #[test]
