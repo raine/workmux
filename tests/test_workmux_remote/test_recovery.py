@@ -97,7 +97,10 @@ def test_reboot_resumes_and_claude_trusts_worktrees(
     # `open` replaces the stale window and resumes the conversation.
     [before] = local_records(mux_server)
     opened = wm(mux_server, workmux_exe_path, repo, "open feat")
-    assert "Restarted remote workspace 'feat'" in opened.stdout, opened.stderr
+    assert (
+        "Resumed 'feat' on 'lo' after the host rebooted; the agent continues its "
+        "last conversation" in opened.stdout
+    ), opened.stderr
     [after] = local_records(mux_server)
     assert after["execution"]["ex_id"] != before["execution"]["ex_id"]
     assert poll_until(lambda: len(log.read_text().splitlines()) == 2, timeout=20)
@@ -126,6 +129,7 @@ def test_reboot_resumes_and_claude_trusts_worktrees(
     # A session that dies without a reboot starts fresh.
     node.tmux("kill-server")
     opened = wm(mux_server, workmux_exe_path, repo, "open feat")
+    assert "Started remote workspace 'feat' on 'lo'" in opened.stdout, opened.stderr
     assert poll_until(lambda: len(log.read_text().splitlines()) == 4, timeout=20), (
         opened
     )
