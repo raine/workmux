@@ -29,8 +29,20 @@ pub struct ResurrectCandidate {
     pub agent: Option<String>,
 }
 
+/// A remote workspace whose local window the previous server had.
+#[derive(Debug)]
+pub struct RemoteResurrectCandidate {
+    pub record: crate::remote::cache::WorkspaceRecord,
+    pub action: ResurrectAction,
+    pub stale_sources: Vec<AgentStateSource>,
+}
+
 pub struct ResurrectPlan {
     pub candidates: Vec<ResurrectCandidate>,
+    pub remote: Vec<RemoteResurrectCandidate>,
+    /// Sources of panes that relayed remote workspaces which no longer
+    /// exist; nothing restores them.
+    pub forgotten_remote_sources: Vec<AgentStateSource>,
     pub unmatched_states: usize,
 }
 
@@ -93,6 +105,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
 
     // Group agent states by matched worktree handle
     let mut by_handle: HashMap<String, ResurrectHandleState> = HashMap::new();
+    let mut by_workspace: HashMap<(String, String), Vec<AgentStateSource>> = HashMap::new();
     let mut unmatched_states = 0usize;
 
     for stored in relevant {
@@ -101,6 +114,15 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
             source,
             represented_count,
         } = stored;
+        // Panes relaying a remote workspace come back as attach windows, not
+        // through local worktrees.
+        if let Some(at) = &agent.remote {
+            by_workspace
+                .entry((at.remote.clone(), at.ws_id.clone()))
+                .or_default()
+                .push(source);
+            continue;
+        }
         let canon_agent = canon_or_self(&agent.workdir);
 
         // Find matching worktree using descendant path matching
@@ -205,10 +227,57 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
     // Sort by handle for deterministic output
     candidates.sort_by(|a, b| a.handle.cmp(&b.handle));
 
+    let (remote, forgotten_remote_sources) = plan_remote(by_workspace, &canon_main, &mux_windows);
+
     Ok(ResurrectPlan {
         candidates,
+        remote,
+        forgotten_remote_sources,
         unmatched_states,
     })
+}
+
+/// Attach windows to recreate for this repository's remote workspaces,
+/// from the cache alone: the node is not asked, so nothing restarts.
+fn plan_remote(
+    by_workspace: HashMap<(String, String), Vec<AgentStateSource>>,
+    canon_main: &std::path::Path,
+    mux_windows: &std::collections::HashSet<String>,
+) -> (Vec<RemoteResurrectCandidate>, Vec<AgentStateSource>) {
+    if by_workspace.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let records = crate::remote::cache::all();
+    let mut candidates = Vec::new();
+    let mut forgotten = Vec::new();
+    for ((remote, ws_id), sources) in by_workspace {
+        let record = records
+            .iter()
+            .find(|record| record.remote == remote && record.ws_id == ws_id);
+        let Some(record) = record else {
+            forgotten.extend(sources);
+            continue;
+        };
+        if canon_or_self(&record.project_root) != canon_main {
+            continue;
+        }
+        if record.execution.is_none() {
+            forgotten.extend(sources);
+            continue;
+        }
+        let action = if mux_windows.contains(&record.window_name) {
+            ResurrectAction::SkipAlreadyOpen
+        } else {
+            ResurrectAction::Restore
+        };
+        candidates.push(RemoteResurrectCandidate {
+            record: record.clone(),
+            action,
+            stale_sources: sources,
+        });
+    }
+    candidates.sort_by(|a, b| a.record.handle.cmp(&b.record.handle));
+    (candidates, forgotten)
 }
 
 #[cfg(test)]
@@ -236,6 +305,7 @@ mod tests {
             agent_kind: agent_kind.map(|kind| kind.to_string()),
             agent_session_id: None,
             prompt: None,
+            remote: None,
         }
     }
 

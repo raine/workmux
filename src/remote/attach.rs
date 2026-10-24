@@ -20,16 +20,24 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use super::RemoteSpec;
+use super::cache::WorkspaceRecord;
 use super::client::Node;
 use super::install::Pin;
 use super::node::attach::{DETACHED, SESSION_GONE};
+use super::node::observe::{ObservedAgent, ObservedPane};
+use super::observe::Observation;
 use super::transport::{SshFailure, SshFailureKind, Transport};
+use crate::command::set_window_status;
 use crate::config::Config;
+use crate::multiplexer::{Multiplexer, RemoteRef};
+use crate::state::{PromptUpdate, RemoteUpdate};
 
 const FIRST_RETRY: Duration = Duration::from_secs(1);
+/// How often the relay looks at the remote's observation.
+const MIRROR_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
-/// An attachment that lasted this long resets the backoff.
-const STABLE: Duration = Duration::from_secs(30);
+/// An attachment or stream that lasted this long resets the backoff.
+pub(super) const STABLE: Duration = Duration::from_secs(30);
 
 /// Undo terminal input modes the remote tmux enabled: mouse reporting,
 /// bracketed paste and focus events, and show the cursor.
@@ -105,10 +113,12 @@ pub fn status_text(name: &str, ending: &Ending, retry_in: Option<Duration>) -> S
 
 pub fn run(config: &Config, name: &str, ex_id: &str, pane: usize) -> Result<()> {
     let spec = RemoteSpec::resolve(config, name)?;
-    let pin = match super::cache::by_execution(name, ex_id).and_then(|record| record.execution) {
+    let record = super::cache::by_execution(name, ex_id);
+    let pin = match record.as_ref().and_then(|record| record.execution.clone()) {
         Some(execution) => Pin::installed(execution.node_bin),
         None => Pin::for_spec(&spec)?,
     };
+    let status = record.and_then(|record| StatusMirror::start(config, &record, ex_id, pane));
     let node = Node {
         transport: Transport::open(&spec)?,
         spec,
@@ -119,7 +129,179 @@ pub fn run(config: &Config, name: &str, ex_id: &str, pane: usize) -> Result<()> 
         bail!("workmux remote attach needs a terminal");
     }
     let _raw = RawMode::enable()?;
-    Relay::new(node, ex_id.to_string(), pane).run()
+    let mut relay = Relay::new(node, ex_id.to_string(), pane);
+    relay.status = status;
+    relay.run()
+}
+
+/// What a relay does about the observation of its remote pane.
+#[derive(Debug, PartialEq)]
+enum Mirror {
+    /// Disconnected, not observed yet, or unchanged.
+    Nothing,
+    /// The node's status changed: show it.
+    Status(ObservedAgent),
+    /// Only the title, kind or prompt changed; the icon stays as it is, so
+    /// a focus acknowledgement survives.
+    Metadata(ObservedAgent),
+    /// No agent runs in the pane any more.
+    Clear,
+}
+
+/// Compare the observed pane with what was last mirrored (`None` before
+/// the first observation).
+fn mirror_step(shown: Option<&Option<ObservedAgent>>, observed: Option<&ObservedPane>) -> Mirror {
+    let Some(observed) = observed else {
+        return Mirror::Nothing;
+    };
+    match (&observed.agent, shown) {
+        (Some(agent), Some(Some(previous)))
+            if (previous.status, previous.status_ts) == (agent.status, agent.status_ts) =>
+        {
+            if previous == agent {
+                Mirror::Nothing
+            } else {
+                Mirror::Metadata(agent.clone())
+            }
+        }
+        (Some(agent), _) => Mirror::Status(agent.clone()),
+        (None, Some(None)) => Mirror::Nothing,
+        (None, _) => Mirror::Clear,
+    }
+}
+
+/// Shows the remote agent's state on the local pane the relay runs in,
+/// through the same path as local status hooks. It converges on the
+/// latest observation instead of replaying transitions.
+struct StatusMirror {
+    config: Config,
+    mux: Arc<dyn Multiplexer>,
+    pane_id: String,
+    at: RemoteRef,
+    workdir: std::path::PathBuf,
+    shown: Option<Option<ObservedAgent>>,
+    checked: Option<Instant>,
+}
+
+impl StatusMirror {
+    /// Register the local pane as relaying the remote pane, with no status,
+    /// and start observing the remote. `None` outside a multiplexer pane.
+    fn start(config: &Config, record: &WorkspaceRecord, ex_id: &str, pane: usize) -> Option<Self> {
+        let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
+        let pane_id = mux.current_pane_id()?;
+        let mirror = Self {
+            config: config.clone(),
+            mux,
+            pane_id,
+            at: RemoteRef {
+                remote: record.remote.clone(),
+                ws_id: record.ws_id.clone(),
+                ex_id: ex_id.to_string(),
+                pane,
+            },
+            workdir: record.local_path.clone(),
+            shown: None,
+            checked: None,
+        };
+        crate::state::persist_remote_registration(
+            mirror.mux.as_ref(),
+            &mirror.pane_id,
+            mirror.update(None, None),
+        );
+        super::observe::spawn(config, std::slice::from_ref(&record.remote));
+        Some(mirror)
+    }
+
+    fn update(
+        &self,
+        agent: Option<&ObservedAgent>,
+        observation: Option<&Observation>,
+    ) -> RemoteUpdate {
+        RemoteUpdate {
+            at: self.at.clone(),
+            workdir: self.workdir.clone(),
+            status_ts: agent
+                .and_then(|agent| agent.status_ts)
+                .zip(observation)
+                .map(|(ts, observation)| observation.local_ts(ts)),
+            title: agent.and_then(|agent| agent.title.clone()),
+            agent_kind: agent.and_then(|agent| agent.agent_kind.clone()),
+        }
+    }
+
+    /// Mirror the current observation, at most once a second.
+    fn tick(&mut self) {
+        if self
+            .checked
+            .is_some_and(|at| at.elapsed() < MIRROR_INTERVAL)
+        {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        let Some(observation) = super::observe::load_connected(&self.at.remote) else {
+            return;
+        };
+        let observed = observation.pane(&self.at.ws_id, &self.at.ex_id, self.at.pane);
+        let step = mirror_step(self.shown.as_ref(), observed);
+        let mux = self.mux.as_ref();
+        let result = match &step {
+            Mirror::Nothing => return,
+            Mirror::Status(agent) => {
+                let update = self.update(Some(agent), Some(&observation));
+                let applied = set_window_status::apply_status(
+                    &self.config,
+                    mux,
+                    &self.pane_id,
+                    agent.status,
+                    None,
+                    agent.prompt.as_deref(),
+                    Some(update.clone()),
+                );
+                if agent.status.is_none() {
+                    crate::state::persist_remote_update(
+                        mux,
+                        &self.pane_id,
+                        None,
+                        update,
+                        PromptUpdate::Keep,
+                    );
+                }
+                applied
+            }
+            Mirror::Metadata(agent) => {
+                let update = self.update(Some(agent), Some(&observation));
+                crate::state::persist_remote_update(
+                    mux,
+                    &self.pane_id,
+                    None,
+                    update,
+                    PromptUpdate::Keep,
+                );
+                crate::command::sidebar::request_refresh_for(mux);
+                Ok(())
+            }
+            Mirror::Clear => set_window_status::apply_status(
+                &self.config,
+                mux,
+                &self.pane_id,
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
+        match result {
+            Ok(()) => {
+                self.shown = Some(match step {
+                    Mirror::Status(agent) | Mirror::Metadata(agent) => Some(agent),
+                    _ => None,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(pane = %self.pane_id, "failed to mirror remote status: {err:#}")
+            }
+        }
+    }
 }
 
 enum Event {
@@ -158,6 +340,7 @@ struct Relay {
     input_target: Arc<Mutex<Option<Arc<File>>>>,
     generation: u64,
     attempt: u32,
+    status: Option<StatusMirror>,
 }
 
 impl Relay {
@@ -172,6 +355,7 @@ impl Relay {
             input_target: Arc::new(Mutex::new(None)),
             generation: 0,
             attempt: 0,
+            status: None,
         }
     }
 
@@ -181,7 +365,10 @@ impl Relay {
         let mut connection = Some(self.connect()?);
         let mut state = State::Connecting;
         loop {
-            let event = match self.receiver.recv_timeout(Duration::from_secs(1)) {
+            if let Some(status) = &mut self.status {
+                status.tick();
+            }
+            let event = match self.receiver.recv_timeout(MIRROR_INTERVAL) {
                 Ok(event) => Some(event),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -558,6 +745,68 @@ mod tests {
         assert_eq!(
             classify(None, b"", None),
             Ending::RemoteError("killed by a signal".into())
+        );
+    }
+
+    fn observed(agent: Option<ObservedAgent>) -> ObservedPane {
+        ObservedPane {
+            index: 0,
+            alive: true,
+            agent,
+        }
+    }
+
+    fn agent(status: crate::multiplexer::AgentStatus, ts: u64, title: &str) -> ObservedAgent {
+        ObservedAgent {
+            status: Some(status),
+            status_ts: Some(ts),
+            title: Some(title.into()),
+            agent_kind: Some("claude".into()),
+            prompt: None,
+        }
+    }
+
+    #[test]
+    fn mirror_applies_changes_once() {
+        use crate::multiplexer::AgentStatus::{Done, Working};
+        let working = agent(Working, 10, "a");
+        // Not observed: nothing to mirror.
+        assert_eq!(mirror_step(None, None), Mirror::Nothing);
+        // First observation shows the agent.
+        let pane = observed(Some(working.clone()));
+        assert_eq!(
+            mirror_step(None, Some(&pane)),
+            Mirror::Status(working.clone())
+        );
+        // Unchanged: an acknowledged icon is not re-armed.
+        let shown = Some(working.clone());
+        assert_eq!(mirror_step(Some(&shown), Some(&pane)), Mirror::Nothing);
+        // Title only.
+        let retitled = agent(Working, 10, "b");
+        assert_eq!(
+            mirror_step(Some(&shown), Some(&observed(Some(retitled.clone())))),
+            Mirror::Metadata(retitled)
+        );
+        // New transition, including the same status again later.
+        let done = agent(Done, 20, "a");
+        assert_eq!(
+            mirror_step(Some(&shown), Some(&observed(Some(done.clone())))),
+            Mirror::Status(done)
+        );
+        let again = agent(Working, 30, "a");
+        assert_eq!(
+            mirror_step(Some(&shown), Some(&observed(Some(again.clone())))),
+            Mirror::Status(again)
+        );
+        // The agent exited, once.
+        assert_eq!(
+            mirror_step(Some(&shown), Some(&observed(None))),
+            Mirror::Clear
+        );
+        assert_eq!(mirror_step(None, Some(&observed(None))), Mirror::Clear);
+        assert_eq!(
+            mirror_step(Some(&None), Some(&observed(None))),
+            Mirror::Nothing
         );
     }
 

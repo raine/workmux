@@ -23,6 +23,10 @@ pub const CAPABILITIES: &[&str] = &[
     LOGIN,
     CREDENTIALS,
     PUT_CREDENTIALS,
+    WATCH,
+    SEND,
+    CAPTURE,
+    STATUS_HOOKS,
 ];
 
 pub const PROVISION_WORKSPACE: &str = "provision-workspace";
@@ -32,6 +36,12 @@ pub const REMOVE_WORKSPACE: &str = "remove-workspace";
 pub const LOGIN: &str = "login";
 pub const CREDENTIALS: &str = "credentials";
 pub const PUT_CREDENTIALS: &str = "put-credentials";
+/// Wire types in `remote::node::observe`.
+pub const WATCH: &str = "watch";
+pub const SEND: &str = "send";
+pub const CAPTURE: &str = "capture";
+/// Wire types in `remote::node::hooks`.
+pub const STATUS_HOOKS: &str = "status-hooks";
 
 /// Error codes a node verb reports in its [`ErrorEnvelope`].
 pub mod code {

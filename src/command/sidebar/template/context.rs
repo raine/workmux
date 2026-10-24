@@ -82,6 +82,13 @@ impl<'a> RowContext<'a> {
         );
         let (template_worktree, _) =
             extract_worktree_name(&agent.session, &agent.window_name, "", &agent.path);
+        let (label_worktree, template_worktree) = match &agent.remote {
+            Some(remote) => (
+                crate::remote::agents::label(&label_worktree, &remote.at.remote),
+                crate::remote::agents::label(&template_worktree, &remote.at.remote),
+            ),
+            None => (label_worktree, template_worktree),
+        };
         let session = if agent.session.starts_with(app.window_prefix()) {
             ""
         } else {
@@ -103,16 +110,22 @@ impl<'a> RowContext<'a> {
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
         let is_interrupted = app.interrupted_pane_ids.contains(&agent.pane_id);
-        let is_stale = should_dim_agent(
-            app.dim_stale,
-            agent_is_stale(
-                agent,
-                now_secs,
-                app.stale_threshold_secs,
-                is_sleeping,
-                is_interrupted,
-            ),
-        );
+        let connectivity = agent
+            .remote
+            .as_ref()
+            .and_then(|remote| crate::remote::agents::connectivity(remote, now_secs));
+        // A remote that does not answer shows its last status dimmed.
+        let is_stale = connectivity.is_some()
+            || should_dim_agent(
+                app.dim_stale,
+                agent_is_stale(
+                    agent,
+                    now_secs,
+                    app.stale_threshold_secs,
+                    is_sleeping,
+                    is_interrupted,
+                ),
+            );
         let is_active = app.host_agent_idx == Some(idx);
         let jump_idx = app.jump_numbers.get(idx).copied().flatten();
         let is_selected = selected_idx == Some(idx);
@@ -126,7 +139,8 @@ impl<'a> RowContext<'a> {
             .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
             .unwrap_or_default();
 
-        let pane_title = build_pane_title(agent, &primary, &secondary, &label_worktree, &project);
+        let pane_title = connectivity
+            .or_else(|| build_pane_title(agent, &primary, &secondary, &label_worktree, &project));
         let git_status = app.git_statuses.get(&agent.path);
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
@@ -663,6 +677,7 @@ mod tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 

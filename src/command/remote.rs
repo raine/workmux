@@ -19,7 +19,8 @@ pub struct RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RemoteCommand {
-    /// Install this workmux's node binary on a remote
+    /// Install this workmux's node binary and the agents' status hooks on a
+    /// remote
     Setup {
         /// Remote name from `remotes:` in the global config
         name: String,
@@ -68,7 +69,9 @@ pub fn run(args: RemoteArgs) -> Result<()> {
     match args.command {
         None => list(&config),
         Some(RemoteCommand::Setup { name }) => {
-            install::setup(&RemoteSpec::resolve(&config, &name)?)
+            let spec = RemoteSpec::resolve(&config, &name)?;
+            install::setup(&spec)?;
+            crate::remote::hooks::setup(&spec, &config)
         }
         Some(RemoteCommand::Doctor { name }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;

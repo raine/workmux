@@ -391,6 +391,37 @@ pub fn install(agent: Agent) -> Result<String> {
     }
 }
 
+/// Check status tracking for `agent` in `dir`, its config or agent
+/// directory, instead of the one its environment selects. OpenCode's plugin
+/// layout depends on its version, so it is checked with
+/// `opencode::check_dir_for`.
+pub fn check_in(agent: Agent, dir: &Path) -> Result<StatusCheck> {
+    match agent {
+        Agent::Claude => claude::check_dir(dir),
+        Agent::Codex => codex::check_dir(dir),
+        Agent::Gemini => gemini::check_dir(dir),
+        Agent::Pi => pi::check_dir(dir),
+        Agent::Omp => omp::check_dir(dir),
+        Agent::Antigravity | Agent::Copilot | Agent::Grok | Agent::OpenCode => {
+            anyhow::bail!("{} cannot be set up in a given directory", agent.name())
+        }
+    }
+}
+
+/// Install status tracking for `agent` in `dir`; see [`check_in`].
+pub fn install_in(agent: Agent, dir: &Path) -> Result<String> {
+    match agent {
+        Agent::Claude => claude::install_dir(dir),
+        Agent::Codex => codex::install_dir(dir),
+        Agent::Gemini => gemini::install_dir(dir),
+        Agent::Pi => pi::install_dir(dir),
+        Agent::Omp => omp::install_dir(dir),
+        Agent::Antigravity | Agent::Copilot | Agent::Grok | Agent::OpenCode => {
+            anyhow::bail!("{} cannot be set up in a given directory", agent.name())
+        }
+    }
+}
+
 /// Remove status tracking hooks for the given agent.
 pub fn uninstall_one(agent: Agent) -> Result<String> {
     match agent {

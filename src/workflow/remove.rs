@@ -11,22 +11,7 @@ use super::context::WorkflowContext;
 use super::types::RemoveResult;
 
 pub fn fallback_worktree_path(handle: &str, context: &WorkflowContext) -> Result<Option<PathBuf>> {
-    let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
-        crate::util::expand_worktree_dir(worktree_dir, &context.main_worktree_root)?
-    } else {
-        let project_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Could not determine project name"))?;
-        context
-            .main_worktree_root
-            .parent()
-            .ok_or_else(|| anyhow!("Could not determine parent directory"))?
-            .join(format!("{}__worktrees", project_name))
-    };
-
-    let path = base_dir.join(handle);
+    let path = context.worktree_base_dir()?.join(handle);
     let Some(admin_dir) = git::linked_worktree_admin_dir(&path) else {
         return Ok(None);
     };

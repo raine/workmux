@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use crate::agent_identity::classify_agent_kind;
-use crate::multiplexer::{AgentStatus, Multiplexer};
+use crate::multiplexer::{AgentStatus, Multiplexer, RemoteRef};
 
 pub use store::StateStore;
 pub(crate) use store::{AgentStateCache, AgentStateSource, ResurrectionAgentState};
@@ -29,6 +29,18 @@ pub enum PromptUpdate {
     Set(String),
     /// Remove the stored prompt.
     Clear,
+}
+
+/// What a local attach pane's state takes from its remote agent.
+#[derive(Debug, Clone)]
+pub struct RemoteUpdate {
+    pub at: RemoteRef,
+    /// Display path of the remote workspace.
+    pub workdir: std::path::PathBuf,
+    /// The node's status timestamp, on the laptop clock.
+    pub status_ts: Option<u64>,
+    pub title: Option<String>,
+    pub agent_kind: Option<String>,
 }
 
 /// Persist an agent state update to the StateStore.
@@ -64,6 +76,33 @@ pub fn persist_agent_update(
         agent_session_id,
         prompt,
         true,
+        None,
+    );
+}
+
+/// Persist the state of a local pane relaying a remote agent. `status`
+/// `None` keeps the stored status, as for [`persist_agent_update`].
+pub fn persist_remote_update(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    update: RemoteUpdate,
+    prompt: PromptUpdate,
+) {
+    persist_agent_snapshot(mux, pane_id, status, None, None, prompt, true, Some(update));
+}
+
+/// Register a local pane relaying a remote workspace pane, with no status.
+pub fn persist_remote_registration(mux: &dyn Multiplexer, pane_id: &str, update: RemoteUpdate) {
+    persist_agent_snapshot(
+        mux,
+        pane_id,
+        None,
+        None,
+        None,
+        PromptUpdate::Keep,
+        false,
+        Some(update),
     );
 }
 
@@ -78,7 +117,16 @@ pub fn persist_agent_registration(
     agent_session_id: Option<String>,
     prompt: PromptUpdate,
 ) {
-    persist_agent_snapshot(mux, pane_id, None, None, agent_session_id, prompt, false);
+    persist_agent_snapshot(
+        mux,
+        pane_id,
+        None,
+        None,
+        agent_session_id,
+        prompt,
+        false,
+        None,
+    );
 }
 
 /// Clear an agent's persisted status without deleting its state record.
@@ -106,6 +154,7 @@ pub fn clear_agent_status(mux: &dyn Multiplexer, pane_id: &str, clear_prompt: bo
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_agent_snapshot(
     mux: &dyn Multiplexer,
     pane_id: &str,
@@ -114,6 +163,7 @@ fn persist_agent_snapshot(
     agent_session_id: Option<String>,
     prompt: PromptUpdate,
     preserve_existing: bool,
+    remote: Option<RemoteUpdate>,
 ) {
     let Ok(store) = StateStore::new() else {
         return;
@@ -128,6 +178,7 @@ fn persist_agent_snapshot(
             agent_session_id,
             prompt,
             preserve_existing,
+            remote,
         );
         Ok(())
     }) {
@@ -145,6 +196,7 @@ fn persist_agent_snapshot_locked(
     agent_session_id: Option<String>,
     prompt: PromptUpdate,
     preserve_existing: bool,
+    remote: Option<RemoteUpdate>,
 ) {
     let pane_key = PaneKey {
         backend: mux.name().to_string(),
@@ -223,9 +275,17 @@ fn persist_agent_snapshot_locked(
 
     let previous_status = existing.as_ref().and_then(|state| state.status);
 
+    // A remote agent's transitions happened on the node, at its timestamp.
+    let transition_ts = remote
+        .as_ref()
+        .and_then(|update| update.status_ts)
+        .filter(|_| status.is_some())
+        .unwrap_or(now);
+
     // Preserve existing status_ts if status hasn't changed (avoids resetting timer)
     let status_ts = match final_status {
         None => None,
+        Some(_) if remote.is_some() && status.is_some() => Some(transition_ts),
         Some(_) if final_status == previous_status => {
             Some(existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now))
         }
@@ -238,7 +298,7 @@ fn persist_agent_snapshot_locked(
         status,
         previous_status,
         previous_activity_ts,
-        now,
+        transition_ts,
     );
 
     // Capture existing agent_kind before `existing` is consumed below.
@@ -255,8 +315,13 @@ fn persist_agent_snapshot_locked(
     // `pane_title` consumes `live_info.title`.
     let live_title_for_classify = live_info.title.clone();
 
+    let existing_remote = existing.as_ref().and_then(|state| state.remote.clone());
+    let existing_workdir = existing.as_ref().map(|state| state.workdir.clone());
+
     // Resolve title: explicit override wins, then existing stored title, then live
+    let remote_title = remote.as_ref().and_then(|update| update.title.clone());
     let pane_title = title_override
+        .or(remote_title)
         .or_else(|| existing.as_ref().and_then(|state| state.pane_title.clone()))
         .or(live_info.title);
 
@@ -267,17 +332,29 @@ fn persist_agent_snapshot_locked(
     // Reconcile clears entries when it observes a foreground command change.
     // This path does not use the command as process identity because a status
     // hook can temporarily become the pane's foreground command.
-    let agent_kind = merge_agent_kind(
-        classify_agent_kind(
-            live_info.current_command.as_deref(),
-            live_title_for_classify.as_deref(),
+    let agent_kind = match &remote {
+        // The pane's foreground is the relay; the node knows the agent.
+        Some(update) => update.agent_kind.clone().or(existing_agent_kind),
+        None => merge_agent_kind(
+            classify_agent_kind(
+                live_info.current_command.as_deref(),
+                live_title_for_classify.as_deref(),
+            ),
+            existing_agent_kind,
         ),
-        existing_agent_kind,
-    );
+    };
+
+    let (workdir, remote) = match remote {
+        Some(update) => (update.workdir, Some(update.at)),
+        None => match existing_remote {
+            Some(at) => (existing_workdir.unwrap_or(live_info.working_dir), Some(at)),
+            None => (live_info.working_dir, None),
+        },
+    };
 
     let state = AgentState {
         pane_key,
-        workdir: live_info.working_dir,
+        workdir,
         status: final_status,
         status_ts,
         activity_ts,
@@ -291,6 +368,7 @@ fn persist_agent_snapshot_locked(
         agent_kind,
         agent_session_id,
         prompt,
+        remote,
     };
 
     if let Err(error) = store.upsert_agent_locked(&state) {

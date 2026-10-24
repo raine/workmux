@@ -9,7 +9,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::remote::node::{self, NodeRoot};
+use crate::remote::node::{self, NodeRoot, hooks, observe};
 use crate::remote::protocol::{ErrorEnvelope, Hello, NodeError, code};
 
 #[derive(Debug, Args)]
@@ -72,6 +72,30 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Report the agents of running executions, once or as a stream
+    Watch {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Type text into an agent pane
+    Send {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Return the recent output of an agent pane
+    Capture {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Check or install the agents' workmux status hooks on the node
+    StatusHooks {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
@@ -114,6 +138,18 @@ pub fn run(args: NodeArgs) -> Result<()> {
         NodeVerb::PutCredentials { .. } => serve(request, |root, request| {
             node::credentials::put(&root, request)
         }),
+        NodeVerb::Watch { .. } => serve(request, |root, request: observe::WatchRequest| {
+            if request.stream {
+                observe::stream(&root)?;
+                std::process::exit(0);
+            }
+            observe::snapshot(&root)
+        }),
+        NodeVerb::Send { .. } => serve(request, |root, request| observe::send(&root, request)),
+        NodeVerb::Capture { .. } => {
+            serve(request, |root, request| observe::capture(&root, request))
+        }
+        NodeVerb::StatusHooks { .. } => serve(request, |_, request| hooks::status_hooks(request)),
         NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
     });
     match response {

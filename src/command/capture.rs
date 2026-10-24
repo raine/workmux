@@ -5,12 +5,18 @@ use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow;
 
 pub fn run(name: &str, lines: u16) -> Result<()> {
-    let mux = create_backend(detect_backend());
-    let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref())?;
-
-    let output = mux
-        .capture_pane(&agent.pane_id, lines)
-        .ok_or_else(|| anyhow!("Failed to capture pane output"))?;
+    let output = match crate::remote::agents::find_target(name) {
+        Some(record) => {
+            let config = crate::config::Config::load(None).unwrap_or_default();
+            crate::remote::agents::capture(&config, &record, None, lines)?
+        }
+        None => {
+            let mux = create_backend(detect_backend());
+            let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref())?;
+            mux.capture_pane(&agent.pane_id, lines)
+                .ok_or_else(|| anyhow!("Failed to capture pane output"))?
+        }
+    };
 
     // Strip ANSI escape codes
     let stripped = strip_ansi_codes(&output);

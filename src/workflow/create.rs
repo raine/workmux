@@ -386,24 +386,9 @@ fn create_impl(
         base_branch_for_creation.clone()
     };
 
-    // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
-    // Always use main_worktree_root (not repo_root) to ensure consistent paths even when
-    // running from inside an existing worktree.
-    let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
-        crate::util::expand_worktree_dir(worktree_dir, &context.main_worktree_root)?
-    } else {
-        // Default behavior: <main_worktree_root>/../<project_name>__worktrees
-        let project_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Could not determine project name"))?;
-        context
-            .main_worktree_root
-            .parent()
-            .ok_or_else(|| anyhow!("Could not determine parent directory"))?
-            .join(format!("{}__worktrees", project_name))
-    };
+    // Always based on main_worktree_root (not repo_root) to ensure consistent
+    // paths even when running from inside an existing worktree.
+    let base_dir = context.worktree_base_dir()?;
     // Use current_handle for the worktree directory name (may be suffixed for cross-repo collision)
     let worktree_path = base_dir.join(&current_handle);
 

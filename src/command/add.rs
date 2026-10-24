@@ -1336,20 +1336,7 @@ fn print_dry_run(
             .context("Failed to determine the current branch to use as the base")?
     };
 
-    let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
-        crate::util::expand_worktree_dir(worktree_dir, &context.main_worktree_root)?
-    } else {
-        let project_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow!("Could not determine project name"))?;
-        context
-            .main_worktree_root
-            .parent()
-            .ok_or_else(|| anyhow!("Could not determine parent directory"))?
-            .join(format!("{}__worktrees", project_name))
-    };
+    let base_dir = context.worktree_base_dir()?;
     let worktree_path = base_dir.join(handle);
     let target_name = options.primary_mux_target_name(handle);
     let target = MuxHandle::new(
