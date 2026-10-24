@@ -1,7 +1,8 @@
 use crate::config::MuxMode;
 use crate::multiplexer::handle::mode_label;
-use crate::multiplexer::{MuxHandle, create_backend, detect_backend};
+use crate::multiplexer::{BackendType, MuxHandle, create_backend, detect_backend};
 use crate::prompt::{Prompt, PromptDocument, foreach_from_frontmatter};
+use crate::remote::{Placement, RemoteSpec};
 use crate::spinner;
 use crate::template::{
     TemplateEnv, WorktreeSpec, create_template_env, generate_worktree_specs, parse_foreach_matrix,
@@ -357,18 +358,40 @@ fn run_headless(
     Ok(())
 }
 
-/// Refuse placements `add` cannot honour before anything is created.
+/// The remote a new agent goes to, if any, decided before anything is
+/// created.
 ///
 /// Inside a sandbox guest, placement is decided by the host that serves the
 /// RPC request, so the guest's own config is never consulted.
-pub fn check_placement(config: &config::Config, placement: &PlacementArgs) -> Result<()> {
+pub fn check_placement(
+    config: &config::Config,
+    placement: &PlacementArgs,
+) -> Result<Option<RemoteSpec>> {
     if crate::sandbox::guest::is_sandbox_guest() {
         if placement.is_set() {
             bail!("--remote and --local are not supported from inside a sandbox");
         }
-        return Ok(());
+        return Ok(None);
     }
-    crate::remote::reject_remote_placement(config, placement.remote_flag(), placement.local)
+    match crate::remote::resolve_placement(config, placement.remote_flag(), placement.local)? {
+        Placement::Local => Ok(None),
+        Placement::Remote(name) => Ok(Some(RemoteSpec::resolve(config, &name)?)),
+    }
+}
+
+/// Refuse options a remote agent cannot honour.
+fn check_remote_options(spec: &RemoteSpec, options: &[(bool, &str)]) -> Result<()> {
+    if let Some((_, option)) = options.iter().find(|(set, _)| *set) {
+        bail!(
+            "{option} is not supported for remote agents (remote '{}'); pass --local to \
+             create a local agent",
+            spec.name
+        );
+    }
+    if detect_backend() != BackendType::Tmux {
+        bail!("remote agents need tmux; pass --local to create a local agent");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,7 +417,26 @@ pub fn run(
     headless: bool,
     json: bool,
     config_override: Option<&std::path::Path>,
+    remote: Option<RemoteSpec>,
 ) -> Result<()> {
+    if let Some(spec) = &remote {
+        check_remote_options(
+            spec,
+            &[
+                (headless, "--headless"),
+                (pr.is_some(), "--pr"),
+                (rescue.with_changes, "--with-changes"),
+                (fork.is_some(), "--fork"),
+                (continue_session, "--continue"),
+                (setup.open_if_exists, "--open-if-exists"),
+                (setup.sandbox, "--sandbox"),
+                (target_name.is_some(), "--target-name"),
+                (parent_session.is_some(), "--parent-session"),
+                (mode_override == Some(MuxMode::Session), "Session mode"),
+                (dry_run, "--dry-run"),
+            ],
+        )?;
+    }
     if headless {
         return run_headless(
             branch_name,
@@ -511,6 +553,9 @@ pub fn run(
         None
     };
     let mode = mode_override.unwrap_or(initial_config.mode());
+    if let Some(spec) = &remote {
+        check_remote_options(spec, &[(mode == MuxMode::Session, "Session mode")])?;
+    }
 
     // Validate layout early to fail fast before any LLM calls
     if let Some(layout_name) = &layout {
@@ -667,7 +712,8 @@ pub fn run(
         ));
     }
 
-    if !setup.no_pane_cmds && !sandbox_override && !dry_run {
+    // A remote agent's executable lives on the remote.
+    if remote.is_none() && !setup.no_pane_cmds && !sandbox_override && !dry_run {
         for agent in &multi.agent {
             let config = config::Config::load_with_override(Some(agent), config_override)?;
             validate_agent_executable(&config)?;
@@ -761,6 +807,13 @@ pub fn run(
     } else {
         detect_remote_branch(branch_name, cli_base)?
     };
+    if let (Some(spec), Some(remote_branch)) = (&remote, &remote_branch) {
+        bail!(
+            "remote agents start from a local commit; fetch '{remote_branch}' and pass a local \
+             branch name with --base instead (remote '{}')",
+            spec.name
+        );
+    }
     let resolved_base = if remote_branch.is_some() {
         pr_base_branch.as_deref()
     } else {
@@ -823,6 +876,7 @@ pub fn run(
         layout: layout.as_deref(),
         fork_source,
         config_override,
+        remote: remote.as_ref(),
     };
     plan.execute()
 }
@@ -964,6 +1018,7 @@ struct CreationPlan<'a> {
     layout: Option<&'a str>,
     fork_source: Option<crate::workflow::types::ForkSource>,
     config_override: Option<&'a std::path::Path>,
+    remote: Option<&'a RemoteSpec>,
 }
 
 impl<'a> CreationPlan<'a> {
@@ -1093,6 +1148,7 @@ impl<'a> CreationPlan<'a> {
             };
 
             // Create a WorkflowContext for this spec's config (reuse shared mux)
+            let location = config_location.clone();
             let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
             let configured_base = if self.resolved_base.is_none() && self.remote_branch.is_none() {
                 workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
@@ -1119,6 +1175,65 @@ impl<'a> CreationPlan<'a> {
                 Some(&self.options),
                 super::HookPhase::PostCreate,
             );
+
+            if let Some(remote) = self.remote {
+                let record = crate::remote::lifecycle::create(
+                    &context,
+                    remote,
+                    crate::remote::lifecycle::CreateRequest {
+                        branch: &final_branch_name,
+                        handle: &handle,
+                        base: resolved_base,
+                        prompt: prompt_for_spec.as_ref(),
+                        agent: spec.agent.as_deref(),
+                        location: location.as_ref(),
+                        options: &self.options,
+                        prompt_file_only: self.prompt_file_only,
+                    },
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to create remote workspace for branch '{}'",
+                        final_branch_name
+                    )
+                })?;
+                if self.wait {
+                    created_targets.push(record.window_name.clone());
+                }
+                if self.max_concurrent.is_some() {
+                    active_targets.push(record.window_name.clone());
+                }
+                println!(
+                    "✓ Successfully created remote workspace and tmux window for '{}' on '{}'",
+                    record.branch, record.remote
+                );
+                if let Some(base) = &record.base_label {
+                    println!("  Base: {base}");
+                }
+                if let Some(path) = &record.remote_worktree {
+                    println!("  Worktree: {}:{path}", record.remote);
+                }
+                continue;
+            }
+            if let Some(record) = crate::remote::cache::claimed(
+                &context.main_worktree_root,
+                &handle,
+                &final_branch_name,
+            ) {
+                if record.handle == handle {
+                    bail!(
+                        "'{handle}' is already a remote workspace on '{}'; pick another name \
+                         with --name",
+                        record.remote
+                    );
+                }
+                bail!(
+                    "Branch '{}' belongs to remote workspace '{}' on '{}'",
+                    record.branch,
+                    record.handle,
+                    record.remote
+                );
+            }
 
             let result = workflow::create(
                 &context,

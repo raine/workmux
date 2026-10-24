@@ -7,7 +7,7 @@
 //! Loopback runs the same encoded command with the local `sh`, for tests.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -65,6 +65,40 @@ impl Output {
 pub enum Input {
     Null,
     File(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+/// What kind of ssh failure ended a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshFailureKind {
+    /// The server refused every credential.
+    Auth,
+    /// The host key is unknown or changed.
+    HostKey,
+    /// DNS, refused or timed-out connections, dropped links and the rest.
+    Other,
+}
+
+/// An ssh failure (exit 255) with a user-facing explanation.
+#[derive(Debug, Clone)]
+pub struct SshFailure {
+    pub kind: SshFailureKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for SshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SshFailure {}
+
+/// Whether remote stderr is captured or also shown on the local terminal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stderr {
+    Capture,
+    Tee,
 }
 
 pub struct Transport {
@@ -158,7 +192,7 @@ impl Transport {
             )
         })?;
         if !output.success() {
-            bail!(classify_ssh_failure(name, host, &output));
+            return Err(classify_ssh_failure(name, host, &output).into());
         }
         Ok(())
     }
@@ -166,34 +200,103 @@ impl Transport {
     /// Run `script` with POSIX `sh` on the node. Returns the script's own
     /// result; ssh failures and timeouts are errors.
     pub fn run(&self, script: &str, input: Input, timeout: Option<Duration>) -> Result<Output> {
-        let stdin = match input {
-            Input::Null => Stdio::null(),
-            Input::File(path) => Stdio::from(
-                fs::File::open(&path)
-                    .with_context(|| format!("Failed to open {}", path.display()))?,
-            ),
-        };
+        self.run_with(script, input, timeout, Stderr::Capture)
+    }
+
+    /// Like [`Transport::run`] without a timeout, also copying the script's
+    /// stderr to the local terminal as it arrives (for hook output).
+    pub fn run_streaming(&self, script: &str, input: Input) -> Result<Output> {
+        self.run_with(script, input, None, Stderr::Tee)
+    }
+
+    /// Run `script` with this process's stdin, stdout and stderr, returning
+    /// its exit status (a helper that git drives over stdio).
+    pub fn exec_inherit(&self, script: &str) -> Result<i32> {
+        let mut cmd = self.command(&remote_command(script));
+        let status = cmd
+            .status()
+            .with_context(|| format!("Failed to run {}", cmd.get_program().to_string_lossy()))?;
+        Ok(status.code().unwrap_or(SSH_ERROR_STATUS))
+    }
+
+    /// Command that runs `script` on a terminal: a dedicated ssh connection
+    /// with a short keepalive, so a dead link is noticed within seconds, or
+    /// local `sh` for loopback. Stdio is left to the caller.
+    pub fn terminal_command(&self, script: &str) -> Command {
         let command = remote_command(script);
-        let (cmd, remote) = match &self.kind {
-            Kind::Ssh { name, host, socket } => {
-                (self.ssh(socket, host, &command), Some((name, host)))
+        match &self.kind {
+            Kind::Ssh { host, .. } => {
+                let mut cmd = Command::new("ssh");
+                cmd.args(terminal_ssh_args(host, &command));
+                cmd
             }
             Kind::Loopback => {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(&command);
-                (cmd, None)
+                cmd
             }
+        }
+    }
+
+    /// Classify a failed [`Transport::terminal_command`] from its stderr;
+    /// `None` when the exit was not an ssh failure.
+    pub fn terminal_failure(&self, status: Option<i32>, stderr: &[u8]) -> Option<SshFailure> {
+        let Kind::Ssh { name, host, .. } = &self.kind else {
+            return None;
         };
-        let output = run_bounded(cmd, stdin, timeout)?.ok_or_else(|| {
+        (status == Some(SSH_ERROR_STATUS)).then(|| {
+            classify_ssh_failure(
+                name,
+                host,
+                &Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: stderr.to_vec(),
+                },
+            )
+        })
+    }
+
+    fn command(&self, remote_command: &str) -> Command {
+        match &self.kind {
+            Kind::Ssh { host, socket, .. } => self.ssh(socket, host, remote_command),
+            Kind::Loopback => {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(remote_command);
+                cmd
+            }
+        }
+    }
+
+    fn run_with(
+        &self,
+        script: &str,
+        input: Input,
+        timeout: Option<Duration>,
+        stderr: Stderr,
+    ) -> Result<Output> {
+        let (stdin, bytes) = match input {
+            Input::Null => (Stdio::null(), None),
+            Input::File(path) => (
+                Stdio::from(
+                    fs::File::open(&path)
+                        .with_context(|| format!("Failed to open {}", path.display()))?,
+                ),
+                None,
+            ),
+            Input::Bytes(bytes) => (Stdio::piped(), Some(bytes)),
+        };
+        let cmd = self.command(&remote_command(script));
+        let output = run_bounded_with(cmd, stdin, bytes, timeout, stderr)?.ok_or_else(|| {
             anyhow!(
                 "remote command timed out after {}s",
                 timeout.unwrap_or_default().as_secs()
             )
         })?;
-        if let Some((name, host)) = remote
+        if let Kind::Ssh { name, host, .. } = &self.kind
             && output.status == Some(SSH_ERROR_STATUS)
         {
-            bail!(classify_ssh_failure(name, host, &output));
+            return Err(classify_ssh_failure(name, host, &output).into());
         }
         Ok(output)
     }
@@ -255,6 +358,33 @@ fn ssh_args(socket: &Path, host: &str, remote_command: &str) -> Vec<String> {
     args
 }
 
+/// Arguments for an interactive ssh session that bypasses the shared
+/// master: a terminal must see its own connection die within seconds,
+/// while the master's keepalive is tuned for batch commands.
+fn terminal_ssh_args(host: &str, remote_command: &str) -> Vec<String> {
+    let mut args = vec!["-tt".to_string()];
+    for option in [
+        "BatchMode=yes",
+        "ConnectTimeout=10",
+        "ServerAliveInterval=5",
+        "ServerAliveCountMax=3",
+        "ControlMaster=no",
+        "ControlPath=none",
+        "RemoteCommand=none",
+        "ForwardAgent=no",
+        "ForwardX11=no",
+        "ClearAllForwardings=yes",
+        "LogLevel=ERROR",
+    ] {
+        args.push("-o".to_string());
+        args.push(option.to_string());
+    }
+    args.push("--".to_string());
+    args.push(host.to_string());
+    args.push(remote_command.to_string());
+    args
+}
+
 /// Command string that decodes and runs `script` with `sh`, immune to the
 /// quoting rules of whatever login shell receives it.
 pub fn remote_command(script: &str) -> String {
@@ -262,37 +392,63 @@ pub fn remote_command(script: &str) -> String {
     format!("sh -c 'eval \"$(printf %s \"$1\" | base64 -d)\"' workmux {encoded}")
 }
 
-fn classify_ssh_failure(name: &str, host: &str, output: &Output) -> String {
+fn classify_ssh_failure(name: &str, host: &str, output: &Output) -> SshFailure {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let reason = if stderr.contains("Permission denied") {
-        format!(
-            "authentication failed. workmux runs ssh in batch mode and never prompts; \
-             make sure `ssh {host}` logs in without a password prompt (ssh-agent or an \
-             unencrypted key)"
+    let (kind, reason) = if stderr.contains("Permission denied") {
+        (
+            SshFailureKind::Auth,
+            format!(
+                "authentication failed. workmux runs ssh in batch mode and never prompts; \
+                 make sure `ssh {host}` logs in without a password prompt (ssh-agent or an \
+                 unencrypted key)"
+            ),
         )
     } else if stderr.contains("Host key verification failed") {
-        format!("host key is not trusted. Run `ssh {host}` once to verify and accept it")
+        (
+            SshFailureKind::HostKey,
+            format!("host key is not trusted. Run `ssh {host}` once to verify and accept it"),
+        )
     } else if stderr.contains("Could not resolve hostname") {
-        format!("cannot resolve the host name. Check remotes.{name}.host and ~/.ssh/config")
+        (
+            SshFailureKind::Other,
+            format!("cannot resolve the host name. Check remotes.{name}.host and ~/.ssh/config"),
+        )
     } else if stderr.contains("Connection refused") {
-        "connection refused. Is sshd running and the port correct?".to_string()
+        (
+            SshFailureKind::Other,
+            "connection refused. Is sshd running and the port correct?".to_string(),
+        )
     } else if stderr.contains("timed out") {
-        "connection timed out".to_string()
+        (SshFailureKind::Other, "connection timed out".to_string())
     } else {
-        match output.stderr_line() {
+        let reason = match output.stderr_line() {
             line if line.is_empty() => "ssh failed without an error message".to_string(),
             line => line,
-        }
+        };
+        (SshFailureKind::Other, reason)
     };
-    format!("ssh {host}: {reason}")
+    SshFailure {
+        kind,
+        message: format!("ssh {host}: {reason}"),
+    }
 }
 
 /// Spawn `cmd` and collect its output. Returns `None` if `timeout` elapses
 /// first, after killing the process.
-fn run_bounded(
-    mut cmd: Command,
+pub(crate) fn run_bounded(
+    cmd: Command,
     stdin: Stdio,
     timeout: Option<Duration>,
+) -> Result<Option<Output>> {
+    run_bounded_with(cmd, stdin, None, timeout, Stderr::Capture)
+}
+
+fn run_bounded_with(
+    mut cmd: Command,
+    stdin: Stdio,
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    stderr_mode: Stderr,
 ) -> Result<Option<Output>> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd
@@ -301,16 +457,53 @@ fn run_bounded(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("Failed to run {program}"))?;
+    let writer = child.stdin.take().map(|mut pipe| {
+        let bytes = input.unwrap_or_default();
+        // A script may exit without reading its input; that is its result,
+        // not a transport error.
+        thread::spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        })
+    });
     let stdout = read_in_background(child.stdout.take());
-    let stderr = read_in_background(child.stderr.take());
+    let stderr = match stderr_mode {
+        Stderr::Capture => read_in_background(child.stderr.take()),
+        Stderr::Tee => tee_in_background(child.stderr.take()),
+    };
     let Some(status) = wait_with_deadline(&mut child, timeout)? else {
         return Ok(None);
     };
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     Ok(Some(Output {
         status: status.code(),
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
     }))
+}
+
+/// Collect `pipe` while copying each chunk to this process's stderr.
+fn tee_in_background(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return buf;
+        };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut out = std::io::stderr().lock();
+                    let _ = out.write_all(&chunk[..n]);
+                    let _ = out.flush();
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+        }
+        buf
+    })
 }
 
 fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
@@ -382,8 +575,8 @@ fn is_literal_control_path(path: &Path) -> bool {
 
 /// Create `dir` if needed and require it to be a real directory private to
 /// `uid`: anyone who can write it could plant a socket that impersonates the
-/// master.
-fn ensure_private_dir(dir: &Path, uid: u32) -> Result<()> {
+/// server behind it.
+pub(crate) fn ensure_private_dir(dir: &Path, uid: u32) -> Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -400,13 +593,13 @@ fn ensure_private_dir(dir: &Path, uid: u32) -> Result<()> {
         .with_context(|| format!("Failed to inspect {}", dir.display()))?;
     if !meta.file_type().is_dir() {
         bail!(
-            "ssh socket directory {} is not a directory (or is a symlink); remove it",
+            "socket directory {} is not a directory (or is a symlink); remove it",
             dir.display()
         );
     }
     if meta.uid() != uid {
         bail!(
-            "ssh socket directory {} is owned by uid {}, not you; remove it",
+            "socket directory {} is owned by uid {}, not you; remove it",
             dir.display(),
             meta.uid()
         );
@@ -564,10 +757,68 @@ mod tests {
             ),
         ];
         for (stderr, expected) in cases {
-            let message = classify_ssh_failure("r", "h", &output(stderr));
+            let message = classify_ssh_failure("r", "h", &output(stderr)).to_string();
             assert!(message.contains(expected), "{stderr} -> {message}");
             assert!(message.starts_with("ssh h: "), "{message}");
         }
+    }
+
+    #[test]
+    fn ssh_failure_kinds() {
+        let kind = |stderr: &str| {
+            classify_ssh_failure(
+                "r",
+                "h",
+                &Output {
+                    status: Some(255),
+                    stdout: vec![],
+                    stderr: stderr.as_bytes().to_vec(),
+                },
+            )
+            .kind
+        };
+        assert_eq!(
+            kind("dev@h: Permission denied (publickey)."),
+            SshFailureKind::Auth
+        );
+        assert_eq!(
+            kind("Host key verification failed."),
+            SshFailureKind::HostKey
+        );
+        assert_eq!(
+            kind("Timeout, server h not responding."),
+            SshFailureKind::Other
+        );
+    }
+
+    #[test]
+    fn terminal_args_use_their_own_connection() {
+        let args = terminal_ssh_args("h", "cmd");
+        assert_eq!(args[0], "-tt");
+        for option in [
+            "ControlMaster=no",
+            "ControlPath=none",
+            "ServerAliveInterval=5",
+        ] {
+            assert!(args.iter().any(|arg| arg == option), "missing {option}");
+        }
+        assert_eq!(&args[args.len() - 3..], ["--", "h", "cmd"]);
+    }
+
+    #[test]
+    fn run_bounded_feeds_bytes_to_stdin() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("cat");
+        let output = run_bounded_with(
+            cmd,
+            Stdio::piped(),
+            Some(b"hello".to_vec()),
+            Some(Duration::from_secs(5)),
+            Stderr::Capture,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(output.stdout_text(), "hello");
     }
 
     #[test]

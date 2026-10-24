@@ -197,6 +197,8 @@ pub struct PaneSetupOptions<'a> {
     pub lima_vm_name: Option<&'a str>,
     /// How to resume a conversation (continue last, fork specific session, or none).
     pub resume_mode: ResumeMode,
+    /// Shell-quoted words that replace `workmux sandbox run` in wrapped panes.
+    pub sandbox_supervisor: Option<&'a str>,
 }
 
 /// Backend type for multiplexer selection

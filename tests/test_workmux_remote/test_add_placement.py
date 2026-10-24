@@ -1,5 +1,6 @@
-"""`workmux add` placement: remote placement fails before creating anything,
-`--local` and configurations without remotes create normal local worktrees."""
+"""`workmux add` placement: remote options are validated before anything is
+created, `--local` and configurations without remotes create normal local
+worktrees."""
 
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -41,19 +42,28 @@ def assert_not_created(repo_path: Path, branch: str) -> None:
     assert branch not in [b.name for b in branches]
 
 
-def test_remote_placement_fails_before_creating(
+def test_remote_placement_refuses_unsupported_options_before_connecting(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
+    """`placement` selects the remote; options a remote agent cannot honour
+    fail before anything is created or any host is contacted."""
     configure(mux_server, mux_repo_path, REMOTES, placement="hetzner")
     result = run_workmux_command(
-        mux_server, workmux_exe_path, mux_repo_path, "add feat", expect_fail=True
+        mux_server,
+        workmux_exe_path,
+        mux_repo_path,
+        "add feat --dry-run",
+        expect_fail=True,
     )
-    assert "remote agents are not available yet (remote 'hetzner')" in result.stderr
+    assert (
+        "--dry-run is not supported for remote agents (remote 'hetzner')"
+        in result.stderr
+    )
     assert "--local" in result.stderr
     assert_not_created(mux_repo_path, "feat")
 
 
-def test_named_remote_flag_fails_clearly(
+def test_named_remote_flag_refuses_headless(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
     configure(mux_server, mux_repo_path, REMOTES, placement=None)
@@ -61,10 +71,12 @@ def test_named_remote_flag_fails_clearly(
         mux_server,
         workmux_exe_path,
         mux_repo_path,
-        "add feat --remote box",
+        "add feat --remote box --headless",
         expect_fail=True,
     )
-    assert "remote agents are not available yet (remote 'box')" in result.stderr
+    assert "--headless is not supported for remote agents (remote 'box')" in (
+        result.stderr
+    )
     assert_not_created(mux_repo_path, "feat")
 
 

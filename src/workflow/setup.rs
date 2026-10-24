@@ -171,6 +171,7 @@ pub fn setup_environment(
         worktree_root: Some(worktree_path),
         lima_vm_name: lima_vm_name.as_deref(),
         resume_mode: options.resume_mode.clone(),
+        sandbox_supervisor: None,
     };
 
     let target_window_name = options.target_window_name.as_deref().unwrap_or(handle);
@@ -582,7 +583,7 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
 ///
 /// This prevents the case where a user provides `-p "some prompt"` but no pane
 /// is configured to run an agent that would receive it.
-fn validate_prompt_consumption(
+pub fn validate_prompt_consumption(
     panes: &[config::PaneConfig],
     cli_agent: Option<&str>,
     config: &config::Config,

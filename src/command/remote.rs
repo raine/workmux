@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::remote::RemoteSpec;
 use crate::remote::install::{self, NodeStatus, Pin};
 use crate::remote::transport::Transport;
-use crate::remote::{Placement, doctor, resolve_placement};
+use crate::remote::{Placement, client, doctor, resolve_placement};
 
 #[derive(Debug, Args)]
 pub struct RemoteArgs {
@@ -29,6 +29,21 @@ pub enum RemoteCommand {
         /// Remote name from `remotes:` in the global config
         name: String,
     },
+    /// Relay one pane of a remote execution into this terminal
+    #[command(hide = true)]
+    Attach {
+        name: String,
+        ex_id: String,
+        #[arg(long)]
+        pane: usize,
+    },
+    /// `GIT_SSH_COMMAND` for pushing a base commit to a remote
+    #[command(hide = true, name = "git-ssh")]
+    GitSsh {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 pub fn run(args: RemoteArgs) -> Result<()> {
@@ -44,6 +59,13 @@ pub fn run(args: RemoteArgs) -> Result<()> {
                 bail!("remote {name} is not ready");
             }
             Ok(())
+        }
+        Some(RemoteCommand::Attach { name, ex_id, pane }) => {
+            crate::remote::attach::run(&config, &name, &ex_id, pane)
+        }
+        Some(RemoteCommand::GitSsh { name, args }) => {
+            let status = client::git_ssh(&RemoteSpec::resolve(&config, &name)?, &args)?;
+            std::process::exit(status)
         }
     }
 }

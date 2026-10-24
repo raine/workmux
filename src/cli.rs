@@ -213,6 +213,7 @@ Setup and configuration:
   setup        Set up agent status tracking hooks and install skills
   config       Manage global configuration
   sandbox      Manage sandbox settings
+  remote       Manage SSH remotes that run agents
   sync-files   Re-apply file operations (copy/symlink) to worktrees
   claude       Claude Code integration commands
 
@@ -773,7 +774,6 @@ enum Commands {
     Sandbox(command::sandbox::SandboxArgs),
 
     /// Manage SSH remotes that run agents
-    #[command(hide = true)]
     Remote(command::remote::RemoteArgs),
 
     /// Remote node entry point (runs on the remote, JSON in and out)
@@ -1113,7 +1113,7 @@ pub fn run() -> Result<()> {
             json,
             config,
         } => {
-            command::add::check_placement(&cfg, &placement)?;
+            let remote = command::add::check_placement(&cfg, &placement)?;
             let mode_override = mode
                 .map(MuxMode::from)
                 .or(session.then_some(MuxMode::Session));
@@ -1139,6 +1139,7 @@ pub fn run() -> Result<()> {
                 headless,
                 json,
                 config.as_deref(),
+                remote,
             )
         }
         Commands::Open {
@@ -1183,19 +1184,24 @@ pub fn run() -> Result<()> {
             no_verify,
             no_hooks,
             notification,
-        } => command::merge::run(
-            name.as_deref(),
-            into.as_deref(),
-            ignore_uncommitted,
-            rebase,
-            squash,
-            keep,
-            cleanup,
-            no_verify,
-            no_hooks,
-            notification,
-        ),
-        Commands::Rebase { name } => command::rebase::run(name.as_deref()),
+        } => reject_remote("merge", name.iter()).and_then(|()| {
+            command::merge::run(
+                name.as_deref(),
+                into.as_deref(),
+                ignore_uncommitted,
+                rebase,
+                squash,
+                keep,
+                cleanup,
+                no_verify,
+                no_hooks,
+                notification,
+            )
+        }),
+        Commands::Rebase { name } => {
+            reject_remote("rebase", name.iter())?;
+            command::rebase::run(name.as_deref())
+        }
         Commands::Remove {
             names,
             gone,
@@ -1203,37 +1209,56 @@ pub fn run() -> Result<()> {
             force,
             keep_branch,
         } => command::remove::run(names, gone, all, force, keep_branch),
-        Commands::Rename { names, branch } => command::rename::run(names, branch),
+        Commands::Rename { names, branch } => {
+            reject_remote("rename", names.iter())?;
+            command::rename::run(names, branch)
+        }
         Commands::List {
             pr,
             json,
             all,
             filter,
         } => command::list::run(pr, json, all, &filter),
-        Commands::Path { name } => command::path::run(&name),
+        Commands::Path { name } => {
+            reject_remote("path", [&name])?;
+            command::path::run(&name)
+        }
         Commands::Send { name, text, file } => {
+            reject_remote("send", [&name])?;
             command::send::run(&name, text.as_deref(), file.as_deref())
         }
-        Commands::Capture { name, lines } => command::capture::run(&name, lines),
+        Commands::Capture { name, lines } => {
+            reject_remote("capture", [&name])?;
+            command::capture::run(&name, lines)
+        }
         Commands::Status {
             worktrees,
             json,
             all,
             git,
-        } => command::status::run(&worktrees, json, all, git),
+        } => {
+            reject_remote("status", worktrees.iter())?;
+            command::status::run(&worktrees, json, all, git)
+        }
         Commands::Wait {
             worktrees,
             status,
             timeout,
             any,
-        } => command::wait::run(&worktrees, &status, timeout, any),
+        } => {
+            reject_remote("wait", worktrees.iter())?;
+            command::wait::run(&worktrees, &status, timeout, any)
+        }
         Commands::Run {
             name,
             command,
             background,
             keep,
             timeout,
-        } => command::run::run(&name, command, background, keep, timeout),
+        } => {
+            reject_remote("run", [&name])?;
+            command::run::run(&name, command, background, keep, timeout)
+        }
         Commands::ReapAgents { hours, force } => {
             command::reap_agents::run(hours.saturating_mul(3600), force)
         }
@@ -1374,6 +1399,13 @@ pub fn run() -> Result<()> {
         }
         Commands::CheckUpdate => command::update::run_background_check(),
     }
+}
+
+/// Refuse `command` for names that are remote workspaces.
+fn reject_remote<'a>(command: &str, names: impl IntoIterator<Item = &'a String>) -> Result<()> {
+    names
+        .into_iter()
+        .try_for_each(|name| crate::remote::cache::reject_remote_handle(name, command))
 }
 
 fn prune_claude_config() -> Result<()> {

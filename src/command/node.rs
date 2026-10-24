@@ -4,10 +4,13 @@
 
 use std::io::{IsTerminal, Read};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use crate::remote::protocol::{ErrorEnvelope, Hello};
+use crate::remote::node::{self, NodeRoot};
+use crate::remote::protocol::{ErrorEnvelope, Hello, NodeError, code};
 
 #[derive(Debug, Args)]
 pub struct NodeArgs {
@@ -23,11 +26,45 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Prepare a workspace's repository, then create and provision it
+    ProvisionWorkspace {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Start a workspace's panes in node tmux sessions
+    StartExecution {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Stop a workspace and delete its worktree, branch and records
+    RemoveWorkspace {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Attach this terminal to a pane session of an execution
+    Attach { ex_id: String, pane: usize },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
-    let response = read_request().and_then(|_request| match args.verb {
+    if let NodeVerb::Attach { ex_id, pane } = &args.verb {
+        let status = node::attach::attach(&NodeRoot::from_env()?, ex_id, *pane)?;
+        std::process::exit(status);
+    }
+    let response = read_request().and_then(|request| match args.verb {
         NodeVerb::Hello { .. } => Ok(serde_json::to_value(Hello::local())?),
+        NodeVerb::ProvisionWorkspace { .. } => serve(request, |root, request| {
+            node::provision::provision(&root, request)
+        }),
+        NodeVerb::StartExecution { .. } => serve(request, |root, request| {
+            node::execution::start(&root, request)
+        }),
+        NodeVerb::RemoveWorkspace { .. } => serve(request, |root, request| {
+            node::remove::remove(&root, request)
+        }),
+        NodeVerb::Attach { .. } => unreachable!("handled above"),
     });
     match response {
         Ok(value) => {
@@ -35,11 +72,27 @@ pub fn run(args: NodeArgs) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            let envelope = ErrorEnvelope::new("bad_request", format!("{err:#}"));
+            let envelope = match err.downcast_ref::<NodeError>() {
+                Some(refusal) => ErrorEnvelope::new(&refusal.code, refusal.message.clone()),
+                None => ErrorEnvelope::new(code::FAILED, format!("{err:#}")),
+            };
             println!("{}", serde_json::to_string(&envelope)?);
             std::process::exit(1);
         }
     }
+}
+
+/// Decode a typed request, run `verb` on the node root and encode its
+/// response.
+fn serve<Req: DeserializeOwned, Resp: Serialize>(
+    request: serde_json::Map<String, serde_json::Value>,
+    verb: impl FnOnce(NodeRoot, Req) -> Result<Resp>,
+) -> Result<serde_json::Value> {
+    let request: Req = serde_json::from_value(serde_json::Value::Object(request))
+        .map_err(|err| node::refuse(code::BAD_REQUEST, format!("invalid request: {err}")))?;
+    let root =
+        NodeRoot::from_env().map_err(|err| node::refuse(code::BAD_REQUEST, format!("{err:#}")))?;
+    Ok(serde_json::to_value(verb(root, request)?)?)
 }
 
 /// The request object from stdin; `{}` when stdin is a terminal or empty.
@@ -55,6 +108,9 @@ fn read_request() -> Result<serde_json::Map<String, serde_json::Value>> {
     }
     match serde_json::from_str(&text)? {
         serde_json::Value::Object(map) => Ok(map),
-        _ => bail!("request must be a JSON object"),
+        _ => Err(node::refuse(
+            code::BAD_REQUEST,
+            "request must be a JSON object",
+        )),
     }
 }

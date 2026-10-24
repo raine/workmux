@@ -7,11 +7,165 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::RemoteIsolation;
+
 /// Node wire protocol version.
 pub const NODE_PROTOCOL: u32 = 1;
 
 /// Verbs this build's node entry point implements.
-pub const CAPABILITIES: &[&str] = &["hello"];
+pub const CAPABILITIES: &[&str] = &[
+    "hello",
+    PROVISION_WORKSPACE,
+    START_EXECUTION,
+    REMOVE_WORKSPACE,
+];
+
+pub const PROVISION_WORKSPACE: &str = "provision-workspace";
+pub const START_EXECUTION: &str = "start-execution";
+pub const REMOVE_WORKSPACE: &str = "remove-workspace";
+
+/// Error codes a node verb reports in its [`ErrorEnvelope`].
+pub mod code {
+    /// The request was malformed.
+    pub const BAD_REQUEST: &str = "bad_request";
+    /// Another call holds this workspace; retry later.
+    pub const BUSY: &str = "busy";
+    /// The id is already used with different inputs, or the handle or
+    /// branch belongs to another workspace.
+    pub const CONFLICT: &str = "conflict";
+    /// The workspace id is unknown to the node.
+    pub const NOT_FOUND: &str = "not_found";
+    /// Container isolation needs a runtime the node does not support.
+    pub const UNSUPPORTED_RUNTIME: &str = "unsupported_runtime";
+    /// Removal would discard work that exists only on the node.
+    pub const UNSAVED_WORK: &str = "unsaved_work";
+    /// Anything else.
+    pub const FAILED: &str = "failed";
+}
+
+/// What identifies a workspace; a second call with the same `ws_id` must
+/// repeat these values exactly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceIdentity {
+    pub ws_id: String,
+    pub project_id: String,
+    pub handle: String,
+    pub branch: String,
+    /// Full object id of the commit the branch starts from.
+    pub base_sha: String,
+}
+
+/// `provision-workspace`. Without `payload` it only prepares the project
+/// repository so the laptop can push the base commit; with it, it creates
+/// and provisions the worktree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionRequest {
+    #[serde(flatten)]
+    pub identity: WorkspaceIdentity,
+    pub isolation: RemoteIsolation,
+    pub payload: Option<ProvisionPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionPayload {
+    /// Frozen configuration snapshot document (see `frozen_config`).
+    pub config: serde_json::Value,
+    /// Agent named with `--agent`, if any.
+    pub agent: Option<String>,
+    pub prompt: Option<String>,
+    /// Write the prompt file without handing it to the agent.
+    pub prompt_file_only: bool,
+    /// `files.copy` results, relative to the worktree.
+    pub copies: Vec<FileEntry>,
+    /// Sources of `files.symlink` for the node's project directory, applied
+    /// only where that directory lacks them.
+    pub seeds: Vec<FileEntry>,
+    /// `files.symlink` patterns, matched against the node's project directory.
+    pub symlink_patterns: Vec<String>,
+    /// Transferred paths the laptop's git ignores, through rules the node
+    /// lacks (global excludes, `info/exclude`) as well as `.gitignore`.
+    #[serde(default)]
+    pub ignored: Vec<String>,
+    pub run_file_ops: bool,
+    pub run_hooks: bool,
+    /// Laptop `user.name` / `user.email` for commits made on the node.
+    pub git_user_name: Option<String>,
+    pub git_user_email: Option<String>,
+}
+
+/// One file-tree entry; `path` is relative and never contains `..`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileEntry {
+    pub path: String,
+    #[serde(flatten)]
+    pub kind: FileEntryKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileEntryKind {
+    File {
+        mode: u32,
+        /// Base64 contents.
+        data: String,
+    },
+    Dir,
+    Symlink {
+        target: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProvisionResponse {
+    /// Absolute path of the project repository on the node.
+    pub repo_path: String,
+    /// Absolute path of the workspace worktree on the node.
+    pub worktree_path: String,
+    /// Whether `refs/workmux/base/<ws_id>` already holds `base_sha`.
+    pub has_base: bool,
+}
+
+/// `start-execution`: idempotent per `ex_id`; returns the workspace's live
+/// execution instead when one exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartRequest {
+    pub ws_id: String,
+    pub ex_id: String,
+    /// Hand the workspace prompt to the agent (only on creation).
+    pub use_prompt: bool,
+    pub run_commands: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartResponse {
+    pub ex_id: String,
+    /// Indices of the configured panes that have a session, in order.
+    pub panes: Vec<usize>,
+    /// Whether an existing execution was returned.
+    pub reused: bool,
+}
+
+/// `remove-workspace`: stops the execution and deletes the worktree, branch,
+/// base ref and records. Idempotent: an unknown id is already removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveRequest {
+    pub ws_id: String,
+    /// Remove even with uncommitted changes or commits made on the node.
+    pub force: bool,
+    pub keep_branch: bool,
+    pub run_hooks: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoveResponse {
+    /// The workspace was unknown to the node.
+    pub already_removed: bool,
+}
+
+/// tmux session of pane `index` of execution `ex_id`.
+pub fn session_name(ex_id: &str, index: usize) -> String {
+    format!("{ex_id}-{index}")
+}
 
 /// Response of `workmux node hello --json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +202,14 @@ pub struct NodeError {
     pub code: String,
     pub message: String,
 }
+
+impl std::fmt::Display for NodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NodeError {}
 
 impl ErrorEnvelope {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
