@@ -553,7 +553,7 @@ fn supervisors(root: &NodeRoot) -> Vec<(i32, String)> {
     found
 }
 
-/// `refs/workmux/**` of every project repository.
+/// Workspace-owned `refs/workmux/**` of every project repository.
 fn workmux_refs(root: &NodeRoot) -> Vec<(PathBuf, String)> {
     let mut refs = Vec::new();
     for project in read_dir(&root.path.join("projects")) {
@@ -565,7 +565,12 @@ fn workmux_refs(root: &NodeRoot) -> Vec<(PathBuf, String)> {
             &repo,
             &["for-each-ref", "--format=%(refname)", "refs/workmux/"],
         ) {
-            refs.extend(output.lines().map(|line| (repo.clone(), line.to_string())));
+            refs.extend(
+                output
+                    .lines()
+                    .filter(|line| *line != super::PROJECT_TRANSFER_REF)
+                    .map(|line| (repo.clone(), line.to_string())),
+            );
         }
     }
     refs

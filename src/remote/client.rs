@@ -1,5 +1,6 @@
 //! Laptop side of the node verbs.
 
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
@@ -151,8 +152,8 @@ impl Node {
         parse_reply(&self.spec.name, verb, &output)
     }
 
-    /// Push `sha` from the local repository to the workspace's base ref in
-    /// the node's project repository.
+    /// Push `sha` to the workspace base and the project's transfer ref.
+    /// The latter advertises history after all workspace refs are removed.
     pub fn push_base(
         &self,
         project_root: &Path,
@@ -160,8 +161,17 @@ impl Node {
         sha: &str,
         ws_id: &str,
     ) -> Result<()> {
-        self.push_ref(project_root, repo_path, sha, &super::node::base_ref(ws_id))
-            .with_context(|| format!("Failed to push the base commit to '{}'", self.spec.name))
+        self.push_refs(
+            project_root,
+            repo_path,
+            sha,
+            &[
+                &super::node::base_ref(ws_id),
+                super::node::PROJECT_TRANSFER_REF,
+            ],
+            std::io::stderr().is_terminal(),
+        )
+        .with_context(|| format!("Failed to push the base commit to '{}'", self.spec.name))
     }
 
     /// Push `sha` from the local repository to `refname` in the node's
@@ -173,16 +183,31 @@ impl Node {
         sha: &str,
         refname: &str,
     ) -> Result<()> {
-        let refspec = format!("+{sha}:{refname}");
+        self.push_refs(project_root, repo_path, sha, &[refname], false)
+    }
+
+    fn push_refs(
+        &self,
+        project_root: &Path,
+        repo_path: &str,
+        sha: &str,
+        refnames: &[&str],
+        progress: bool,
+    ) -> Result<()> {
+        let refspecs: Vec<_> = refnames
+            .iter()
+            .map(|name| format!("+{sha}:{name}"))
+            .collect();
         let status = self
             .git_over_ssh(project_root)?
             .args([
                 "push",
                 "--no-verify",
-                "--quiet",
+                "--atomic",
+                if progress { "--progress" } else { "--quiet" },
                 &self.repo_url(repo_path),
-                &refspec,
             ])
+            .args(&refspecs)
             .status()
             .context("Failed to run git push")?;
         if !status.success() {

@@ -135,7 +135,10 @@ def test_gc_lists_and_removes_orphans(
     assert [r["branch"] for r in local_records(mux_server)] == ["healthy"]
     assert node.sessions() == [f"{records['healthy']['execution']['ex_id']}-0"]
     refs = git(node_repo, "for-each-ref", "--format=%(refname)", "refs/workmux/")
-    assert refs.split() == [f"refs/workmux/base/{healthy['ws_id']}"]
+    assert refs.split() == [
+        f"refs/workmux/base/{healthy['ws_id']}",
+        "refs/workmux/project/transfer",
+    ]
     assert not side.exists() and not secret.exists() and not ghost.exists()
     assert not detached.exists()
     assert fresh.exists()
