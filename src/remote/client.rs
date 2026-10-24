@@ -139,7 +139,23 @@ impl Node {
             "WORKMUX_NODE_ROOT=$root\nexport WORKMUX_NODE_ROOT\n\
              exec \"$root/bin/$pin\" node attach \"$ex\" \"$pane\"\n",
         );
-        self.transport.terminal_command(&script)
+        self.transport.terminal_command(&script, &[])
+    }
+
+    /// Command that runs `node login <args>` on the calling terminal,
+    /// forwarding `ports` for the login's browser callbacks.
+    pub fn login_command(&self, args: &[String], ports: &[u16]) -> std::process::Command {
+        let args: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
+        let script = self.spec.script(
+            &[("pin", &self.pin.name)],
+            &format!(
+                "WORKMUX_NODE_ROOT=$root XDG_STATE_HOME=$root/state\n\
+                 export WORKMUX_NODE_ROOT XDG_STATE_HOME\n\
+                 exec \"$root/bin/$pin\" node login {}\n",
+                args.join(" ")
+            ),
+        );
+        self.transport.terminal_command(&script, ports)
     }
 }
 

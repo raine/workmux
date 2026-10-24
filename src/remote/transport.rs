@@ -221,13 +221,15 @@ impl Transport {
 
     /// Command that runs `script` on a terminal: a dedicated ssh connection
     /// with a short keepalive, so a dead link is noticed within seconds, or
-    /// local `sh` for loopback. Stdio is left to the caller.
-    pub fn terminal_command(&self, script: &str) -> Command {
+    /// local `sh` for loopback. Each of `ports` on this machine's loopback is
+    /// forwarded to the same port on the remote's. Stdio is left to the
+    /// caller.
+    pub fn terminal_command(&self, script: &str, ports: &[u16]) -> Command {
         let command = remote_command(script);
         match &self.kind {
             Kind::Ssh { host, .. } => {
                 let mut cmd = Command::new("ssh");
-                cmd.args(terminal_ssh_args(host, &command));
+                cmd.args(terminal_ssh_args(host, &command, ports));
                 cmd
             }
             Kind::Loopback => {
@@ -361,8 +363,18 @@ fn ssh_args(socket: &Path, host: &str, remote_command: &str) -> Vec<String> {
 /// Arguments for an interactive ssh session that bypasses the shared
 /// master: a terminal must see its own connection die within seconds,
 /// while the master's keepalive is tuned for batch commands.
-fn terminal_ssh_args(host: &str, remote_command: &str) -> Vec<String> {
+///
+/// With `ports`, each is forwarded from this machine's loopback.
+/// `ClearAllForwardings` would drop those too, so it is pinned off: the
+/// user's configured forwards then apply as well, and one that cannot bind
+/// does not end the session.
+fn terminal_ssh_args(host: &str, remote_command: &str, ports: &[u16]) -> Vec<String> {
     let mut args = vec!["-tt".to_string()];
+    let forwarding: &[&str] = if ports.is_empty() {
+        &["ClearAllForwardings=yes"]
+    } else {
+        &["ClearAllForwardings=no", "ExitOnForwardFailure=no"]
+    };
     for option in [
         "BatchMode=yes",
         "ConnectTimeout=10",
@@ -373,11 +385,17 @@ fn terminal_ssh_args(host: &str, remote_command: &str) -> Vec<String> {
         "RemoteCommand=none",
         "ForwardAgent=no",
         "ForwardX11=no",
-        "ClearAllForwardings=yes",
         "LogLevel=ERROR",
-    ] {
+    ]
+    .iter()
+    .chain(forwarding)
+    {
         args.push("-o".to_string());
         args.push(option.to_string());
+    }
+    for port in ports {
+        args.push("-L".to_string());
+        args.push(format!("{port}:127.0.0.1:{port}"));
     }
     args.push("--".to_string());
     args.push(host.to_string());
@@ -593,13 +611,13 @@ pub(crate) fn ensure_private_dir(dir: &Path, uid: u32) -> Result<()> {
         .with_context(|| format!("Failed to inspect {}", dir.display()))?;
     if !meta.file_type().is_dir() {
         bail!(
-            "socket directory {} is not a directory (or is a symlink); remove it",
+            "{} is not a directory (or is a symlink); remove it",
             dir.display()
         );
     }
     if meta.uid() != uid {
         bail!(
-            "socket directory {} is owned by uid {}, not you; remove it",
+            "directory {} is owned by uid {}, not you; remove it",
             dir.display(),
             meta.uid()
         );
@@ -793,7 +811,7 @@ mod tests {
 
     #[test]
     fn terminal_args_use_their_own_connection() {
-        let args = terminal_ssh_args("h", "cmd");
+        let args = terminal_ssh_args("h", "cmd", &[]);
         assert_eq!(args[0], "-tt");
         for option in [
             "ControlMaster=no",
@@ -802,6 +820,22 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == option), "missing {option}");
         }
+        assert_eq!(&args[args.len() - 3..], ["--", "h", "cmd"]);
+        assert!(args.iter().any(|arg| arg == "ClearAllForwardings=yes"));
+        assert!(!args.iter().any(|arg| arg == "-L"));
+    }
+
+    #[test]
+    fn login_args_forward_ports_to_the_remote_loopback() {
+        let args = terminal_ssh_args("h", "cmd", &[1455, 54545]);
+        let forwards: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-L")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(forwards, ["1455:127.0.0.1:1455", "54545:127.0.0.1:54545"]);
+        assert!(args.iter().any(|arg| arg == "ClearAllForwardings=no"));
+        assert!(args.iter().any(|arg| arg == "ExitOnForwardFailure=no"));
         assert_eq!(&args[args.len() - 3..], ["--", "h", "cmd"]);
     }
 

@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::remote::RemoteSpec;
 use crate::remote::install::{self, NodeStatus, Pin};
 use crate::remote::transport::Transport;
-use crate::remote::{Placement, client, doctor, resolve_placement};
+use crate::remote::{Placement, client, credentials, doctor, resolve_placement};
 
 #[derive(Debug, Args)]
 pub struct RemoteArgs {
@@ -28,6 +28,23 @@ pub enum RemoteCommand {
     Doctor {
         /// Remote name from `remotes:` in the global config
         name: String,
+    },
+    /// Log an agent in on a remote, where its remote agents find the login
+    Login {
+        /// Remote name from `remotes:` in the global config
+        name: String,
+        /// claude, codex, gemini, opencode, pi or omp
+        agent: String,
+        /// Copy this machine's credential files for the agent instead
+        #[arg(long, conflicts_with_all = ["setup_token", "args"])]
+        import: bool,
+        /// Claude: run `claude setup-token` and keep the token it prints
+        /// for Claude agents on the remote
+        #[arg(long)]
+        setup_token: bool,
+        /// Extra arguments for the agent's login command
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Relay one pane of a remote execution into this terminal
     #[command(hide = true)]
@@ -57,6 +74,23 @@ pub fn run(args: RemoteArgs) -> Result<()> {
             let spec = RemoteSpec::resolve(&config, &name)?;
             if !doctor::run(&spec, &config)? {
                 bail!("remote {name} is not ready");
+            }
+            Ok(())
+        }
+        Some(RemoteCommand::Login {
+            name,
+            agent,
+            import,
+            setup_token,
+            args,
+        }) => {
+            let spec = RemoteSpec::resolve(&config, &name)?;
+            if import {
+                return credentials::import(&spec, &config, &agent);
+            }
+            let status = credentials::login(&spec, &config, &agent, setup_token, &args)?;
+            if status != 0 {
+                std::process::exit(status);
             }
             Ok(())
         }

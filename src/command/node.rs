@@ -46,12 +46,56 @@ pub enum NodeVerb {
     },
     /// Attach this terminal to a pane session of an execution
     Attach { ex_id: String, pane: usize },
+    /// Run an agent's login on this terminal, where executions find it
+    Login {
+        agent: String,
+        /// Container image to log in from; without it, the login runs on the
+        /// host (isolation: none)
+        #[arg(long)]
+        image: Option<String>,
+        /// Then read the token `claude setup-token` printed
+        #[arg(long)]
+        setup_token: bool,
+        /// Login command and arguments
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Report which agents have credentials on the node
+    Credentials {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Write an agent's credential files into the node user's directories
+    PutCredentials {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
-    if let NodeVerb::Attach { ex_id, pane } = &args.verb {
-        let status = node::attach::attach(&NodeRoot::from_env()?, ex_id, *pane)?;
-        std::process::exit(status);
+    match &args.verb {
+        NodeVerb::Attach { ex_id, pane } => {
+            let status = node::attach::attach(&NodeRoot::from_env()?, ex_id, *pane)?;
+            std::process::exit(status);
+        }
+        NodeVerb::Login {
+            agent,
+            image,
+            setup_token,
+            command,
+        } => {
+            let status = node::credentials::login(
+                &NodeRoot::from_env()?,
+                agent,
+                image.as_deref(),
+                *setup_token,
+                command,
+            )?;
+            std::process::exit(status);
+        }
+        _ => {}
     }
     let response = read_request().and_then(|request| match args.verb {
         NodeVerb::Hello { .. } => Ok(serde_json::to_value(Hello::local())?),
@@ -64,7 +108,13 @@ pub fn run(args: NodeArgs) -> Result<()> {
         NodeVerb::RemoveWorkspace { .. } => serve(request, |root, request| {
             node::remove::remove(&root, request)
         }),
-        NodeVerb::Attach { .. } => unreachable!("handled above"),
+        NodeVerb::Credentials { .. } => serve(request, |root, request| {
+            node::credentials::check(&root, request)
+        }),
+        NodeVerb::PutCredentials { .. } => serve(request, |root, request| {
+            node::credentials::put(&root, request)
+        }),
+        NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
     });
     match response {
         Ok(value) => {

@@ -23,6 +23,7 @@ pub use container::dockerfile_for_agent;
 pub use container::ensure_image_ready;
 pub(crate) use container::ensure_sandbox_config_dirs;
 pub use container::pull_image;
+pub(crate) use container::push_agent_home;
 pub use container::stop_containers_for_handle;
 pub(crate) use container::validate_git_metadata_boundary;
 pub use container::wrap_for_container;
