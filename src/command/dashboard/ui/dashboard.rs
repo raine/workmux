@@ -370,6 +370,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Track position within each window group for pane numbering
     let mut window_positions: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     // Pre-compute row data to calculate max widths
     let mut row_data: Vec<_> = app
@@ -415,14 +419,20 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 25usize.saturating_sub(pane_suffix.chars().count()),
             );
             let worktree_suffix = pane_suffix;
-            let title = agent
-                .pane_title
+            let connectivity = agent
+                .remote
                 .as_ref()
-                .map(|t| {
-                    let t = strip_oc_title_prefix(t);
-                    t.strip_prefix("... ").unwrap_or(t).to_string()
-                })
-                .unwrap_or_default();
+                .and_then(|remote| crate::remote::agents::connectivity(remote, now));
+            let title = connectivity.unwrap_or_else(|| {
+                agent
+                    .pane_title
+                    .as_ref()
+                    .map(|t| {
+                        let t = strip_oc_title_prefix(t);
+                        t.strip_prefix("... ").unwrap_or(t).to_string()
+                    })
+                    .unwrap_or_default()
+            });
             let status_spans = app.get_status_display(agent);
             let elapsed = app.get_elapsed(agent);
             let duration = elapsed
@@ -430,9 +440,14 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 .unwrap_or_else(|| "-".to_string());
             let duration_line = format::elapsed_time_line(duration, elapsed, &app.palette);
 
-            // Get git status for this worktree (may be None if not yet fetched)
-            let git_status = app.git_statuses.get(&agent.path);
-            let git_spans = format_git_status(git_status, app.spinner_frame, &app.palette);
+            // Get git status for this worktree (may be None if not yet fetched).
+            // Remote worktrees live on the node, so they have none.
+            let git_spans = if agent.remote.is_some() {
+                Vec::new()
+            } else {
+                let git_status = app.git_statuses.get(&agent.path);
+                format_git_status(git_status, app.spinner_frame, &app.palette)
+            };
 
             let pr = app.get_pr_for_agent(agent);
             let pr_title = pr.map(|pr| pr.title.clone()).unwrap_or_default();
@@ -578,7 +593,19 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.palette.success),
         )
     } else if let Some(agent) = selected_agent {
-        let worktree_name = app.extract_worktree_name(agent).0;
+        let mut worktree_name = app.extract_worktree_name(agent).0;
+        if let Some(remote) = &agent.remote {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if !remote.host.is_empty() {
+                worktree_name = format!("{worktree_name} · {}", remote.host);
+            }
+            if let Some(connectivity) = crate::remote::agents::connectivity(remote, now) {
+                worktree_name = format!("{worktree_name} · {connectivity}");
+            }
+        }
         (
             format!(" Preview: {} ", worktree_name),
             Style::default().fg(app.palette.header),

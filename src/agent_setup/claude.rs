@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{StatusCheck, UpdatePreview};
 use crate::agent_setup::hooks;
@@ -46,10 +46,15 @@ pub fn detect() -> Option<&'static str> {
 /// 1. Plugin: `enabledPlugins` has an enabled key starting with `workmux-status@`
 /// 2. Manual hooks: `hooks` contains the complete workmux integration
 pub fn check() -> Result<StatusCheck> {
-    let Some(path) = settings_path() else {
+    let Some(dir) = claude_dir() else {
         return Ok(StatusCheck::NotInstalled);
     };
+    check_dir(&dir)
+}
 
+/// [`check`] for the Claude config directory `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    let path = dir.join("settings.json");
     if !path.exists() {
         return Ok(StatusCheck::NotInstalled);
     }
@@ -142,9 +147,13 @@ pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
 /// Merges hook groups into existing hooks without clobbering or creating
 /// duplicates. Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path =
-        settings_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir = claude_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
+/// [`install`] into the Claude config directory `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = dir.join("settings.json");
     json_config::json_hook_install_with(
         &path,
         &load_hooks_from_plugin()?,

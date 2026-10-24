@@ -36,6 +36,8 @@ pub enum AppEvent {
     SweepProgressUpdate(usize, usize, String),
     /// Sweep operation completed
     SweepComplete(Result<SweepOutcome, String>),
+    /// Capture of a remote agent's pane fetched from its node, by row pane id
+    RemotePreview(String, Result<String, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

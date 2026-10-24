@@ -1,10 +1,19 @@
 //! Preview pane management for the dashboard.
 
+use std::time::Duration;
+
 use super::super::settings::save_preview_size;
 use super::App;
+use super::types::AppEvent;
 
 /// Number of lines to capture from the agent's terminal for preview (scrollable history)
 pub const PREVIEW_LINES: u16 = 200;
+
+/// Remote previews are fetched at most this often.
+const REMOTE_PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+/// A remote preview fetch that has not answered by then no longer holds
+/// back the next one.
+const REMOTE_PREVIEW_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl App {
     /// Update the preview for the currently selected agent.
@@ -24,7 +33,7 @@ impl App {
             self.preview_pane_id = current_pane_id.clone();
             self.preview = current_pane_id
                 .as_ref()
-                .and_then(|pane_id| self.mux.capture_pane(pane_id, PREVIEW_LINES));
+                .and_then(|pane_id| self.capture_preview(pane_id));
             // Reset scroll position when selection changes
             self.preview_scroll = None;
         }
@@ -37,8 +46,54 @@ impl App {
         }
         self.preview = self
             .preview_pane_id
-            .as_ref()
-            .and_then(|pane_id| self.mux.capture_pane(pane_id, PREVIEW_LINES));
+            .clone()
+            .and_then(|pane_id| self.capture_preview(&pane_id));
+    }
+
+    /// The pane's output: captured locally, or for a remote agent no local
+    /// pane relays, the last capture its node returned while a new one is
+    /// fetched.
+    fn capture_preview(&mut self, pane_id: &str) -> Option<String> {
+        let detached = self
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id && crate::remote::agents::is_detached(agent))
+            .and_then(|agent| agent.remote.clone());
+        let Some(remote) = detached else {
+            return self.mux.capture_pane(pane_id, PREVIEW_LINES);
+        };
+        let busy = self.remote_preview_fetch.is_some_and(|(started, running)| {
+            started.elapsed()
+                < if running {
+                    REMOTE_PREVIEW_TIMEOUT
+                } else {
+                    REMOTE_PREVIEW_INTERVAL
+                }
+        });
+        let placeholder = format!("(fetching from {})", remote.at.remote);
+        if !busy {
+            self.remote_preview_fetch = Some((std::time::Instant::now(), true));
+            let tx = self.event_tx.clone();
+            let config = self.config.clone();
+            let pane_id = pane_id.to_string();
+            std::thread::spawn(move || {
+                let capture = crate::remote::agents::capture_from(
+                    &config,
+                    &remote.at.remote,
+                    &remote.at.ws_id,
+                    Some(remote.at.pane),
+                    PREVIEW_LINES,
+                )
+                .map_err(|err| format!("{err:#}"));
+                let _ = tx.send(AppEvent::RemotePreview(pane_id, capture));
+            });
+        }
+        Some(
+            self.remote_previews
+                .get(pane_id)
+                .cloned()
+                .unwrap_or(placeholder),
+        )
     }
 
     pub fn scroll_preview_lines(&mut self, delta: isize) {

@@ -137,6 +137,17 @@ impl Transport {
         let Kind::Ssh { name, host, socket } = &self.kind else {
             return Ok(());
         };
+        // Processes reconnecting at once must not replace each other's
+        // fresh master.
+        let lock_path = socket.with_extension("lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open {}", lock_path.display()))?;
+        lock.lock()
+            .context("Failed to lock the ssh control socket")?;
         if socket.symlink_metadata().is_ok() {
             let wedged = match run_bounded(
                 self.control(socket, host, "check"),
@@ -209,6 +220,24 @@ impl Transport {
         self.run_with(script, input, None, Stderr::Tee)
     }
 
+    /// Start `script` with `input` on stdin and stdout and stderr piped, for
+    /// a verb that streams until the caller kills it.
+    pub fn spawn(&self, script: &str, input: Vec<u8>) -> Result<Child> {
+        let mut cmd = self.command(&remote_command(script));
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("Failed to run {}", cmd.get_program().to_string_lossy()))?;
+        if let Some(mut pipe) = child.stdin.take() {
+            thread::spawn(move || {
+                let _ = pipe.write_all(&input);
+            });
+        }
+        Ok(child)
+    }
+
     /// Run `script` with this process's stdin, stdout and stderr, returning
     /// its exit status (a helper that git drives over stdio).
     pub fn exec_inherit(&self, script: &str) -> Result<i32> {
@@ -240,8 +269,9 @@ impl Transport {
         }
     }
 
-    /// Classify a failed [`Transport::terminal_command`] from its stderr;
-    /// `None` when the exit was not an ssh failure.
+    /// Classify a failed [`Transport::terminal_command`] or
+    /// [`Transport::spawn`] from its stderr; `None` when the exit was not an
+    /// ssh failure.
     pub fn terminal_failure(&self, status: Option<i32>, stderr: &[u8]) -> Option<SshFailure> {
         let Kind::Ssh { name, host, .. } = &self.kind else {
             return None;

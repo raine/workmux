@@ -60,13 +60,75 @@ impl Node {
                 protocol::mismatch_message(&hello, &pin.path(spec)),
                 pin.mismatch_hint(spec)
             ),
-            NodeStatus::Missing | NodeStatus::Broken(_) => install::setup(spec)?,
+            NodeStatus::Missing | NodeStatus::Broken(_) => {
+                install::setup(spec)?;
+                let config = crate::config::Config::load(None).unwrap_or_default();
+                if let Err(err) = super::hooks::setup(spec, &config) {
+                    eprintln!("warning: {err:#}");
+                }
+            }
         }
         Ok(Self {
             spec: spec.clone(),
             transport,
             pin,
         })
+    }
+
+    /// Connect to read from the node without installing anything: the
+    /// laptop's pin when it is installed and serves `verb`, else the newest
+    /// pin of a recorded execution on the remote that does, since an
+    /// execution keeps the binary that started it.
+    pub fn connect_reader(spec: &RemoteSpec, verb: &str) -> Result<Self> {
+        let transport = Transport::open(spec)?;
+        transport.connect()?;
+        let mut candidates = vec![Pin::for_spec(spec)?.name];
+        let mut records: Vec<_> = super::cache::all()
+            .into_iter()
+            .filter(|record| record.remote == spec.name)
+            .collect();
+        records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
+        for record in records {
+            if let Some(execution) = record.execution
+                && !candidates.contains(&execution.node_bin)
+            {
+                candidates.push(execution.node_bin);
+            }
+        }
+        for name in candidates {
+            let pin = Pin::installed(name);
+            if let NodeStatus::Ready(hello) = install::node_status(&transport, spec, &pin)?
+                && hello.capabilities.iter().any(|c| c == verb)
+            {
+                return Ok(Self {
+                    spec: spec.clone(),
+                    transport,
+                    pin,
+                });
+            }
+        }
+        bail!(
+            "no workmux on '{}' supports {verb}; run `workmux remote setup {}`",
+            spec.name,
+            spec.name
+        )
+    }
+
+    /// Script that runs `workmux node <verb> --json` with the pinned binary.
+    pub fn verb_script(&self, verb: &str) -> String {
+        let missing = MISSING_STATUS.to_string();
+        self.spec.script(
+            &[
+                ("pin", &self.pin.name),
+                ("verb", verb),
+                ("missing", &missing),
+            ],
+            "bin=\"$root/bin/$pin\"\n\
+             [ -x \"$bin\" ] || exit \"$missing\"\n\
+             WORKMUX_NODE_ROOT=$root XDG_STATE_HOME=$root/state\n\
+             export WORKMUX_NODE_ROOT XDG_STATE_HOME\n\
+             exec \"$bin\" node \"$verb\" --json\n",
+        )
     }
 
     /// Run `workmux node <verb> --json` with `request` on stdin. With
@@ -78,19 +140,7 @@ impl Node {
         request: &Req,
         streaming: bool,
     ) -> Result<Resp> {
-        let missing = MISSING_STATUS.to_string();
-        let script = self.spec.script(
-            &[
-                ("pin", &self.pin.name),
-                ("verb", verb),
-                ("missing", &missing),
-            ],
-            "bin=\"$root/bin/$pin\"\n\
-             [ -x \"$bin\" ] || exit \"$missing\"\n\
-             WORKMUX_NODE_ROOT=$root XDG_STATE_HOME=$root/state\n\
-             export WORKMUX_NODE_ROOT XDG_STATE_HOME\n\
-             exec \"$bin\" node \"$verb\" --json\n",
-        );
+        let script = self.verb_script(verb);
         let input = Input::Bytes(serde_json::to_vec(request)?);
         let output = if streaming {
             self.transport.run_streaming(&script, input)?

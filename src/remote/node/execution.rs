@@ -36,7 +36,9 @@ set -g set-clipboard on
 set -g allow-passthrough on
 set -g focus-events on
 set -g set-titles on
-set -g set-titles-string '#{pane_title}'
+# A kitty graphics query an agent sends to probe the terminal arrives as an
+# APC sequence, which tmux takes as the pane title; it is not relayed.
+set -g set-titles-string '#{?#{m/r:^G[a-zA-Z]=[^;]*;,#{pane_title}},,#{pane_title}}'
 set -g window-size latest
 set -g history-limit 50000
 set -s escape-time 0
@@ -174,6 +176,12 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         shell_quote(&root.path.to_string_lossy()),
         request.ws_id
     );
+    // Without a container, agent hooks run the node's `workmux`, which must
+    // report to the node store.
+    let status_bin = match workspace.isolation {
+        RemoteIsolation::None => Some(write_status_wrapper(root, &pin)?),
+        RemoteIsolation::Container => None,
+    };
     let prompt = workspace
         .prompt_path
         .clone()
@@ -226,6 +234,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                     lima_vm_name: None,
                     resume_mode: Default::default(),
                     sandbox_supervisor: Some(&supervisor),
+                    agent_path_prefix: status_bin.as_deref(),
                 },
                 &config,
                 workspace.agent.as_deref(),
@@ -247,6 +256,26 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
     };
     root.save(&workspace)?;
     Ok(response)
+}
+
+/// Write `run/bin/workmux`, which runs `pin` against the node store, and
+/// return its directory.
+fn write_status_wrapper(root: &NodeRoot, pin: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.path.join("run").join("bin");
+    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let script = format!(
+        "#!/bin/sh\n# Written by workmux.\nexport XDG_STATE_HOME={}\nexec {} \"$@\"\n",
+        shell_quote(&root.path.join("state").to_string_lossy()),
+        shell_quote(&pin.to_string_lossy())
+    );
+    let path = dir.join("workmux");
+    if fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
+        crate::util::write_atomic(&path, script.as_bytes())?;
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("Failed to make {} executable", path.display()))?;
+    Ok(dir)
 }
 
 /// Create a detached session and return its pane. The variables that steer

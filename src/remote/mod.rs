@@ -5,14 +5,17 @@
 //! detection, installation, doctor checks); everything else goes through the
 //! pinned node binary's `workmux node <verb> --json` entry point.
 
+pub mod agents;
 pub mod attach;
 pub mod cache;
 pub mod client;
 pub mod credentials;
 pub mod doctor;
+pub mod hooks;
 pub mod install;
 pub mod lifecycle;
 pub mod node;
+pub mod observe;
 pub mod portable;
 pub mod protocol;
 pub mod transport;

@@ -6,7 +6,7 @@
 //! Installs extension by writing `workmux-status.ts` to the extensions directory.
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{StatusCheck, UpdatePreview};
 use crate::agent_setup::extension_file;
@@ -22,7 +22,11 @@ fn pi_agent_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn extension_path() -> Option<PathBuf> {
-    pi_agent_dir().map(|d| d.join("extensions/workmux-status.ts"))
+    pi_agent_dir().map(|d| extension_path_in(&d))
+}
+
+fn extension_path_in(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("extensions/workmux-status.ts")
 }
 
 /// Detect if pi is present via filesystem.
@@ -42,6 +46,11 @@ pub fn check() -> Result<StatusCheck> {
     extension_file::check_installed(extension_path().as_deref(), EXTENSION_SOURCE)
 }
 
+/// [`check`] for the pi agent directory `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    extension_file::check_installed(Some(&extension_path_in(dir)), EXTENSION_SOURCE)
+}
+
 pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
     let Some(path) = extension_path().filter(|path| path.exists()) else {
         return Ok(None);
@@ -56,9 +65,14 @@ pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
 /// Install workmux extension for pi.
 /// Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path =
-        extension_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir =
+        pi_agent_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
+/// [`install`] into the pi agent directory `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = extension_path_in(dir);
     extension_file::install_extension_file(
         &path,
         EXTENSION_SOURCE,

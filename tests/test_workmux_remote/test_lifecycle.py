@@ -6,11 +6,9 @@ driven by the same scripts SSH would run on a remote."""
 
 import json
 import os
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import List
 
 import pytest
 import yaml
@@ -22,77 +20,11 @@ from ..conftest import (
     get_window_name,
     get_worktree_path,
     poll_until,
-    run_workmux_command,
     wait_for_pane_output,
 )
+from .conftest import LOOPBACK, Node, git, local_records, wm
 
 pytestmark = pytest.mark.tmux_only
-
-LOOPBACK = {"WORKMUX_REMOTE_LOOPBACK": "1"}
-
-
-class Node:
-    """The loopback node: its root, records and tmux server."""
-
-    def __init__(self, root: Path):
-        self.root = root
-
-    def tmux(self, *args: str) -> subprocess.CompletedProcess[str]:
-        socket = self.root / "run" / "tmux.sock"
-        return subprocess.run(
-            ["tmux", "-S", str(socket), *args], capture_output=True, text=True
-        )
-
-    def sessions(self) -> List[str]:
-        result = self.tmux("list-sessions", "-F", "#{session_name}")
-        return sorted(result.stdout.split()) if result.returncode == 0 else []
-
-    def workspaces(self) -> List[dict]:
-        directory = self.root / "state" / "workspaces"
-        if not directory.is_dir():
-            return []
-        return [
-            json.loads(path.read_text())
-            for path in sorted(directory.glob("w*.json"))
-            if not path.name.endswith(".config.json")
-        ]
-
-
-@pytest.fixture
-def node(mux_server: TmuxEnvironment, workmux_exe_path: Path) -> Iterator[Node]:
-    # A short root keeps the node's tmux socket under the root.
-    root = Path(tempfile.mkdtemp(prefix="wmn-", dir="/tmp")).resolve()
-    config = {
-        "nerdfont": False,
-        "remotes": {
-            "lo": {
-                "host": "localhost",
-                "path": str(root),
-                "binary": str(workmux_exe_path),
-                "isolation": "none",
-            }
-        },
-    }
-    config_dir = mux_server.home_path / ".config" / "workmux"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.yaml").write_text(yaml.dump(config))
-    node = Node(root)
-    yield node
-    node.tmux("kill-server")
-    shutil.rmtree(root, ignore_errors=True)
-
-
-def git(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-
-def local_records(env: TmuxEnvironment) -> List[dict]:
-    directory = env.home_path / ".local/state/workmux/remote/lo/workspaces"
-    if not directory.is_dir():
-        return []
-    return [json.loads(p.read_text()) for p in sorted(directory.glob("*.json"))]
 
 
 def setup_project(repo: Path) -> str:
@@ -114,25 +46,6 @@ def setup_project(repo: Path) -> str:
     git(repo, "commit", "-m", "configure remote panes")
     (repo / ".env.local").write_text("SECRET=fake\n")
     return git(repo, "rev-parse", "HEAD")
-
-
-def wm(
-    env: TmuxEnvironment,
-    exe: Path,
-    repo: Path,
-    command: str,
-    extra_env: Optional[Dict[str, str]] = None,
-    **kwargs,
-):
-    """Run workmux from the runner pane; commands that focus a remote window
-    would otherwise type the next command into the remote shell."""
-    assert env.runner_pane_id is not None
-    env.tmux(["select-window", "-t", env.runner_pane_id])
-    kwargs.setdefault("timeout", 60)
-    pre_run_env = {**LOOPBACK, **(extra_env or {})}
-    return run_workmux_command(
-        env, exe, repo, command, pre_run_env=pre_run_env, **kwargs
-    )
 
 
 def pane_commands(env: TmuxEnvironment, window: str) -> List[str]:
@@ -202,7 +115,7 @@ def test_remote_lifecycle(
     assert len(pane_commands(mux_server, window)) == 2
 
     # Commands that cannot act on remote workspaces yet say so.
-    for command in ["merge feat", "path feat", "send feat hi"]:
+    for command in ["merge feat", "path feat"]:
         refused = wm(mux_server, workmux_exe_path, repo, command, expect_fail=True)
         assert "is a remote workspace on 'lo'" in refused.stderr, command
 

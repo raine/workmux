@@ -814,6 +814,14 @@ pub trait Multiplexer: Send + Sync {
                     resolved.render_command()
                 };
 
+                let final_command = match options.agent_path_prefix {
+                    Some(dir) if is_agent_pane => format!(
+                        "env PATH={}:\"$PATH\" {final_command}",
+                        agent::shell_quote(&dir.to_string_lossy())
+                    ),
+                    _ => final_command,
+                };
+
                 let final_command = if is_agent_pane && self.name() == "zellij" {
                     command_with_status_target(
                         &final_command,

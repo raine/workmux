@@ -1224,31 +1224,21 @@ pub fn run() -> Result<()> {
             command::path::run(&name)
         }
         Commands::Send { name, text, file } => {
-            reject_remote("send", [&name])?;
             command::send::run(&name, text.as_deref(), file.as_deref())
         }
-        Commands::Capture { name, lines } => {
-            reject_remote("capture", [&name])?;
-            command::capture::run(&name, lines)
-        }
+        Commands::Capture { name, lines } => command::capture::run(&name, lines),
         Commands::Status {
             worktrees,
             json,
             all,
             git,
-        } => {
-            reject_remote("status", worktrees.iter())?;
-            command::status::run(&worktrees, json, all, git)
-        }
+        } => command::status::run(&worktrees, json, all, git),
         Commands::Wait {
             worktrees,
             status,
             timeout,
             any,
-        } => {
-            reject_remote("wait", worktrees.iter())?;
-            command::wait::run(&worktrees, &status, timeout, any)
-        }
+        } => command::wait::run(&worktrees, &status, timeout, any),
         Commands::Run {
             name,
             command,

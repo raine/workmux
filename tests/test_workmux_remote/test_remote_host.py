@@ -96,7 +96,8 @@ def test_doctor_is_green_after_setup(node: Node):
     result = node.cli.run("remote", "doctor", "e2e", timeout=600)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    for check in ["ssh", "arch", "node", "git", "tmux", "linger", "container", "image"]:
+    checks = ["ssh", "arch", "node", "git", "tmux", "linger", "container", "hooks"]
+    for check in [*checks, "image"]:
         assert f"✓ {check}" in result.stdout
 
 

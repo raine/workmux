@@ -267,3 +267,58 @@ def test_setup_unknown_remote(loopback_cli: RemoteCli, workmux_exe_path: Path):
     result = loopback_cli.run("remote", "setup", "nope")
     assert result.returncode == 1
     assert "Unknown remote 'nope' (configured: lo)" in result.stderr
+
+
+def test_setup_installs_status_hooks_where_containers_mount_them(
+    loopback_cli: RemoteCli, workmux_exe_path: Path
+):
+    configure_loopback(loopback_cli, workmux_exe_path)
+    home = loopback_cli.home
+
+    result = loopback_cli.run("remote", "setup", "lo")
+
+    assert result.returncode == 0, result.stderr
+    assert "installed status hooks for Claude Code, Codex, Gemini CLI" in result.stdout
+    for settings in [".claude/settings.json", ".gemini/settings.json"]:
+        hooks = json.loads((home / settings).read_text())["hooks"]
+        assert "workmux set-window-status" in json.dumps(hooks), settings
+    assert "workmux set-window-status" in (home / ".codex/hooks.json").read_text()
+    assert "hooks = true" in (home / ".codex/config.toml").read_text()
+    for agent_dir in [".pi/agent", ".omp/agent"]:
+        assert (home / agent_dir / "extensions/workmux-status.ts").is_file()
+    claude = (home / ".claude/settings.json").stat()
+
+    again = loopback_cli.run("remote", "setup", "lo")
+
+    assert again.returncode == 0, again.stderr
+    assert "status hooks are already installed for Claude Code" in again.stdout
+    assert "installed status hooks" not in again.stdout
+    assert (home / ".claude/settings.json").stat().st_mtime_ns == claude.st_mtime_ns
+
+
+def test_doctor_reports_status_hooks(loopback_cli: RemoteCli, workmux_exe_path: Path):
+    loopback_cli.write_config(
+        {
+            "lo": {
+                "host": "localhost",
+                "path": "~/node",
+                "binary": str(workmux_exe_path),
+                "isolation": "none",
+            }
+        }
+    )
+    settings = loopback_cli.home / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    assert loopback_cli.run("remote", "setup", "lo").returncode == 0
+    assert "workmux set-window-status" in settings.read_text()
+
+    ready = loopback_cli.run("remote", "doctor", "lo")
+    settings.write_text('{"theme": "dark"}\n')
+    missing = loopback_cli.run("remote", "doctor", "lo")
+
+    assert "✓ hooks      installed for Claude Code" in ready.stdout, ready.stdout
+    assert "! hooks      missing for Claude Code" in missing.stdout, missing.stdout
+    assert "fix: workmux remote setup lo" in missing.stdout
+    assert loopback_cli.run("remote", "setup", "lo").returncode == 0
+    assert json.loads(settings.read_text())["theme"] == "dark"
+    assert "✓ hooks" in loopback_cli.run("remote", "doctor", "lo").stdout
