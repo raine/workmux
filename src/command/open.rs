@@ -93,7 +93,6 @@ pub fn run(
             (force_files, "--force-files"),
             (target_name.is_some(), "--target-name"),
             (parent_session.is_some(), "--parent-session"),
-            (mode_override == Some(MuxMode::Session), "Session mode"),
         ];
         if let Some((_, option)) = unsupported.iter().find(|(set, _)| *set) {
             bail!(
@@ -109,6 +108,16 @@ pub fn run(
     let context = WorkflowContext::new(config, mux, config_location)?;
 
     let preliminary_mode = context.config.mode();
+    if let Some(record) = remote_records.iter().flatten().next()
+        && mode_override.unwrap_or(preliminary_mode) == MuxMode::Session
+    {
+        bail!(
+            "Session mode cannot be used with remote workspace '{}' on '{}'; remote agents \
+             open in a window: pass --mode window",
+            record.handle,
+            record.remote
+        );
+    }
 
     if new_window && mode_override == Some(MuxMode::Session) {
         bail!("--new is not supported in session mode. Each worktree can only have one session.");
