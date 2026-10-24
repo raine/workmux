@@ -174,6 +174,16 @@ pub fn create(
             branch: record.branch.clone(),
             base_sha: record.base_sha.clone(),
         };
+        let plan = if request.options.run_file_ops {
+            plan_files(context)?
+        } else {
+            FilePlan::default()
+        };
+        let seed_dir = request
+            .location
+            .map(|location| location.rel_dir.as_path())
+            .unwrap_or_else(|| Path::new(""));
+        let seed_paths = plan.seed_paths(&context.config_source_dir, seed_dir)?;
         let prepared: ProvisionResponse = node
             .call(
                 protocol::PROVISION_WORKSPACE,
@@ -181,6 +191,7 @@ pub fn create(
                     identity: identity.clone(),
                     isolation: spec.isolation,
                     payload: None,
+                    seed_paths,
                 },
                 false,
             )
@@ -206,7 +217,13 @@ pub fn create(
             eprintln!("workmux: not applied on '{}': {line}", spec.name);
         }
         let files = if request.options.run_file_ops {
-            collect_files(context, &spec.name)?
+            collect_files(
+                &context.config_source_dir,
+                &plan,
+                &spec.name,
+                seed_dir,
+                &prepared.cached_seeds,
+            )?
         } else {
             Files::default()
         };
@@ -220,6 +237,7 @@ pub fn create(
             prompt_file_only: request.prompt_file_only,
             copies: files.copies,
             seeds: files.seeds,
+            cached_seeds: files.cached_seeds,
             symlink_patterns: files.patterns,
             ignored: files.ignored,
             run_file_ops: request.options.run_file_ops,
@@ -228,17 +246,33 @@ pub fn create(
             git_user_email: git_config(&project_root, "user.email"),
             secrets: portable.secrets.clone(),
         };
-        let provisioned: ProvisionResponse = node
-            .call(
-                protocol::PROVISION_WORKSPACE,
-                &ProvisionRequest {
-                    identity,
-                    isolation: spec.isolation,
-                    payload: Some(payload),
-                },
-                true,
-            )
-            .map_err(|err| explain(spec, err))?;
+        let mut provision_request = ProvisionRequest {
+            identity,
+            isolation: spec.isolation,
+            payload: Some(payload),
+            seed_paths: Vec::new(),
+        };
+        let result = node.call::<_, ProvisionResponse>(
+            protocol::PROVISION_WORKSPACE,
+            &provision_request,
+            true,
+        );
+        let provisioned = match result {
+            Err(err) if error_code(&err) == Some(code::MISSING_SEED) => {
+                // The cache can be removed between prepare and provision. Retry
+                // once with full seeds; completed provisioning steps are idempotent.
+                let files =
+                    collect_files(&context.config_source_dir, &plan, &spec.name, seed_dir, &[])?;
+                let payload = provision_request.payload.as_mut().unwrap();
+                payload.copies = files.copies;
+                payload.seeds = files.seeds;
+                payload.cached_seeds.clear();
+                payload.ignored = files.ignored;
+                node.call(protocol::PROVISION_WORKSPACE, &provision_request, true)
+                    .map_err(|err| explain(spec, err))?
+            }
+            other => other.map_err(|err| explain(spec, err))?,
+        };
         Ok((portable, provisioned))
     })()
     .with_context(|| {
@@ -398,21 +432,41 @@ pub(super) fn explain(spec: &RemoteSpec, err: anyhow::Error) -> anyhow::Error {
 struct Files {
     copies: Vec<FileEntry>,
     seeds: Vec<FileEntry>,
+    cached_seeds: Vec<String>,
     patterns: Vec<String>,
     ignored: Vec<String>,
 }
 
-/// `files.copy` results and `files.symlink` sources from the config
-/// directory, within [`TRANSFER_LIMIT`]. A source that does not fit is left
-/// out whole and reported.
-fn collect_files(context: &WorkflowContext, remote: &str) -> Result<Files> {
-    use crate::workflow::file_ops::{FileOperationKind, resolve_file_operations};
+#[derive(Default)]
+struct FilePlan {
+    sources: Vec<(PathBuf, crate::workflow::file_ops::FileOperationKind)>,
+    patterns: Vec<String>,
+}
 
+impl FilePlan {
+    fn seed_paths(&self, source: &Path, directory: &Path) -> Result<Vec<String>> {
+        use crate::workflow::file_ops::FileOperationKind;
+        self.sources
+            .iter()
+            .filter(|(_, kind)| *kind == FileOperationKind::Symlink)
+            .map(|(path, _)| {
+                Ok(directory
+                    .join(path.strip_prefix(source)?)
+                    .to_string_lossy()
+                    .into_owned())
+            })
+            .collect()
+    }
+}
+
+/// Resolve names without traversing or reading the source trees.
+fn plan_files(context: &WorkflowContext) -> Result<FilePlan> {
+    use crate::workflow::file_ops::{FileOperationKind, resolve_file_operations};
     let source = &context.config_source_dir;
     let files_config = &context.config.files;
-    let mut files = Files {
+    let mut plan = FilePlan {
         patterns: files_config.symlink.clone().unwrap_or_default(),
-        ..Files::default()
+        ..FilePlan::default()
     };
     let mut sources: Vec<(PathBuf, FileOperationKind)> =
         resolve_file_operations(source, Path::new("/"), files_config)?
@@ -425,13 +479,40 @@ fn collect_files(context: &WorkflowContext, remote: &str) -> Result<Files> {
         && !sources.iter().any(|(path, _)| path == &claude_local)
     {
         sources.push((claude_local, FileOperationKind::Symlink));
-        files.patterns.push("CLAUDE.local.md".to_string());
+        plan.patterns.push("CLAUDE.local.md".to_string());
     }
 
+    plan.sources = sources;
+    Ok(plan)
+}
+
+/// Collect only missing seeds, leaving the budget for bytes actually sent.
+fn collect_files(
+    source: &Path,
+    plan: &FilePlan,
+    remote: &str,
+    seed_dir: &Path,
+    cached: &[String],
+) -> Result<Files> {
+    use crate::workflow::file_ops::FileOperationKind;
+    let mut files = Files {
+        patterns: plan.patterns.clone(),
+        ..Files::default()
+    };
     let mut budget = TRANSFER_LIMIT;
-    for (path, kind) in sources {
+    for (path, kind) in &plan.sources {
         let relative = path.strip_prefix(source)?.to_path_buf();
-        let size = tree_size(&path, true)?;
+        let name = relative.to_string_lossy().into_owned();
+        if *kind == FileOperationKind::Symlink
+            && cached.contains(&seed_dir.join(&relative).to_string_lossy().into_owned())
+        {
+            files.cached_seeds.push(name.clone());
+            if crate::git::is_path_ignored(source, &name) {
+                files.ignored.push(name);
+            }
+            continue;
+        }
+        let size = tree_size(path, true)?;
         let setting = match kind {
             FileOperationKind::Copy => "files.copy",
             FileOperationKind::Symlink => "files.symlink",
@@ -451,7 +532,7 @@ fn collect_files(context: &WorkflowContext, remote: &str) -> Result<Files> {
             FileOperationKind::Copy => &mut files.copies,
             FileOperationKind::Symlink => &mut files.seeds,
         };
-        collect_tree(&path, &relative, true, entries)?;
+        collect_tree(path, &relative, true, entries)?;
         let relative = relative.to_string_lossy().into_owned();
         if crate::git::is_path_ignored(source, &relative) {
             files.ignored.push(relative);
@@ -1080,5 +1161,72 @@ fn forget_attachments(record: &WorkspaceRecord) {
         .and_then(|store| store.delete_remote_attachments(&record.remote, &record.ws_id));
     if let Err(err) = result {
         tracing::warn!(handle = %record.handle, "failed to forget attach panes: {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    use crate::workflow::file_ops::FileOperationKind::{Copy, Symlink};
+
+    #[test]
+    fn cached_sources_are_not_read_and_copies_still_transfer() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("copy"), "new").unwrap();
+        // An absent local tree proves cache hits do not stat or walk it.
+        let plan = FilePlan {
+            sources: vec![
+                (dir.path().join("absent"), Symlink),
+                (dir.path().join("copy"), Copy),
+            ],
+            patterns: vec!["absent".into()],
+        };
+        let cached = plan.seed_paths(dir.path(), Path::new("subdir")).unwrap();
+        assert_eq!(cached, ["subdir/absent"]);
+        let files = collect_files(dir.path(), &plan, "test", Path::new("subdir"), &cached).unwrap();
+        assert!(files.seeds.is_empty());
+        assert_eq!(files.cached_seeds, ["absent"]);
+        assert_eq!(files.copies.len(), 1);
+        // A response from an old node, or another config directory, is not a hit.
+        assert!(collect_files(dir.path(), &plan, "test", Path::new(""), &cached).is_err());
+        assert!(collect_files(dir.path(), &plan, "test", Path::new("subdir"), &[]).is_err());
+    }
+
+    #[test]
+    #[ignore = "35 MiB transfer measurement; run explicitly with --nocapture"]
+    fn measure_cold_and_warm_seed_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = vec![0x5a; 64 * 1024];
+        let mut plan = FilePlan::default();
+        for (name, count) in [("history", 80), ("tests/venv", 480)] {
+            let path = dir.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            for index in 0..count {
+                fs::write(path.join(format!("file-{index}")), &block).unwrap();
+            }
+            plan.sources.push((path, Symlink));
+            plan.patterns.push(name.into());
+        }
+        let cached = plan.seed_paths(dir.path(), Path::new("")).unwrap();
+        for (label, cache) in [("cold", &[][..]), ("warm", cached.as_slice())] {
+            let start = std::time::Instant::now();
+            let files = collect_files(dir.path(), &plan, "fixture", Path::new(""), cache).unwrap();
+            #[derive(serde::Serialize)]
+            struct Transfer<'a> {
+                seeds: &'a [FileEntry],
+                cached_seeds: &'a [String],
+            }
+            let payload = serde_json::to_vec(&Transfer {
+                seeds: &files.seeds,
+                cached_seeds: &files.cached_seeds,
+            })
+            .unwrap();
+            eprintln!("{label}: {} bytes, {:?}", payload.len(), start.elapsed());
+            if label == "warm" {
+                assert!(payload.len() < 100);
+            } else {
+                assert!(payload.len() > 46_000_000);
+            }
+        }
     }
 }
