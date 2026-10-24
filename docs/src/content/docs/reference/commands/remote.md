@@ -27,7 +27,7 @@ workmux remote setup <name>
 
 - `<name>` - Remote name from `remotes:` in the global config
 
-Uploads the workmux binary for this workmux version into the remote's node root (the release, downloaded and checksum-verified on the laptop, or the configured `binary`), and installs workmux's status hooks for every supported agent in the remote user's agent directories. Running it again is a no-op when everything is installed. An interrupted install is recovered by the next run.
+Uploads the workmux binary for this workmux version into the remote's node root (the release, downloaded and checksum-verified on the laptop, or the configured `binary`), and installs workmux's status hooks for the supported agents in the remote user's agent directories. OpenCode's hooks are installed once the OpenCode sandbox image is on the remote. Running it again only installs what is missing. An interrupted install is recovered by the next run.
 
 Commands that need the node, such as `add --remote` and `remote login`, install it automatically, so `setup` is mostly useful as a first check, and after you make OpenCode's sandbox image available on the remote (its hooks depend on the OpenCode version in that image).
 
