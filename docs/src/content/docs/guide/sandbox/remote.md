@@ -325,6 +325,8 @@ With `container` isolation, agents run in the same container sandbox as locally,
 
 With `isolation: none`, there is no sandbox: agents run directly as the SSH user with that user's access to the host, and their permission prompts are not disabled. Only use it on a machine you'd let the agent use freely.
 
+The node creates every remote worktree, so it marks them as trusted before an agent starts, and Claude and Codex don't stop on their "trust this folder?" question. It adds `<path>/projects` to Claude's trusted folders, and each project's node repository (`<path>/projects/<id>/repo`, which Codex uses for all of the project's worktrees) to `[projects]` in Codex's `config.toml`. The entry goes into the config the agent reads: the remote user's agent directory, which containers mount, or the directory `CLAUDE_CONFIG_DIR` or `CODEX_HOME` points to for `isolation: none`. A folder you marked untrusted stays untrusted. Trusted folders let the agent load the repository's own agent settings, such as a `.codex/config.toml`.
+
 ## Troubleshooting
 
 **`ssh` fails or asks for a password.** Run `ssh <host>` yourself first. workmux never prompts, so the key must be in your SSH agent or unencrypted, and the host key must already be in `known_hosts`. `remote doctor` names the failing step: authentication, host key, DNS, refused connection or timeout.
@@ -338,6 +340,8 @@ With `isolation: none`, there is no sandbox: agents run directly as the SSH user
 **A login fails because the agent is missing.** With a `sandbox.image` override, logins run in that image, which may not contain the agent. With `isolation: none`, install the agent on the host.
 
 **No status icons for a remote agent.** Run `workmux remote setup <remote>` again to install the status hooks, and check doctor's `hooks` row. OpenCode's hooks need the OpenCode sandbox image on the remote.
+
+**Codex asks to review hooks with `isolation: none`.** Sandboxed Codex runs hooks without review (see [Agent flags](/guide/sandbox/features/#agent-flags)), but on the host Codex asks once for workmux's status hooks. Attach to the agent and trust them; Codex asks again only when the hooks change.
 
 **Protocol mismatch.** The node runs a binary that matches your local workmux: the release of the same version, or the `binary` you configured, identified by its content. After an upgrade, the next remote command installs the new version next to the old one, and running agents keep the binary they started with. A mismatch means the local workmux is not the release it claims to be (for example, built from source), or `binary` was built from different source. Point `binary` at a Linux build of the same source.
 
