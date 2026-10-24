@@ -1520,7 +1520,7 @@ pub struct RemoteConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RemoteIsolation {
-    /// Run agents in a docker or podman container on the remote.
+    /// Run agents in a docker container on the remote.
     #[default]
     Container,
     /// Run agents directly on the remote host.

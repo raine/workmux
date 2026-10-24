@@ -77,6 +77,8 @@ workmux supports two sandboxing backends:
 
 Container is a good default: it's simple to set up and ephemeral, so no state accumulates between sessions. Choose Lima if you want persistent VMs with built-in Nix/Devbox toolchain support.
 
+To run agents on another machine instead, see [remote hosts](/guide/sandbox/remote/): individual agents run in containers on an SSH-reachable Linux host while the rest stay local.
+
 ## Adding tools to the sandbox
 
 Agents often need project tooling (compilers, linters, build tools) available inside the sandbox. There are several ways to provide this depending on your backend:

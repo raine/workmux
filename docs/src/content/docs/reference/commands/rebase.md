@@ -21,6 +21,10 @@ workmux rebase [name]
 4. Runs `git rebase <base>` inside the worktree
 5. Leaves the worktree, window, and branch in place
 
+## Remote workspaces
+
+For a workspace on a [remote host](/guide/sandbox/remote/), workmux sends your local base branch to the remote and runs the rebase there, committing as your local git identity. The agent keeps running. On a conflict, the rebase stops in the remote worktree: open the workspace and run `git rebase --continue` or `git rebase --abort` in its shell pane.
+
 ## Examples
 
 ```bash
