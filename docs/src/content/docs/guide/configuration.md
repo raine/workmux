@@ -71,22 +71,23 @@ Most options have sensible defaults. You only need to configure what you want to
 
 ### Basic options
 
-| Option             | Description                                                                          | Default                     |
-| ------------------ | ------------------------------------------------------------------------------------ | --------------------------- |
-| `main_branch`      | Branch to merge into                                                                 | Auto-detected               |
-| `base_branch`      | Default base ref for new worktrees, or `auto` for the effective main branch          | Current branch              |
-| `worktree_dir`     | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.        | `<project>__worktrees/`     |
-| `nerdfont`         | Enable nerdfont icons (prompted on first run)                                        | Prompted                    |
-| `window_prefix`    | Override tmux window/session prefix. Supports `{project}`.                           | Icon or `wm-`               |
-| `window_placement` | New tmux window placement (`after_current` or `rightmost`)                           | `after_current`             |
-| `agent`            | Default agent for `<agent>` placeholder                                              | `claude`                    |
-| `agents`           | Named agent commands (global-only). See [named agents](/guide/agents/#named-agents). | `{}`                        |
-| `prompt_file_only` | Write prompt files without injecting into agent commands                             | `false`                     |
-| `merge_strategy`   | Default merge strategy (`merge`, `rebase`, `squash`)                                 | `merge`                     |
-| `merge_keep`       | Keep resources after `workmux merge` by default                                      | `false`                     |
-| `theme`            | Dashboard color scheme (see [themes](#themes))                                       | `default` (auto dark/light) |
-| `mode`             | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode/).         | `window`                    |
-| `default_session`  | Session to return to when a workmux session closes (session mode)                    | Previous session            |
+| Option             | Description                                                                            | Default                     |
+| ------------------ | -------------------------------------------------------------------------------------- | --------------------------- |
+| `main_branch`      | Branch to merge into                                                                   | Auto-detected               |
+| `base_branch`      | Default base ref for new worktrees, or `auto` for the effective main branch            | Current branch              |
+| `worktree_dir`     | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.          | `<project>__worktrees/`     |
+| `nerdfont`         | Enable nerdfont icons (prompted on first run)                                          | Prompted                    |
+| `window_prefix`    | Override tmux window/session prefix. Supports `{project}`.                             | Icon or `wm-`               |
+| `window_placement` | New tmux window placement (`after_current` or `rightmost`)                             | `after_current`             |
+| `agent`            | Default agent for `<agent>` placeholder                                                | `claude`                    |
+| `agents`           | Named agent commands (global-only). See [named agents](/guide/agents/#named-agents).   | `{}`                        |
+| `prompt_file_only` | Write prompt files without injecting into agent commands                               | `false`                     |
+| `merge_strategy`   | Default merge strategy (`merge`, `rebase`, `squash`)                                   | `merge`                     |
+| `merge_keep`       | Keep resources after `workmux merge` by default                                        | `false`                     |
+| `theme`            | Dashboard color scheme (see [themes](#themes))                                         | `default` (auto dark/light) |
+| `mode`             | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode/).           | `window`                    |
+| `default_session`  | Session to return to when a workmux session closes (session mode)                      | Previous session            |
+| `placement`        | Where `workmux add` creates agents: `local` or a remote name. See [remotes](#remotes). | `local`                     |
 
 Set `base_branch: auto` to create new branches from the effective main branch,
 regardless of the currently checked-out branch. Workmux uses configured
@@ -94,6 +95,32 @@ regardless of the currently checked-out branch. Workmux uses configured
 local Git state and does not fetch. An explicit `workmux add --base` takes
 precedence. When `base_branch` is omitted, new branches use the checked-out
 branch.
+
+### Remotes
+
+`remotes` defines the SSH hosts that can run agents. See [remote hosts](/guide/sandbox/remote/) for setup and usage.
+
+```yaml
+# ~/.config/workmux/config.yaml
+remotes:
+  devbox:
+    host: devbox
+    path: ~/.workmux-node
+    isolation: container
+
+placement: devbox
+```
+
+| Option                     | Description                                                                                           | Default           |
+| -------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------- |
+| `remotes.<name>.host`      | SSH destination: an alias from `~/.ssh/config` or `user@host`                                         | required          |
+| `remotes.<name>.path`      | Node root on the remote: `~`, a path starting with `~/` (expanded on the remote), or an absolute path | `~/.workmux-node` |
+| `remotes.<name>.isolation` | `container` runs agents in Docker on the remote; `none` runs them on the host without a sandbox       | `container`       |
+| `remotes.<name>.binary`    | Local path to a Linux `workmux` binary to install instead of the matching release                     | none              |
+
+`remotes` is global-only: in a project's `.workmux.yaml` it is ignored with a warning. Unknown keys under a remote are an error.
+
+`placement` sets where `workmux add` creates agents when neither `--remote` nor `--local` is given. It can be set globally or per project; the project value wins. It can only name a remote from the global `remotes`, and it is ignored when no remotes are configured.
 
 ### Themes
 

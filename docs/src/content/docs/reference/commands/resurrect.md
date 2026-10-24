@@ -31,6 +31,10 @@ and state owned by another multiplexer instance or backend are preserved. Each
 instance compacts its own history when workmux observes that instance with a
 reliable boot identity.
 
+## Remote workspaces
+
+Agents on [remote hosts](/guide/sandbox/remote/) kept running while the local tmux was down, so `resurrect` reopens their windows and reattaches them without restarting anything. A remote agent whose session ended, for example because the remote host rebooted, is skipped: run `workmux open <handle>` to start it again.
+
 ## Examples
 
 ```bash
