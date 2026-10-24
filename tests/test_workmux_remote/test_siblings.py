@@ -182,7 +182,7 @@ def test_agent_spawns_sibling(
     assert_window_not_exists(mux_server, window)
     opened = wm(mux_server, workmux_exe_path, repo, "open sib")
     assert "Attached to the running agent" in opened.stdout, opened.stderr
-    observed = mux_server.home_path / ".local/state/workmux/remote/lo/observed.json"
+    observed = mux_server.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
     before = json.loads(observed.read_text())
     assert any(ws.get("sibling") for ws in before["workspaces"])
     removed = wm(mux_server, workmux_exe_path, repo, "remove --force sib")
