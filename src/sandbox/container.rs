@@ -815,6 +815,13 @@ pub(crate) fn push_agent_home(
             target
         ));
 
+        // The runtime creates /tmp/.local for the opencode mount as root, and
+        // opencode creates ~/.local/state/opencode at startup.
+        if agent == "opencode" && runtime != SandboxRuntime::AppleContainer {
+            args.push("--mount".to_string());
+            args.push("type=tmpfs,destination=/tmp/.local/state".to_string());
+        }
+
         // Pi stores managed fd/rg binaries under bin/; keep the guest's
         // downloads out of the host's directory.
         if let Some(overlay) = pi_bin_overlay {
@@ -2369,6 +2376,10 @@ mod tests {
             &args,
             Some("/tmp/.local/share/opencode"),
             &["target=/tmp/.claude.json", "target=/tmp/.gemini"],
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "type=tmpfs,destination=/tmp/.local/state")
         );
     }
 
