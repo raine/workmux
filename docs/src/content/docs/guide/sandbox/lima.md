@@ -144,6 +144,8 @@ The agent CLI installed depends on your `agent` configuration:
 | `pi`               | Pi CLI via npm                             |
 | `omp`              | Oh My Pi CLI via Bun + Python              |
 
+Codex needs the whole Codex package, which VMs created by older workmux versions don't have. Codex also needs to be 0.156 or newer (see [Agent flags](/guide/sandbox/features/#agent-flags)). Recreate such a VM with `workmux sandbox prune`.
+
 Changing the `agent` setting after VM creation has no effect on existing VMs. Recreate the VM with `workmux sandbox prune` to provision with a different agent.
 
 ### Authentication
