@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use super::RemoteSpec;
-use super::cache::{self, WorkspaceRecord};
+use super::cache::{self, SentTurn, WorkspaceRecord};
 use super::client::Node;
 use super::node::observe::{
     CaptureRequest, CaptureResponse, ObservedAgent, SendRequest, SendResponse,
@@ -349,14 +349,15 @@ pub fn observations(
         .collect()
 }
 
-/// Type `text` into the workspace's agent through the node.
+/// Type `text` into the workspace's agent through the node, and remember
+/// the agent's state before it so `wait` holds out for the turn it starts.
 pub fn send(config: &Config, record: &WorkspaceRecord, text: &str) -> Result<()> {
-    if record.execution.is_none() {
+    let Some(execution) = &record.execution else {
         return Err(no_execution(record));
-    }
+    };
     let spec = RemoteSpec::resolve(config, &record.remote)?;
     let node = Node::connect_reader(&spec, protocol::SEND)?;
-    let _: SendResponse = node.call(
+    let response: SendResponse = node.call(
         protocol::SEND,
         &SendRequest {
             ws_id: record.ws_id.clone(),
@@ -365,6 +366,17 @@ pub fn send(config: &Config, record: &WorkspaceRecord, text: &str) -> Result<()>
         },
         false,
     )?;
+    // Nodes from before the baseline report nothing to tell the turn by.
+    let turn = response.pane.map(|pane| SentTurn {
+        ex_id: execution.ex_id.clone(),
+        pane,
+        status: response.status,
+        status_ts: response.status_ts,
+        sent_at: cache::now(),
+    });
+    if let Err(err) = cache::set_sent_turn(&record.remote, &record.ws_id, turn.as_ref()) {
+        tracing::warn!(handle = %record.handle, "failed to record the sent turn: {err:#}");
+    }
     Ok(())
 }
 

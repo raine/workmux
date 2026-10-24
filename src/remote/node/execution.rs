@@ -95,7 +95,7 @@ pub fn sessions(socket: &Path) -> HashSet<String> {
 }
 
 /// Kill the sessions of execution `ex_id`, live or not.
-pub fn kill_execution(socket: &Path, ex_id: &str) {
+pub fn kill_execution(root: &NodeRoot, socket: &Path, ex_id: &str) {
     let prefix = format!("{ex_id}-");
     for name in sessions(socket) {
         if name.starts_with(&prefix) {
@@ -104,6 +104,7 @@ pub fn kill_execution(socket: &Path, ex_id: &str) {
                 .output();
         }
     }
+    AgentMarker::sweep(root, socket);
 }
 
 /// The panes of a workspace that get a session, with their configured
@@ -120,6 +121,108 @@ pub fn pane_plan(config: &Config, agent: Option<&str>) -> Vec<(usize, PaneConfig
         .enumerate()
         .filter(|(index, pane)| *index == 0 || pane.split.is_some())
         .collect()
+}
+
+/// `run/agents/<pane>` under a node root: present, holding the time it was
+/// written, while a supervisor's container runtime runs in that pane of the
+/// node tmux server and reads its input. Removed when the runtime exits.
+pub struct AgentMarker(Option<PathBuf>);
+
+impl AgentMarker {
+    fn path(root: &NodeRoot, pane_id: &str) -> Option<PathBuf> {
+        let number = pane_id.strip_prefix('%')?;
+        number
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| root.path.join("run").join("agents").join(number))
+    }
+
+    /// Write the marker of `pane_id`; failures only lose the marker.
+    pub fn write(root: &NodeRoot, pane_id: &str) -> Self {
+        let Some(path) = Self::path(root, pane_id) else {
+            return Self(None);
+        };
+        let written = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                crate::util::write_atomic(&path, crate::remote::cache::now().to_string().as_bytes())
+            });
+        match written {
+            Ok(()) => Self(Some(path)),
+            Err(err) => {
+                tracing::warn!("failed to write {}: {err:#}", path.display());
+                Self(None)
+            }
+        }
+    }
+
+    /// When the marker of `pane_id` was written (node clock), if it exists.
+    pub fn read(root: &NodeRoot, pane_id: &str) -> Option<u64> {
+        fs::read_to_string(Self::path(root, pane_id)?)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Remove the markers of panes gone from the node tmux server: a
+    /// supervisor killed with its session leaves its marker behind.
+    pub fn sweep(root: &NodeRoot, socket: &Path) {
+        let dir = root.path.join("run").join("agents");
+        // Listed before the panes, so a marker written meanwhile is for a
+        // pane the listing has.
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let markers: Vec<_> = entries.flatten().map(|entry| entry.file_name()).collect();
+        let live: HashSet<String> = tmux(socket)
+            .args(["list-panes", "-a", "-F", "#{pane_id}"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|id| id.strip_prefix('%'))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in markers {
+            if !name.to_str().is_some_and(|number| live.contains(number)) {
+                let _ = fs::remove_file(dir.join(name));
+            }
+        }
+    }
+}
+
+impl Drop for AgentMarker {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Index of the first pane of [`pane_plan`] that runs the agent.
+pub fn agent_pane(config: &Config, agent: Option<&str>, working_dir: &Path) -> Option<usize> {
+    pane_plan(config, agent)
+        .into_iter()
+        .find_map(|(index, pane)| {
+            crate::multiplexer::util::resolve_pane_command_with_config(
+                pane.command.as_deref(),
+                true,
+                None,
+                working_dir,
+                config,
+                agent,
+                "sh",
+            )
+            .is_some_and(|resolved| resolved.selected_agent.is_some())
+            .then_some(index)
+        })
 }
 
 /// [`pane_plan`] as the laptop records it to lay out the window.
@@ -174,7 +277,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         let mut continues = false;
         if let Some(previous) = workspace.execution.take() {
             continues = previous.ended_by_reboot(boot_id.as_deref());
-            kill_execution(&socket, &previous.ex_id);
+            kill_execution(root, &socket, &previous.ex_id);
         }
         if workspace.isolation == RemoteIsolation::Container {
             stop_containers_mounting(&workspace.worktree_path)?;
@@ -421,6 +524,51 @@ mod tests {
         };
         let indices: Vec<usize> = pane_plan(&config, None).iter().map(|(i, _)| *i).collect();
         assert_eq!(indices, [0, 2]);
+    }
+
+    #[test]
+    fn an_agent_marker_lasts_while_it_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = NodeRoot {
+            path: dir.path().to_path_buf(),
+        };
+        let marker = AgentMarker::write(&root, "%12");
+        assert!(AgentMarker::read(&root, "%12").is_some_and(|at| at > 0));
+        assert_eq!(AgentMarker::read(&root, "%13"), None);
+        drop(marker);
+        assert_eq!(AgentMarker::read(&root, "%12"), None);
+        // Only tmux pane ids name a file.
+        drop(AgentMarker::write(&root, "../x"));
+        assert!(!dir.path().join("run/x").exists());
+        // Without a tmux server no pane is live.
+        std::mem::forget(AgentMarker::write(&root, "%14"));
+        AgentMarker::sweep(&root, &dir.path().join("no-server.sock"));
+        assert_eq!(AgentMarker::read(&root, "%14"), None);
+    }
+
+    #[test]
+    fn the_agent_pane_is_the_first_that_runs_the_agent() {
+        let dir = std::env::temp_dir();
+        let pane = |command: &str, split| PaneConfig {
+            command: Some(command.into()),
+            split,
+            ..Default::default()
+        };
+        let config = Config {
+            agent: Some("codex".into()),
+            panes: Some(vec![
+                pane("bash", None),
+                pane("<agent>", Some(SplitDirection::Horizontal)),
+                pane("<agent>", Some(SplitDirection::Vertical)),
+            ]),
+            ..Config::default()
+        };
+        assert_eq!(agent_pane(&config, None, &dir), Some(1));
+        let config = Config {
+            panes: Some(vec![pane("htop", None)]),
+            ..config
+        };
+        assert_eq!(agent_pane(&config, None, &dir), None);
     }
 
     #[test]

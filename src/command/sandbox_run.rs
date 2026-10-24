@@ -456,6 +456,7 @@ fn run_container(
         bind_ip,
         node,
     )?;
+    let pane_id = ctx.pane_id.clone();
     let _rpc_handle = rpc_server.spawn(ctx);
 
     // Start network proxy when policy is deny
@@ -575,10 +576,17 @@ fn run_container(
         handle,
     };
 
-    let status = Command::new(runtime_bin)
+    let mut child = Command::new(runtime_bin)
         .args(&docker_args)
-        .status()
+        .spawn()
         .with_context(|| format!("Failed to execute {} run", runtime_bin))?;
+    // While the runtime runs it reads the pane's input, so a node may type
+    // into an agent that has not reported yet.
+    let marker =
+        node.map(|(root, _)| crate::remote::node::execution::AgentMarker::write(root, &pane_id));
+    let status = child.wait();
+    drop(marker);
+    let status = status.with_context(|| format!("Failed to wait for {} run", runtime_bin))?;
 
     let exit_code = status.code().unwrap_or(1);
     info!(exit_code, "container command exited");

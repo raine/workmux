@@ -330,6 +330,7 @@ fn remove(root: &NodeRoot, id: &str) -> Result<()> {
             if !output.status.success() {
                 anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
             }
+            super::execution::AgentMarker::sweep(root, &socket);
         }
         "container" => {
             let output = std::process::Command::new("docker")
