@@ -185,4 +185,44 @@ def test_multi_remove_pending_merges_keeps_remote_target_identity(
     assert node.workspaces() == []
     assert get_window_name("other") not in mux_server.list_windows()
     assert "could not be removed" not in stderr.read_text()
-    assert "Finished removing remote workspace 'other'" in stdout.read_text()
+    assert "Successfully merged 'other'" in stdout.read_text()
+
+
+@pytest.mark.parametrize("pending_count", [3, 4])
+def test_batch_pending_cleanup_attempts_each_hook_once(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    pending_count: int,
+):
+    repo = mux_repo_path
+    attempts = node.root / "attempts"
+    block = node.root / "block"
+    configure(
+        repo,
+        pre_remove=[
+            f'case "$(pwd -P)" in {node.root}/*) '
+            f"echo attempt >> {attempts}; sleep 0.1; test ! -e {block} ;; esac"
+        ],
+    )
+    block.touch()
+    handles = ("one", "two", "three", "unrelated")[:pending_count]
+    for handle in handles:
+        wm(mux_server, workmux_exe_path, repo, f"add {handle} --remote lo")
+        commit_on_node(node_worktree(node, handle), f"{handle}.txt", "merged\n")
+        wm(mux_server, workmux_exe_path, repo, f"merge {handle}", expect_fail=True)
+    attempts.write_text("")
+    started = time.monotonic()
+    result = wm(
+        mux_server, workmux_exe_path, repo, "remove one two three", expect_fail=True
+    )
+    count = len(attempts.read_text().splitlines())
+    print(f"batch cleanup: {count} hooks, {time.monotonic() - started:.3f}s")
+    assert "3 remote workspace(s) could not be removed" in result.stderr
+    assert len(local_records(mux_server)) == pending_count
+    assert count == pending_count
+    block.unlink()
+    wm(mux_server, workmux_exe_path, repo, "remove " + " ".join(handles))
+    assert local_records(mux_server) == []
+    assert node.workspaces() == []

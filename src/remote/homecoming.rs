@@ -488,8 +488,13 @@ fn remove_remote(
 /// Finish the remote cleanups an earlier merge or pull left pending on
 /// `node`'s remote, except for workspace `skip`. Quiet unless one ends.
 pub fn finish_pending(node: &Node, skip: &str) {
+    finish_pending_except(node, |id| id == skip);
+}
+
+/// Retry unrelated pending records while explicit batch targets are handled by their caller.
+pub(super) fn finish_pending_except(node: &Node, skip: impl Fn(&str) -> bool) {
     for mut record in cache::all() {
-        if record.remote != node.spec.name || record.ws_id == skip {
+        if record.remote != node.spec.name || skip(&record.ws_id) {
             continue;
         }
         let Some(Homecoming::Merged { snapshot } | Homecoming::Pulled { snapshot }) =

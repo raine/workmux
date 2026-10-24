@@ -848,122 +848,145 @@ pub struct RemoveOptions {
     pub confirm_unmerged: bool,
 }
 
-/// `workmux remove` of a remote workspace, with the checks a local remove
-/// makes: uncommitted work refuses and unmerged commits ask, unless
-/// `--force`. `--keep-branch` brings the branch to the laptop. Local state
-/// goes only after the node acknowledges, except that `--force` forgets a
-/// workspace whose remote is unconfigured or unreachable. The caller closes
-/// the relay after all removals and their output have finished.
-pub fn remove(mut record: WorkspaceRecord, options: RemoveOptions) -> Result<()> {
-    if record
-        .homecoming
-        .as_ref()
-        .is_some_and(|stage| !stage.cleanup_pending())
-    {
-        if !options.force {
-            bail!(
-                "A merge of '{}' is in progress in {}; finish it with `workmux merge {}`, or \
-                 pass --force to remove the remote workspace and keep that copy",
-                record.handle,
-                record.local_path.display(),
-                record.handle
-            );
+/// Command-scoped connections and cleanup sweep. Failed connections are not
+/// cached, so a later target can retry after a transient failure. Explicit
+/// targets are excluded from the sweep to avoid duplicate hook attempts.
+pub struct RemovalBatch {
+    nodes: std::collections::HashMap<String, Node>,
+    targets: std::collections::HashSet<String>,
+}
+
+impl RemovalBatch {
+    pub fn new(targets: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            nodes: Default::default(),
+            targets: targets.into_iter().collect(),
         }
-        record.homecoming = None;
     }
-    let forget = |record: &WorkspaceRecord, reason: anyhow::Error| -> Result<()> {
-        record.delete()?;
-        forget_attachments(record);
-        eprintln!(
-            "workmux: forgot remote workspace '{}' without contacting '{}' ({reason:#}); \
-             its worktree and agent may remain there (`workmux remote gc {}` removes them)",
-            record.handle, record.remote, record.remote
-        );
-        Ok(())
-    };
-    let config = Config::load(None)?;
-    let spec = match RemoteSpec::resolve(&config, &record.remote) {
-        Ok(spec) => spec,
-        Err(err) if options.force => return forget(&record, err),
-        Err(err) => {
-            return Err(err.context(format!(
-                "Cannot remove '{}'; pass --force to forget it locally",
-                record.handle
-            )));
+
+    /// `workmux remove` of a remote workspace, with the checks a local remove
+    /// makes: uncommitted work refuses and unmerged commits ask, unless
+    /// `--force`. `--keep-branch` brings the branch to the laptop. Local state
+    /// goes only after the node acknowledges, except that `--force` forgets a
+    /// workspace whose remote is unconfigured or unreachable. The caller closes
+    /// the relay after all removals and their output have finished.
+    pub fn remove(&mut self, mut record: WorkspaceRecord, options: RemoveOptions) -> Result<()> {
+        if record
+            .homecoming
+            .as_ref()
+            .is_some_and(|stage| !stage.cleanup_pending())
+        {
+            if !options.force {
+                bail!(
+                    "A merge of '{}' is in progress in {}; finish it with `workmux merge {}`, or \
+                 pass --force to remove the remote workspace and keep that copy",
+                    record.handle,
+                    record.local_path.display(),
+                    record.handle
+                );
+            }
+            record.homecoming = None;
         }
-    };
-    let node = match Node::connect(&spec) {
-        Ok(node) => node,
-        Err(err) if options.force => return forget(&record, err),
-        Err(err) => {
-            return Err(err.context(format!(
+        let forget = |record: &WorkspaceRecord, reason: anyhow::Error| -> Result<()> {
+            record.delete()?;
+            forget_attachments(record);
+            eprintln!(
+                "workmux: forgot remote workspace '{}' without contacting '{}' ({reason:#}); \
+             its worktree and agent may remain there (`workmux remote gc {}` removes them)",
+                record.handle, record.remote, record.remote
+            );
+            Ok(())
+        };
+        let config = Config::load(None)?;
+        let spec = match RemoteSpec::resolve(&config, &record.remote) {
+            Ok(spec) => spec,
+            Err(err) if options.force => return forget(&record, err),
+            Err(err) => {
+                return Err(err.context(format!(
+                    "Cannot remove '{}'; pass --force to forget it locally",
+                    record.handle
+                )));
+            }
+        };
+        let node = match self.nodes.entry(record.remote.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let node = match Node::connect(&spec) {
+                    Ok(node) => node,
+                    Err(err) if options.force => return forget(&record, err),
+                    Err(err) => {
+                        return Err(err.context(format!(
                 "Cannot reach '{}' to remove '{}'; nothing was removed (pass --force to forget \
                  it locally)",
                 record.remote, record.handle
             )));
-        }
-    };
-    super::homecoming::finish_pending(&node, &record.ws_id);
-    super::observe::current_on(&node);
-    if record.cleanup_pending() {
-        return super::homecoming::finish_cleanup(&node, record);
-    }
-
-    let mut expect = None;
-    if !options.force || options.keep_branch {
-        match check_removable(&node, &mut record, &options) {
-            Ok(Some(snapshot)) => expect = Some(snapshot),
-            Ok(None) => {}
-            Err(err) if err.is::<Declined>() => {
-                println!("Aborted.");
-                return Ok(());
+                    }
+                };
+                super::homecoming::finish_pending_except(&node, |id| self.targets.contains(id));
+                super::observe::current_on(&node);
+                entry.insert(node)
             }
-            Err(err) if options.force => eprintln!("workmux: {err:#}"),
-            Err(err) => return Err(err),
+        };
+        if record.cleanup_pending() {
+            return super::homecoming::finish_cleanup(node, record);
         }
-    }
-    if options.force {
-        expect = None;
-    }
-    // Under `expect`, a kept branch is home exactly as the node has it, so
-    // the node's copy goes; otherwise the node keeps it.
-    let keep_on_node = options.keep_branch && expect.is_none();
-    let reply: Result<RemoveResponse> = node.call(
-        protocol::REMOVE_WORKSPACE,
-        &RemoveRequest {
-            ws_id: record.ws_id.clone(),
-            keep_branch: keep_on_node,
-            run_hooks: options.run_hooks,
-            expect,
-        },
-        true,
-    );
-    match reply {
-        Ok(_) => {}
-        Err(err) if error_code(&err) == Some(code::DIVERGED) => {
-            bail!(
-                "{}; nothing was removed. Run `workmux remove {}` again",
-                super::homecoming::node_message(&err),
+
+        let mut expect = None;
+        if !options.force || options.keep_branch {
+            match check_removable(node, &mut record, &options) {
+                Ok(Some(snapshot)) => expect = Some(snapshot),
+                Ok(None) => {}
+                Err(err) if err.is::<Declined>() => {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+                Err(err) if options.force => eprintln!("workmux: {err:#}"),
+                Err(err) => return Err(err),
+            }
+        }
+        if options.force {
+            expect = None;
+        }
+        // Under `expect`, a kept branch is home exactly as the node has it, so
+        // the node's copy goes; otherwise the node keeps it.
+        let keep_on_node = options.keep_branch && expect.is_none();
+        let reply: Result<RemoveResponse> = node.call(
+            protocol::REMOVE_WORKSPACE,
+            &RemoveRequest {
+                ws_id: record.ws_id.clone(),
+                keep_branch: keep_on_node,
+                run_hooks: options.run_hooks,
+                expect,
+            },
+            true,
+        );
+        match reply {
+            Ok(_) => {}
+            Err(err) if error_code(&err) == Some(code::DIVERGED) => {
+                bail!(
+                    "{}; nothing was removed. Run `workmux remove {}` again",
+                    super::homecoming::node_message(&err),
+                    record.handle
+                );
+            }
+            Err(err) => return Err(explain(&spec, err)),
+        }
+        if record.local_path.join(".git").exists() {
+            println!(
+                "The local copy at {} stays a local worktree (`workmux remove {}` removes it)",
+                record.local_path.display(),
                 record.handle
             );
         }
-        Err(err) => return Err(explain(&spec, err)),
-    }
-    if record.local_path.join(".git").exists() {
+        super::homecoming::forget_fetched(&record);
+        record.delete()?;
+        forget_attachments(&record);
         println!(
-            "The local copy at {} stays a local worktree (`workmux remove {}` removes it)",
-            record.local_path.display(),
-            record.handle
+            "✓ Removed remote workspace '{}' from '{}'",
+            record.handle, record.remote
         );
+        Ok(())
     }
-    super::homecoming::forget_fetched(&record);
-    record.delete()?;
-    forget_attachments(&record);
-    println!(
-        "✓ Removed remote workspace '{}' from '{}'",
-        record.handle, record.remote
-    );
-    Ok(())
 }
 
 /// The checks before removing `record`: refuses uncommitted work, asks
