@@ -273,12 +273,22 @@ fn agent_image(config: &Config) -> (String, &'static str) {
 }
 
 fn image_row(transport: &Transport, runtime: &str, image: &str, source: &str) -> Row {
-    let script = format!(
-        "{runtime} pull -q -- {} </dev/null\n",
-        crate::shell::shell_quote(image)
-    );
+    let quoted = crate::shell::shell_quote(image);
+    let script = format!("{runtime} pull -q -- {quoted} </dev/null\n");
+    // An image built on the remote is in no registry.
+    let present = || {
+        let script = format!("{runtime} image inspect -- {quoted} >/dev/null 2>&1 </dev/null\n");
+        transport
+            .run(&script, Input::Null, None)
+            .is_ok_and(|output| output.success())
+    };
     match transport.run(&script, Input::Null, None) {
         Ok(output) if output.success() => Row::new("image", Level::Ok, format!("pulled {image}")),
+        Ok(_) if source == "sandbox.image" && present() => Row::new(
+            "image",
+            Level::Ok,
+            format!("{image} is on the remote (not in a registry it can pull from)"),
+        ),
         Ok(output) => Row::new(
             "image",
             Level::Fail,
