@@ -118,6 +118,7 @@ pub fn spawn(root: &NodeRoot, request: SpawnRequest) -> Result<SpawnResponse> {
             ignored,
         } = recipe.unwrap_or_default();
         let payload = ProvisionPayload {
+            cached_seeds: Vec::new(),
             config: crate::frozen_config::snapshot_document(&config, location.as_ref())?,
             agent: parent.agent.clone(),
             prompt: request.prompt.clone().filter(|prompt| !prompt.is_empty()),

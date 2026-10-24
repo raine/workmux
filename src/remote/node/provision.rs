@@ -62,7 +62,14 @@ pub fn provision(root: &NodeRoot, request: ProvisionRequest) -> Result<Provision
             provision_worktree(root, &mut workspace, payload)?;
         }
     }
-    Ok(response(&workspace, has_base))
+    let mut response = response(&workspace, has_base);
+    let _project = root.lock_project(&workspace.identity.project_id)?;
+    for path in &request.seed_paths {
+        if seed_exists(&workspace.repo_path, path)? {
+            response.cached_seeds.push(path.clone());
+        }
+    }
+    Ok(response)
 }
 
 fn response(workspace: &Workspace, has_base: bool) -> ProvisionResponse {
@@ -70,6 +77,7 @@ fn response(workspace: &Workspace, has_base: bool) -> ProvisionResponse {
         repo_path: workspace.repo_path.to_string_lossy().into_owned(),
         worktree_path: workspace.worktree_path.to_string_lossy().into_owned(),
         has_base,
+        cached_seeds: Vec::new(),
     }
 }
 
@@ -198,6 +206,16 @@ pub(super) fn provision_worktree(
     if !workspace.progress.files {
         if payload.run_file_ops {
             let seed_root = workspace.repo_path.join(&rel_dir);
+            let _project = root.lock_project(&workspace.identity.project_id)?;
+            fs::create_dir_all(&seed_root)?;
+            for path in &payload.cached_seeds {
+                if !seed_exists(&seed_root, path)? {
+                    return Err(refuse(
+                        code::MISSING_SEED,
+                        format!("symlink source disappeared: {path}"),
+                    ));
+                }
+            }
             apply_files(workspace, &seed_root, &payload)?;
             exclude_ignored(workspace, &payload.ignored)?;
         }
@@ -465,18 +483,60 @@ fn exclude_ignored(workspace: &Workspace, ignored: &[String]) -> Result<()> {
         .with_context(|| format!("Failed to write {}", exclude.display()))
 }
 
+/// Match seed installation's first-copy-wins rule without following a leaf
+/// symlink. Ancestors must stay inside the project, even for missing paths.
+fn seed_exists(root: &Path, name: &str) -> Result<bool> {
+    let relative = safe_relative(name)?;
+    let canonical_root = root.canonicalize()?;
+    let mut path = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(_) if index + 1 == components.len() => return Ok(true),
+            Ok(_) => {
+                if !path.canonicalize()?.starts_with(&canonical_root) {
+                    return Err(anyhow!("{name} leaves {}", root.display()));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(false)
+}
+
 /// Write `entries` under `root` where nothing exists yet; an existing entry
 /// is kept along with everything below it. New entries are built in a
 /// staging directory and renamed into place whole, so an interrupted call
 /// leaves no partial tree for a retry to keep.
 fn seed_entries(root: &Path, entries: &[FileEntry]) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut kept = Vec::new();
+    for entry in entries {
+        let relative = safe_relative(&entry.path)?;
+        if kept
+            .iter()
+            .any(|prefix: &PathBuf| relative.starts_with(prefix))
+        {
+            continue;
+        }
+        if seed_exists(root, &entry.path)? {
+            kept.push(relative);
+        } else {
+            missing.push(entry);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
     let stage = tempfile::Builder::new()
         .prefix(".workmux-seed-")
         .tempdir_in(root)
         .context("Failed to create a staging directory")?;
-    write_entries(stage.path(), entries)?;
+    write_entries(stage.path(), missing.iter().copied())?;
     let mut settled: Vec<PathBuf> = Vec::new();
-    for entry in entries {
+    for entry in missing {
         let relative = safe_relative(&entry.path)?;
         if settled.iter().any(|prefix| relative.starts_with(prefix)) {
             continue;
@@ -508,7 +568,7 @@ fn create_parent_within(root: &Path, path: &Path, name: &str) -> Result<()> {
 }
 
 /// Write `entries` under `root`, replacing what is there.
-fn write_entries(root: &Path, entries: &[FileEntry]) -> Result<()> {
+fn write_entries<'a>(root: &Path, entries: impl IntoIterator<Item = &'a FileEntry>) -> Result<()> {
     for entry in entries {
         let relative = safe_relative(&entry.path)?;
         let path = root.join(&relative);
@@ -637,6 +697,48 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o640);
+    }
+
+    #[test]
+    fn seed_queries_match_existing_entries_and_refuse_escaping_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("sub/cache")).unwrap();
+        assert!(seed_exists(dir.path(), "sub/cache").unwrap());
+        assert!(!seed_exists(dir.path(), "sub/missing").unwrap());
+        fs::remove_dir(dir.path().join("sub/cache")).unwrap();
+        assert!(!seed_exists(dir.path(), "sub/cache").unwrap());
+        std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+        assert!(seed_exists(dir.path(), "dangling").unwrap());
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        assert!(seed_exists(dir.path(), "escape/child").is_err());
+        for bad in ["../x", "/etc", "", "sub/../../x"] {
+            assert!(seed_exists(dir.path(), bad).is_err());
+        }
+    }
+
+    #[test]
+    fn existing_seeds_are_not_decoded_or_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("cache")).unwrap();
+        let entries = [
+            FileEntry {
+                path: "cache".into(),
+                kind: FileEntryKind::Dir,
+            },
+            FileEntry {
+                path: "cache/data".into(),
+                kind: FileEntryKind::File {
+                    mode: 0o600,
+                    data: "not base64!".into(),
+                },
+            },
+        ];
+        seed_entries(dir.path(), &entries).unwrap();
+        assert!(!dir.path().join("cache/data").exists());
+        fs::remove_dir(dir.path().join("cache")).unwrap();
+        assert!(seed_entries(dir.path(), &entries).is_err());
+        assert!(!dir.path().join("cache").exists());
     }
 
     #[test]
