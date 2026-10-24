@@ -348,32 +348,35 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         print_row(&row);
         rows.push(row);
     }
-    let agents = configured_agents(config);
-    if !agents.is_empty() {
-        let login_rows = if matches!(node, NodeStatus::Ready(_)) {
-            let node = Node {
-                spec: spec.clone(),
-                transport,
-                pin,
-            };
-            let request = protocol::CredentialsRequest {
-                agents: agents.iter().map(|agent| agent.to_string()).collect(),
-            };
-            match node.call(protocol::CREDENTIALS, &request, false) {
-                Ok(response) => credential_rows(&spec.name, &response),
-                Err(err) => vec![Row::new("logins", Level::Warn, format!("{err:#}"))],
-            }
-        } else {
-            vec![Row::new(
-                "logins",
-                Level::Skip,
-                "the node binary is not ready",
-            )]
+    let configured = configured_agents(config);
+    let login_rows = if matches!(node, NodeStatus::Ready(_)) {
+        let node = Node {
+            spec: spec.clone(),
+            transport,
+            pin,
         };
-        for row in login_rows {
-            print_row(&row);
-            rows.push(row);
+        let request = protocol::CredentialsRequest {
+            agents: credentials::AGENTS
+                .iter()
+                .map(|auth| auth.agent.to_string())
+                .collect(),
+        };
+        match node.call(protocol::CREDENTIALS, &request, false) {
+            Ok(response) => credential_rows(&spec.name, &response, &configured),
+            Err(err) => vec![Row::new("logins", Level::Warn, format!("{err:#}"))],
         }
+    } else if configured.is_empty() {
+        Vec::new()
+    } else {
+        vec![Row::new(
+            "logins",
+            Level::Skip,
+            "the node binary is not ready",
+        )]
+    };
+    for row in login_rows {
+        print_row(&row);
+        rows.push(row);
     }
     Ok(rows.iter().all(|row| row.level != Level::Fail))
 }
@@ -396,12 +399,21 @@ fn configured_agents(config: &Config) -> Vec<&'static str> {
     agents
 }
 
-fn credential_rows(remote: &str, response: &protocol::CredentialsResponse) -> Vec<Row> {
+/// A row per configured agent, and an OK row per other agent whose login
+/// the node has, so a one-off `add -a <agent>` can be checked too.
+fn credential_rows(
+    remote: &str,
+    response: &protocol::CredentialsResponse,
+    configured: &[&str],
+) -> Vec<Row> {
     response
         .agents
         .iter()
         .filter_map(|agent| {
             let auth = credentials::agent_auth(&agent.agent).ok()?;
+            if !configured.contains(&auth.agent) && agent.found.is_empty() {
+                return None;
+            }
             let login = format!("workmux remote login {remote} {}", auth.agent);
             let row = if auth.files.is_empty() {
                 Row::new(
@@ -685,6 +697,25 @@ mod tests {
     }
 
     #[test]
+    fn login_rows_add_other_agents_only_when_logged_in() {
+        let found = |agent: &str, found: &[&str]| protocol::AgentCredentials {
+            agent: agent.into(),
+            found: found.iter().map(|f| f.to_string()).collect(),
+        };
+        let response = protocol::CredentialsResponse {
+            agents: vec![
+                found("claude", &[]),
+                found("codex", &["auth.json"]),
+                found("gemini", &[]),
+                found("omp", &[]),
+            ],
+        };
+        let rows = credential_rows("hetzner", &response, &["claude"]);
+        let levels: Vec<_> = rows.iter().map(|row| (row.check, row.level)).collect();
+        assert_eq!(levels, [("claude", Level::Warn), ("codex", Level::Ok)]);
+    }
+
+    #[test]
     fn login_rows_warn_with_the_login_command() {
         let response = protocol::CredentialsResponse {
             agents: vec![
@@ -702,7 +733,7 @@ mod tests {
                 },
             ],
         };
-        let rows = credential_rows("hetzner", &response);
+        let rows = credential_rows("hetzner", &response, &["claude", "codex", "omp"]);
         let levels: Vec<_> = rows.iter().map(|row| (row.check, row.level)).collect();
         assert_eq!(
             levels,
