@@ -81,14 +81,32 @@ impl RpcRequest {
     }
 }
 
-/// Why a remote agent cannot make `request`, and what works instead. The
-/// node names a workspace's worktree after its handle.
-fn node_refusal(request: &RpcRequest, worktree: &Path) -> String {
+/// How a node supervisor answers `request`, or `None` when it serves it
+/// as the laptop does. Requests that act on the laptop's worktrees, windows
+/// or clipboard cannot be served on a node; the refusal says what works
+/// instead. The node names a workspace's worktree after its handle.
+fn on_node(request: &RpcRequest, node: &NodeWorkspace, worktree: &Path) -> Option<RpcResponse> {
     let handle = worktree
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<handle>".to_string());
-    match request {
+    let refusal = match request {
+        RpcRequest::SetStatus { .. }
+        | RpcRequest::SetTitle { .. }
+        | RpcRequest::Heartbeat
+        | RpcRequest::Exec { .. } => return None,
+        RpcRequest::SpawnAgent {
+            prompt,
+            branch_name,
+            background,
+        } => {
+            return Some(handle_node_spawn(
+                node,
+                prompt,
+                branch_name.as_deref(),
+                *background,
+            ));
+        }
         RpcRequest::Merge { .. } => format!(
             "merging runs on the laptop for remote workspaces: run `workmux merge {handle}` \
              there; it brings this workspace's work home and merges it"
@@ -96,15 +114,18 @@ fn node_refusal(request: &RpcRequest, worktree: &Path) -> String {
         RpcRequest::ClipboardRead { .. } => "the clipboard is on the laptop, which remote \
              agents cannot read; copy the image into the worktree instead"
             .to_string(),
-        RpcRequest::SpawnAgent { .. } => {
-            "remote agents cannot start agents; run `workmux add --remote <name>` on the laptop"
-                .to_string()
-        }
         RpcRequest::Close { .. } => {
             format!("the window is on the laptop: run `workmux close {handle}` there")
         }
-        _ => format!("{} is not available to remote agents", request.kind()),
-    }
+    };
+    Some(RpcResponse::Error { message: refusal })
+}
+
+/// The node workspace a node supervisor serves, from its own arguments;
+/// the guest never names it.
+pub struct NodeWorkspace {
+    pub root: PathBuf,
+    pub ws_id: String,
 }
 
 /// RPC response sent from host to guest.
@@ -142,12 +163,9 @@ pub struct RpcContext {
     pub detected_toolchain: crate::sandbox::toolchain::DetectedToolchain,
     /// Whether to allow host-exec without bwrap on Linux.
     pub allow_unsandboxed_host_exec: bool,
-    /// The supervisor runs on a remote node, where requests that act on
-    /// the laptop's worktrees, windows or clipboard cannot be served.
-    pub on_node: bool,
-    /// Node root and workspace id of a node supervisor, from its own
-    /// arguments; the guest never names them.
-    pub node_workspace: Option<(PathBuf, String)>,
+    /// Set when the supervisor runs on a remote node; [`on_node`] decides
+    /// how it answers each request.
+    pub node: Option<NodeWorkspace>,
 }
 
 /// TCP RPC server that accepts guest connections.
@@ -328,36 +346,12 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
 
         info!(request = request.kind(), "RPC request received");
 
-        if let (
-            RpcRequest::SpawnAgent {
-                prompt,
-                branch_name,
-                background,
-            },
-            Some((root, ws_id)),
-        ) = (&request, &ctx.node_workspace)
+        if let Some(response) = ctx
+            .node
+            .as_ref()
+            .and_then(|node| on_node(&request, node, &ctx.worktree_path))
         {
-            let response =
-                handle_node_spawn(root, ws_id, prompt, branch_name.as_deref(), *background);
             write_response(&mut writer, &response)?;
-            continue;
-        }
-
-        if ctx.on_node
-            && matches!(
-                request,
-                RpcRequest::SpawnAgent { .. }
-                    | RpcRequest::Merge { .. }
-                    | RpcRequest::Close { .. }
-                    | RpcRequest::ClipboardRead { .. }
-            )
-        {
-            write_response(
-                &mut writer,
-                &RpcResponse::Error {
-                    message: node_refusal(&request, &ctx.worktree_path),
-                },
-            )?;
             continue;
         }
 
@@ -758,20 +752,19 @@ fn node_spawn_command(root: &Path) -> std::process::Command {
 }
 
 fn handle_node_spawn(
-    root: &Path,
-    ws_id: &str,
+    node: &NodeWorkspace,
     prompt: &str,
     branch_name: Option<&str>,
     background: Option<bool>,
 ) -> RpcResponse {
     let request = crate::remote::node::spawn::SpawnRequest {
-        parent: ws_id.to_string(),
+        parent: node.ws_id.clone(),
         branch: branch_name.map(str::to_string),
         prompt: (!prompt.is_empty()).then(|| prompt.to_string()),
         background: background.unwrap_or(false),
     };
     let output = (|| -> Result<std::process::Output> {
-        let mut child = node_spawn_command(root).spawn()?;
+        let mut child = node_spawn_command(&node.root).spawn()?;
         let mut stdin = child.stdin.take().expect("stdin piped");
         stdin.write_all(&serde_json::to_vec(&request)?)?;
         drop(stdin);
@@ -1180,17 +1173,28 @@ mod tests {
     #[test]
     fn node_refusals_say_what_to_run_on_the_laptop() {
         let worktree = Path::new("/node/projects/p1/worktrees/feat");
+        let node = NodeWorkspace {
+            root: PathBuf::from("/node"),
+            ws_id: "ws".into(),
+        };
+        let refusal = |request: &RpcRequest| match on_node(request, &node, worktree) {
+            Some(RpcResponse::Error { message }) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
         let merge: RpcRequest = serde_json::from_str(
             r#"{"type":"Merge","name":"feat","into":null,"rebase":false,"squash":false,
                 "ignore_uncommitted":false,"keep":false,"no_verify":false,"no_hooks":false,
                 "notification":false}"#,
         )
         .unwrap();
-        assert!(node_refusal(&merge, worktree).contains("`workmux merge feat`"));
+        assert!(refusal(&merge).contains("`workmux merge feat`"));
         let paste = RpcRequest::ClipboardRead {
             mime: "image/png".into(),
         };
-        assert!(node_refusal(&paste, worktree).contains("clipboard is on the laptop"));
+        assert!(refusal(&paste).contains("clipboard is on the laptop"));
+        let close = RpcRequest::Close { name: "x".into() };
+        assert!(refusal(&close).contains("`workmux close feat`"));
+        assert!(on_node(&RpcRequest::Heartbeat, &node, worktree).is_none());
     }
 
     fn test_context(worktree_path: &std::path::Path) -> RpcContext {
@@ -1204,8 +1208,7 @@ mod tests {
             allowed_commands: std::collections::HashSet::new(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
-            on_node: false,
-            node_workspace: None,
+            node: None,
         }
     }
 
@@ -1482,8 +1485,7 @@ mod tests {
             allowed_commands: allowed.iter().map(|s| s.to_string()).collect(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: allow_unsandboxed,
-            on_node: false,
-            node_workspace: None,
+            node: None,
         });
 
         let handle = server.spawn(ctx);
@@ -2065,8 +2067,7 @@ mod tests {
             allowed_commands: std::collections::HashSet::new(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
-            on_node: false,
-            node_workspace: None,
+            node: None,
         });
 
         let _handle = server.spawn(ctx);
