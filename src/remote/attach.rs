@@ -341,6 +341,9 @@ struct Relay {
     generation: u64,
     attempt: u32,
     status: Option<StatusMirror>,
+    /// The row of the last painted status line, cleared when a resize
+    /// moves the bottom row away from it.
+    painted_row: Option<u16>,
 }
 
 impl Relay {
@@ -356,6 +359,7 @@ impl Relay {
             generation: 0,
             attempt: 0,
             status: None,
+            painted_row: None,
         }
     }
 
@@ -385,6 +389,8 @@ impl Relay {
                         flush_input();
                         *self.input_target.lock().unwrap() =
                             connection.as_ref().map(|c| c.master.clone());
+                        // The remote client repaints the whole screen.
+                        self.painted_row = None;
                         state = State::Attached {
                             since: Instant::now(),
                         };
@@ -461,7 +467,7 @@ impl Relay {
         }
     }
 
-    fn draw(&self, state: &State) {
+    fn draw(&mut self, state: &State) {
         let name = &self.node.spec.name;
         let text = match state {
             State::Attached { .. } => return,
@@ -474,9 +480,13 @@ impl Relay {
         let size = window_size(libc::STDOUT_FILENO);
         let width = usize::from(size.ws_col.max(1));
         let text: String = text.chars().take(width).collect();
+        let row = size.ws_row.max(1);
+        let stale = match self.painted_row.replace(row) {
+            Some(old) if old < row => format!("\x1b[{old};1H\x1b[2K"),
+            _ => String::new(),
+        };
         write_out(&format!(
-            "\x1b7\x1b[{};1H\x1b[2K\x1b[7m{text}\x1b[0m\x1b8",
-            size.ws_row.max(1)
+            "\x1b7{stale}\x1b[{row};1H\x1b[2K\x1b[7m{text}\x1b[0m\x1b8"
         ));
     }
 
