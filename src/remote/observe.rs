@@ -337,25 +337,38 @@ fn stream(spec: &RemoteSpec, observation: &mut Observation) -> Result<String> {
 /// known workspaces) when the node cannot be reached. Adopts the siblings a
 /// connected observation reports.
 pub fn current(config: &Config, name: &str) -> Observation {
-    let observation = fetch(config, name);
+    let observation = fetch(name, || {
+        let spec = RemoteSpec::resolve(config, name)?;
+        watch_once(&Node::connect_reader(&spec, protocol::WATCH)?)
+    });
+    adopt_siblings(name, observation)
+}
+
+/// [`current`] through `node`, a connection the caller already holds.
+pub fn current_on(node: &Node) -> Observation {
+    let name = &node.spec.name;
+    adopt_siblings(name, fetch(name, || watch_once(node)))
+}
+
+fn adopt_siblings(name: &str, observation: Observation) -> Observation {
     if observation.is_connected(now()) {
         super::siblings::adopt(name, &observation, true);
     }
     observation
 }
 
-fn fetch(config: &Config, name: &str) -> Observation {
+fn watch_once(node: &Node) -> Result<Snapshot> {
+    node.call(protocol::WATCH, &WatchRequest { stream: false }, false)
+}
+
+fn fetch(name: &str, snapshot: impl FnOnce() -> Result<Snapshot>) -> Observation {
     let now = now();
     let mut observation = load(name).unwrap_or_default();
     let observed = matches!(take_lock(name), Ok(None));
     if observed {
         return observation;
     }
-    let fetched = RemoteSpec::resolve(config, name).and_then(|spec| {
-        let node = Node::connect_reader(&spec, protocol::WATCH)?;
-        node.call::<_, Snapshot>(protocol::WATCH, &WatchRequest { stream: false }, false)
-    });
-    match fetched {
+    match snapshot() {
         Ok(snapshot) => observation.apply(WatchFrame::Snapshot(snapshot), now),
         Err(err) => {
             tracing::debug!(remote = name, "remote not reachable: {err:#}");
