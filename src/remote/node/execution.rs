@@ -14,12 +14,12 @@ use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 
 use super::{
-    Execution, ExecutionState, NODE_ROOT_ENV, NodeRoot, PaneProgress, refuse,
+    Execution, ExecutionState, NODE_ROOT_ENV, NodeRoot, PaneProgress, refuse, secrets,
     stop_containers_mounting, validate_id,
 };
 use crate::config::{Config, PaneConfig, RemoteIsolation};
 use crate::multiplexer::{Multiplexer, PaneSetupOptions, tmux::TmuxBackend};
-use crate::remote::protocol::{StartRequest, StartResponse, code, session_name};
+use crate::remote::protocol::{Secrets, StartRequest, StartResponse, code, session_name};
 use crate::shell::shell_quote;
 
 /// Longest socket path tmux can bind on Linux and macOS, with a margin.
@@ -169,9 +169,10 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
 
     let pin = std::env::current_exe().context("Failed to locate the node binary")?;
     let supervisor = format!(
-        "{} sandbox run --node-root {}",
+        "{} sandbox run --node-root {} --node-workspace {}",
         shell_quote(&pin.to_string_lossy()),
-        shell_quote(&root.path.to_string_lossy())
+        shell_quote(&root.path.to_string_lossy()),
+        request.ws_id
     );
     let prompt = workspace
         .prompt_path
@@ -180,6 +181,14 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
     let working_dir = workspace.working_dir().to_path_buf();
     let worktree = workspace.worktree_path.clone();
     let backend = TmuxBackend::for_socket(&socket.to_string_lossy());
+    // Containers get the workspace's secrets from their supervisor; panes
+    // without one get them in their session's environment.
+    let session_secrets = match workspace.isolation {
+        RemoteIsolation::None => {
+            secrets::for_execution(root, &request.ws_id, workspace.agent_kind(&config))?
+        }
+        RemoteIsolation::Container => Default::default(),
+    };
 
     for (index, pane) in &plan {
         let execution = workspace.execution.as_ref().expect("execution recorded");
@@ -195,6 +204,9 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
             .args(["kill-session", "-t", &format!("={name}")])
             .output();
         let pane_id = new_session(&socket, &conf, &name, &working_dir, &config_path)?;
+        if !session_secrets.0.is_empty() {
+            set_session_env(root, &socket, &name, &session_secrets)?;
+        }
         let single = PaneConfig {
             split: None,
             target: None,
@@ -271,6 +283,24 @@ fn new_session(
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Set `secrets` in a session's environment through a private file, so no
+/// value appears in argv; panes spawned afterwards inherit them.
+fn set_session_env(root: &NodeRoot, socket: &Path, name: &str, secrets: &Secrets) -> Result<()> {
+    let file = secrets::tmux_file(root, name, secrets)?;
+    let output = tmux(socket)
+        .arg("source-file")
+        .arg(&*file)
+        .output()
+        .context("Failed to run tmux")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to set the environment of session {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use crate::config::{Config, SandboxBackend, SandboxRuntime};
 use crate::frozen_config::FrozenConfigGuard;
 use crate::multiplexer;
+use crate::remote::node::{NodeRoot, secrets};
 use crate::sandbox::build_docker_run_args;
 use crate::sandbox::ensure_sandbox_config_dirs;
 use crate::sandbox::lima;
@@ -66,19 +67,21 @@ impl Drop for ContainerGuard {
 /// Detects the sandbox backend from config and dispatches to the
 /// appropriate handler (Lima VM or Docker/Podman container).
 ///
-/// With `node_root`, the supervisor runs on a remote node for an agent the
-/// laptop started: the config is the workspace's frozen snapshot, state
-/// lives under the node root, and listeners bind only to docker's bridge.
+/// With `node` (root and workspace id), the supervisor runs on a remote node
+/// for an agent the laptop started: the config is the workspace's frozen
+/// snapshot, state lives under the node root, listeners bind only to
+/// docker's bridge, and the container gets the workspace's secrets.
 pub fn run(
     worktree: PathBuf,
     worktree_root: Option<PathBuf>,
     command: Vec<String>,
-    node_root: Option<PathBuf>,
+    node: Option<(PathBuf, String)>,
 ) -> Result<i32> {
     if command.is_empty() {
         bail!("No command specified. Usage: workmux sandbox run <worktree> -- <command...>");
     }
-    if let Some(root) = &node_root {
+    let node_root = node.as_ref().map(|(root, _)| root);
+    if let Some(root) = node_root {
         if std::env::var_os(crate::frozen_config::FROZEN_CONFIG_ENV).is_none() {
             bail!(
                 "--node-root needs the workspace config in {}",
@@ -102,13 +105,19 @@ pub fn run(
             let wt_root = worktree_root
                 .map(|p| p.canonicalize().unwrap_or(p))
                 .unwrap_or_else(|| worktree.clone());
+            let node = node
+                .map(|(root, ws_id)| -> Result<_> {
+                    crate::remote::node::validate_id(&ws_id, 'w', "workspace id")?;
+                    Ok((NodeRoot::at(root)?, ws_id))
+                })
+                .transpose()?;
             run_container(
                 &config,
                 frozen_config.path(),
                 &worktree,
                 &wt_root,
                 &command,
-                node_root.is_some(),
+                node.as_ref().map(|(root, ws_id)| (root, ws_id.as_str())),
             )
         }
     }
@@ -352,8 +361,9 @@ fn run_container(
     pane_cwd: &Path,
     worktree_root: &Path,
     command: &[String],
-    on_node: bool,
+    node: Option<(&NodeRoot, &str)>,
 ) -> Result<i32> {
+    let on_node = node.is_some();
     info!(
         pane_cwd = %pane_cwd.display(),
         worktree_root = %worktree_root.display(),
@@ -531,6 +541,19 @@ fn run_container(
     // Insert --name after "run" (index 0 is "run")
     docker_args.insert(1, "--name".to_string());
     docker_args.insert(2, container_name.clone());
+
+    // A node's workspace environment goes through a private pipe, so values
+    // never appear in argv or change this process's own environment.
+    let _env_file = match node {
+        Some((root, ws_id)) => {
+            let secrets = secrets::for_execution(root, ws_id, Some(agent))?;
+            let file = secrets::env_file(root, &container_name, &secrets)?;
+            docker_args.insert(3, "--env-file".to_string());
+            docker_args.insert(4, file.to_string_lossy().into_owned());
+            Some(file)
+        }
+        None => None,
+    };
 
     let env_keys: Vec<&str> = config.sandbox.env_vars().iter().map(|(k, _)| *k).collect();
     let redacted_args: Vec<_> = docker_args

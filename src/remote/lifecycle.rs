@@ -209,6 +209,7 @@ pub fn create(
             run_hooks: request.options.run_hooks,
             git_user_name: git_config(&project_root, "user.name"),
             git_user_email: git_config(&project_root, "user.email"),
+            secrets: portable.secrets.clone(),
         };
         let provisioned: ProvisionResponse = node
             .call(

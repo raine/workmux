@@ -5,6 +5,10 @@
 //! an allowlist. Fields that name laptop resources (paths, devices, VM
 //! settings, host commands) are dropped and reported, so a new config field
 //! stays on the laptop until it is deliberately made portable.
+//!
+//! The container environment (`sandbox.env_passthrough` values as the
+//! laptop has them now, then `sandbox.env`) travels separately as secrets,
+//! never in the config.
 
 use std::path::Path;
 
@@ -12,6 +16,8 @@ use crate::config::{
     Config, ConfigLocation, ContainerConfig, RemoteIsolation, SandboxBackend, SandboxConfig,
     SandboxRuntime,
 };
+use crate::remote::node::secrets::representable;
+use crate::remote::protocol::Secrets;
 
 /// A config for the node and the laptop settings it leaves behind.
 pub struct Portable {
@@ -19,6 +25,8 @@ pub struct Portable {
     pub location: Option<ConfigLocation>,
     /// One line per dropped or changed setting, naming it but never its value.
     pub dropped: Vec<String>,
+    /// Environment for the workspace's containers.
+    pub secrets: Secrets,
 }
 
 /// Build the node config from the laptop's effective `config`.
@@ -30,6 +38,18 @@ pub fn portable_config(
     location: Option<&ConfigLocation>,
     isolation: RemoteIsolation,
     remote_worktree: &Path,
+) -> Portable {
+    portable_config_with_env(config, location, isolation, remote_worktree, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn portable_config_with_env(
+    config: &Config,
+    location: Option<&ConfigLocation>,
+    isolation: RemoteIsolation,
+    remote_worktree: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
 ) -> Portable {
     let mut dropped = Vec::new();
     let mut portable = Config {
@@ -60,12 +80,16 @@ pub fn portable_config(
             .push("agent: an absolute laptop path is kept but may not exist on the remote".into());
     }
 
+    let mut secrets = Secrets::default();
     portable.sandbox = match isolation {
         RemoteIsolation::None => SandboxConfig {
             enabled: Some(false),
             ..SandboxConfig::default()
         },
-        RemoteIsolation::Container => portable_sandbox(&config.sandbox, &mut dropped),
+        RemoteIsolation::Container => {
+            secrets = snapshot_env(&config.sandbox, env, &mut dropped);
+            portable_sandbox(&config.sandbox, &mut dropped)
+        }
     };
 
     let location = location.map(|location| {
@@ -86,7 +110,68 @@ pub fn portable_config(
         config: portable,
         location,
         dropped,
+        secrets,
     }
+}
+
+/// The container environment as the laptop has it now. Variables that are
+/// unset here or that docker cannot carry are reported by name.
+fn snapshot_env(
+    sandbox: &SandboxConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    dropped: &mut Vec<String>,
+) -> Secrets {
+    let mut secrets = Secrets::default();
+    let mut unset = Vec::new();
+    for name in sandbox.env_passthrough() {
+        match env(name) {
+            Some(value) => {
+                secrets.0.insert(name.to_string(), value);
+            }
+            None => unset.push(name),
+        }
+    }
+    for (name, value) in sandbox.env_vars() {
+        secrets.0.insert(name.to_string(), value.to_string());
+    }
+    let mut unsendable = Vec::new();
+    secrets.0.retain(|name, value| {
+        let ok = crate::config::is_valid_env_name(name) && representable(value);
+        if !ok {
+            unsendable.push(name.clone());
+        }
+        ok
+    });
+    if !unset.is_empty() {
+        dropped.push(format!(
+            "sandbox.env_passthrough: not set here, so not sent: {}",
+            unset.join(", ")
+        ));
+    }
+    if !unsendable.is_empty() {
+        dropped.push(format!(
+            "sandbox.env/env_passthrough: invalid name, or a line break or NUL in \
+             the value: {}",
+            unsendable.join(", ")
+        ));
+    }
+    secrets
+}
+
+/// `sandbox.image` unless it names a Lima image.
+fn portable_image(sandbox: &SandboxConfig) -> Option<String> {
+    (sandbox.backend() != SandboxBackend::Lima)
+        .then(|| sandbox.image.clone())
+        .flatten()
+}
+
+/// The image remote containers of `agent` run.
+pub fn remote_image(sandbox: &SandboxConfig, agent: &str) -> String {
+    SandboxConfig {
+        image: portable_image(sandbox),
+        ..SandboxConfig::default()
+    }
+    .resolved_image(agent)
 }
 
 fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> SandboxConfig {
@@ -131,16 +216,6 @@ fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> Sandb
             "host commands are off on remotes",
         );
     }
-    if sandbox
-        .env_passthrough
-        .as_ref()
-        .is_some_and(|e| !e.is_empty())
-    {
-        drop(
-            "env_passthrough",
-            "laptop environment values are not sent to remotes",
-        );
-    }
     let container = &sandbox.container;
     if container.devices.as_ref().is_some_and(|d| !d.is_empty()) {
         drop("container.devices", "laptop devices");
@@ -153,12 +228,7 @@ fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> Sandb
         enabled: Some(true),
         backend: Some(SandboxBackend::Container),
         target: sandbox.target.clone(),
-        image: if laptop_lima {
-            None
-        } else {
-            sandbox.image.clone()
-        },
-        env: sandbox.env.clone(),
+        image: portable_image(sandbox),
         toolchain: sandbox.toolchain.clone(),
         network: sandbox.network.clone(),
         container: ContainerConfig {
@@ -204,13 +274,18 @@ mod tests {
         config
     }
 
+    fn laptop_env(name: &str) -> Option<String> {
+        (name == "GITHUB_TOKEN").then(|| "ghp_secret".to_string())
+    }
+
     #[test]
     fn container_isolation_forces_docker_and_reports_drops() {
-        let portable = portable_config(
+        let portable = portable_config_with_env(
             &laptop(),
             None,
             RemoteIsolation::Container,
             Path::new("/n/wt"),
+            &laptop_env,
         );
         let sandbox = &portable.config.sandbox;
         assert!(sandbox.is_enabled());
@@ -234,7 +309,6 @@ mod tests {
             "sandbox.container.runtime",
             "sandbox.rpc_host",
             "sandbox.extra_mounts",
-            "sandbox.env_passthrough",
             "sandbox.container.oci_runtime",
             "hook_shell",
         ] {
@@ -242,6 +316,64 @@ mod tests {
         }
         assert!(!report.contains("GITHUB_TOKEN"), "{report}");
         assert!(!report.contains("/Users/me"), "{report}");
+    }
+
+    #[test]
+    fn container_env_travels_as_secrets_only() {
+        let mut config = laptop();
+        config.sandbox.env_passthrough = Some(vec![
+            "GITHUB_TOKEN".into(),
+            "UNSET_HERE".into(),
+            "API_KEY".into(),
+        ]);
+        config.sandbox.env = Some(
+            [("API_KEY", "explicit"), ("MULTI", "a\nb"), ("PLAIN", "x y")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        let env = |name: &str| match name {
+            "API_KEY" => Some("from-laptop".to_string()),
+            name => laptop_env(name),
+        };
+        let portable = portable_config_with_env(
+            &config,
+            None,
+            RemoteIsolation::Container,
+            Path::new("/n/wt"),
+            &env,
+        );
+        let secrets: Vec<(&str, &str)> = portable
+            .secrets
+            .0
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            secrets,
+            [
+                ("API_KEY", "explicit"),
+                ("GITHUB_TOKEN", "ghp_secret"),
+                ("PLAIN", "x y")
+            ]
+        );
+        assert!(portable.config.sandbox.env.is_none());
+        assert!(portable.config.sandbox.env_passthrough.is_none());
+        let report = portable.dropped.join("\n");
+        assert!(report.contains("UNSET_HERE"), "{report}");
+        assert!(report.contains("MULTI"), "{report}");
+        for value in ["explicit", "ghp_secret", "a\nb"] {
+            assert!(!report.contains(value), "{report}");
+        }
+
+        let none = portable_config_with_env(
+            &config,
+            None,
+            RemoteIsolation::None,
+            Path::new("/n/wt"),
+            &env,
+        );
+        assert!(none.secrets.0.is_empty());
     }
 
     #[test]

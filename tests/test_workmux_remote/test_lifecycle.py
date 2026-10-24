@@ -435,3 +435,47 @@ def test_host_only_workspaces_never_need_docker(
     )
     assert "Removed remote workspace 'feat'" in removed.stdout, removed.stderr
     assert node.workspaces() == []
+
+
+def test_setup_token_reaches_claude_panes_on_the_host(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    """With `isolation: none` the node-wide setup token is in the session
+    environment of a Claude workspace's panes."""
+    token = "sk-ant-oat01-fake-token"
+    (mux_server.fake_bin_dir / "claude").write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = setup-token ] && { echo "fake setup-token flow"; exit 0; }\n'
+        'echo "TOKEN-IN-PANE:${CLAUDE_CODE_OAUTH_TOKEN:-none}"\n'
+        "exec sh\n"
+    )
+    (mux_server.fake_bin_dir / "claude").chmod(0o755)
+    login = subprocess.run(
+        [str(workmux_exe_path), "remote", "login", "lo", "claude", "--setup-token"],
+        cwd=mux_repo_path,
+        env={**mux_server.env, **LOOPBACK},
+        input=f"{token}\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert login.returncode == 0, login.stderr
+    assert (node.root / "secrets" / "node.json").stat().st_mode & 0o777 == 0o600
+
+    repo = mux_repo_path
+    (repo / ".workmux.yaml").write_text(
+        yaml.dump(
+            {"nerdfont": False, "agent": "claude", "panes": [{"command": "<agent>"}]}
+        )
+    )
+    git(repo, "add", ".workmux.yaml")
+    git(repo, "commit", "-m", "claude panes")
+    added = wm(mux_server, workmux_exe_path, repo, "add feat --remote lo")
+    assert "Successfully created remote workspace" in added.stdout, added.stderr
+    wait_for_pane_output(
+        mux_server, get_window_name("feat"), f"TOKEN-IN-PANE:{token}", timeout=20
+    )
+    assert list((node.root / "secrets").glob("*.tmux")) == []

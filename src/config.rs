@@ -1080,7 +1080,7 @@ impl AgentEnvValue {
     }
 }
 
-fn is_valid_env_name(name: &str) -> bool {
+pub(crate) fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
