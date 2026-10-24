@@ -6,6 +6,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use super::RemoteSpec;
+use super::client::Node;
+use super::credentials;
 use super::install::{self, NodeStatus, Pin};
 use super::protocol::{self, HelloFailure};
 use super::transport::{Input, Transport};
@@ -339,7 +341,86 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         print_row(&row);
         rows.push(row);
     }
+    let agents = configured_agents(config);
+    if !agents.is_empty() {
+        let login_rows = if matches!(node, NodeStatus::Ready(_)) {
+            let node = Node {
+                spec: spec.clone(),
+                transport,
+                pin,
+            };
+            let request = protocol::CredentialsRequest {
+                agents: agents.iter().map(|agent| agent.to_string()).collect(),
+            };
+            match node.call(protocol::CREDENTIALS, &request, false) {
+                Ok(response) => credential_rows(&spec.name, &response),
+                Err(err) => vec![Row::new("logins", Level::Warn, format!("{err:#}"))],
+            }
+        } else {
+            vec![Row::new(
+                "logins",
+                Level::Skip,
+                "the node binary is not ready",
+            )]
+        };
+        for row in login_rows {
+            print_row(&row);
+            rows.push(row);
+        }
+    }
     Ok(rows.iter().all(|row| row.level != Level::Fail))
+}
+
+/// Agents the config can start: the default agent and the kinds of the
+/// `agents:` entries, those remote logins know.
+fn configured_agents(config: &Config) -> Vec<&'static str> {
+    let default = crate::multiplexer::agent::resolve_selected_agent(config, None);
+    let entries = config
+        .agents
+        .keys()
+        .filter_map(|name| crate::multiplexer::agent::resolve_selected_agent(config, Some(name)));
+    let mut agents: Vec<&'static str> = Vec::new();
+    for agent in default.into_iter().chain(entries) {
+        let kind = agent.kind();
+        if credentials::agent_auth(kind).is_ok() && !agents.contains(&kind) {
+            agents.push(kind);
+        }
+    }
+    agents
+}
+
+fn credential_rows(remote: &str, response: &protocol::CredentialsResponse) -> Vec<Row> {
+    response
+        .agents
+        .iter()
+        .filter_map(|agent| {
+            let auth = credentials::agent_auth(&agent.agent).ok()?;
+            let login = format!("workmux remote login {remote} {}", auth.agent);
+            let row = if auth.files.is_empty() {
+                Row::new(
+                    auth.agent,
+                    Level::Skip,
+                    "cannot tell: its logins live in its database",
+                )
+                .fix(format!("if it asks you to log in: {login}"))
+            } else if agent.found.is_empty() {
+                let fix = if auth.agent == "claude" {
+                    format!("{login} (or --import, or --setup-token)")
+                } else {
+                    format!("{login} (or --import)")
+                };
+                Row::new(
+                    auth.agent,
+                    Level::Warn,
+                    "no login found (an API key in sandbox.env may still work)",
+                )
+                .fix(fix)
+            } else {
+                Row::new(auth.agent, Level::Ok, agent.found.join(", "))
+            };
+            Some(row)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -565,5 +646,55 @@ mod tests {
         assert!(!fact(&facts, "os").is_empty());
         assert!(!fact(&facts, "user").is_empty());
         assert!(facts.contains_key("linger"));
+    }
+
+    #[test]
+    fn configured_agents_are_the_default_and_entry_kinds() {
+        let mut config = Config {
+            agent: Some("claude".into()),
+            ..Config::default()
+        };
+        assert_eq!(configured_agents(&config), ["claude"]);
+        config.agents =
+            serde_yaml::from_str("fast: claude --model haiku\nreview: codex\nlocal: ./my-agent\n")
+                .unwrap();
+        let mut agents = configured_agents(&config);
+        agents.sort();
+        assert_eq!(agents, ["claude", "codex"]);
+    }
+
+    #[test]
+    fn login_rows_warn_with_the_login_command() {
+        let response = protocol::CredentialsResponse {
+            agents: vec![
+                protocol::AgentCredentials {
+                    agent: "claude".into(),
+                    found: vec!["the setup token".into()],
+                },
+                protocol::AgentCredentials {
+                    agent: "codex".into(),
+                    found: vec![],
+                },
+                protocol::AgentCredentials {
+                    agent: "omp".into(),
+                    found: vec![],
+                },
+            ],
+        };
+        let rows = credential_rows("hetzner", &response);
+        let levels: Vec<_> = rows.iter().map(|row| (row.check, row.level)).collect();
+        assert_eq!(
+            levels,
+            [
+                ("claude", Level::Ok),
+                ("codex", Level::Warn),
+                ("omp", Level::Skip)
+            ]
+        );
+        let fix = rows[1].fix.as_deref().unwrap();
+        assert!(
+            fix.starts_with("workmux remote login hetzner codex"),
+            "{fix}"
+        );
     }
 }

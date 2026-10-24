@@ -5,6 +5,8 @@
 //! version changes only when the wire contract changes and must match
 //! exactly; it is independent of the crate version.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::RemoteIsolation;
@@ -18,11 +20,18 @@ pub const CAPABILITIES: &[&str] = &[
     PROVISION_WORKSPACE,
     START_EXECUTION,
     REMOVE_WORKSPACE,
+    LOGIN,
+    CREDENTIALS,
+    PUT_CREDENTIALS,
 ];
 
 pub const PROVISION_WORKSPACE: &str = "provision-workspace";
 pub const START_EXECUTION: &str = "start-execution";
 pub const REMOVE_WORKSPACE: &str = "remove-workspace";
+/// Terminal verb: runs an agent's login flow on the node.
+pub const LOGIN: &str = "login";
+pub const CREDENTIALS: &str = "credentials";
+pub const PUT_CREDENTIALS: &str = "put-credentials";
 
 /// Error codes a node verb reports in its [`ErrorEnvelope`].
 pub mod code {
@@ -91,6 +100,21 @@ pub struct ProvisionPayload {
     /// Laptop `user.name` / `user.email` for commits made on the node.
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
+    /// Environment the workspace's containers get, read on the laptop when
+    /// the workspace is created.
+    #[serde(default)]
+    pub secrets: Secrets,
+}
+
+/// Environment values that may be secret. `Debug` shows names only.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secrets(pub BTreeMap<String, String>);
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
 }
 
 /// One file-tree entry; `path` is relative and never contains `..`.
@@ -160,6 +184,55 @@ pub struct RemoveRequest {
 pub struct RemoveResponse {
     /// The workspace was unknown to the node.
     pub already_removed: bool,
+}
+
+/// `credentials`: which of `agents` have a login on the node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialsRequest {
+    pub agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialsResponse {
+    pub agents: Vec<AgentCredentials>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentCredentials {
+    pub agent: String,
+    /// What holds a login: credential files, or the setup token.
+    pub found: Vec<String>,
+}
+
+/// `put-credentials`: write credential files into the node user's
+/// directory for `agent`. Names come from the agent's fixed set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutCredentialsRequest {
+    pub agent: String,
+    pub files: Vec<CredentialFile>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CredentialFile {
+    pub name: String,
+    /// Base64 contents.
+    pub data: String,
+}
+
+impl std::fmt::Debug for CredentialFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialFile")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutCredentialsResponse {
+    /// Paths written on the node.
+    pub written: Vec<String>,
+    /// Anything the user should know about the result.
+    pub notes: Vec<String>,
 }
 
 /// tmux session of pane `index` of execution `ex_id`.

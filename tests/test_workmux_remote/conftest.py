@@ -36,9 +36,12 @@ class RemoteCli:
             self.env.pop("WORKMUX_REMOTE_LOOPBACK", None)
 
     def write_config(
-        self, remotes: Dict[str, Dict[str, Any]], placement: Optional[str] = None
+        self,
+        remotes: Dict[str, Dict[str, Any]],
+        placement: Optional[str] = None,
+        **extra: Any,
     ) -> None:
-        config: Dict[str, Any] = {"nerdfont": False, "remotes": remotes}
+        config: Dict[str, Any] = {"nerdfont": False, "remotes": remotes, **extra}
         if placement is not None:
             config["placement"] = placement
         config_dir = self.home / ".config" / "workmux"

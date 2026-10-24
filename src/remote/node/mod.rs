@@ -11,15 +11,18 @@
 //! state/workspaces/<ws-id>.config.json       portable config snapshot (0600)
 //! state/workspaces/<ws-id>.lock              held for the duration of a verb
 //! run/tmux.sock, tmux.conf                   node tmux server
+//! secrets/                                   environment values (see `secrets`)
 //! ```
 //!
 //! Verbs never read the remote user's workmux config: a workspace runs the
 //! snapshot the laptop sent when it was provisioned.
 
 pub mod attach;
+pub mod credentials;
 pub mod execution;
 pub mod provision;
 pub mod remove;
+pub mod secrets;
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -159,6 +162,7 @@ impl NodeRoot {
     /// Delete a workspace's records; the lock file goes last.
     pub fn forget(&self, ws_id: &str) -> Result<()> {
         for path in [
+            self.workspace_secrets_path(ws_id),
             self.config_path(ws_id),
             self.record_path(ws_id),
             self.lock_path(ws_id),
@@ -225,6 +229,12 @@ impl Workspace {
 
     pub fn working_dir(&self) -> &Path {
         self.working_dir.as_deref().unwrap_or(&self.worktree_path)
+    }
+
+    /// Kind of the agent the workspace runs (`claude`, `codex`, ...).
+    pub fn agent_kind(&self, config: &Config) -> Option<&'static str> {
+        crate::multiplexer::agent::resolve_selected_agent(config, self.agent.as_deref())
+            .map(|agent| agent.kind())
     }
 }
 
@@ -372,7 +382,7 @@ pub fn run_hook(
 
 /// Environment of a login shell, so hooks see the PATH and variables an
 /// interactive login would. Falls back to the current environment.
-fn login_env() -> Vec<(String, String)> {
+pub(super) fn login_env() -> Vec<(String, String)> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-l", "-c", "env -0"]);
@@ -391,7 +401,7 @@ fn login_env() -> Vec<(String, String)> {
             };
             eprintln!(
                 "workmux: could not read the login environment of {shell} ({detail}); \
-                 hooks run with the ssh session environment"
+                 using the ssh session environment"
             );
             Vec::new()
         }

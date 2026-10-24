@@ -8,6 +8,7 @@
 pub mod attach;
 pub mod cache;
 pub mod client;
+pub mod credentials;
 pub mod doctor;
 pub mod install;
 pub mod lifecycle;

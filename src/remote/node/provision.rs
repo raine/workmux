@@ -175,6 +175,7 @@ fn provision_worktree(
     // runs with what the user fixed and the laptop lays out the same panes.
     let config_path = root.config_path(&ws_id);
     crate::frozen_config::write_document(&config_path, &payload.config)?;
+    super::secrets::save_workspace(root, &ws_id, &payload.secrets)?;
     workspace.agent = payload.agent.clone();
     workspace.prompt_file_only = payload.prompt_file_only;
     root.save(workspace)?;
