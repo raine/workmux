@@ -175,6 +175,11 @@ def local_records(env: TmuxEnvironment) -> List[dict]:
     return [json.loads(p.read_text()) for p in sorted(directory.glob("*.json"))]
 
 
+def observation_path(env: TmuxEnvironment) -> Path:
+    """The laptop's observation of the loopback remote."""
+    return env.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
+
+
 def wm(
     env: TmuxEnvironment,
     exe: Path,

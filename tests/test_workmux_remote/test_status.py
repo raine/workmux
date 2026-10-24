@@ -21,7 +21,7 @@ from ..conftest import (
 )
 from ..support.codex import CODEX_SIMULATOR
 from ..test_popup_navigation import attached_client
-from .conftest import LOOPBACK, Node, git, local_records, wm
+from .conftest import LOOPBACK, Node, git, local_records, observation_path, wm
 
 pytestmark = pytest.mark.tmux_only
 
@@ -79,10 +79,6 @@ def local_states(env: TmuxEnvironment) -> List[dict]:
 def remote_state(env: TmuxEnvironment) -> Optional[dict]:
     states = [state for state in local_states(env) if state.get("remote")]
     return states[0] if len(states) == 1 else None
-
-
-def observation_path(env: TmuxEnvironment) -> Path:
-    return env.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
 
 
 def observed_since(env: TmuxEnvironment, since: float) -> bool:
@@ -498,7 +494,7 @@ def test_an_older_observer_does_not_hide_the_node(
 
     # An older build observes the remote: it holds its lock and keeps writing
     # a connected observation in its own format that lists no agents.
-    directory = mux_server.home_path / ".local/state/workmux/remote/lo"
+    directory = observation_path(mux_server).parent
     legacy = directory / "observed.json"
     holder = subprocess.Popen(
         [
