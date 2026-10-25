@@ -89,9 +89,13 @@ const wall = testimonials.slice(1);
           >
           {stars ?? 'GitHub'}
         </a>
-        <button class="w-theme" data-theme-toggle aria-label="Toggle theme">
+        <button
+          class="w-theme"
+          data-theme-toggle
+          aria-label="Color theme: Dark. Switch to System"
+          title="Color theme: Dark. Switch to System"
+        >
           <svg
-            class="w-sun"
             width="16"
             height="16"
             viewBox="0 0 24 24"
@@ -99,22 +103,67 @@ const wall = testimonials.slice(1);
             stroke="currentColor"
             stroke-width="2"
             aria-hidden="true"
-            ><circle cx="12" cy="12" r="4"></circle><path
-              d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
-            ></path></svg
           >
-          <svg
-            class="w-moon"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            aria-hidden="true"
-            ><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg
-          >
+            <path
+              data-theme-icon
+              d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+          </svg>
         </button>
+        <script is:inline>
+          // Initialize the icon while parsing, before deferred scripts or first paint.
+          (() => {
+            const themeToggle = document.querySelector('[data-theme-toggle]');
+            const nextTheme = { auto: 'light', light: 'dark', dark: 'auto' };
+            const themeLabels = {
+              auto: 'System',
+              light: 'Light',
+              dark: 'Dark',
+            };
+            const themeIcons = {
+              auto: 'M3 3h18v13H3zM12 16v5M8 21h8',
+              light:
+                'M16 12a4 4 0 1 0-8 0 4 4 0 0 0 8 0M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+              dark: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
+            };
+            const systemTheme = matchMedia('(prefers-color-scheme: light)');
+            const loadTheme = () => {
+              const stored = localStorage.getItem('starlight-theme');
+              // Starlight stores an explicit System preference as an empty string.
+              return stored === ''
+                ? 'auto'
+                : stored === 'light'
+                  ? 'light'
+                  : 'dark';
+            };
+            const applyTheme = () => {
+              const theme = loadTheme();
+              if (themeToggle) {
+                const label = `Color theme: ${themeLabels[theme]}. Switch to ${themeLabels[nextTheme[theme]]}`;
+                themeToggle.setAttribute('aria-label', label);
+                themeToggle.title = label;
+                themeToggle
+                  .querySelector('[data-theme-icon]')
+                  ?.setAttribute('d', themeIcons[theme]);
+              }
+              document.documentElement.dataset.theme =
+                theme === 'auto'
+                  ? systemTheme.matches
+                    ? 'light'
+                    : 'dark'
+                  : theme;
+            };
+            themeToggle?.addEventListener('click', () => {
+              const theme = nextTheme[loadTheme()];
+              localStorage.setItem(
+                'starlight-theme',
+                theme === 'auto' ? '' : theme,
+              );
+              applyTheme();
+            });
+            systemTheme.addEventListener('change', applyTheme);
+            applyTheme();
+          })();
+        </script>
         <a class="w-btn w-btn-sm" href="/guide/quick-start/">Get started</a>
       </div>
     </div>
@@ -692,13 +741,9 @@ const wall = testimonials.slice(1);
     background: var(--sunken);
   }
 
-  .w-moon,
-  :global(html[data-theme='dark']) .w-sun {
-    display: none;
-  }
-
-  :global(html[data-theme='dark']) .w-moon {
-    display: block;
+  .w-theme:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
   }
 
   .w-btn {
