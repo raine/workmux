@@ -198,15 +198,13 @@ impl Node {
             .iter()
             .map(|name| format!("+{sha}:{name}"))
             .collect();
+        // `--quiet` hides the ref summary, which names internal refs;
+        // `--progress` still reports the transfer.
         let status = self
             .git_over_ssh(project_root)?
-            .args([
-                "push",
-                "--no-verify",
-                "--atomic",
-                if progress { "--progress" } else { "--quiet" },
-                &self.repo_url(repo_path),
-            ])
+            .args(["push", "--no-verify", "--atomic", "--quiet"])
+            .args(progress.then_some("--progress"))
+            .arg(self.repo_url(repo_path))
             .args(&refspecs)
             .status()
             .context("Failed to run git push")?;
