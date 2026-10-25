@@ -456,15 +456,19 @@ fn apply_files(workspace: &Workspace, seed_root: &Path, payload: &ProvisionPaylo
 /// they never look like unsaved work or get committed by an agent.
 fn exclude_ignored(workspace: &Workspace, ignored: &[String]) -> Result<()> {
     let worktree = &workspace.worktree_path;
-    let mut patterns = String::new();
+    let mut paths = Vec::new();
     for path in ignored {
         let full = workspace.working_dir().join(safe_relative(path)?);
         let Ok(relative) = full.strip_prefix(worktree) else {
             continue;
         };
-        let relative = relative.to_string_lossy();
-        if !crate::git::is_path_ignored(worktree, &relative) {
-            patterns.push_str(&format!("/{relative}\n"));
+        paths.push(relative.to_string_lossy().into_owned());
+    }
+    let already_ignored = crate::git::ignored_paths(worktree, &paths);
+    let mut patterns = String::new();
+    for path in paths {
+        if !already_ignored.contains(&path) {
+            patterns.push_str(&format!("/{path}\n"));
         }
     }
     if patterns.is_empty() {

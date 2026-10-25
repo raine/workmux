@@ -491,6 +491,7 @@ fn collect_files(
         ..Files::default()
     };
     let mut budget = TRANSFER_LIMIT;
+    let mut selected = Vec::new();
     for (path, kind) in &plan.sources {
         let relative = path.strip_prefix(source)?.to_path_buf();
         let name = relative.to_string_lossy().into_owned();
@@ -498,9 +499,7 @@ fn collect_files(
             && cached.contains(&seed_dir.join(&relative).to_string_lossy().into_owned())
         {
             files.cached_seeds.push(name.clone());
-            if crate::git::is_path_ignored(source, &name) {
-                files.ignored.push(name);
-            }
+            selected.push(name);
             continue;
         }
         let size = tree_size(path, true)?;
@@ -524,11 +523,13 @@ fn collect_files(
             FileOperationKind::Symlink => &mut files.seeds,
         };
         collect_tree(path, &relative, true, entries)?;
-        let relative = relative.to_string_lossy().into_owned();
-        if crate::git::is_path_ignored(source, &relative) {
-            files.ignored.push(relative);
-        }
+        selected.push(name);
     }
+    let ignored = crate::git::ignored_paths(source, &selected);
+    files.ignored = selected
+        .into_iter()
+        .filter(|path| ignored.contains(path))
+        .collect();
     Ok(files)
 }
 
