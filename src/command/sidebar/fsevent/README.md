@@ -25,9 +25,16 @@ well as source builds. Cargo removes `[patch]` overrides when publishing.
   upstream's crate-internal test harness.
 
 Run `cargo test git_watch_churn_delivers_events_and_stops` on macOS to exercise
-sibling watch/unwatch churn, mutation delivery, and destruction in a bounded
+100 sibling watch/unwatch cycles, mutation delivery, and destruction in a bounded
 child. Churn exercises the race probabilistically; its deadline also bounds
 failures in registration and destruction.
+
+For extended stress coverage, run
+`cargo test git_watch_churn_stress_delivers_events_and_stops -- --ignored`.
+This performs 10,000 cycles with a 15-minute child deadline. It is excluded from
+routine checks because FSEvents stream restarts can take several minutes in
+aggregate even when shutdown is working. Progress is included in failure output
+to distinguish slow churn from a stalled watcher.
 
 Remove this module and its direct FFI dependencies when adopting an upstream
 release with suitable registration-failure handling. rc.6 contains the shutdown

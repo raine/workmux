@@ -2813,13 +2813,27 @@ mod tests {
     fn git_watch_churn_delivers_events_and_stops() {
         const TEST: &str =
             "command::sidebar::daemon::tests::git_watch_churn_delivers_events_and_stops";
+        run_git_watch_churn(TEST, 100, Duration::from_secs(180));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual FSEvents watch churn stress test"]
+    fn git_watch_churn_stress_delivers_events_and_stops() {
+        const TEST: &str =
+            "command::sidebar::daemon::tests::git_watch_churn_stress_delivers_events_and_stops";
+        run_git_watch_churn(TEST, 10_000, Duration::from_secs(900));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_git_watch_churn(test_name: &str, iterations: usize, timeout: Duration) {
         let temp = tempfile::tempdir().unwrap();
-        if !crate::test_support::is_isolated_child(TEST) {
+        if !crate::test_support::is_isolated_child(test_name) {
             crate::test_support::run_isolated_test_with_timeout(
-                TEST,
+                test_name,
                 temp.path(),
                 &[],
-                Duration::from_secs(180),
+                timeout,
             );
             return;
         }
@@ -2846,7 +2860,14 @@ mod tests {
         ));
         // Sibling roots require stream restarts even on backends that coalesce
         // nested watches. Each registration immediately follows a fresh start.
-        for _ in 0..10_000 {
+        let churn_started = Instant::now();
+        for iteration in 0..iterations {
+            if iteration % 100 == 0 {
+                eprintln!(
+                    "watch churn {iteration}/{iterations}: {:?}",
+                    churn_started.elapsed()
+                );
+            }
             assert!(add_watch(
                 &mut watcher,
                 &b,
@@ -2856,6 +2877,7 @@ mod tests {
             ));
             remove_worktree_watch(&mut watcher, &b, &b, &mut reverse);
         }
+        eprintln!("watch churn complete: {:?}", churn_started.elapsed());
         let changed = a.join("changed");
         std::fs::write(&changed, "mutation").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);

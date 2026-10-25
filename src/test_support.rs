@@ -36,6 +36,8 @@ fn run_isolated_test_inner(
     command
         .arg(test_name)
         .arg("--exact")
+        // The parent may be an explicitly selected ignored stress test.
+        .arg("--include-ignored")
         .arg("--nocapture")
         .current_dir(cwd)
         .env(ISOLATED_TEST_ENV, test_name);
