@@ -1,6 +1,6 @@
 //! `workmux node <verb> --json`: the entry point the laptop calls on a
-//! remote node. Each verb reads one JSON object on stdin and writes one JSON
-//! document on stdout; failures write an error envelope and exit 1.
+//! remote node. Provisioning reads a compressed stream; other verbs read JSON.
+//! Responses are JSON; failures write an error envelope and exit 1.
 
 use std::io::{IsTerminal, Read};
 
@@ -157,51 +157,70 @@ pub fn run(args: NodeArgs) -> Result<()> {
         }
         _ => {}
     }
-    let response = read_request().and_then(|request| match args.verb {
-        NodeVerb::Hello { .. } => Ok(serde_json::to_value(Hello::local())?),
-        NodeVerb::ProvisionWorkspace { .. } => serve(request, |root, request| {
-            node::provision::provision(&root, request)
-        }),
-        NodeVerb::StartExecution { .. } => serve(request, |root, request| {
-            node::execution::start(&root, request)
-        }),
-        NodeVerb::RemoveWorkspace { .. } => serve(request, |root, request| {
-            node::remove::remove(&root, request)
-        }),
-        NodeVerb::Credentials { .. } => serve(request, |root, request| {
-            node::credentials::check(&root, request)
-        }),
-        NodeVerb::PutCredentials { .. } => serve(request, |root, request| {
-            node::credentials::put(&root, request)
-        }),
-        NodeVerb::Watch { .. } => serve(request, |root, request: observe::WatchRequest| {
-            if request.stream {
-                observe::stream(&root)?;
-                std::process::exit(0);
+    let response = if matches!(args.verb, NodeVerb::ProvisionWorkspace { .. }) {
+        (|| -> Result<serde_json::Value> {
+            let mut reader = flate2::bufread::GzDecoder::new(std::io::stdin().lock());
+            let mut request: crate::remote::protocol::ProvisionRequest =
+                crate::remote::transfer::metadata(&mut reader)?;
+            let entries = request
+                .payload
+                .iter_mut()
+                .flat_map(|payload| payload.copies.iter_mut().chain(&mut payload.seeds));
+            let _stage = crate::remote::transfer::read_files(&mut reader, entries)?;
+            Ok(serde_json::to_value(node::provision::provision(
+                &NodeRoot::from_env()?,
+                request,
+            )?)?)
+        })()
+    } else {
+        read_request().and_then(|request| match args.verb {
+            NodeVerb::Hello { .. } => Ok(serde_json::to_value(Hello::local())?),
+            NodeVerb::ProvisionWorkspace { .. } => unreachable!("handled above"),
+            NodeVerb::StartExecution { .. } => serve(request, |root, request| {
+                node::execution::start(&root, request)
+            }),
+            NodeVerb::RemoveWorkspace { .. } => serve(request, |root, request| {
+                node::remove::remove(&root, request)
+            }),
+            NodeVerb::Credentials { .. } => serve(request, |root, request| {
+                node::credentials::check(&root, request)
+            }),
+            NodeVerb::PutCredentials { .. } => serve(request, |root, request| {
+                node::credentials::put(&root, request)
+            }),
+            NodeVerb::Watch { .. } => serve(request, |root, request: observe::WatchRequest| {
+                if request.stream {
+                    observe::stream(&root)?;
+                    std::process::exit(0);
+                }
+                observe::snapshot(&root)
+            }),
+            NodeVerb::Send { .. } => serve(request, |root, request| observe::send(&root, request)),
+            NodeVerb::Capture { .. } => {
+                serve(request, |root, request| observe::capture(&root, request))
             }
-            observe::snapshot(&root)
-        }),
-        NodeVerb::Send { .. } => serve(request, |root, request| observe::send(&root, request)),
-        NodeVerb::Capture { .. } => {
-            serve(request, |root, request| observe::capture(&root, request))
-        }
-        NodeVerb::StatusHooks { .. } => serve(request, |_, request| hooks::status_hooks(request)),
-        NodeVerb::Export { .. } => {
-            serve(request, |root, request| node::git::export(&root, request))
-        }
-        NodeVerb::Checkout { .. } => {
-            serve(request, |root, request| node::git::checkout(&root, request))
-        }
-        NodeVerb::Rebase { .. } => {
-            serve(request, |root, request| node::git::rebase(&root, request))
-        }
-        NodeVerb::Diff { .. } => serve(request, |root, request| node::git::diff(&root, request)),
-        NodeVerb::Spawn { .. } => {
-            serve(request, |root, request| node::spawn::spawn(&root, request))
-        }
-        NodeVerb::Gc { .. } => serve(request, |root, request| node::gc::gc(&root, request)),
-        NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
-    });
+            NodeVerb::StatusHooks { .. } => {
+                serve(request, |_, request| hooks::status_hooks(request))
+            }
+            NodeVerb::Export { .. } => {
+                serve(request, |root, request| node::git::export(&root, request))
+            }
+            NodeVerb::Checkout { .. } => {
+                serve(request, |root, request| node::git::checkout(&root, request))
+            }
+            NodeVerb::Rebase { .. } => {
+                serve(request, |root, request| node::git::rebase(&root, request))
+            }
+            NodeVerb::Diff { .. } => {
+                serve(request, |root, request| node::git::diff(&root, request))
+            }
+            NodeVerb::Spawn { .. } => {
+                serve(request, |root, request| node::spawn::spawn(&root, request))
+            }
+            NodeVerb::Gc { .. } => serve(request, |root, request| node::gc::gc(&root, request)),
+            NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
+        })
+    };
     match response {
         Ok(value) => {
             println!("{value}");

@@ -13,7 +13,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::{NodeRoot, Workspace, base_ref, git, hook_env, refuse, run_hook, validate_identity};
@@ -23,6 +22,7 @@ use crate::remote::protocol::{
     FileEntry, FileEntryKind, ProvisionPayload, ProvisionRequest, ProvisionResponse,
     WorkspaceIdentity, code,
 };
+use crate::remote::transfer;
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -272,22 +272,31 @@ fn save_recipe(root: &NodeRoot, ws_id: &str, payload: &ProvisionPayload) -> Resu
         symlink_patterns: payload.symlink_patterns.clone(),
         ignored: payload.ignored.clone(),
     };
-    crate::util::write_atomic(&root.files_path(ws_id), &serde_json::to_vec(&recipe)?)
+    let path = root.files_path(ws_id);
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    let mut writer = transfer::encoder(file.as_file_mut(), &recipe)?;
+    transfer::write_files(&mut writer, recipe.copies.iter())?;
+    writer.finish()?;
+    file.persist(path)?;
+    Ok(())
 }
 
 /// The recipe workspace `ws_id` was provisioned with, if it ran file
 /// operations.
-pub(super) fn load_recipe(root: &NodeRoot, ws_id: &str) -> Result<Option<FileRecipe>> {
+pub(super) fn load_recipe(
+    root: &NodeRoot,
+    ws_id: &str,
+) -> Result<Option<(FileRecipe, tempfile::TempDir)>> {
     let path = root.files_path(ws_id);
-    match fs::read(&path) {
-        Ok(bytes) => {
-            Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
-                format!("Corrupt file recipe {}", path.display())
-            })?))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("Failed to read {}", path.display())),
-    }
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("Failed to read {}", path.display())),
+    };
+    let mut reader = flate2::bufread::GzDecoder::new(std::io::BufReader::new(file));
+    let mut recipe: FileRecipe = transfer::metadata(&mut reader)?;
+    let stage = transfer::read_files(&mut reader, recipe.copies.iter_mut())?;
+    Ok(Some((recipe, stage)))
 }
 
 /// Refuse to provision when a path the node writes into the worktree goes
@@ -584,11 +593,8 @@ fn write_entries<'a>(root: &Path, entries: impl IntoIterator<Item = &'a FileEntr
         }
         match &entry.kind {
             FileEntryKind::Dir => fs::create_dir_all(&path)?,
-            FileEntryKind::File { mode, data } => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .with_context(|| format!("Invalid contents for {}", entry.path))?;
-                fs::write(&path, bytes)
+            FileEntryKind::File { mode, source, .. } => {
+                fs::copy(source, &path)
                     .with_context(|| format!("Failed to write {}", path.display()))?;
                 fs::set_permissions(&path, fs::Permissions::from_mode(mode & 0o777))?;
             }
@@ -601,7 +607,7 @@ fn write_entries<'a>(root: &Path, entries: impl IntoIterator<Item = &'a FileEntr
     Ok(())
 }
 
-fn safe_relative(path: &str) -> Result<PathBuf> {
+pub(crate) fn safe_relative(path: &str) -> Result<PathBuf> {
     let relative = PathBuf::from(path);
     let valid = !path.is_empty()
         && relative
@@ -654,18 +660,23 @@ mod tests {
         }
     }
 
-    fn file(path: &str, text: &str) -> FileEntry {
+    fn file(source_dir: &Path, path: &str, text: &str) -> FileEntry {
+        let source = source_dir.join(path);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, text).unwrap();
         FileEntry {
             path: path.into(),
             kind: FileEntryKind::File {
                 mode: 0o640,
-                data: base64::engine::general_purpose::STANDARD.encode(text),
+                size: text.len() as u64,
+                source,
             },
         }
     }
 
     #[test]
     fn seeds_keep_existing_subtrees() {
+        let source = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("deps")).unwrap();
         fs::write(dir.path().join("deps/old"), "old").unwrap();
@@ -674,13 +685,13 @@ mod tests {
                 path: "deps".into(),
                 kind: FileEntryKind::Dir,
             },
-            file("deps/new", "new"),
-            file(".env", "A=1"),
+            file(source.path(), "deps/new", "new"),
+            file(source.path(), ".env", "A=1"),
             FileEntry {
                 path: "lib".into(),
                 kind: FileEntryKind::Dir,
             },
-            file("lib/a", "a"),
+            file(source.path(), "lib/a", "a"),
         ];
         seed_entries(dir.path(), &entries).unwrap();
         assert!(!dir.path().join("deps/new").exists());
@@ -718,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_seeds_are_not_decoded_or_staged() {
+    fn existing_seeds_are_not_read_or_staged() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("cache")).unwrap();
         let entries = [
@@ -730,7 +741,8 @@ mod tests {
                 path: "cache/data".into(),
                 kind: FileEntryKind::File {
                     mode: 0o600,
-                    data: "not base64!".into(),
+                    size: 1,
+                    source: dir.path().join("absent"),
                 },
             },
         ];
@@ -743,10 +755,11 @@ mod tests {
 
     #[test]
     fn copies_overwrite_and_refuse_escaping_symlinks() {
+        let source = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a"), "old").unwrap();
-        write_entries(dir.path(), &[file("a", "new")]).unwrap();
+        write_entries(dir.path(), &[file(source.path(), "a", "new")]).unwrap();
         assert_eq!(fs::read_to_string(dir.path().join("a")).unwrap(), "new");
 
         let entries = vec![
@@ -756,7 +769,7 @@ mod tests {
                     target: outside.path().to_string_lossy().into_owned(),
                 },
             },
-            file("link/escaped", "x"),
+            file(source.path(), "link/escaped", "x"),
         ];
         assert!(write_entries(dir.path(), &entries).is_err());
         assert!(!outside.path().join("escaped").exists());

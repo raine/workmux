@@ -34,7 +34,7 @@ def test_remote_transfer_benchmark(
     node: Node,
     tmp_path: Path,
 ):
-    """CLIENT/NODE select binaries; RATE caps each upload stream in bytes/sec."""
+    """CLIENT/NODE select binaries; RATE caps each opaque upload stream in bytes/sec."""
     binary = os.environ.get("WORKMUX_PERF_NODE", str(workmux_exe_path))
     rate = int(os.environ.get("WORKMUX_PERF_RATE", "0"))
     log = tmp_path / "requests.jsonl"
@@ -42,19 +42,19 @@ def test_remote_transfer_benchmark(
     wrapper = tmp_path / "node-wrapper"
     wrapper.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, subprocess, sys, time\n"
+        "import json, os, subprocess, sys, tempfile, time\n"
         f"binary = {binary!r}\n"
         "if sys.argv[1:3] != ['node', 'provision-workspace']:\n"
         "    os.execv(binary, [binary, *sys.argv[1:]])\n"
-        "chunks = []; size = 0; start = time.monotonic()\n"
+        "spool = tempfile.TemporaryFile(); size = 0; start = time.monotonic()\n"
         "while True:\n"
         "    chunk = sys.stdin.buffer.read1(65536)\n"
         "    if not chunk: break\n"
-        "    chunks.append(chunk); size += len(chunk)\n"
+        "    spool.write(chunk); size += len(chunk)\n"
         f"    if {rate}: time.sleep(max(0, size / {rate or 1} - (time.monotonic() - start)))\n"
-        "raw = b''.join(chunks)\n"
+        "spool.seek(0)\n"
         f"with open({str(log)!r}, 'a') as log: log.write(json.dumps(size) + '\\n')\n"
-        "sys.exit(subprocess.run([binary, *sys.argv[1:]], input=raw).returncode)\n"
+        "sys.exit(subprocess.run([binary, *sys.argv[1:]], stdin=spool).returncode)\n"
     )
     wrapper.chmod(0o755)
     bindir = tmp_path / "bin"
@@ -111,7 +111,18 @@ def test_remote_transfer_benchmark(
         path = repo / name
         path.mkdir(parents=True)
         for i in range(count):
-            (path / str(i)).write_bytes(rng.randbytes(65536))
+            # Text-heavy history and Python packages, plus incompressible
+            # native/package data: 35 MiB total, 7.5 MiB of it random.
+            if name == "tests/venv" and i % 4 == 0:
+                data = rng.randbytes(65536)
+            else:
+                line = (
+                    f"## Investigation {i}: validate remote workspace provisioning.\n"
+                    if name == "history"
+                    else f"def package_function_{i}(value): return value + {i}\n"
+                ).encode()
+                data = (line * (65536 // len(line) + 1))[:65536]
+            (path / str(i)).write_bytes(data)
     (repo / "blob").write_bytes(rng.randbytes(30 * 1024 * 1024))
     git(repo, "add", "blob")
     git(repo, "commit", "-m", "large history")

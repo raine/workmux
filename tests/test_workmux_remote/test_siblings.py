@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ..conftest import (
     TmuxEnvironment,
@@ -95,6 +96,14 @@ def test_agent_spawns_sibling(
 ):
     repo = mux_repo_path
     setup_agent_project(repo, tmp_path / "fake-agent")
+    project = yaml.safe_load((repo / ".workmux.yaml").read_text())
+    project["files"] = {"copy": ["copied-binary"]}
+    commit_project(repo, project)
+    with (repo / ".git/info/exclude").open("a") as exclude:
+        exclude.write("\ncopied-binary\n")
+    binary = bytes(range(256)) * 1024
+    (repo / "copied-binary").write_bytes(binary)
+    (repo / "copied-binary").chmod(0o751)
     added = wm(mux_server, workmux_exe_path, repo, "add feat --remote lo")
     assert "Successfully created remote workspace" in added.stdout, added.stderr
     [parent] = node.workspaces()
@@ -106,6 +115,9 @@ def test_agent_spawns_sibling(
 
     # The parent commits; its sibling starts from that commit.
     worktree = Path(parent["worktree_path"])
+    # Siblings replay the saved recipe, not either mutable source tree.
+    (repo / "copied-binary").unlink()
+    (worktree / "copied-binary").write_text("changed by parent")
     (worktree / "parent.txt").write_text("from the parent\n")
     git(worktree, "add", "parent.txt")
     git(worktree, "commit", "-m", "parent work")
@@ -125,6 +137,8 @@ def test_agent_spawns_sibling(
     assert sibling["project_id"] == parent["project_id"]
     sib_tree = Path(sibling["worktree_path"])
     assert (sib_tree / "parent.txt").is_file()
+    assert (sib_tree / "copied-binary").read_bytes() == binary
+    assert (sib_tree / "copied-binary").stat().st_mode & 0o777 == 0o751
     assert git(sib_tree, "branch", "--show-current") == "sib"
     prompt = sib_tree / ".workmux" / "PROMPT-sib.md"
     assert prompt.read_text().strip() == "sibling-task"
