@@ -197,10 +197,14 @@ impl WorkspaceRecord {
     }
 
     pub fn delete(&self) -> Result<()> {
+        let _lock = super::siblings::lock(&self.remote)?;
         for mode in [DiffMode::Wip, DiffMode::Branch] {
             let _ = fs::remove_file(diff_path(&self.remote, &self.ws_id, mode)?);
         }
         let _ = set_sent_turn(&self.remote, &self.ws_id, None);
+        // Publish the tombstone before deleting the record, so a failed
+        // write cannot leave a removed workspace eligible for adoption.
+        forget(&self.remote, &self.ws_id)?;
         let path = record_path(&root()?, &self.remote, &self.ws_id);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -208,9 +212,6 @@ impl WorkspaceRecord {
             Err(err) => {
                 return Err(err).with_context(|| format!("Failed to remove {}", path.display()));
             }
-        }
-        if let Err(err) = forget(&self.remote, &self.ws_id) {
-            tracing::warn!(handle = %self.handle, "failed to mark record as forgotten: {err:#}");
         }
         Ok(())
     }
@@ -220,8 +221,9 @@ fn forgotten_path(remote: &str, ws_id: &str) -> Result<PathBuf> {
     Ok(remote_dir(remote)?.join("forgotten").join(ws_id))
 }
 
-/// Note when the record of `ws_id` went, so no observation brings it back
-/// while the node still lists it (see `remote::siblings`).
+/// Remember that `ws_id` was deleted. Workspace IDs are not reused, and
+/// in-flight readers can still adopt an old observation after a newer one
+/// no longer lists it, so the tombstone must outlive those observations.
 fn forget(remote: &str, ws_id: &str) -> Result<()> {
     let path = forgotten_path(remote, ws_id)?;
     if let Some(dir) = path.parent() {
@@ -231,31 +233,10 @@ fn forget(remote: &str, ws_id: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
-/// When the laptop last deleted its record of `ws_id` on `remote`, if it
-/// did and the node has not been seen without the workspace since.
+/// When the laptop deleted its record of `ws_id` on `remote`, if it did.
 pub fn forgotten_at(remote: &str, ws_id: &str) -> Option<u64> {
     let text = fs::read_to_string(forgotten_path(remote, ws_id).ok()?).ok()?;
     text.trim().parse().ok()
-}
-
-/// Drop the notes of forgotten workspaces on `remote` that an observation
-/// taken at `seen`, after they went, no longer lists in `present`.
-pub fn prune_forgotten(remote: &str, present: &[&str], seen: u64) {
-    let Ok(dir) = remote_dir(remote).map(|dir| dir.join("forgotten")) else {
-        return;
-    };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(ws_id) = name.to_str() else {
-            continue;
-        };
-        if !present.contains(&ws_id) && forgotten_at(remote, ws_id).is_none_or(|at| seen > at) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
 }
 
 /// Where the diff of workspace `ws_id` last fetched from `remote` is kept.
