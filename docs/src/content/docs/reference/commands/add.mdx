@@ -78,7 +78,7 @@ Git repository and only provides conservative evidence for tmux placement.
 
 With `--remote`, or when `placement` names a remote, the worktree, its panes and the agent are created on a [remote host](/guide/sandbox/remote/). The tmux window opens locally and relays to the remote session. The workspace starts from a local commit, so remote branch references aren't accepted: fetch the branch, then pass a new branch name with `--base origin/<branch>`. Unpushed local commits are sent along.
 
-File operations and `post_create` hooks run on the remote, and the agent runs in a container there unless the remote uses `isolation: none`. If an add fails part way, run the same command again to resume it.
+File operations and `post_create` hooks run on the remote, and agent isolation follows `sandbox.enabled` unless the remote explicitly overrides it. See [where remote agents run](/guide/sandbox/remote/#where-remote-agents-run). If an add fails part way, run the same command again to resume it.
 
 These options aren't available for remote workspaces: `--headless`, `--sandbox`, `--pr`, `--with-changes`, `--fork`, `--continue`, `--open-if-exists`, `--target-name`, `--parent-session`, `--dry-run`, session mode, and the `windows:` config. Remote workspaces need the tmux backend.
 

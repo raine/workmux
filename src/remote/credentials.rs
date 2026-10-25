@@ -142,6 +142,9 @@ pub fn login(
     .chain(args.iter().cloned())
     .collect();
 
+    if spec.isolation == RemoteIsolation::None {
+        super::host::require(spec, &[auth.login[0].to_string()])?;
+    }
     let node = Node::connect(spec)?;
     let mut forwards = Vec::new();
     for port in forward_ports(auth, args) {

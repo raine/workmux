@@ -45,20 +45,21 @@ workmux remote doctor <name>
 
 Prints one row per check, with a fix for each failing row:
 
-| Check       | What it checks                                                                           |
-| ----------- | ---------------------------------------------------------------------------------------- |
-| `ssh`       | The SSH connection works without a prompt                                                |
-| `arch`      | The remote runs Linux on a supported architecture                                        |
-| `node`      | The node binary is installed and speaks this workmux's protocol                          |
-| `git`       | Git is installed                                                                         |
-| `tmux`      | tmux 3.3 or newer is installed                                                           |
-| `linger`    | systemd linger is enabled, so agents survive logout                                      |
-| `container` | Docker works for the SSH user (skipped with `isolation: none`)                           |
-| `hooks`     | workmux's status hooks are installed for each agent                                      |
-| logins      | One row per configured agent, with the credential files found on the remote              |
-| `image`     | The sandbox image of the default agent can be pulled (it is pulled as part of the check) |
+| Check       | What it checks                                                                                            |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `ssh`       | The SSH connection works without a prompt                                                                 |
+| `arch`      | The remote runs Linux on a supported architecture                                                         |
+| `node`      | The node binary is installed and speaks this workmux's protocol                                           |
+| `git`       | Git is installed                                                                                          |
+| `tmux`      | tmux 3.3 or newer is installed                                                                            |
+| `linger`    | systemd linger is enabled, so agents survive logout                                                       |
+| `agents`    | Resolved mode and deciding setting; in host mode, default CLI required and other configured CLIs optional |
+| `container` | Docker works for the SSH user (Docker mode only)                                                          |
+| `hooks`     | workmux's status hooks are installed for each agent                                                       |
+| logins      | One row per configured agent, with the credential files found on the remote                               |
+| `image`     | The sandbox image of the default agent can be pulled (it is pulled as part of the check)                  |
 
-Exits with status 1 when any check fails. Missing logins are warnings, not failures.
+Uses the current directory's effective config, like `add`; outside a project, uses global config. See [where remote agents run](/guide/sandbox/remote/#where-remote-agents-run). Exits with status 1 when any check fails. Missing logins are warnings, not failures.
 
 ## remote login
 
@@ -81,7 +82,7 @@ workmux remote login <name> claude --setup-token
 - `--import` - Copy this machine's credential files for the agent instead of logging in. Cannot be combined with `--setup-token` or extra arguments.
 - `--setup-token` - Claude only: run `claude setup-token` and keep the token it prints for every Claude agent using the remote's node root
 
-Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or on the host with `isolation: none`. Browser logins that call back to `localhost` get their ports forwarded from the laptop. See [logins and credentials](/guide/sandbox/remote/#logins-and-credentials) for each agent's flow and the limits of `--import`.
+Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or directly on the host when sandboxing is off or `isolation: none` is set. Browser logins that call back to `localhost` get their ports forwarded from the laptop. See [logins and credentials](/guide/sandbox/remote/#logins-and-credentials) for each agent's flow and the limits of `--import`.
 
 ## remote pull
 

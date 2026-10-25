@@ -1180,9 +1180,10 @@ impl<'a> CreationPlan<'a> {
             );
 
             if let Some(remote) = self.remote {
+                let remote = RemoteSpec::resolve(&context.config, &remote.name)?;
                 let record = crate::remote::lifecycle::create(
                     &context,
-                    remote,
+                    &remote,
                     crate::remote::lifecycle::CreateRequest {
                         branch: &final_branch_name,
                         handle: &handle,
@@ -1217,6 +1218,7 @@ impl<'a> CreationPlan<'a> {
                 if let Some(path) = &record.remote_worktree {
                     println!("  Worktree: {}:{path}", record.remote);
                 }
+                println!("  Runs: {}", remote.runs_description());
                 continue;
             }
             if let Some(record) = crate::remote::cache::claimed(

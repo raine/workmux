@@ -4,6 +4,7 @@ transport runs on a remote, executed by the local `sh`."""
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -273,6 +274,8 @@ def test_setup_installs_status_hooks_where_containers_mount_them(
     loopback_cli: RemoteCli, workmux_exe_path: Path
 ):
     configure_loopback(loopback_cli, workmux_exe_path)
+    subprocess.run(["git", "init", "-q", str(loopback_cli.cwd)], check=True)
+    (loopback_cli.cwd / ".workmux.yaml").write_text("sandbox:\n  enabled: true\n")
     home = loopback_cli.home
 
     result = loopback_cli.run("remote", "setup", "lo")
@@ -322,3 +325,46 @@ def test_doctor_reports_status_hooks(loopback_cli: RemoteCli, workmux_exe_path: 
     assert loopback_cli.run("remote", "setup", "lo").returncode == 0
     assert json.loads(settings.read_text())["theme"] == "dark"
     assert "✓ hooks" in loopback_cli.run("remote", "doctor", "lo").stdout
+
+
+@pytest.mark.parametrize(
+    "program,expected,success",
+    [
+        (None, "skipped OpenCode status hooks: opencode is not installed", True),
+        ("echo version-failed >&2\nexit 7\n", "opencode --version failed", False),
+        ("echo 99.0.0\n", "Unsupported OpenCode version", False),
+        ("echo 2.0.1\n", "installed status hooks for OpenCode", True),
+    ],
+)
+def test_host_setup_opencode_requires_an_installed_version(
+    loopback_cli: RemoteCli,
+    workmux_exe_path: Path,
+    program: str | None,
+    expected: str,
+    success: bool,
+):
+    configure_loopback(loopback_cli, workmux_exe_path)
+    home = loopback_cli.home
+    config_dir = home / ".config/opencode"
+    config_dir.mkdir(parents=True)
+    sentinel = config_dir / "user-config.json"
+    sentinel.write_text('{"keep": true}')
+    fake_bin = home / "host-bin"
+    fake_bin.mkdir()
+    shell = write_script(
+        home / "login-shell",
+        f'export PATH={fake_bin}:/usr/bin:/bin\nshift\nexec /bin/sh "$@"\n',
+    )
+    loopback_cli.env["SHELL"] = str(shell)
+    if program is not None:
+        write_script(fake_bin / "opencode", program)
+
+    result = loopback_cli.run("remote", "setup", "lo")
+
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    assert expected in result.stdout + result.stderr
+    assert sentinel.read_text() == '{"keep": true}'
+    if program is None:
+        assert sorted(p.name for p in config_dir.iterdir()) == ["user-config.json"]
+    elif success:
+        assert (config_dir / "plugins/workmux-status/index.ts").is_file()

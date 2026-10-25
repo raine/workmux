@@ -106,17 +106,17 @@ remotes:
   devbox:
     host: devbox
     path: ~/.workmux-node
-    isolation: container
+    # isolation: container # optional: force Docker regardless of sandbox.enabled
 
 placement: devbox
 ```
 
-| Option                     | Description                                                                                           | Default           |
-| -------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------- |
-| `remotes.<name>.host`      | SSH destination: an alias from `~/.ssh/config` or `user@host`                                         | required          |
-| `remotes.<name>.path`      | Node root on the remote: `~`, a path starting with `~/` (expanded on the remote), or an absolute path | `~/.workmux-node` |
-| `remotes.<name>.isolation` | `container` runs agents in Docker on the remote; `none` runs them on the host without a sandbox       | `container`       |
-| `remotes.<name>.binary`    | Local path to a Linux `workmux` binary to install instead of the matching release                     | none              |
+| Option                     | Description                                                                                                                            | Default                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `remotes.<name>.host`      | SSH destination: an alias from `~/.ssh/config` or `user@host`                                                                          | required                  |
+| `remotes.<name>.path`      | Node root on the remote: `~`, a path starting with `~/` (expanded on the remote), or an absolute path                                  | `~/.workmux-node`         |
+| `remotes.<name>.isolation` | `container` forces Docker; `none` forces host execution. See [where remote agents run](/guide/sandbox/remote/#where-remote-agents-run) | follows `sandbox.enabled` |
+| `remotes.<name>.binary`    | Local path to a Linux `workmux` binary to install instead of the matching release                                                      | none                      |
 
 `remotes` is global-only: in a project's `.workmux.yaml` it is ignored with a warning. Unknown keys under a remote are an error.
 
