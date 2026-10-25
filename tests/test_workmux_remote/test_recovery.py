@@ -19,12 +19,13 @@ pytestmark = pytest.mark.tmux_only
 
 
 def setup_claude_project(repo: Path, bin_dir: Path, log: Path) -> None:
-    """A fake `claude` that logs its arguments and stays up."""
+    """A fake `claude` that registers its agent, logs arguments and stays up."""
     bin_dir.mkdir()
     claude = bin_dir / "claude"
     claude.write_text(
         f"""#!/bin/sh
 echo "ARGS:$*" >> {log}
+workmux register-agent </dev/null
 echo FAKE-CLAUDE-READY "$*"
 while :; do sleep 1; done
 """
