@@ -33,6 +33,9 @@ pub struct Request {
     pub operation: Operation,
     pub requested_at: u64,
     pub claimed: bool,
+    /// The laptop's stages so far, shown while the requester waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub progress: Vec<String>,
     pub outcome: Option<Outcome>,
 }
 
@@ -95,19 +98,25 @@ pub fn submit(names: &[String], operation: Operation) -> Result<()> {
             operation,
             requested_at: cache::now(),
             claimed: false,
+            progress: Vec::new(),
             outcome: None,
         });
         root.save(&ws)?;
     }
+    let mut status = Status::new();
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let Some(ws) = root.load(&ws_id)? else {
+            status.finish();
             return Ok(());
         };
         let Some(request) = ws.operation.as_ref().filter(|r| r.id == id) else {
+            status.finish();
             bail!("laptop request was withdrawn");
         };
+        status.show(&request.progress);
         if let Some(outcome) = &request.outcome {
+            status.finish();
             if outcome.success {
                 println!("{}", outcome.message);
                 return Ok(());
@@ -127,9 +136,66 @@ pub fn submit(names: &[String], operation: Operation) -> Result<()> {
                 {
                     ws.operation = None;
                     root.save(&ws)?;
+                    status.finish();
                     bail!("the laptop isn't connected or runs an older workmux; request withdrawn");
                 }
             }
+        }
+    }
+}
+
+/// The waiting requester's view of the laptop's progress. A terminal gets one
+/// line per stage with a live elapsed time on the latest; other output gets
+/// plain lines.
+struct Status {
+    seen: usize,
+    current: Option<String>,
+    since: Instant,
+    shown: u64,
+    live: bool,
+}
+
+impl Status {
+    fn new() -> Self {
+        use std::io::IsTerminal;
+        Self {
+            seen: 0,
+            current: None,
+            since: Instant::now(),
+            shown: 0,
+            live: std::io::stdout().is_terminal(),
+        }
+    }
+
+    fn show(&mut self, stages: &[String]) {
+        use std::io::Write;
+        for stage in stages.iter().skip(self.seen) {
+            self.finish();
+            // The laptop is trusted, but a terminal must not interpret its text.
+            let stage: String = stage.chars().filter(|c| !c.is_control()).collect();
+            if self.live {
+                print!("{stage}");
+                self.current = Some(stage);
+            } else {
+                println!("{stage}");
+            }
+            self.since = Instant::now();
+            self.shown = 0;
+        }
+        self.seen = self.seen.max(stages.len());
+        let elapsed = self.since.elapsed().as_secs();
+        if let Some(stage) = &self.current
+            && elapsed > self.shown
+        {
+            self.shown = elapsed;
+            print!("\r\x1b[K{stage} ({elapsed}s)");
+        }
+        let _ = std::io::stdout().flush();
+    }
+
+    fn finish(&mut self) {
+        if self.current.take().is_some() {
+            println!();
         }
     }
 }
@@ -138,7 +204,10 @@ pub fn submit(names: &[String], operation: Operation) -> Result<()> {
 pub struct Update {
     pub ws_id: String,
     pub id: String,
-    /// None claims the request; Some reports its outcome.
+    /// Reports a stage of a claimed request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// Neither field claims the request; Some reports its outcome.
     pub outcome: Option<Outcome>,
 }
 
@@ -168,11 +237,19 @@ pub fn update(root: &NodeRoot, update: Update) -> Result<Operation> {
         .as_mut()
         .filter(|r| r.id == update.id)
         .ok_or_else(|| anyhow::anyhow!("request no longer exists"))?;
-    if let Some(outcome) = update.outcome {
+    if update.outcome.is_some() || update.progress.is_some() {
         if !request.claimed || request.outcome.is_some() {
             bail!("request is not running")
         }
-        request.outcome = Some(outcome);
+        // A few stages per operation; the bound keeps the record small.
+        if let Some(progress) = update.progress
+            && request.progress.len() < 32
+        {
+            request.progress.push(progress);
+        }
+        if let Some(outcome) = update.outcome {
+            request.outcome = Some(outcome);
+        }
     } else {
         if !request.pending(cache::now()) {
             bail!("request expired or already claimed")
@@ -207,16 +284,33 @@ mod tests {
             operation: Operation::Remove { force: false },
             requested_at: cache::now(),
             claimed: false,
+            progress: Vec::new(),
             outcome: None,
         });
         root.save(&ws).unwrap();
         let claim = || Update {
             ws_id: ws.identity.ws_id.clone(),
             id: id.clone(),
+            progress: None,
             outcome: None,
         };
+        let mut progress = claim();
+        progress.progress = Some("Running pre_merge hooks…".into());
+        assert!(update(&root, progress).is_err());
         assert!(update(&root, claim()).is_ok());
         assert!(update(&root, claim()).is_err());
+        let mut progress = claim();
+        progress.progress = Some("Running pre_merge hooks…".into());
+        update(&root, progress).unwrap();
+        assert_eq!(
+            root.load(&ws.identity.ws_id)
+                .unwrap()
+                .unwrap()
+                .operation
+                .unwrap()
+                .progress,
+            ["Running pre_merge hooks…"]
+        );
         let mut complete = claim();
         complete.outcome = Some(Outcome {
             success: false,
@@ -249,6 +343,7 @@ mod tests {
             operation: Operation::Remove { force: false },
             requested_at: 100,
             claimed: false,
+            progress: Vec::new(),
             outcome: None,
         };
         assert!(request.pending(114));

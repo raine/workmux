@@ -114,6 +114,7 @@ pub fn run(
                 no_hooks,
                 notification,
                 noninteractive: false,
+                progress: None,
             },
         );
     }

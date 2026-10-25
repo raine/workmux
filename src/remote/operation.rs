@@ -147,10 +147,27 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         &Update {
             ws_id: ws_id.into(),
             id: id.into(),
+            progress: None,
             outcome: None,
         },
         false,
     )?;
+    // Stages are best effort: the operation must not depend on the requester.
+    let progress = |stage: &str| {
+        let _ = node.call::<_, Operation>(
+            "operation",
+            &Update {
+                ws_id: ws_id.into(),
+                id: id.into(),
+                progress: Some(stage.into()),
+                outcome: None,
+            },
+            false,
+        );
+    };
+    progress(&format!(
+        "Laptop started; follow with `workmux remote logs {remote} {id}`"
+    ));
     let result = (|| -> Result<()> {
         let receipt_dir = cache::remote_dir(remote)?.join("operations");
         std::fs::create_dir_all(&receipt_dir)?;
@@ -161,7 +178,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         {
             Ok(_) => {
                 println!("Remote operation {id}: {remote}/{}", record.handle);
-                execute(record, config, operation)
+                execute(record, config, operation, &progress)
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow::anyhow!(
                 "request was already acted on; submit a new request"
@@ -192,6 +209,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         &Update {
             ws_id: ws_id.into(),
             id: id.into(),
+            progress: None,
             outcome: Some(outcome),
         },
         false,
@@ -199,10 +217,24 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
     result
 }
 
-fn execute(record: WorkspaceRecord, config: Config, operation: Operation) -> Result<()> {
+fn execute(
+    record: WorkspaceRecord,
+    config: Config,
+    operation: Operation,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
     let mux = create_backend(detect_backend());
     match operation {
         Operation::Remove { force } => {
+            let hooks = config
+                .pre_remove
+                .as_ref()
+                .is_some_and(|hooks| !hooks.is_empty());
+            progress(if hooks {
+                "Running pre_remove hooks and removing…"
+            } else {
+                "Removing…"
+            });
             let mut batch = super::lifecycle::RemovalBatch::new([record.ws_id.clone()]);
             batch.remove(
                 record.clone(),
@@ -255,6 +287,7 @@ fn execute(record: WorkspaceRecord, config: Config, operation: Operation) -> Res
                     no_hooks,
                     notification: false,
                     noninteractive: true,
+                    progress: Some(progress),
                 },
             )
         }
