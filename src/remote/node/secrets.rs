@@ -283,15 +283,44 @@ mod tests {
                 .unwrap()
         };
         assert!(tmux(&["new-session", "-d", "-s", "x-0"]).status.success());
-        let value = r#"~a"b\c$HOME ${X} 'q' #{pane_id} ;"#;
-        let file = tmux_file(&root, "x-0", &secrets(&[("TOKEN", value)])).unwrap();
+        let values = [
+            ("TOKEN", r#"~a"b\c$HOME ${X} 'q' #{pane_id} ;"#),
+            ("EMPTY", ""),
+            ("DOLLARS", r"$ $_NAME $1 $$ ${HOME} \$HOME \\$HOME $"),
+            ("QUOTES", r#"'"''"\ \n\t\001\u0041\"#),
+            (
+                "SYNTAX",
+                "  \t~ #comment ; } %if #{HOME} #(id) `id` $(id)  ",
+            ),
+            ("UNICODE", "päivä 🔑"),
+        ];
+        let file = tmux_file(&root, "x-0", &secrets(&values)).unwrap();
+        assert_eq!(mode(&file), 0o600);
         let sourced = tmux(&["source-file", &file.to_string_lossy()]);
-        let shown = tmux(&["show-environment", "-t", "=x-0", "TOKEN"]);
+
+        // Read inherited bytes, not show-environment's display-escaped output.
+        // A pane signals completion after writing, so no polling is needed.
+        let output = dir.path().join("environment");
+        let variables = values
+            .iter()
+            .map(|(name, _)| format!("\"${name}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = format!(
+            "umask 077; printf '%s\\0' {variables} > {}; tmux -S {} wait-for -S read-env",
+            crate::shell::shell_quote(&output.to_string_lossy()),
+            crate::shell::shell_quote(&socket.to_string_lossy())
+        );
+        let read = tmux(&["new-window", "-d", "-t", "=x-0", "/bin/sh", "-c", &command]);
+        let completed = tmux(&["wait-for", "read-env"]);
         tmux(&["kill-server"]);
         assert!(sourced.status.success(), "{sourced:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&shown.stdout),
-            format!("TOKEN={value}\n")
-        );
+        assert!(read.status.success(), "{read:?}");
+        assert!(completed.status.success(), "{completed:?}");
+        let expected: Vec<u8> = values
+            .iter()
+            .flat_map(|(_, value)| value.bytes().chain(std::iter::once(0)))
+            .collect();
+        assert_eq!(fs::read(output).unwrap(), expected);
     }
 }
