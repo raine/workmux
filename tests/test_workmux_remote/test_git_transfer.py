@@ -171,6 +171,7 @@ def test_terminal_progress_and_push_failure(
     stderr = b"".join(chunks).decode()
     assert result.returncode == 0, stderr
     assert "Writing objects:" in stderr
+    assert "refs/workmux/" not in stderr
     [workspace] = node.workspaces()
     remote = Path(workspace["repo_path"])
     retained = git(remote, "rev-parse", TRANSFER_REF)
