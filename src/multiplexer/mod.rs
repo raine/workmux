@@ -745,6 +745,10 @@ pub trait Multiplexer: Send + Sync {
                     }
                 }
 
+                if let Some(selected_agent) = resolved.selected_agent.as_mut() {
+                    selected_agent.add_launch_flags();
+                }
+
                 // Apply sandbox wrapping if enabled for this pane type
                 let final_command = if config.sandbox.is_enabled() {
                     let should_wrap = match config.sandbox.target() {

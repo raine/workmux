@@ -68,7 +68,9 @@ def test_continue_at_recreated_path(
     assert poll_until(lambda: output.exists() and output.stat().st_size > 0)
     launch = json.loads(output.read_text())
     assert launch["cwd"] == str(original_path.resolve())
-    expected = ["--model", "test", *resume_args]
+    # Codex runs without its shared server, so hooks see this pane's environment.
+    launch_args = ["--no-daemon"] if agent == "codex" else []
+    expected = [*launch_args, "--model", "test", *resume_args]
     if prompt_flag:
         if agent != "pi":
             expected.append("--")
