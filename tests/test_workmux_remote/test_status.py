@@ -399,6 +399,14 @@ def test_views_list_remote_agents_beside_local_ones(
     env.tmux(["send-keys", "-t", "dash", "/", "vw@lo", "Enter"])
     assert poll_until(lambda: "applied-working" in dashboard(), timeout=20), dashboard()
 
+    # Preview capture is independent of observation. Wait for the detached
+    # row's metadata before disconnecting the node whose snapshot retains it.
+    assert poll_until(
+        lambda: "fake-title-42" in row(dashboard(), "vw@lo")
+        and "disconnected" not in row(dashboard(), "vw@lo"),
+        timeout=20,
+    ), dashboard()
+
     # The node stops answering: the row stays, disconnected, then recovers.
     bin_dir = node.root / "bin"
     hidden = node.root / "bin-hidden"
