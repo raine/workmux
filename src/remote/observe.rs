@@ -515,6 +515,7 @@ mod tests {
                 operation: super::super::node::operation::Operation::Remove { force: false },
                 requested_at: 90,
                 claimed: false,
+                progress: Vec::new(),
                 outcome: None,
             });
             ws.ended = Some(EndReason::HostReboot);

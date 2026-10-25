@@ -260,7 +260,7 @@ workmux remote logs devbox                # list log paths
 workmux remote logs devbox r0123456789ab   # print one request's output
 ```
 
-The refusal in the remote pane includes a ready-to-run command with the laptop's remote name and the request ID. Only a categorised error, the remote name and the request ID go back to the node, never hook output or laptop paths. Logs are private files under `$XDG_STATE_HOME/workmux/remote/<remote>/operation-logs/` (by default `~/.local/state/workmux/remote/<remote>/operation-logs/`). They survive workspace removal, need no SSH connection to read, and may contain sensitive hook output. Delete old log files when no longer needed; they are not automatically pruned.
+While the worker runs, the remote pane shows its stages (bringing the work to the laptop, setting up the merge worktree, running `pre_merge` hooks, removing the workspace) with the time spent on the current one, and the first line names the request's log command. A refusal includes the same command. Only stage names, a categorised error, the remote name and the request ID go back to the node, never hook output or laptop paths. Logs are private files under `$XDG_STATE_HOME/workmux/remote/<remote>/operation-logs/` (by default `~/.local/state/workmux/remote/<remote>/operation-logs/`). They survive workspace removal, need no SSH connection to read, and may contain sensitive hook output. Delete old log files when no longer needed; they are not automatically pruned.
 
 As locally, unstaged changes and untracked files on the remote refuse the merge unless you pass `--ignore-uncommitted` or `--keep`. With `--ignore-uncommitted`, those changes are not merged and are removed with the workspace.
 
