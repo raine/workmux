@@ -9,7 +9,7 @@
 //! projects/<project-id>/lock                 serializes git mutations
 //! state/workspaces/<ws-id>.json              workspace record
 //! state/workspaces/<ws-id>.config.json       portable config snapshot (0600)
-//! state/workspaces/<ws-id>.files.json        file recipe siblings replay (0600)
+//! state/workspaces/<ws-id>.files.gz          file recipe siblings replay (0600)
 //! state/workspaces/<ws-id>.lock              held for the duration of a verb
 //! run/tmux.sock, tmux.conf                   node tmux server
 //! secrets/                                   environment values (see `secrets`)
@@ -92,7 +92,7 @@ impl NodeRoot {
     }
 
     pub fn files_path(&self, ws_id: &str) -> PathBuf {
-        self.workspaces_dir().join(format!("{ws_id}.files.json"))
+        self.workspaces_dir().join(format!("{ws_id}.files.gz"))
     }
 
     fn lock_path(&self, ws_id: &str) -> PathBuf {

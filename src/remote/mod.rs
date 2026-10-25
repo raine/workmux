@@ -22,6 +22,7 @@ pub mod observe;
 pub mod portable;
 pub mod protocol;
 pub mod siblings;
+pub mod transfer;
 pub mod transport;
 
 use std::path::PathBuf;

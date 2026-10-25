@@ -112,11 +112,14 @@ pub fn spawn(root: &NodeRoot, request: SpawnRequest) -> Result<SpawnResponse> {
         git(repo, &["update-ref", &base_ref(&ws_id), &identity.base_sha])?;
         let recipe = provision::load_recipe(root, &parent.identity.ws_id)?;
         let run_file_ops = recipe.is_some();
+        let (recipe, _stage) = recipe
+            .map(|(recipe, stage)| (recipe, Some(stage)))
+            .unwrap_or_default();
         let FileRecipe {
             copies,
             symlink_patterns,
             ignored,
-        } = recipe.unwrap_or_default();
+        } = recipe;
         let payload = ProvisionPayload {
             cached_seeds: Vec::new(),
             config: crate::frozen_config::snapshot_document(&config, location.as_ref())?,

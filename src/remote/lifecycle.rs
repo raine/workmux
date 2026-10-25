@@ -9,8 +9,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use super::transfer::TRANSFER_LIMIT;
 use anyhow::{Context, Result, anyhow, bail};
-use base64::Engine;
 
 use super::RemoteSpec;
 use super::cache::{self, ExecutionRecord, LayoutPane, WorkspaceRecord, WorkspaceState};
@@ -26,10 +26,6 @@ use crate::multiplexer::{CreateWindowParams, Multiplexer};
 use crate::prompt::Prompt;
 use crate::shell::shell_quote;
 use crate::workflow::{SetupOptions, WorkflowContext};
-
-/// Combined size of `files.copy` results and symlink sources sent per
-/// workspace.
-const TRANSFER_LIMIT: u64 = 64 * 1024 * 1024;
 
 pub struct CreateRequest<'a> {
     pub branch: &'a str,
@@ -185,8 +181,7 @@ pub fn create(
             .unwrap_or_else(|| Path::new(""));
         let seed_paths = plan.seed_paths(&context.config_source_dir, seed_dir)?;
         let prepared: ProvisionResponse = node
-            .call(
-                protocol::PROVISION_WORKSPACE,
+            .provision(
                 &ProvisionRequest {
                     identity: identity.clone(),
                     isolation: spec.isolation,
@@ -252,11 +247,7 @@ pub fn create(
             payload: Some(payload),
             seed_paths: Vec::new(),
         };
-        let result = node.call::<_, ProvisionResponse>(
-            protocol::PROVISION_WORKSPACE,
-            &provision_request,
-            true,
-        );
+        let result = node.provision(&provision_request, true);
         let provisioned = match result {
             Err(err) if error_code(&err) == Some(code::MISSING_SEED) => {
                 // The cache can be removed between prepare and provision. Retry
@@ -268,7 +259,7 @@ pub fn create(
                 payload.seeds = files.seeds;
                 payload.cached_seeds.clear();
                 payload.ignored = files.ignored;
-                node.call(protocol::PROVISION_WORKSPACE, &provision_request, true)
+                node.provision(&provision_request, true)
                     .map_err(|err| explain(spec, err))?
             }
             other => other.map_err(|err| explain(spec, err))?,
@@ -600,12 +591,12 @@ fn collect_tree(
             )?;
         }
     } else if meta.is_file() {
-        let data = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
         entries.push(FileEntry {
             path: name,
             kind: FileEntryKind::File {
                 mode: meta.permissions().mode(),
-                data: base64::engine::general_purpose::STANDARD.encode(data),
+                size: meta.len(),
+                source: path.to_path_buf(),
             },
         });
     }

@@ -152,6 +152,30 @@ impl Node {
         parse_reply(&self.spec.name, verb, &output)
     }
 
+    /// Send one compressed provisioning stream using disk-backed staging so
+    /// file contents never accumulate in memory.
+    pub fn provision(
+        &self,
+        request: &protocol::ProvisionRequest,
+        streaming: bool,
+    ) -> Result<protocol::ProvisionResponse> {
+        let mut input = tempfile::NamedTempFile::new()?;
+        let mut writer = super::transfer::encoder(input.as_file_mut(), request)?;
+        if let Some(payload) = &request.payload {
+            super::transfer::write_files(&mut writer, payload.copies.iter().chain(&payload.seeds))?;
+        }
+        writer.finish()?;
+        let script = self.verb_script(protocol::PROVISION_WORKSPACE);
+        let file = Input::File(input.path().to_path_buf());
+        let output = if streaming {
+            self.transport.run_streaming(&script, file)?
+        } else {
+            self.transport
+                .run(&script, file, Some(QUICK_VERB_TIMEOUT))?
+        };
+        parse_reply(&self.spec.name, protocol::PROVISION_WORKSPACE, &output)
+    }
+
     /// Push `sha` to the workspace base and the project's transfer ref.
     /// The latter advertises history after all workspace refs are removed.
     pub fn push_base(

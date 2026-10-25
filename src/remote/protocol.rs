@@ -1,6 +1,7 @@
 //! Wire contract between the laptop and `workmux node <verb> --json`.
 //!
-//! Each verb reads one JSON object on stdin and writes one JSON document on
+//! Provisioning reads a compressed binary stream; other verbs read JSON on
+//! stdin. Each verb writes one JSON document on
 //! stdout. Failures write [`ErrorEnvelope`] and exit non-zero. The protocol
 //! version changes only when the wire contract changes and must match
 //! exactly; it is independent of the crate version.
@@ -162,8 +163,11 @@ pub struct FileEntry {
 pub enum FileEntryKind {
     File {
         mode: u32,
-        /// Base64 contents.
-        data: String,
+        /// Uncompressed body length in the provisioning stream.
+        size: u64,
+        /// Local source or validated staging file; never accepted from the wire.
+        #[serde(skip)]
+        source: std::path::PathBuf,
     },
     Dir,
     Symlink {
@@ -179,7 +183,7 @@ pub struct ProvisionResponse {
     pub worktree_path: String,
     /// Whether `refs/workmux/base/<ws_id>` already holds `base_sha`.
     pub has_base: bool,
-    /// Existing seed paths from the request. Absent on older nodes.
+    /// Existing seed paths from the request.
     #[serde(default)]
     pub cached_seeds: Vec<String>,
 }
