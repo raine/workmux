@@ -131,3 +131,60 @@ def test_seed_transfer(
     shutil.rmtree(seed)
     wm(mux_server, workmux_exe_path, repo, "add evicted --remote lo")
     assert (seed / "data").read_text() == "second"
+
+
+def test_config_relative_ignore_classification(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    repo = mux_repo_path
+    app = repo / "app"
+    app.mkdir()
+    (repo / ".gitignore").write_text("*.secret\n!keep.secret\n")
+    (app / "tracked.secret").write_text("tracked")
+    git(repo, "add", ".gitignore")
+    git(repo, "add", "-f", "app/tracked.secret")
+    commit_project(
+        app,
+        {
+            "panes": [{"command": "echo ready"}],
+            "files": {"copy": ["*.secret", "local*", "global*"]},
+        },
+    )
+    with (repo / ".git/info/exclude").open("a") as exclude:
+        exclude.write("\nlocal*\n")
+    global_exclude = mux_server.home_path / "global-ignore"
+    global_exclude.write_text("global*\n")
+    git(repo, "config", "core.excludesFile", str(global_exclude))
+    for name in [
+        "ignored.secret",
+        "keep.secret",
+        "local space",
+        'local"quote',
+        "local\ttab",
+        "global file",
+    ]:
+        (app / name).write_text(name)
+    wm(mux_server, workmux_exe_path, app, "add classified --remote lo")
+    [workspace] = node.workspaces()
+    tree = Path(workspace["worktree_path"])
+    for name in [
+        "tracked.secret",
+        "ignored.secret",
+        "keep.secret",
+        "local space",
+        'local"quote',
+        "local\ttab",
+        "global file",
+    ]:
+        assert (tree / "app" / name).read_text() == (app / name).read_text()
+    assert git(tree, "status", "--porcelain") == "?? app/keep.secret"
+    exclude = Path(
+        git(tree, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    ).read_text()
+    assert "/app/local space\n" in exclude
+    assert "/app/global file\n" in exclude
+    for name in ["tracked.secret", "keep.secret", "ignored.secret"]:
+        assert f"/app/{name}\n" not in exclude
