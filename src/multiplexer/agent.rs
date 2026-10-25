@@ -45,6 +45,11 @@ pub trait AgentProfile: Send + Sync {
         None
     }
 
+    /// CLI flags every launch of this agent in a workmux pane needs.
+    fn launch_flags(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Other CLI flags every sandboxed launch of this agent needs.
     fn sandbox_flags(&self) -> &'static [&'static str] {
         &[]
@@ -213,18 +218,21 @@ impl AgentProfile for CodexProfile {
         Some("--yolo")
     }
 
-    /// `--no-daemon`: the sandbox mounts the host's codex home, which holds
-    /// the install and control state of codex's shared background server.
-    /// A sandboxed codex can't reach a server outside the sandbox, so it
-    /// would fail on a server the host installed there, or install its own
-    /// into the host's codex home.
-    ///
+    /// `--no-daemon`: codex's shared background server runs every session's
+    /// hooks with the environment of the process that started the server,
+    /// so status hooks would report to that pane, or fail where its `PATH`
+    /// lacks workmux. In a sandbox, the server would also be out of reach
+    /// or installed into the host's codex home.
+    fn launch_flags(&self) -> &'static [&'static str] {
+        &["--no-daemon"]
+    }
+
     /// `--dangerously-bypass-hook-trust`: hooks run inside the sandbox like
     /// any command the agent runs under `--yolo`, so reviewing them guards
     /// nothing, and nobody is there to answer the review that would
     /// otherwise hold back the status hooks.
     fn sandbox_flags(&self) -> &'static [&'static str] {
-        &["--no-daemon", "--dangerously-bypass-hook-trust"]
+        &["--dangerously-bypass-hook-trust"]
     }
 
     fn flag_aliases(&self, flag: &str) -> &'static [&'static str] {
@@ -611,17 +619,28 @@ impl SelectedAgent {
         self.profile.name()
     }
 
+    /// Add the flags every launch in a workmux pane needs, skipping any the
+    /// command already sets.
+    pub fn add_launch_flags(&mut self) {
+        self.prepend_missing(self.profile.launch_flags().iter().copied());
+    }
+
     /// Add the skip-permissions flag and the other flags a sandboxed launch
     /// needs, skipping any the command already sets.
     pub fn add_sandbox_flags(&mut self) {
         let profile = self.profile;
-        let flags = profile
-            .skip_permissions_flag()
-            .into_iter()
-            .chain(profile.sandbox_flags().iter().copied());
+        self.prepend_missing(
+            profile
+                .skip_permissions_flag()
+                .into_iter()
+                .chain(profile.sandbox_flags().iter().copied()),
+        );
+    }
+
+    fn prepend_missing<'a>(&mut self, flags: impl DoubleEndedIterator<Item = &'a str>) {
         for flag in flags.rev() {
             self.command
-                .prepend_missing_args_fragment(flag, profile.flag_aliases(flag));
+                .prepend_missing_args_fragment(flag, self.profile.flag_aliases(flag));
         }
     }
 
@@ -784,18 +803,35 @@ mod tests {
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
-    fn sandboxed(profile: &'static dyn AgentProfile, command: &str) -> String {
+    fn launched(profile: &'static dyn AgentProfile, command: &str, sandbox: bool) -> String {
         let mut agent = SelectedAgent {
             command: AgentCommand::parse(command).unwrap(),
             profile,
         };
-        agent.add_sandbox_flags();
+        agent.add_launch_flags();
+        if sandbox {
+            agent.add_sandbox_flags();
+        }
         agent.shell_command()
+    }
+
+    fn sandboxed(profile: &'static dyn AgentProfile, command: &str) -> String {
+        launched(profile, command, true)
+    }
+
+    #[test]
+    fn launch_flags_apply_without_a_sandbox() {
+        assert_eq!(launched(&CodexProfile, "codex", false), "codex --no-daemon");
+        assert_eq!(
+            launched(&CodexProfile, "codex -m o3 --no-daemon", false),
+            "codex -m o3 --no-daemon"
+        );
+        assert_eq!(launched(&ClaudeProfile, "claude", false), "claude");
     }
 
     #[test]
     fn sandbox_flags_are_added_once() {
-        let flags = "--no-daemon --dangerously-bypass-hook-trust";
+        let flags = "--dangerously-bypass-hook-trust --no-daemon";
         assert_eq!(
             sandboxed(&CodexProfile, "codex"),
             format!("codex --yolo {flags}")
@@ -825,7 +861,7 @@ mod tests {
     fn sandbox_flags_ignore_arguments_after_the_terminator() {
         assert_eq!(
             sandboxed(&CodexProfile, "codex -- --no-daemon"),
-            "codex --yolo --no-daemon --dangerously-bypass-hook-trust -- --no-daemon"
+            "codex --yolo --dangerously-bypass-hook-trust --no-daemon -- --no-daemon"
         );
     }
 
