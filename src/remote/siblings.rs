@@ -38,17 +38,12 @@ pub fn adopt(remote: &str, observation: &Observation, foreground: bool) {
 }
 
 fn adopt_all(remote: &str, observation: &Observation, foreground: bool) -> Result<()> {
-    let present: Vec<&str> = observation
-        .workspaces
-        .iter()
-        .map(|ws| ws.ws_id.as_str())
-        .collect();
+    // Deletion uses the same lock, so no adoption can pass the tombstone
+    // check and then recreate a record that another process has deleted.
+    let _lock = lock(remote)?;
     // A workspace whose record went was removed or forgotten on purpose.
-    // `remove --force` can forget one the node still has; it stays
-    // unadopted for as long as the node lists it, and `remote gc` removes
-    // it.
-    let seen = observation.last_seen.unwrap_or(0);
-    cache::prune_forgotten(remote, &present, seen);
+    // `remove --force` can forget one the node still has; `remote gc`
+    // removes it.
     let running: Vec<(&ObservedWorkspace, &Sibling)> = observation
         .workspaces
         .iter()
@@ -69,10 +64,6 @@ fn adopt_all(remote: &str, observation: &Observation, foreground: bool) -> Resul
             })
             .collect()
     };
-    if unsettled(&cache::all()).is_empty() {
-        return Ok(());
-    }
-    let _lock = lock(remote)?;
     let records = cache::all();
     for (ws, sibling) in unsettled(&records) {
         let key = format!("{remote}/{}", ws.ws_id);
@@ -289,8 +280,8 @@ fn refused() -> std::sync::MutexGuard<'static, HashSet<String>> {
         .unwrap_or_else(|err| err.into_inner())
 }
 
-/// Serializes adoption across processes.
-fn lock(remote: &str) -> Result<File> {
+/// Serializes adoption and record deletion across processes.
+pub(super) fn lock(remote: &str) -> Result<File> {
     let file = cache::lock_file(remote, "adopt.lock")?;
     file.lock().context("Failed to lock adopt.lock")?;
     Ok(file)
