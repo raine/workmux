@@ -2,7 +2,7 @@
 
 use std::process::{Command, Stdio};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::cache::{self, WorkspaceRecord};
 use super::client::Node;
@@ -44,6 +44,9 @@ fn owned_record<'a>(
 }
 
 fn spawn(record: &WorkspaceRecord, id: &str) -> Result<()> {
+    let path = log_path(&record.remote, id)?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let output = open_log(&path)?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("_remote-operation")
@@ -55,8 +58,8 @@ fn spawn(record: &WorkspaceRecord, id: &str) -> Result<()> {
         .env("GIT_EDITOR", "false")
         .env("GIT_SEQUENCE_EDITOR", "false")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(output.try_clone()?)
+        .stderr(output);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -74,6 +77,56 @@ fn spawn(record: &WorkspaceRecord, id: &str) -> Result<()> {
     std::thread::spawn(move || {
         let _ = child.wait();
     });
+    Ok(())
+}
+
+fn log_path(remote: &str, id: &str) -> Result<std::path::PathBuf> {
+    super::validate_name(remote)?;
+    super::node::validate_id(id, 'r', "request id")?;
+    Ok(cache::remote_dir(remote)?
+        .join("operation-logs")
+        .join(format!("{id}.log")))
+}
+
+fn open_log(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    // Observers may dispatch the same request more than once. Never truncate
+    // the output of the worker that holds its receipt.
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .context("Failed to open remote operation log")
+}
+
+/// Read retained output without contacting the node or requiring a workspace.
+pub fn logs(remote: &str, id: Option<&str>) -> Result<()> {
+    super::validate_name(remote)?;
+    if let Some(id) = id {
+        let path = log_path(remote, id)?;
+        let mut file = std::fs::File::open(&path)
+            .with_context(|| format!("Failed to open {}", path.display()))?;
+        std::io::copy(&mut file, &mut std::io::stdout().lock())?;
+    } else {
+        let dir = cache::remote_dir(remote)?.join("operation-logs");
+        if !dir.exists() {
+            println!("No remote operation logs for '{remote}'");
+            return Ok(());
+        }
+        let mut paths = std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        for path in paths {
+            if path.extension().is_some_and(|extension| extension == "log") {
+                println!("{}", path.display());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -106,7 +159,10 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
             .create_new(true)
             .open(receipt_dir.join(id))
         {
-            Ok(_) => execute(record, config, operation),
+            Ok(_) => {
+                println!("Remote operation {id}: {remote}/{}", record.handle);
+                execute(record, config, operation)
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow::anyhow!(
                 "request was already acted on; submit a new request"
             )),
@@ -120,9 +176,13 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         },
         Err(err) => {
             tracing::warn!("remote operation failed: {err:#}");
+            eprintln!("Remote operation failed: {err:#}");
             Outcome {
                 success: false,
-                message: refusal(err),
+                message: format!(
+                    "{}; on the laptop, run `workmux remote logs {remote} {id}`",
+                    refusal(err)
+                ),
             }
         }
     };
@@ -227,7 +287,7 @@ fn refusal(err: &anyhow::Error) -> String {
         "this merge needs interaction; commit staged changes first or run merge on the laptop"
     } else if text.contains("conflict") {
         "merge conflict; resolve it on the laptop, then run workmux merge there"
-    } else if text.contains("hook") {
+    } else if text.contains("hook") || text.contains("post-create") {
         "a laptop hook failed; inspect its output on the laptop"
     } else if text.contains("existing laptop branch") {
         "merge target must be an existing laptop branch"
@@ -240,6 +300,38 @@ fn refusal(err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn log_paths_reject_untrusted_components() {
+        assert!(log_path("../escape", "r123456789abc").is_err());
+        assert!(log_path("trusted", "../escape").is_err());
+        assert!(
+            log_path("trusted", "r123456789abc")
+                .unwrap()
+                .ends_with("remote/trusted/operation-logs/r123456789abc.log")
+        );
+    }
+
+    #[test]
+    fn duplicate_workers_preserve_private_output() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output.log");
+        writeln!(open_log(&path).unwrap(), "first").unwrap();
+        writeln!(open_log(&path).unwrap(), "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(open_log(&link).is_err());
+        }
+    }
+
     #[test]
     fn identity_is_scoped_to_the_reporting_remote() {
         let record = WorkspaceRecord::new(

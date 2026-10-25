@@ -151,7 +151,10 @@ fn merge_inner(
             } else if node.is_some() {
                 discard_copy(context, &mut record, created_branch, false)?;
             }
-            return Err(err.context("Failed to merge worktree"));
+            return Err(err.context(
+                "Failed to merge hydrated worktree (pane commands do not run; \
+                 prepare dependencies with files or post_create)",
+            ));
         }
     };
 
@@ -664,7 +667,8 @@ fn provision_copy(
         &context.config,
         &options,
         crate::cmd::ShellOutput::Inherit,
-    )?;
+    )
+    .context("Failed to set up hydrated worktree (files and post_create; no pane commands)")?;
     apply(copy, snapshot)
 }
 

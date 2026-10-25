@@ -184,3 +184,46 @@ def test_staged_changes_and_keep(
     assert git(mux_repo_path, "show", "main:work.txt") == "committed"
     assert (worktree / "staged").read_text() == "staged\n"
     assert local_records(mux_server) and node.workspaces()
+
+
+@pytest.mark.parametrize("hook", ["pre_merge", "post_create"])
+def test_failed_hook_output_stays_on_laptop(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    hook: str,
+):
+    import re
+
+    configure(mux_repo_path)
+    wm(mux_server, workmux_exe_path, mux_repo_path, "add feat --remote lo")
+    configure(
+        mux_repo_path,
+        **{hook: ["echo LAPTOP-STDOUT; echo LAPTOP-STDERR >&2; exit 42"]},
+    )
+    [record] = local_records(mux_server)
+    ex_id = record["execution"]["ex_id"]
+    commit_on_node(node_worktree(node, "feat"), "work.txt", "work\n")
+    request(node, ex_id, "merge")
+    wait_message(node, ex_id, "a laptop hook failed")
+    pane = node_pane(node, ex_id)
+    match = re.search(r"remote logs lo\s+(r[0-9a-f]{12})", pane)
+    assert match, pane
+    request_id = match.group(1)
+    for private in ("LAPTOP-STDOUT", "LAPTOP-STDERR", str(mux_repo_path)):
+        assert private not in pane
+    output = wm(
+        mux_server, workmux_exe_path, mux_repo_path, f"remote logs lo {request_id}"
+    )
+    assert "LAPTOP-STDOUT" in output.stdout
+    assert "LAPTOP-STDERR" in output.stdout
+    if hook == "pre_merge":
+        assert "Pre-merge hook failed" in output.stdout
+        assert "pane commands do not run" in output.stdout
+    else:
+        assert "Failed to run post-create command" in output.stdout
+        assert "no pane commands" in output.stdout
+    listing = wm(mux_server, workmux_exe_path, mux_repo_path, "remote logs lo")
+    assert f"{request_id}.log" in listing.stdout
+    assert local_records(mux_server) and node.workspaces()
