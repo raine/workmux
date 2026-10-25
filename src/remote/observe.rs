@@ -37,7 +37,7 @@ const TAKEOVER_INTERVAL: Duration = Duration::from_secs(3);
 /// Format of the observation file and scope of the observer election. Bump
 /// it whenever [`Observation`] or anything it contains changes shape, so
 /// builds that disagree never share a file (`format_is_pinned` checks).
-const GENERATION: u32 = 2;
+const GENERATION: u32 = 3;
 
 /// Contents of `observed.v<N>.json`. Node timestamps in `workspaces` are raw;
 /// [`Observation::local_ts`] moves them to the laptop clock.
@@ -300,6 +300,7 @@ fn stream(spec: &RemoteSpec, observation: &mut Observation) -> Result<String> {
                     save(&spec.name, observation)?;
                     if snapshot {
                         super::siblings::adopt(&spec.name, observation, false);
+                        super::operation::dispatch(&spec.name, observation);
                     }
                     deadline = now() + STALE_AFTER.as_secs();
                 } else if let Ok(envelope) = serde_json::from_str::<ErrorEnvelope>(&line) {
@@ -403,6 +404,7 @@ mod tests {
                 }],
                 git: None,
                 sibling: None,
+                operation: None,
                 ended: None,
             }],
         })
@@ -508,6 +510,13 @@ mod tests {
                 branch: Some("b".into()),
                 ..GitStatus::default()
             });
+            ws.operation = Some(super::super::node::operation::Request {
+                id: "r123456789abc".into(),
+                operation: super::super::node::operation::Operation::Remove { force: false },
+                requested_at: 90,
+                claimed: false,
+                outcome: None,
+            });
             ws.ended = Some(EndReason::HostReboot);
             ws.sibling = Some(Sibling {
                 identity: WorkspaceIdentity {
@@ -557,6 +566,14 @@ mod tests {
             ".workspaces[].git.lines_removed",
             ".workspaces[].git.uncommitted_added",
             ".workspaces[].git.uncommitted_removed",
+            ".workspaces[].operation",
+            ".workspaces[].operation.claimed",
+            ".workspaces[].operation.id",
+            ".workspaces[].operation.operation",
+            ".workspaces[].operation.operation.force",
+            ".workspaces[].operation.operation.kind",
+            ".workspaces[].operation.outcome",
+            ".workspaces[].operation.requested_at",
             ".workspaces[].panes",
             ".workspaces[].panes[].agent",
             ".workspaces[].panes[].agent.agent_kind",
@@ -593,7 +610,7 @@ mod tests {
             ".workspaces[].ws_id",
         ];
         assert_eq!(paths, expected, "bump GENERATION, then update this list");
-        assert_eq!(GENERATION, 2);
+        assert_eq!(GENERATION, 3);
     }
 
     #[test]

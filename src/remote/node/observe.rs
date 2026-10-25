@@ -83,6 +83,8 @@ pub struct ObservedWorkspace {
     /// starts it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<EndReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<super::operation::Request>,
 }
 
 /// What the laptop needs to adopt a workspace a remote agent spawned.
@@ -409,6 +411,7 @@ fn build_snapshot(
                 panes,
                 git: None,
                 sibling: sibling(ws),
+                operation: ws.operation.clone().filter(|r| r.pending(now)),
                 ended,
             })
         })

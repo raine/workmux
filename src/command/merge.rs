@@ -17,6 +17,24 @@ pub fn run(
     no_hooks: bool,
     notification: bool,
 ) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        if notification {
+            bail!("remote merge does not support --notification; run it on the laptop");
+        }
+        return crate::remote::node::operation::submit(
+            &name.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+            crate::remote::node::operation::Operation::Merge {
+                into: into_branch.map(str::to_owned),
+                rebase,
+                squash,
+                ignore_uncommitted,
+                keep,
+                cleanup,
+                no_verify,
+                no_hooks,
+            },
+        );
+    }
     if keep && cleanup {
         bail!("--keep and --cleanup cannot be used together");
     }
@@ -95,6 +113,7 @@ pub fn run(
                 no_verify,
                 no_hooks,
                 notification,
+                noninteractive: false,
             },
         );
     }

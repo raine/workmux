@@ -36,6 +36,7 @@ pub struct MergeOptions<'a> {
     pub no_verify: bool,
     pub no_hooks: bool,
     pub notification: bool,
+    pub noninteractive: bool,
 }
 
 /// What became of a remote workspace whose work came home.
@@ -672,6 +673,14 @@ fn provision_copy(
 /// earlier conflict.
 fn check_copy(record: &WorkspaceRecord, options: &MergeOptions, resumed: bool) -> Result<()> {
     let copy = &record.local_path;
+    if options.noninteractive
+        && !options.ignore_uncommitted
+        && crate::git::has_staged_changes(copy)?
+    {
+        bail!(
+            "staged changes need an interactive commit message; commit them first or run merge on the laptop"
+        );
+    }
     if let Some(reason) = git::unexportable(copy, &record.branch)? {
         bail!(
             "{reason} in {}; finish it there, then run `workmux merge {}` again",

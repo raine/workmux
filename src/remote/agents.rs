@@ -515,6 +515,7 @@ mod tests {
                 panes,
                 git: None,
                 sibling: None,
+                operation: None,
                 ended: None,
             }],
         }
