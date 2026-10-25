@@ -259,6 +259,12 @@ impl From<CliMuxMode> for MuxMode {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "_remote-operation", hide = true)]
+    RemoteOperation {
+        remote: String,
+        ws_id: String,
+        id: String,
+    },
     #[command(name = "_deferred-cleanup", hide = true)]
     DeferredCleanup {
         #[arg(long, allow_hyphen_values = true)]
@@ -1170,6 +1176,9 @@ pub fn run() -> Result<()> {
                 prompt,
                 config.as_deref(),
             )
+        }
+        Commands::RemoteOperation { remote, ws_id, id } => {
+            crate::remote::operation::run(&remote, &ws_id, &id)
         }
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Resurrect { dry_run } => command::resurrect::run(dry_run),

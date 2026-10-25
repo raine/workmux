@@ -177,7 +177,7 @@ def local_records(env: TmuxEnvironment) -> List[dict]:
 
 def observation_path(env: TmuxEnvironment) -> Path:
     """The laptop's observation of the loopback remote."""
-    return env.home_path / ".local/state/workmux/remote/lo/observed.v2.json"
+    return env.home_path / ".local/state/workmux/remote/lo/observed.v3.json"
 
 
 def wm(

@@ -12,6 +12,17 @@ pub fn run(
     force: bool,
     keep_branch: bool,
 ) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        if gone || all || keep_branch {
+            anyhow::bail!(
+                "remote rm does not support --gone, --all or --keep-branch; run it on the laptop"
+            );
+        }
+        return crate::remote::node::operation::submit(
+            &names,
+            crate::remote::node::operation::Operation::Remove { force },
+        );
+    }
     let config = config::Config::load(None)?;
     let confirm_unmerged = config.confirm_unmerged_removal.unwrap_or(true);
 
@@ -73,6 +84,7 @@ fn run_specified(
             keep_branch,
             run_hooks: true,
             confirm_unmerged,
+            refuse_unmerged: false,
         };
         if let Err(err) = batch.remove(record.clone(), options) {
             eprintln!("✗ {err:#}");
