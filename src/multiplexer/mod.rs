@@ -32,6 +32,14 @@ pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
 pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
 pub const STATUS_TARGET_PANE_ENV: &str = "WORKMUX_STATUS_PANE_ID";
 
+/// A shell statement that puts `dir` first on the pane shell's `PATH`.
+fn export_path_prefix(dir: &Path) -> String {
+    format!(
+        "export PATH={}:\"$PATH\"",
+        agent::shell_quote(&dir.to_string_lossy())
+    )
+}
+
 fn command_with_status_target(
     command: &str,
     backend: &str,
@@ -686,6 +694,7 @@ pub trait Multiplexer: Send + Sync {
                 &shell,
             );
 
+            let has_command = adjusted_command.is_some();
             let pane_id = if let Some(mut resolved) = adjusted_command {
                 let is_agent_pane = resolved.selected_agent.is_some();
 
@@ -817,12 +826,9 @@ pub trait Multiplexer: Send + Sync {
                     resolved.render_command()
                 };
 
-                let final_command = match options.agent_path_prefix {
-                    Some(dir) if is_agent_pane => format!(
-                        "env PATH={}:\"$PATH\" {final_command}",
-                        agent::shell_quote(&dir.to_string_lossy())
-                    ),
-                    _ => final_command,
+                let final_command = match options.path_prefix {
+                    Some(dir) => format!("{}; {final_command}", export_path_prefix(dir)),
+                    None => final_command,
                 };
 
                 // Only a node passes a supervisor. Its command lines name
@@ -884,6 +890,19 @@ pub trait Multiplexer: Send + Sync {
                     None,
                 )?
             };
+
+            if let Some(dir) = options.path_prefix
+                && !has_command
+            {
+                // The keys reach the shell once it starts reading input.
+                self.send_keys(
+                    &pane_id,
+                    &format!(
+                        " {}; printf '\\033[H\\033[2J\\033[3J'",
+                        export_path_prefix(dir)
+                    ),
+                )?;
+            }
 
             if is_first {
                 pane_ids[0] = pane_id.clone();
