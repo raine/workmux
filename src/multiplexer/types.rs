@@ -276,8 +276,9 @@ pub struct PaneSetupOptions<'a> {
     pub resume_mode: ResumeMode,
     /// Shell-quoted words that replace `workmux sandbox run` in wrapped panes.
     pub sandbox_supervisor: Option<&'a str>,
-    /// Directory put first on the agent command's `PATH`.
-    pub agent_path_prefix: Option<&'a std::path::Path>,
+    /// Directory put first on every pane shell's `PATH`, so commands typed
+    /// in the pane find it too.
+    pub path_prefix: Option<&'a std::path::Path>,
 }
 
 /// Backend type for multiplexer selection
