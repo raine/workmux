@@ -26,6 +26,47 @@ def configure_loopback(cli: RemoteCli, binary: Path, name: str = "lo") -> Path:
     return cli.home / "node" / "bin"
 
 
+def test_remote_cli_ignores_host_agent_installations(
+    tmp_path: Path, workmux_exe_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    host = tmp_path / "host-agents"
+    host.mkdir()
+    write_script(host / "agy", "exit 1\n")
+    config = host / "opencode.json"
+    config.write_text("{}")
+    for name in (
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "COPILOT_HOME",
+        "COPILOT_CONFIG_DIR",
+        "GEMINI_CLI_HOME",
+        "GROK_HOME",
+        "PI_CODING_AGENT_DIR",
+        "PI_CONFIG_DIR",
+        "OPENCODE_CONFIG_DIR",
+    ):
+        monkeypatch.setenv(name, str(host))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    monkeypatch.setenv("WORKMUX_TEST_AGY_DETECT", "1")
+    monkeypatch.setenv("PATH", f"{host}:{os.environ['PATH']}")
+    cli = RemoteCli(tmp_path, workmux_exe_path, loopback=True)
+    (cli.home / "node").mkdir()
+    cli.env["WORKMUX_NODE_ROOT"] = str(cli.home / "node")
+
+    result = cli.run(
+        "node",
+        "status-hooks",
+        "--json",
+        input=json.dumps(
+            {"isolation": "none", "install": True, "opencode_image": "unused"}
+        ),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["agents"] == []
+    assert sorted(p.name for p in host.iterdir()) == ["agy", "opencode.json"]
+
+
 def test_node_hello_reports_protocol_version_and_platform(
     loopback_cli: RemoteCli,
 ):

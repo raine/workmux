@@ -46,7 +46,7 @@ def test_headless_add_emits_json_and_creates_no_mux_target(
         files={"copy": [source.name]},
         post_create=["echo hook-output; touch hook-ran"],
     )
-    windows_before = mux_server.list_windows()
+    windows_before = mux_server.list_window_ids()
 
     result = run_headless(
         mux_server,
@@ -68,7 +68,7 @@ def test_headless_add_emits_json_and_creates_no_mux_target(
     assert (worktree / source.name).read_text() == "TOKEN=test\n"
     assert (worktree / "hook-ran").exists()
     assert "hook-output" in result.stderr
-    assert mux_server.list_windows() == windows_before
+    assert mux_server.list_window_ids() == windows_before
     attachment = mux_server.run_command(
         [
             "git",
