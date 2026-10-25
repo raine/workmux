@@ -2,11 +2,9 @@ panes:
   - command: <agent> # Start the configured agent (e.g., claude)
     focus: true
   - split: horizontal
+    command: "(cd docs && bun install)"
 
 # Commands run after worktree creation (blocks window creation, keep fast)
-post_create:
-  - cd docs && bun install
-
 files:
   symlink:
     - CLAUDE.md
