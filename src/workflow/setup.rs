@@ -172,7 +172,7 @@ pub fn setup_environment(
         lima_vm_name: lima_vm_name.as_deref(),
         resume_mode: options.resume_mode.clone(),
         sandbox_supervisor: None,
-        agent_path_prefix: None,
+        path_prefix: None,
     };
 
     let target_window_name = options.target_window_name.as_deref().unwrap_or(handle);

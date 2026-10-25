@@ -323,8 +323,8 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         shell_quote(&root.path.to_string_lossy()),
         request.ws_id
     );
-    // Without a container, agent hooks run the node's `workmux`, which must
-    // report to the node store.
+    // Without a container, agent hooks and commands typed in any pane run
+    // the node's `workmux`, which must use the node store.
     let status_bin = match workspace.isolation {
         RemoteIsolation::None => Some(write_status_wrapper(root, &pin)?),
         RemoteIsolation::Container => None,
@@ -381,7 +381,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                     lima_vm_name: None,
                     resume_mode: resume_mode.clone(),
                     sandbox_supervisor: Some(&supervisor),
-                    agent_path_prefix: status_bin.as_deref(),
+                    path_prefix: status_bin.as_deref(),
                 },
                 &config,
                 workspace.agent.as_deref(),
