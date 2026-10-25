@@ -21,6 +21,11 @@ def agent_dirs_env(home: Path) -> Dict[str, str]:
     return {
         "CLAUDE_CONFIG_DIR": str(home / ".claude"),
         "CODEX_HOME": str(home / ".codex"),
+        "COPILOT_HOME": str(home / ".copilot"),
+        "COPILOT_CONFIG_DIR": str(home / ".copilot"),
+        "GROK_HOME": str(home / ".grok"),
+        "PI_CONFIG_DIR": str(home / ".omp"),
+        "OPENCODE_CONFIG": str(home / ".config" / "opencode" / "opencode.json"),
         "GEMINI_CLI_HOME": str(home),
         "PI_CODING_AGENT_DIR": str(home / ".pi" / "agent"),
         "OPENCODE_CONFIG_DIR": str(home / ".config" / "opencode"),
@@ -40,6 +45,8 @@ class RemoteCli:
         self.env.update(
             {
                 "HOME": str(self.home),
+                # Agent discovery must not depend on executables on the host PATH.
+                "WORKMUX_TEST": "1",
                 "XDG_CONFIG_HOME": str(self.home / ".config"),
                 "XDG_STATE_HOME": str(self.home / ".local" / "state"),
                 "XDG_CACHE_HOME": str(self.home / ".cache"),
@@ -50,6 +57,7 @@ class RemoteCli:
         # PI_CODING_AGENT_DIR would make one.
         for name in ("PI_CODING_AGENT_DIR", "PI_CONFIG_DIR"):
             self.env.pop(name, None)
+        self.env.pop("WORKMUX_TEST_AGY_DETECT", None)
         self.env.pop("TMUX", None)
         self.env.pop("TMUX_PANE", None)
         if loopback:
