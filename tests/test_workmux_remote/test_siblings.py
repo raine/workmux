@@ -134,6 +134,7 @@ def test_agent_spawns_sibling(
     assert sibling["origin"]["parent"] == parent["ws_id"]
     assert sibling["origin"]["background"] is True
     assert sibling["base_sha"] == tip
+    assert sibling["isolation"] == parent["isolation"] == "none"
     assert sibling["project_id"] == parent["project_id"]
     sib_tree = Path(sibling["worktree_path"])
     assert (sib_tree / "parent.txt").is_file()

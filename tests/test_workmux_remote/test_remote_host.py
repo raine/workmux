@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
+import yaml
 
 from .conftest import RemoteCli, dev_pin, write_script
 
@@ -52,7 +53,14 @@ class Node:
     def configure(self, binary: Path) -> None:
         assert HOST
         self.cli.write_config(
-            {"e2e": {"host": HOST, "path": f"~/{self.root}", "binary": str(binary)}}
+            {
+                "e2e": {
+                    "host": HOST,
+                    "path": f"~/{self.root}",
+                    "binary": str(binary),
+                    "isolation": "container",
+                }
+            }
         )
 
     def ls_bin(self) -> list[str]:
@@ -90,15 +98,39 @@ def test_setup_installs_then_reruns_as_noop(node: Node):
     assert '"protocol":1' in hello.stdout
 
 
-def test_doctor_is_green_after_setup(node: Node):
+@pytest.mark.parametrize("host_mode", [False, True])
+def test_doctor_is_green_after_setup(node: Node, host_mode: bool):
     assert node.cli.run("remote", "setup", "e2e").returncode == 0
+
+    if host_mode:
+        config_path = node.cli.home / ".config/workmux/config.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        del config["remotes"]["e2e"]["isolation"]
+        config_path.write_text(yaml.safe_dump(config))
 
     result = node.cli.run("remote", "doctor", "e2e", timeout=600)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    checks = ["ssh", "arch", "node", "git", "tmux", "linger", "container", "hooks"]
-    for check in [*checks, "image"]:
+    checks = [
+        "ssh",
+        "arch",
+        "node",
+        "git",
+        "tmux",
+        "linger",
+        "agents",
+        "hooks",
+    ]
+    for check in checks:
         assert f"✓ {check}" in result.stdout
+    if host_mode:
+        assert "✓ agent " in result.stdout
+        assert "run on host (sandbox.enabled is off)" in result.stdout
+        assert "not needed for host agents" in result.stdout
+        assert "image " not in result.stdout
+    else:
+        assert "✓ container" in result.stdout
+        assert "✓ image" in result.stdout
 
 
 def test_listing_shows_ready_node(node: Node):

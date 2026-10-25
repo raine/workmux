@@ -5,7 +5,7 @@ description: Run individual agents on an SSH-reachable Linux host while others s
 
 workmux can run an agent on a Linux machine you reach over SSH, such as a home server, a Proxmox VM or a cloud VM, while your other agents stay on the laptop. Each remote agent still gets a normal tmux window on the laptop, and shows up in the dashboard, the sidebar, `workmux status` and `workmux list` like a local one.
 
-The agent itself runs on the remote host, inside workmux's container sandbox by default. It keeps running while the laptop sleeps, loses its network or closes the window. When you come back, the window reconnects by itself. When the work is done, `workmux merge` brings it home and merges it on the laptop.
+The agent itself runs on the remote host, with the same sandbox setting as a local agent. It keeps running while the laptop sleeps, loses its network or closes the window. When you come back, the window reconnects by itself. When the work is done, `workmux merge` brings it home and merges it on the laptop.
 
 Use a remote host when:
 
@@ -18,9 +18,28 @@ Use a remote host when:
 workmux installs its own binary on the remote host and drives it over SSH. That remote side is called the **node**, and everything it owns lives under one directory, the **node root**.
 
 - `workmux add --remote` pushes the base commit from the laptop to a repository on the node, creates the worktree there, and starts every configured pane as a session of the node's own tmux server. Unpushed local commits are included. The node never fetches from your Git hosting.
-- The agent pane runs the same sandbox supervisor as a local sandboxed agent: the container, the RPC bridge and, if configured, the network proxy all run on the node.
+- In Docker mode, the agent pane runs the same sandbox supervisor as a local sandboxed agent: the container, the RPC bridge and, if configured, the network proxy all run on the node.
 - The laptop window has one pane per remote pane. Each one relays its remote session over SSH, so the agent outlives the relay.
 - One SSH connection per remote streams agent status, titles and Git status to the laptop.
+
+## Where remote agents run
+
+Remote isolation follows the effective `sandbox.enabled`: the project's setting overrides the global setting, and the default is off. An explicit `remotes.<name>.isolation` overrides that rule in either direction.
+
+| `sandbox.enabled` | `remotes.<name>.isolation` | Result       |
+| ----------------- | -------------------------- | ------------ |
+| off               | unset                      | runs on host |
+| on                | unset                      | Docker       |
+| any               | `none`                     | runs on host |
+| any               | `container`                | Docker       |
+
+**On host:** install each agent CLI on the SSH user's login `PATH`. workmux does not install agents or fall back to Docker. A missing agent command stops `add --remote` before creating workspace state, and stops `remote login` before starting login. No `sandbox.*` settings are sent or reported as unapplied in this mode.
+
+**In Docker:** install Docker and allow the SSH user to use it without `sudo`. Agent CLIs come from the sandbox image; they do not need to be installed on the host.
+
+Run `remote setup`, `remote doctor`, and `remote login` from the same project directory as `add` to use the same effective settings. Outside a project, they use global settings. The add summary and doctor show both the mode and the setting that decided it.
+
+Each workspace keeps the isolation recorded when it was created, even if settings change later. Sibling workspaces spawned by a remote agent inherit its isolation. Logins use the same remote agent directories in both modes.
 
 ## Host requirements
 
@@ -28,8 +47,8 @@ workmux installs its own binary on the remote host and drives it over SSH. That 
 - SSH access that works without a prompt, because workmux connects with `BatchMode=yes`. Use a key loaded in your SSH agent or an unencrypted key, and accept the host key once by running `ssh <host>` yourself. Aliases from `~/.ssh/config`, including `ProxyJump`, `Port` and `User`, are honoured.
 - Git and tmux 3.3 or newer.
 - systemd linger enabled for the SSH user (`sudo loginctl enable-linger <user>`), so agents survive the end of the SSH session.
-- For the default `container` isolation: Docker, usable by the SSH user without `sudo` (membership of the `docker` group). Podman is not supported on remote hosts.
-- Network access from the host to the container registry (`ghcr.io`) and to the APIs your agents use.
+- For Docker isolation: Docker, usable by the SSH user without `sudo` (membership of the `docker` group). Podman is not supported on remote hosts.
+- Network access to the APIs your agents use, and in Docker mode to the container registry (`ghcr.io`).
 
 The remote host does not need access to GitHub: the laptop downloads the workmux release, verifies its checksum and uploads it.
 
@@ -46,7 +65,7 @@ remotes:
     host: devbox # ssh destination: an alias from ~/.ssh/config or user@host
 ```
 
-The other keys (`path`, `isolation` and `binary`) and their defaults are listed under [remotes](/guide/configuration/#remotes) in the configuration reference. With the default `isolation: container`, agents run in Docker containers on the remote, as with the [container backend](/guide/sandbox/container/) locally.
+The other keys (`path`, `isolation` and `binary`) and their defaults are listed under [remotes](/guide/configuration/#remotes) in the configuration reference. See [where remote agents run](#where-remote-agents-run) to choose host execution or Docker.
 
 Remote names may contain letters, digits, `.`, `_` and `-`, and must start with a letter or digit. `local` is reserved.
 
@@ -58,7 +77,7 @@ Remote names may contain letters, digits, `.`, `_` and `-`, and must start with 
 workmux remote setup devbox
 ```
 
-This uploads the workmux binary that matches your local version into the node root and installs workmux's [status hooks](/guide/status-tracking/) for the supported agents in the remote user's agent directories. OpenCode's hooks need the OpenCode sandbox image on the remote, so run `setup` again after its first agent or login there. Running `setup` again is safe: it only installs what is missing. Commands that need the node, such as `add --remote` and `remote login`, also install it on first use, but running `setup` first shows any problem early.
+This uploads the workmux binary that matches your local version into the node root and installs workmux's [status hooks](/guide/status-tracking/) for the supported agents in the remote user's agent directories. OpenCode's hook layout depends on its version. In host mode, its hooks are skipped until its CLI is installed on the login `PATH`; an installed CLI that fails is an error. In Docker mode, its hooks need the OpenCode sandbox image on the remote, so run `setup` again after its first agent or login there. Running `setup` again is safe: it only installs what is missing. Commands that need the node, such as `add --remote` and `remote login`, also install it on first use, but running `setup` first shows any problem early.
 
 ### 3. Check the host
 
@@ -66,7 +85,7 @@ This uploads the workmux binary that matches your local version into the node ro
 workmux remote doctor devbox
 ```
 
-Doctor checks SSH, the architecture, the installed node, Git, tmux, linger, Docker, the status hooks, the logins of the agents your config can start (plus any other agent already logged in on the host) and the sandbox image, and prints a fix for each failing row. It pulls the image, so the first run can take a while; an image that can't be pulled passes when it was built on the remote. It exits non-zero when any check fails.
+Doctor checks SSH, architecture, the installed node, Git, tmux, linger, status hooks and logins. In host mode it checks agent CLIs on the login `PATH`: a missing default agent (`agent:`) fails, while missing other configured agents produce one warning. In Docker mode it checks Docker and pulls the sandbox image, so the first run can take a while; an image that cannot be pulled passes when it was built on the remote. Doctor prints the resolved mode and a fix for each failing row, and exits non-zero when any check fails.
 
 ```bash
 workmux remote
@@ -119,7 +138,7 @@ Remote agents read their logins from the remote user's default agent directories
 workmux remote login devbox <agent> [-- <extra login arguments>]
 ```
 
-This runs the agent's own login flow on the remote, attached to your terminal. With `container` isolation it runs inside the agent's sandbox image with the same credential mounts as the agents. With `isolation: none` it runs on the host, so the agent must be installed there.
+This runs the agent's own login flow on the remote, attached to your terminal. With `container` isolation it runs inside the agent's sandbox image with the same credential mounts as the agents. In host mode it runs on the host, so the agent must be installed there.
 
 | Agent      | Login that runs       | Notes                                                                                                        |
 | ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -156,7 +175,7 @@ workmux remote login devbox codex --import
 workmux remote login devbox claude --setup-token
 ```
 
-This runs `claude setup-token` on the remote, then asks you to paste the token it printed. The input is hidden. The token is stored in the node root's secrets with mode `0600` and given to every Claude agent on that node root as `CLAUDE_CODE_OAUTH_TOKEN`, including agents with `isolation: none`. Press Enter without a token to keep the current one.
+This runs `claude setup-token` on the remote, then asks you to paste the token it printed. The input is hidden. The token is stored in the node root's secrets with mode `0600` and given to every Claude agent on that node root as `CLAUDE_CODE_OAUTH_TOKEN`, including agents running on the host. Press Enter without a token to keep the current one.
 
 ### Environment variables
 
@@ -164,7 +183,7 @@ This runs `claude setup-token` on the remote, then asks you to paste the token i
 
 - The snapshot is taken once per workspace. Changing a value on the laptop does not update existing workspaces; create a new one.
 - Variables that are unset on the laptop, and values with a line break or NUL, are not sent. `add` names them in its report.
-- With `isolation: none`, `sandbox.env` and `sandbox.env_passthrough` are not used.
+- In host mode, `sandbox.env` and `sandbox.env_passthrough` are not used.
 
 `remote doctor` shows one row per configured agent with the credential files it finds, and points at `remote login` when they are missing.
 
@@ -193,7 +212,7 @@ Remote workspaces use the usual commands. Name them by handle; the commands find
 - [`workmux resurrect`](/reference/commands/resurrect/) reopens the windows of remote agents that are still running after the laptop's tmux server restarted. The agents are not restarted.
 - `workmux status`, `wait`, `send` and `capture` work on remote agents whether or not their window is open. `send` and `capture` always go through the remote.
 - After `send`, `wait` waits for the turn the text started, though the agent may report it a few seconds later: the agent's earlier `done` doesn't count. Sent to an agent that is still working, the text may only run after the current turn, and `wait` ends when that turn does. A `wait` with nothing sent returns at once for an agent that is already done, and so does one more than two minutes after a `send` that started no turn.
-- With container isolation, `send` reaches an agent that hasn't reported a status yet, such as Codex before its first turn after `add` without a prompt, or after `open` resumed it. Until the agent's container is running, `send` refuses; an agent whose container started less than five seconds ago gets the rest of that time to start first. With `isolation: none`, `send` needs the agent's first status: until then nothing tells the agent apart from another program in its pane, so pass the first prompt with `add -p` or type it into the window.
+- With container isolation, `send` reaches an agent that hasn't reported a status yet, such as Codex before its first turn after `add` without a prompt, or after `open` resumed it. Until the agent's container is running, `send` refuses; an agent whose container started less than five seconds ago gets the rest of that time to start first. In host mode, `send` needs the agent's first status: until then nothing tells the agent apart from another program in its pane, so pass the first prompt with `add -p` or type it into the window.
 
 `workmux list` shows remote workspaces with their remote, and `list --json` adds a `remote` field. `workmux status` labels remote agents `handle@remote`, and `status --json` adds a `remote` object with the remote's name and host, whether a window is attached, whether the remote is connected and when it was last seen.
 
@@ -325,9 +344,9 @@ With `container` isolation, agents run in the same container sandbox as locally,
 
 `post_create` and `pre_remove` hooks run on the remote host as the SSH user, outside the container, as they run on the laptop for local agents. They come from the laptop's config at creation time, not from the remote worktree.
 
-With `isolation: none`, there is no sandbox: agents run directly as the SSH user with that user's access to the host, and their permission prompts are not disabled. Only use it on a machine you'd let the agent use freely.
+In host mode, there is no sandbox: agents run directly as the SSH user with that user's access to the host, and their permission prompts are not disabled. Only use it on a machine you'd let the agent use freely.
 
-The node creates every remote worktree, so it marks them as trusted before an agent starts, and Claude and Codex don't stop on their "trust this folder?" question. It adds `<path>/projects` to Claude's trusted folders, and each project's node repository (`<path>/projects/<id>/repo`, which Codex uses for all of the project's worktrees) to `[projects]` in Codex's `config.toml`. The entry goes into the config the agent reads: the remote user's agent directory, which containers mount, or the directory `CLAUDE_CONFIG_DIR` or `CODEX_HOME` points to for `isolation: none`. A folder you marked untrusted stays untrusted. Trusted folders let the agent load the repository's own agent settings, such as a `.codex/config.toml`.
+The node creates every remote worktree, so it marks them as trusted before an agent starts, and Claude and Codex don't stop on their "trust this folder?" question. It adds `<path>/projects` to Claude's trusted folders, and each project's node repository (`<path>/projects/<id>/repo`, which Codex uses for all of the project's worktrees) to `[projects]` in Codex's `config.toml`. The entry goes into the config the agent reads: the remote user's agent directory, which containers mount, or the directory `CLAUDE_CONFIG_DIR` or `CODEX_HOME` points to in host mode. A folder you marked untrusted stays untrusted. Trusted folders let the agent load the repository's own agent settings, such as a `.codex/config.toml`.
 
 ## Troubleshooting
 
@@ -339,11 +358,11 @@ The node creates every remote worktree, so it marks them as trusted before an ag
 
 **An agent asks you to log in.** Run `workmux remote login <remote> <agent>`. `remote doctor` shows which agents have credentials on the remote.
 
-**A login fails because the agent is missing.** With a `sandbox.image` override, logins run in that image, which may not contain the agent. With `isolation: none`, install the agent on the host.
+**A login fails because the agent is missing.** With a `sandbox.image` override, logins run in that image, which may not contain the agent. In host mode, install the agent on the host.
 
 **No status icons for a remote agent.** Run `workmux remote setup <remote>` again to install the status hooks, and check doctor's `hooks` row. OpenCode's hooks need the OpenCode sandbox image on the remote.
 
-**Codex asks to review hooks with `isolation: none`.** Sandboxed Codex runs hooks without review (see [Agent flags](/guide/sandbox/features/#agent-flags)), but on the host Codex asks once for workmux's status hooks. Attach to the agent and trust them; Codex asks again only when the hooks change.
+**Codex asks to review hooks in host mode.** Sandboxed Codex runs hooks without review (see [Agent flags](/guide/sandbox/features/#agent-flags)), but on the host Codex asks once for workmux's status hooks. Attach to the agent and trust them; Codex asks again only when the hooks change.
 
 **Protocol mismatch.** The node runs a binary that matches your local workmux: the release of the same version, or the `binary` you configured, identified by its content. After an upgrade, the next remote command installs the new version next to the old one, and running agents keep the binary they started with. A mismatch means the local workmux is not the release it claims to be (for example, built from source), or `binary` was built from different source. Point `binary` at a Linux build of the same source.
 

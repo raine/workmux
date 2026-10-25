@@ -87,9 +87,15 @@ pub fn status_hooks(request: StatusHooksRequest) -> Result<StatusHooksResponse> 
                 (_, Some(dir)) => in_dir(agent, &dir, None, request.install),
             })
             .collect(),
-        RemoteIsolation::None => agent_setup::check_all_for_setup()
+        RemoteIsolation::None => agent_setup::check_all()
             .into_iter()
-            .map(|check| on_host(check.agent, check.status, request.install))
+            .map(|check| {
+                if check.agent == Agent::OpenCode {
+                    opencode_on_host(request.install)
+                } else {
+                    on_host(check.agent, check.status, request.install)
+                }
+            })
             .collect(),
     };
     Ok(StatusHooksResponse { agents })
@@ -177,6 +183,58 @@ fn in_dir(agent: Agent, dir: &Path, version: Option<&str>, install: bool) -> Age
         .and_then(|_| check());
     }
     report(agent, Some(dir), status, changed)
+}
+
+/// OpenCode's plugin layout depends on its installed version, not on the
+/// presence of a config directory (which containers also use).
+fn opencode_on_host(install: bool) -> AgentHooks {
+    let agent = Agent::OpenCode;
+    let env = super::login_env();
+    let path = env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Ok(program) = which::which_in("opencode", path, cwd) else {
+        return AgentHooks {
+            agent,
+            dir: None,
+            state: HookState::Unknown,
+            detail: Some(
+                "opencode is not installed on the host login PATH; run setup again after installing it"
+                    .into(),
+            ),
+            changed: false,
+        };
+    };
+    let Some(dir) = opencode::opencode_config_dir() else {
+        return report(
+            agent,
+            None,
+            Err("cannot locate its directory".into()),
+            false,
+        );
+    };
+    let mut command = Command::new(program);
+    command.arg("--version").envs(env);
+    match super::super::transport::run_bounded(
+        command,
+        Stdio::null(),
+        Some(std::time::Duration::from_secs(20)),
+    ) {
+        Ok(Some(output)) if output.success() => {
+            in_dir(agent, &dir, Some(&output.stdout_text()), install)
+        }
+        result => {
+            let detail = match result {
+                Ok(Some(output)) => format!("opencode --version failed: {}", output.stderr_line()),
+                Ok(None) => "opencode --version timed out".into(),
+                Err(err) => format!("could not run opencode --version: {err:#}"),
+            };
+            report(agent, Some(&dir), Err(detail), false)
+        }
+    }
 }
 
 fn on_host(agent: Agent, status: StatusCheck, install: bool) -> AgentHooks {

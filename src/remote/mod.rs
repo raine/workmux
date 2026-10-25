@@ -15,6 +15,7 @@ pub mod gc;
 pub mod git;
 pub mod homecoming;
 pub mod hooks;
+pub mod host;
 pub mod install;
 pub mod lifecycle;
 pub mod node;
@@ -43,6 +44,8 @@ pub struct RemoteSpec {
     /// Node root as written in config; a leading `~` is expanded on the remote.
     pub path: String,
     pub isolation: RemoteIsolation,
+    /// Whether the remote overrides sandbox.enabled.
+    pub isolation_explicit: bool,
     /// Local binary to upload, with `~` expanded.
     pub binary: Option<PathBuf>,
 }
@@ -70,9 +73,31 @@ impl RemoteSpec {
             name: name.to_string(),
             host: remote.host.clone(),
             path,
-            isolation: remote.isolation.unwrap_or_default(),
+            isolation: resolve_isolation(remote.isolation, config.sandbox.is_enabled()),
+            isolation_explicit: remote.isolation.is_some(),
             binary,
         })
+    }
+
+    /// Where new workspaces run and which setting decides it.
+    pub fn runs_description(&self) -> String {
+        let (mode, value) = match self.isolation {
+            RemoteIsolation::None => ("on host", "none"),
+            RemoteIsolation::Container => ("in Docker", "container"),
+        };
+        let source = if self.isolation_explicit {
+            format!("remotes.{}.isolation: {value}", self.name)
+        } else {
+            format!(
+                "sandbox.enabled is {}",
+                if self.isolation == RemoteIsolation::Container {
+                    "on"
+                } else {
+                    "off"
+                }
+            )
+        };
+        format!("{mode} ({source})")
     }
 
     /// A node script: `$root` is the node root with `~` expanded, followed by
@@ -88,6 +113,15 @@ impl RemoteSpec {
         script.push_str(body);
         script
     }
+}
+
+/// Resolve only from the effective config: an explicit machine override wins.
+fn resolve_isolation(explicit: Option<RemoteIsolation>, sandbox_enabled: bool) -> RemoteIsolation {
+    explicit.unwrap_or(if sandbox_enabled {
+        RemoteIsolation::Container
+    } else {
+        RemoteIsolation::None
+    })
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -408,8 +442,34 @@ mod tests {
         let spec = RemoteSpec::resolve(&config, "hetzner").unwrap();
         assert_eq!(spec.host, "example");
         assert_eq!(spec.path, DEFAULT_NODE_PATH);
-        assert_eq!(spec.isolation, RemoteIsolation::Container);
+        assert_eq!(spec.isolation, RemoteIsolation::None);
         assert!(spec.binary.is_none());
+    }
+
+    #[test]
+    fn isolation_precedence_and_provenance() {
+        use RemoteIsolation::{Container, None as Host};
+        for (enabled, explicit, expected) in [
+            (false, None, Host),
+            (true, None, Container),
+            (false, Some(Host), Host),
+            (true, Some(Host), Host),
+            (false, Some(Container), Container),
+            (true, Some(Container), Container),
+        ] {
+            assert_eq!(resolve_isolation(explicit, enabled), expected);
+            let mut config = config_with(&["hetzner"], None);
+            config.sandbox.enabled = Some(enabled);
+            config.remotes.get_mut("hetzner").unwrap().isolation = explicit;
+            let spec = RemoteSpec::resolve(&config, "hetzner").unwrap();
+            assert_eq!(spec.isolation, expected);
+            assert_eq!(spec.isolation_explicit, explicit.is_some());
+            assert!(spec.runs_description().contains(if explicit.is_some() {
+                "remotes.hetzner.isolation"
+            } else {
+                "sandbox.enabled"
+            }));
+        }
     }
 
     fn spec_error(name: &str, remote: RemoteConfig) -> String {
