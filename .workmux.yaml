@@ -9,6 +9,7 @@ files:
   symlink:
     - CLAUDE.md
     - tests/venv # Share Python venv for faster worktree creation
+    - docs/node_modules # Lets pre_merge's docs check run without a pane install
     - .ignore
     - history
 
