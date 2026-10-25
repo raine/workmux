@@ -464,3 +464,40 @@ def test_squash_and_configured_rebase_strategies(
     assert git(repo, "rev-list", "--merges", "--count", "main") == "0"
     assert git(repo, "log", "-1", "--format=%s", "main") == "node: d.txt"
     assert node.workspaces() == []
+
+
+@pytest.mark.parametrize("flags", ["", "--no-hooks", "--no-verify", "--keep"])
+def test_merge_provisions_headless_dependencies(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    flags: str,
+):
+    repo = mux_repo_path
+    (repo / ".gitignore").write_text("dependency\nprepared\n")
+    git(repo, "add", ".gitignore")
+    (repo / "dependency").write_text("laptop dependency\n")
+    marker = node.root / "laptop-setup"
+    configure(
+        repo,
+        files={"symlink": ["dependency"]},
+        post_create=["test -L dependency && touch prepared"],
+        pre_merge=["test -L dependency && test -f prepared && echo HOOK-OUTPUT"],
+    )
+    wm(mux_server, workmux_exe_path, repo, "add feat --remote lo")
+    commit_on_node(node_worktree(node, "feat"), "work.txt", "work\n")
+    # Only the laptop's current config controls homecoming setup.
+    configure(
+        repo,
+        files={"symlink": ["dependency"]},
+        post_create=[f"test -L dependency && touch prepared {marker}"],
+        pre_merge=["test -L dependency && test -f prepared && echo HOOK-OUTPUT"],
+        panes=[{"command": "exit 99"}],
+    )
+    result = wm(mux_server, workmux_exe_path, repo, f"merge feat {flags}")
+    assert marker.exists() == (flags != "--no-hooks")
+    assert ("HOOK-OUTPUT" in result.stdout) == (
+        flags not in ("--no-hooks", "--no-verify")
+    )
+    assert git(repo, "show", "main:work.txt") == "work"

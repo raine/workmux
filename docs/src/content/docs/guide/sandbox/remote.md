@@ -245,8 +245,22 @@ Merging a remote workspace brings its work home and runs the normal local merge:
 
 1. The remote exports the branch, the index and the worktree.
 2. The laptop fetches it into a local worktree at the usual path, with the branch, staged changes and files exactly as on the remote.
-3. The local merge runs there: staged changes are committed with your editor, `pre_merge` hooks run on the laptop, and `merge_strategy`, `--rebase`, `--squash`, `--into` and `--keep` behave as for a local worktree.
-4. The remote workspace, its agent and its branch are removed.
+3. The laptop applies `files.copy` and `files.symlink` and runs `post_create` hooks, as for a headless local add. The exported files and index are restored afterwards so setup cannot replace the remote's work.
+4. The local merge runs there: staged changes are committed with your editor, `pre_merge` hooks run on the laptop, and `merge_strategy`, `--rebase`, `--squash`, `--into` and `--keep` behave as for a local worktree.
+5. The remote workspace, its agent and its branch are removed.
+
+The merge worktree has no panes: pane commands never run, and ignored dependencies such as `node_modules` are not fetched from the remote. Put setup needed by `pre_merge` in `post_create` (for example, `cd docs && bun install`) or use `files` to share suitable laptop files. Keep setup hooks repeatable: they run for each fresh merge attempt, including `--keep`, but not when resuming a conflict in an existing copy. A setup failure aborts the merge without removing the remote workspace.
+
+`--no-hooks` skips setup and lifecycle hooks, but still applies `files`. `--no-verify` skips `pre_merge`, not `post_create`. Ordinary `remove`, including `--keep-branch`, does not create or provision a local worktree.
+
+A merge started on the laptop prints hook output in that terminal. A merge or removal requested from a remote pane runs in a detached laptop worker. Its stdout and stderr are retained on the laptop, including failed setup and hook output:
+
+```bash
+workmux remote logs devbox                # list log paths
+workmux remote logs devbox r0123456789ab   # print one request's output
+```
+
+The refusal in the remote pane includes a ready-to-run command with the laptop's remote name and the request ID. Only a categorised error, the remote name and the request ID go back to the node, never hook output or laptop paths. Logs are private files under `$XDG_STATE_HOME/workmux/remote/<remote>/operation-logs/` (by default `~/.local/state/workmux/remote/<remote>/operation-logs/`). They survive workspace removal, need no SSH connection to read, and may contain sensitive hook output. Delete old log files when no longer needed; they are not automatically pruned.
 
 As locally, unstaged changes and untracked files on the remote refuse the merge unless you pass `--ignore-uncommitted` or `--keep`. With `--ignore-uncommitted`, those changes are not merged and are removed with the workspace.
 
