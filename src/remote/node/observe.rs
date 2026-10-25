@@ -236,20 +236,13 @@ impl Observer {
         }
     }
 
-    /// The node as of `live`, the panes [`Observer::live_panes`] returned.
-    fn snapshot(
+    /// Agent state for `workspaces`, reconciled against the current live panes.
+    /// Targeted commands need this state, but not the worktrees' Git status.
+    fn observe_workspaces(
         &mut self,
         live: &HashMap<String, LivePaneInfo>,
-        only: Option<&str>,
+        workspaces: &[Workspace],
     ) -> Result<Snapshot> {
-        let mut workspaces: Vec<Workspace> = self
-            .root
-            .workspaces()
-            .into_iter()
-            .filter(|ws| ws.execution.is_some())
-            .filter(|ws| only.is_none_or(|ws_id| ws.identity.ws_id == ws_id))
-            .collect();
-        workspaces.sort_by(|a, b| a.identity.ws_id.cmp(&b.identity.ws_id));
         let agents = if live.is_empty() {
             Vec::new()
         } else {
@@ -263,14 +256,26 @@ impl Observer {
                 )?
                 .0
         };
-        let mut snapshot = build_snapshot(
+        Ok(build_snapshot(
             now(),
-            &workspaces,
+            workspaces,
             live,
             &agents,
             self.host.as_deref(),
             self.boot.as_deref(),
-        );
+        ))
+    }
+
+    /// The node as of `live`, including each workspace's Git status.
+    fn snapshot(&mut self, live: &HashMap<String, LivePaneInfo>) -> Result<Snapshot> {
+        let mut workspaces: Vec<Workspace> = self
+            .root
+            .workspaces()
+            .into_iter()
+            .filter(|ws| ws.execution.is_some())
+            .collect();
+        workspaces.sort_by(|a, b| a.identity.ws_id.cmp(&b.identity.ws_id));
+        let mut snapshot = self.observe_workspaces(live, &workspaces)?;
         self.git
             .retain(|ws_id, _| workspaces.iter().any(|ws| ws.identity.ws_id == *ws_id));
         for observed in &mut snapshot.workspaces {
@@ -448,7 +453,7 @@ fn pane_number(id: &str) -> u64 {
 pub fn snapshot(root: &NodeRoot) -> Result<Snapshot> {
     let mut observer = Observer::new(root)?;
     let live = observer.live_panes()?;
-    observer.snapshot(&live, None)
+    observer.snapshot(&live)
 }
 
 /// `watch` with `stream`: NDJSON frames on stdout until it is closed. A
@@ -464,7 +469,7 @@ pub fn stream(root: &NodeRoot) -> Result<()> {
         let quiet = last_sent.is_none_or(|sent| sent.elapsed() >= HEARTBEAT_INTERVAL);
         let frame = match observer
             .live_panes()
-            .and_then(|live| observer.snapshot(&live, None))
+            .and_then(|live| observer.snapshot(&live))
         {
             Ok(snapshot) => {
                 last_error = None;
@@ -525,7 +530,7 @@ fn target(root: &NodeRoot, ws_id: &str, pane: Option<usize>) -> Result<Target> {
     })?;
     let mut observer = Observer::new(root)?;
     let live = observer.live_panes()?;
-    let snapshot = observer.snapshot(&live, Some(ws_id))?;
+    let snapshot = observer.observe_workspaces(&live, std::slice::from_ref(&workspace))?;
     let observed = snapshot.workspaces.into_iter().next().ok_or_else(|| {
         refuse(
             code::NOT_FOUND,
@@ -865,6 +870,17 @@ mod tests {
     fn snapshot_without_server_marks_panes_dead() {
         let ws = workspace("w0123456789ab", "x0123456789ab", &[0], None);
         let snapshot = build_snapshot(7, &[ws], &HashMap::new(), &[], None, None);
+        let pane = &snapshot.workspaces[0].panes[0];
+        assert!(!pane.alive);
+        assert!(pane.agent.is_none());
+    }
+
+    #[test]
+    fn a_previous_execution_does_not_supply_the_current_agent() {
+        let ws = workspace("w0123456789ab", "x0123456789ac", &[0], None);
+        let live = HashMap::from([("%3".to_string(), live("x0123456789ab-0"))]);
+        let agents = [agent("%3", AgentStatus::Done)];
+        let snapshot = build_snapshot(7, &[ws], &live, &agents, None, None);
         let pane = &snapshot.workspaces[0].panes[0];
         assert!(!pane.alive);
         assert!(pane.agent.is_none());
