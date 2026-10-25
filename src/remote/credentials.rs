@@ -2,6 +2,7 @@
 //! login flow on the node, with the credential directories remote
 //! executions mount; `--import` copies the laptop's credential files once.
 
+use std::io::{IsTerminal, Write};
 use std::net::TcpListener;
 use std::path::Path;
 
@@ -201,6 +202,12 @@ pub fn login(
     }
     if matches!(spec.isolation, RemoteIsolation::Container) {
         println!("If Ctrl-C does not leave it, press Ctrl-P Ctrl-Q.");
+    }
+    // A fullscreen login hides these instructions as soon as it starts.
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        print!("Press Enter to start the login...");
+        std::io::stdout().flush()?;
+        std::io::stdin().read_line(&mut String::new())?;
     }
     let status = node
         .login_command(&flags, &forwards)
