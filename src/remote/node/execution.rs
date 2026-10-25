@@ -445,8 +445,11 @@ fn new_session(
     let mut cmd = tmux(socket);
     cmd.arg("-f")
         .arg(conf)
-        .args(["new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "200"])
-        .args(["-y", "50", "-s", name, "-c"])
+        // Use tmux's default size until a viewer attaches. An oversized
+        // initial screen can push startup output into history when reflowed
+        // to the viewer's narrower terminal.
+        .args(["new-session", "-d", "-P", "-F", "#{pane_id}"])
+        .args(["-s", name, "-c"])
         .arg(cwd)
         .arg("-e")
         .arg(format!(
@@ -502,6 +505,40 @@ fn set_session_env(root: &NodeRoot, socket: &Path, name: &str, secrets: &Secrets
 mod tests {
     use super::*;
     use crate::config::SplitDirection;
+
+    #[test]
+    fn fresh_server_uses_the_default_terminal_size() {
+        if which::which("tmux").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tmux.sock");
+        let conf = dir.path().join("tmux.conf");
+        fs::write(&conf, TMUX_CONF).unwrap();
+        let result = new_session(
+            &socket,
+            &conf,
+            "first",
+            dir.path(),
+            &dir.path().join("config.json"),
+            None,
+        );
+        let dimensions = tmux(&socket)
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                "=first:",
+                "#{pane_width}x#{pane_height}",
+            ])
+            .output();
+        let _ = tmux(&socket).arg("kill-server").output();
+
+        result.unwrap();
+        let dimensions = dimensions.unwrap();
+        assert!(dimensions.status.success());
+        assert_eq!(String::from_utf8_lossy(&dimensions.stdout).trim(), "80x24");
+    }
 
     #[test]
     fn plan_skips_unsplit_panes_and_defaults_to_one_shell() {
