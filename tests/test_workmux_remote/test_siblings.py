@@ -2,6 +2,7 @@
 execution creates a sibling workspace on the same node, which the laptop
 adopts the next time it looks at the node."""
 
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -200,15 +201,33 @@ def test_agent_spawns_sibling(
     observed = observation_path(mux_server)
     before = json.loads(observed.read_text())
     assert any(ws.get("sibling") for ws in before["workspaces"])
-    removed = wm(mux_server, workmux_exe_path, repo, "remove --force sib")
-    assert "Removed remote workspace 'sib'" in removed.stdout, removed.stderr
-    assert by_branch(node, "sib") is None
+    # No relay may publish while the test supplies observations. Holding the
+    # observer lock also makes commands read the supplied file, not the node.
+    wm(mux_server, workmux_exe_path, repo, "close sib")
+    wm(mux_server, workmux_exe_path, repo, "close feat")
+    with (observed.parent / "observer.v3.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        removed = wm(mux_server, workmux_exe_path, repo, "remove --force sib")
+        assert "Removed remote workspace 'sib'" in removed.stdout, removed.stderr
+        assert by_branch(node, "sib") is None
+        forgotten = observed.parent / "forgotten" / sibling["ws_id"]
+        removed_at = int(forgotten.read_text())
 
-    # An observation from before the removal does not bring it back.
-    observed.write_text(json.dumps({**before, "last_seen": int(time.time())}))
-    listing = wm(mux_server, workmux_exe_path, repo, "list")
-    assert "adopted" not in listing.stderr, listing.stderr
-    assert [r["branch"] for r in local_records(mux_server)] == ["feat"]
+        # An observation from before removal does not bring it back, even
+        # when another command has already processed a newer observation.
+        after = {
+            **before,
+            "last_seen": removed_at + 1,
+            "workspaces": [
+                ws for ws in before["workspaces"] if ws["ws_id"] != sibling["ws_id"]
+            ],
+        }
+        for snapshot in (before, after, before):
+            observed.write_text(json.dumps(snapshot))
+            listing = wm(mux_server, workmux_exe_path, repo, "list")
+            assert "adopted" not in listing.stderr, listing.stderr
+            assert [r["branch"] for r in local_records(mux_server)] == ["feat"]
+        assert forgotten.exists()
 
 
 def test_sibling_spawned_while_nobody_watches(
