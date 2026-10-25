@@ -21,6 +21,13 @@ pub struct RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RemoteCommand {
+    /// List laptop operation logs, or print one request's output (no SSH)
+    Logs {
+        /// Remote name
+        name: String,
+        /// Request ID printed in the remote pane; omit to list log paths
+        request: Option<String>,
+    },
     /// Install this workmux's node binary and the agents' status hooks on a
     /// remote
     Setup {
@@ -88,8 +95,12 @@ pub enum RemoteCommand {
 }
 
 pub fn run(args: RemoteArgs) -> Result<()> {
+    if let Some(RemoteCommand::Logs { name, request }) = &args.command {
+        return crate::remote::operation::logs(name, request.as_deref());
+    }
     let config = Config::load(None)?;
     match args.command {
+        Some(RemoteCommand::Logs { .. }) => unreachable!(),
         None => list(&config),
         Some(RemoteCommand::Setup { name }) => {
             let spec = RemoteSpec::resolve(&config, &name)?;
