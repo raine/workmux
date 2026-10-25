@@ -20,6 +20,7 @@ pub mod install;
 pub mod lifecycle;
 pub mod node;
 pub mod observe;
+pub mod operation;
 pub mod portable;
 pub mod protocol;
 pub mod siblings;

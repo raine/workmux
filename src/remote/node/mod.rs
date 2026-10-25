@@ -25,6 +25,7 @@ pub mod gc;
 pub mod git;
 pub mod hooks;
 pub mod observe;
+pub mod operation;
 pub mod provision;
 pub mod remove;
 pub mod secrets;
@@ -223,6 +224,8 @@ pub struct Workspace {
     /// Set when a remote agent created the workspace on the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<operation::Request>,
 }
 
 /// How a workspace a remote agent spawned came about, and what the laptop
@@ -256,6 +259,7 @@ impl Workspace {
             prompt_file_only: false,
             execution: None,
             origin: None,
+            operation: None,
         }
     }
 

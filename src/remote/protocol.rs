@@ -19,6 +19,7 @@ pub const NODE_PROTOCOL: u32 = 1;
 /// Verbs this build's node entry point implements.
 pub const CAPABILITIES: &[&str] = &[
     "hello",
+    "operation",
     PROVISION_WORKSPACE,
     START_EXECUTION,
     REMOVE_WORKSPACE,

@@ -20,6 +20,11 @@ pub struct NodeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeVerb {
+    /// Claim a workspace lifecycle request or report its outcome
+    Operation {
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Report protocol version, workmux version, platform and capabilities
     Hello {
         /// Write JSON to stdout (required)
@@ -214,6 +219,9 @@ pub fn run(args: NodeArgs) -> Result<()> {
             NodeVerb::Diff { .. } => {
                 serve(request, |root, request| node::git::diff(&root, request))
             }
+            NodeVerb::Operation { .. } => serve(request, |root, request| {
+                node::operation::update(&root, request)
+            }),
             NodeVerb::Spawn { .. } => {
                 serve(request, |root, request| node::spawn::spawn(&root, request))
             }

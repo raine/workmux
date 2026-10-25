@@ -858,6 +858,8 @@ pub struct RemoveOptions {
     pub run_hooks: bool,
     /// Ask before deleting commits the local base lacks.
     pub confirm_unmerged: bool,
+    /// Refuse rather than prompt when deleting commits the local base lacks.
+    pub refuse_unmerged: bool,
 }
 
 /// Command-scoped connections and cleanup sweep. Failed connections are not
@@ -1045,9 +1047,12 @@ fn check_removable(
             &export.snapshot,
         )?;
         keep_branch_locally(record, head)?;
-    } else if options.confirm_unmerged {
+    } else if options.confirm_unmerged || options.refuse_unmerged {
         let base = record.base_branch();
         if !is_ancestor(&record.project_root, head, &base) {
+            if options.refuse_unmerged {
+                bail!("has commits not merged into its base; run `workmux rm --force`");
+            }
             println!("The following branches have commits not merged into their base:");
             println!("  - {} (base: {base})", record.branch);
             println!(
