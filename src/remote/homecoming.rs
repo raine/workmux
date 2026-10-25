@@ -37,6 +37,16 @@ pub struct MergeOptions<'a> {
     pub no_hooks: bool,
     pub notification: bool,
     pub noninteractive: bool,
+    /// Told each stage of a merge that runs for a remote requester.
+    pub progress: Option<&'a dyn Fn(&str)>,
+}
+
+impl MergeOptions<'_> {
+    fn stage(&self, stage: &str) {
+        if let Some(progress) = self.progress {
+            progress(stage);
+        }
+    }
 }
 
 /// What became of a remote workspace whose work came home.
@@ -104,11 +114,13 @@ fn merge_inner(
             (snapshot, created_branch, None)
         }
         None => {
+            options.stage("Bringing the work to the laptop…");
             let node = Node::connect(&spec)?;
             finish_pending(&node, &record.ws_id);
             let export = export(&node, &mut record, false)?;
             let created_branch = hydrate(context, &node, &mut record, &export)?;
             let prepared = check_copy(&record, &options, false).and_then(|()| {
+                options.stage("Setting up the laptop worktree (files, post_create)…");
                 provision_copy(context, &record, &export.snapshot, !options.no_hooks)
             });
             if let Err(err) = prepared {
@@ -119,6 +131,18 @@ fn merge_inner(
         }
     };
 
+    let hooks = !options.no_verify
+        && !options.no_hooks
+        && context
+            .config
+            .pre_merge
+            .as_ref()
+            .is_some_and(|hooks| !hooks.is_empty());
+    options.stage(if hooks {
+        "Running pre_merge hooks on the laptop…"
+    } else {
+        "Merging on the laptop…"
+    });
     let result = workflow::merge(
         &record.handle,
         options.into,
@@ -178,6 +202,7 @@ fn merge_inner(
         return Ok(());
     }
 
+    options.stage("Merged; removing the workspace…");
     // The checkpoint that keeps a retry from merging again.
     record.homecoming = Some(Homecoming::Merged {
         snapshot: snapshot.clone(),
