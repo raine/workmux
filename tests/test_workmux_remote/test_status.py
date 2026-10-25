@@ -6,6 +6,7 @@ real agent hooks do, and is driven through a control file."""
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -228,6 +229,49 @@ def test_commands_reach_remote_agents_with_or_without_a_window(
         timeout=10,
     )
 
+    # Pane commands need live agent state, not Git status. A node-local Git
+    # probe must stay untouched by send/capture, but be used by watch.
+    bindir = tmp_path / "probe-bin"
+    bindir.mkdir()
+    git_calls = tmp_path / "git-calls"
+    probe = bindir / "git"
+    probe.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys\n"
+        f"pathlib.Path({str(git_calls)!r}).touch()\n"
+        "sys.exit(1)\n"
+    )
+    probe.chmod(0o755)
+    node_env = {
+        **mux_server.env,
+        "WORKMUX_NODE_ROOT": str(node.root),
+        "XDG_STATE_HOME": str(node.root / "state"),
+        "PATH": f"{bindir}:{mux_server.env['PATH']}",
+    }
+
+    def node_call(verb: str, request: dict, *, success: bool = True) -> dict:
+        result = subprocess.run(
+            [str(exe), "node", verb, "--json"],
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            env=node_env,
+            timeout=20,
+        )
+        assert (result.returncode == 0) == success, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
+    target = {"ws_id": workspace["ws_id"], "pane": 0}
+    sent = node_call("send", {**target, "text": "without-git"})
+    assert sent["pane"] == 0 and sent["status"] == "working"
+    captured = node_call("capture", {**target, "lines": 100})
+    assert "remote-hello-42" in captured["text"]
+    assert not git_calls.exists()
+    invalid = node_call("capture", {**target, "pane": 99, "lines": 10}, success=False)
+    assert invalid["error"]["code"] == "not_found"
+    node_call("watch", {})
+    assert git_calls.exists(), "Git probe was not used by the node"
+
     # wait sees transitions on the node.
     waiting = start_workmux(mux_server, exe, repo, "wait", "cmd", "--timeout", "30")
     agent.do("done")
@@ -252,6 +296,12 @@ def test_commands_reach_remote_agents_with_or_without_a_window(
     assert waiting.returncode == 3, stderr
     assert "agent exited unexpectedly" in stderr
     assert status_rows(mux_server, exe, repo) == []
+    for verb, request in [
+        ("capture", {**target, "lines": 10}),
+        ("send", {**target, "text": "must-not-reach-shell"}),
+    ]:
+        error = node_call(verb, request, success=False)
+        assert error["error"]["code"] == "not_found"
 
 
 def test_send_reaches_a_remote_agent_the_config_picks(
