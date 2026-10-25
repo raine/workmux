@@ -25,7 +25,7 @@ from ..conftest import (
     wait_for_pane_output,
     write_workmux_config,
 )
-from .conftest import LOOPBACK, Node, git, local_records, wm
+from .conftest import LOOPBACK, Node, commit_project, git, local_records, wm
 
 pytestmark = pytest.mark.tmux_only
 
@@ -54,6 +54,67 @@ def setup_project(repo: Path) -> str:
 def pane_commands(env: TmuxEnvironment, window: str) -> List[str]:
     result = env.tmux(["list-panes", "-t", window, "-F", "#{pane_start_command}"])
     return result.stdout.splitlines()
+
+
+def wait_for_startup_and_relay(
+    env: TmuxEnvironment, node: Node, window: str, ex_id: str
+) -> None:
+    session = f"={ex_id}-0"
+    target = f"{session}:"
+    # Attaching a narrower viewer can reflow startup output into node history.
+    # Check execution there, then check fresh output through the live relay.
+    assert poll_until(
+        lambda: "AGENT-READY"
+        in node.tmux("capture-pane", "-p", "-S", "-", "-t", target).stdout,
+        timeout=20,
+    )
+    assert poll_until(
+        lambda: bool(
+            node.tmux(
+                "list-clients", "-t", session, "-F", "#{client_pid}"
+            ).stdout.strip()
+        ),
+        timeout=20,
+    )
+    node.tmux("send-keys", "-t", target, "printf 'RELAY-%s\\n' READY", "Enter")
+    wait_for_pane_output(env, window, "RELAY-READY", timeout=20)
+
+
+def test_first_bash_pane_keeps_startup_output(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    # A prompt wider than the viewer exercises reflow on the first attach.
+    prompt = "node:" + "x" * 100 + "$ "
+    commit_project(
+        mux_repo_path,
+        {
+            "nerdfont": False,
+            "panes": [
+                {
+                    "command": f"PS1='{prompt}'; "
+                    "echo ran >> command-runs; echo FIRST-PANE-READY"
+                }
+            ],
+        },
+    )
+    assert node.sessions() == []
+    wm(
+        mux_server,
+        workmux_exe_path,
+        mux_repo_path,
+        "add first --remote lo",
+        extra_env={"SHELL": "/bin/bash"},
+    )
+    [workspace] = node.workspaces()
+    marker = Path(workspace["worktree_path"]) / "command-runs"
+    assert poll_until(marker.exists, timeout=10)
+    assert marker.read_text() == "ran\n"
+    wait_for_pane_output(
+        mux_server, get_window_name("first"), "FIRST-PANE-READY", timeout=20
+    )
 
 
 def test_remote_lifecycle(
@@ -89,7 +150,7 @@ def test_remote_lifecycle(
     commands = pane_commands(mux_server, window)
     assert len(commands) == 2
     assert all("remote attach" in command for command in commands)
-    wait_for_pane_output(mux_server, window, "AGENT-READY", timeout=20)
+    wait_for_startup_and_relay(mux_server, node, window, ex_id)
 
     # Keystrokes reach the remote shell.
     mux_server.tmux(["send-keys", "-t", window, "echo typed-$((40+2))", "Enter"])
@@ -181,7 +242,7 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
     wm(mux_server, workmux_exe_path, repo, "add relay --remote lo")
     [record] = local_records(mux_server)
     ex_id = record["execution"]["ex_id"]
-    wait_for_pane_output(mux_server, window, "AGENT-READY", timeout=20)
+    wait_for_startup_and_relay(mux_server, node, window, ex_id)
 
     def client_pids() -> List[str]:
         result = node.tmux("list-clients", "-t", f"={ex_id}-0", "-F", "#{client_pid}")
@@ -279,7 +340,7 @@ def test_add_resumes_interrupted_provisioning(
     ex_id = ready["execution"]["ex_id"]
     assert node.sessions() == [f"{ex_id}-0", f"{ex_id}-1"]
     assert len(pane_commands(mux_server, get_window_name("feat"))) == 2
-    wait_for_pane_output(mux_server, get_window_name("feat"), "AGENT-READY", timeout=20)
+    wait_for_startup_and_relay(mux_server, node, get_window_name("feat"), ex_id)
 
 
 def test_add_suffixes_a_name_another_repository_holds(
