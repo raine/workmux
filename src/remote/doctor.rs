@@ -31,7 +31,9 @@ if command -v loginctl >/dev/null 2>&1; then
 else
   fact linger unavailable
 fi
-if command -v docker >/dev/null 2>&1; then
+"#;
+
+const RUNTIME_FACTS_SCRIPT: &str = r#"if command -v docker >/dev/null 2>&1; then
   out=$(docker info --format '{{.ServerVersion}}' 2>&1 </dev/null)
   fact docker_status $?
   fact docker_out "$out"
@@ -182,8 +184,17 @@ pub fn evaluate(facts: &Facts, cx: &Context) -> (Vec<Row>, Option<&'static str>)
         .fix(format!("sudo loginctl enable-linger {user}")),
     });
 
+    rows.push(Row::new(
+        "agents",
+        Level::Ok,
+        format!("run {}", cx.spec.runs_description()),
+    ));
     if cx.spec.isolation == RemoteIsolation::None {
-        rows.push(Row::new("container", Level::Skip, "isolation: none"));
+        rows.push(Row::new(
+            "container",
+            Level::Skip,
+            "not needed for host agents",
+        ));
         return (rows, None);
     }
     let (row, runtime) = runtime_row(facts, cx);
@@ -201,7 +212,6 @@ fn runtime_row(facts: &Facts, cx: &Context) -> (Row, Option<&'static str>) {
         );
     }
     let user = fact(facts, "user");
-    let name = &cx.spec.name;
     let row = if !facts.contains_key("docker_status") {
         let detail = if fact(facts, "podman_status") == "0" {
             format!(
@@ -212,7 +222,8 @@ fn runtime_row(facts: &Facts, cx: &Context) -> (Row, Option<&'static str>) {
             "docker is not installed".to_string()
         };
         Row::new("container", Level::Fail, detail).fix(format!(
-            "install docker, or set remotes.{name}.isolation: none"
+            "install docker; agents run {}",
+            cx.spec.runs_description()
         ))
     } else {
         let output = fact(facts, "docker_out");
@@ -324,7 +335,12 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         print_row(&Row::new("ssh", Level::Fail, format!("{err:#}")));
         return Ok(false);
     }
-    let output = transport.run(FACTS_SCRIPT, Input::Null, Some(PROBE_TIMEOUT))?;
+    let script = if spec.isolation == RemoteIsolation::Container {
+        format!("{FACTS_SCRIPT}{RUNTIME_FACTS_SCRIPT}")
+    } else {
+        FACTS_SCRIPT.to_string()
+    };
+    let output = transport.run(&script, Input::Null, Some(PROBE_TIMEOUT))?;
     let facts = parse_facts(&output.stdout_text());
 
     let pin = Pin::for_spec(spec)?;
@@ -340,6 +356,9 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         disconnect_hint: disconnect_hint.as_deref(),
     };
     let (mut rows, runtime) = evaluate(&facts, &cx);
+    if spec.isolation == RemoteIsolation::None {
+        rows.extend(host_agent_rows(spec, config, &transport)?);
+    }
     rows.extend(super::hooks::doctor_rows(
         spec,
         config,
@@ -389,6 +408,66 @@ pub fn run(spec: &RemoteSpec, config: &Config) -> Result<bool> {
         rows.push(row);
     }
     Ok(rows.iter().all(|row| row.level != Level::Fail))
+}
+
+/// The default agent is required; additional configured agents are optional.
+fn host_agent_rows(spec: &RemoteSpec, config: &Config, transport: &Transport) -> Result<Vec<Row>> {
+    let default = crate::multiplexer::agent::resolve_selected_agent(config, None);
+    let mut programs = Vec::new();
+    if let Some(default) = &default {
+        programs.push(default.command.program.clone());
+    }
+    let others: Vec<_> = config
+        .agents
+        .keys()
+        .filter_map(|name| {
+            crate::multiplexer::agent::resolve_selected_agent(config, Some(name))
+                .filter(|agent| {
+                    default
+                        .as_ref()
+                        .is_none_or(|default| agent.command.program != default.command.program)
+                })
+                .map(|agent| (name, agent.command.program))
+        })
+        .collect();
+    programs.extend(others.iter().map(|(_, program)| program.clone()));
+    let available = super::host::available(transport, &programs)?;
+    let mut rows = Vec::new();
+    let mut results = available.into_iter();
+    if let Some(default) = default {
+        let program = default.command.program;
+        rows.push(if results.next() == Some(true) {
+            Row::new(
+                "agent",
+                Level::Ok,
+                format!("default agent {program}: found on host login PATH"),
+            )
+        } else {
+            Row::new(
+                "agent",
+                Level::Fail,
+                format!("default agent {program}: not installed"),
+            )
+            .fix(super::host::missing_message(spec, &program))
+        });
+    }
+    let missing: Vec<_> = others
+        .iter()
+        .zip(results)
+        .filter(|(_, found)| !found)
+        .map(|((name, program), _)| format!("{name} ({program})"))
+        .collect();
+    if !missing.is_empty() {
+        rows.push(Row::new(
+            "agents",
+            Level::Warn,
+            format!(
+                "other configured agents not installed: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    Ok(rows)
 }
 
 /// Agents the config can start: the default agent and the kinds of the
@@ -463,6 +542,7 @@ mod tests {
             host: "wm".into(),
             path: "~/.workmux-node".into(),
             isolation,
+            isolation_explicit: true,
             binary: None,
         }
     }
@@ -505,7 +585,16 @@ mod tests {
         let checks: Vec<_> = rows.iter().map(|row| row.check).collect();
         assert_eq!(
             checks,
-            ["ssh", "arch", "node", "git", "tmux", "linger", "container"]
+            [
+                "ssh",
+                "arch",
+                "node",
+                "git",
+                "tmux",
+                "linger",
+                "agents",
+                "container"
+            ]
         );
         assert_eq!(runtime, Some("docker"));
         assert_eq!(row(&rows, "arch").detail, "linux-arm64");
@@ -616,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn no_runtime_suggests_install_or_isolation_none() {
+    fn no_runtime_explains_the_resolved_rule() {
         let mut facts = healthy_facts();
         facts.remove("docker_status");
         facts.remove("docker_out");
@@ -632,7 +721,7 @@ mod tests {
                 .fix
                 .as_deref()
                 .unwrap()
-                .contains("isolation: none")
+                .contains("remotes.hetzner.isolation: container")
         );
     }
 

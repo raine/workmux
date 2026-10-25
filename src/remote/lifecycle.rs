@@ -133,6 +133,26 @@ pub fn create(
         crate::workflow::validate_prompt_consumption(&panes, request.agent, config, &options)?;
     }
 
+    if spec.isolation == crate::config::RemoteIsolation::None && request.options.run_pane_commands {
+        let mut programs = Vec::new();
+        for (_, pane) in super::node::execution::pane_plan(config, request.agent) {
+            if let Some(resolved) = crate::multiplexer::util::resolve_pane_command_with_config(
+                pane.command.as_deref(),
+                true,
+                None,
+                &context.config_source_dir,
+                config,
+                request.agent,
+                "sh",
+            ) && let Some(agent) = resolved.selected_agent
+                && !programs.contains(&agent.command.program)
+            {
+                programs.push(agent.command.program);
+            }
+        }
+        super::host::require(spec, &programs)?;
+    }
+
     let mut record = match resume {
         Some(record) => {
             println!(

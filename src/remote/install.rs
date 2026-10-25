@@ -370,6 +370,7 @@ mod tests {
             host: "h".into(),
             path: "~/n".into(),
             isolation: Default::default(),
+            isolation_explicit: false,
             binary: Some(path.clone()),
         };
         // sha256("abc") = ba7816bf8f01cfea...

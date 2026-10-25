@@ -1508,7 +1508,7 @@ pub struct RemoteConfig {
     /// Node root on the remote (default: `~/.workmux-node`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// How agents are isolated on the remote (default: container).
+    /// Override sandbox.enabled for this remote; unset follows the effective sandbox setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<RemoteIsolation>,
     /// Local path of a Linux workmux binary to upload instead of downloading
@@ -1521,9 +1521,9 @@ pub struct RemoteConfig {
 #[serde(rename_all = "lowercase")]
 pub enum RemoteIsolation {
     /// Run agents in a docker container on the remote.
-    #[default]
     Container,
     /// Run agents directly on the remote host.
+    #[default]
     None,
 }
 

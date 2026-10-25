@@ -40,7 +40,7 @@ def configure(cli: RemoteCli, binary: Path, **extra) -> Path:
     # The node reads the login environment from `$SHELL -l`.
     shell = write_script(
         cli.home / "login-shell",
-        f"PATH={fake_bin}:/usr/bin:/bin\nexport PATH\nexec env -0\n",
+        f'PATH={fake_bin}:/usr/bin:/bin\nexport PATH\nshift\nexec /bin/sh "$@"\n',
     )
     cli.env["SHELL"] = str(shell)
     return cli.home / "node"
