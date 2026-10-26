@@ -12,6 +12,7 @@ export default defineConfig({
   site,
   trailingSlash: "always",
   build: { format: "directory" },
+  redirects: { "/guide/sandbox/remote/": "/guide/remote/" },
   markdown: { remarkPlugins: [changelogReleases] },
   image: {
     layout: "constrained",
@@ -126,9 +127,26 @@ export default defineConfig({
             { label: "Overview", slug: "guide/sandbox" },
             { label: "Container backend", slug: "guide/sandbox/container" },
             { label: "Lima VM backend", slug: "guide/sandbox/lima" },
-            { label: "Remote hosts", slug: "guide/sandbox/remote" },
             { label: "Shared features", slug: "guide/sandbox/features" },
             { label: "Alternatives", slug: "guide/sandbox/alternatives" },
+          ],
+        },
+        {
+          label: "Remote servers",
+          badge: { text: "New", variant: "tip" },
+          items: [
+            { label: "Overview", slug: "guide/remote" },
+            { label: "Setting up a server", slug: "guide/remote/setup" },
+            { label: "Logins and secrets", slug: "guide/remote/logins" },
+            {
+              label: "Working with remote agents",
+              slug: "guide/remote/usage",
+            },
+            { label: "Bringing work home", slug: "guide/remote/git" },
+            {
+              label: "Maintenance and troubleshooting",
+              slug: "guide/remote/troubleshooting",
+            },
           ],
         },
         {

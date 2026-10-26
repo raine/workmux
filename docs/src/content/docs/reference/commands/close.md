@@ -25,7 +25,7 @@ workmux close
 
 To reopen the window later, use [`workmux open`](/reference/commands/open/).
 
-For a workspace on a [remote host](/guide/sandbox/remote/), `close` closes only the local window: the agent keeps running on the remote. Run it with no name inside the workspace's window, or name the workspace (`workmux close <handle>`).
+For a workspace on a [remote server](/guide/remote/), `close` closes only the local window: the agent keeps running on the server. Run it with no name inside the workspace's window, or name the workspace (`workmux close <handle>`). In a pane on the server, `close` is refused, because the window is on the laptop.
 
 :::tip
 You can also use tmux's native kill-window command (default: `prefix + &`) to close a worktree's window with the same effect. For worktrees created with `--session`, this closes the entire session.
