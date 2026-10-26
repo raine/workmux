@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::cache::{self, WorkspaceRecord};
 use super::client::Node;
-use super::node::operation::{Operation, Outcome, Update};
+use super::node::operation::{Claim, Operation, Outcome, Update};
 use super::{RemoteSpec, observe::Observation};
 use crate::config::{Config, MergeStrategy};
 use crate::multiplexer::{create_backend, detect_backend};
@@ -27,7 +27,7 @@ pub fn dispatch(remote: &str, observation: &Observation) {
         let Some(record) = owned_record(&records, remote, &ws.ws_id) else {
             continue;
         };
-        if let Err(err) = spawn(record, &request.id) {
+        if let Err(err) = spawn(record, &request.id, request.sandboxed) {
             tracing::warn!("cannot start remote operation worker: {err}");
         }
     }
@@ -43,7 +43,7 @@ fn owned_record<'a>(
         .find(|record| record.remote == remote && record.ws_id == ws_id)
 }
 
-fn spawn(record: &WorkspaceRecord, id: &str) -> Result<()> {
+fn spawn(record: &WorkspaceRecord, id: &str, sandboxed: bool) -> Result<()> {
     let path = log_path(&record.remote, id)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     let output = open_log(&path)?;
@@ -60,6 +60,10 @@ fn spawn(record: &WorkspaceRecord, id: &str) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(output);
+    if sandboxed {
+        // Git hooks in the workspace's repository come from the agent.
+        crate::sandbox::rpc::disable_git_hooks(&mut command);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -142,7 +146,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
     let node = Node::connect(&RemoteSpec::resolve(&config, remote)?)?;
     // The node serializes claims with expiry and withdrawal. A stale snapshot,
     // observer restart or duplicate worker cannot run an operation twice.
-    let operation: Operation = node.call(
+    let claim: Claim = node.call(
         "operation",
         &Update {
             ws_id: ws_id.into(),
@@ -154,7 +158,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
     )?;
     // Stages are best effort: the operation must not depend on the requester.
     let progress = |stage: &str| {
-        let _ = node.call::<_, Operation>(
+        let _ = node.call::<_, Claim>(
             "operation",
             &Update {
                 ws_id: ws_id.into(),
@@ -178,7 +182,10 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         {
             Ok(_) => {
                 println!("Remote operation {id}: {remote}/{}", record.handle);
-                execute(record, config, operation, &progress)
+                if claim.sandboxed && !git_hooks_disabled() {
+                    bail!("a sandboxed agent's request needs git hooks disabled");
+                }
+                execute(record, config, claim, &progress)
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow::anyhow!(
                 "request was already acted on; submit a new request"
@@ -204,7 +211,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         }
     };
     // Successful cleanup removes the record, so there is nobody left to notify.
-    let _ = node.call::<_, Operation>(
+    let _ = node.call::<_, Claim>(
         "operation",
         &Update {
             ws_id: ws_id.into(),
@@ -217,19 +224,31 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
     result
 }
 
+/// Whether this worker was started with `disable_git_hooks`.
+fn git_hooks_disabled() -> bool {
+    std::env::var_os("GIT_CONFIG_PARAMETERS").is_none()
+        && std::env::var("GIT_CONFIG_COUNT").as_deref() == Ok("1")
+        && std::env::var("GIT_CONFIG_KEY_0").as_deref() == Ok("core.hooksPath")
+        && std::env::var("GIT_CONFIG_VALUE_0").as_deref() == Ok("/dev/null")
+}
+
+/// Hooks run outside any sandbox, so a sandboxed agent's request runs
+/// none, as the laptop's own supervisor does for its merges.
 fn execute(
     record: WorkspaceRecord,
     config: Config,
-    operation: Operation,
+    claim: Claim,
     progress: &dyn Fn(&str),
 ) -> Result<()> {
     let mux = create_backend(detect_backend());
-    match operation {
+    let run_hooks = !claim.sandboxed;
+    match claim.operation {
         Operation::Remove { force } => {
-            let hooks = config
-                .pre_remove
-                .as_ref()
-                .is_some_and(|hooks| !hooks.is_empty());
+            let hooks = run_hooks
+                && config
+                    .pre_remove
+                    .as_ref()
+                    .is_some_and(|hooks| !hooks.is_empty());
             progress(if hooks {
                 "Running pre_remove hooks and removing…"
             } else {
@@ -241,7 +260,7 @@ fn execute(
                 super::lifecycle::RemoveOptions {
                     force,
                     keep_branch: false,
-                    run_hooks: true,
+                    run_hooks,
                     confirm_unmerged: false,
                     refuse_unmerged: true,
                 },
@@ -258,6 +277,7 @@ fn execute(
             cleanup,
             no_verify,
             no_hooks,
+            notification,
         } => {
             if (keep && cleanup) || (rebase && squash) {
                 bail!("incompatible merge options");
@@ -283,9 +303,9 @@ fn execute(
                     rebase,
                     squash: false,
                     keep,
-                    no_verify,
-                    no_hooks,
-                    notification: false,
+                    no_verify: no_verify || !run_hooks,
+                    no_hooks: no_hooks || !run_hooks,
+                    notification,
                     noninteractive: true,
                     progress: Some(progress),
                 },

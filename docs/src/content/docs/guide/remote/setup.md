@@ -49,7 +49,7 @@ The two modes need different things on the server and behave differently in a fe
 | Agent CLIs                                | Install each one on the SSH user's login `PATH`   | Come from the sandbox image                        |
 | Also needs                                | Your project's tools, if hooks or agents use them | Docker, usable without `sudo`; access to `ghcr.io` |
 | Sandbox                                   | None, with the agent's normal permission prompts  | The [container sandbox](/guide/sandbox/container/) |
-| `workmux rm` and `merge` in a remote pane | Ask the laptop to do it                           | Run them on the laptop                             |
+| `workmux rm` and `merge` in a remote pane | Ask the laptop to do it                           | Agents can ask the laptop, without hooks           |
 | `sandbox.env` and `env_passthrough`       | Not used                                          | Used                                               |
 
 workmux doesn't install agents on the server and doesn't fall back to Docker: if the agent's CLI is missing on the server, `add --remote` stops before creating anything. Podman isn't supported on servers.
@@ -119,7 +119,7 @@ Treat the server as an extension of your laptop: the SSH user runs every agent a
 
 - **No host commands.** [Host command proxying](/guide/sandbox/features/#host-command-proxying) is off on servers. In Docker mode, agents can only run what their container has.
 - **No Git credentials.** The server has no `origin`, and workmux connects without SSH agent or X11 forwarding. Anything else you give agents, such as tokens in `sandbox.env`, is up to you.
-- **Laptop actions stay on the laptop.** Inside a container, `workmux merge`, `workmux close` and image paste fail with a message saying what to run on the laptop. When agents run on the server directly, a remote pane can ask the laptop to remove or merge its own workspace, and nothing else; hook output from that work stays on the laptop.
+- **Laptop actions stay on the laptop.** A remote pane or agent can ask the laptop to remove or merge its own workspace, and nothing else; hook output from that work stays on the laptop. A request from a container runs no hooks. `workmux close` and image paste fail with a message saying what to run on the laptop.
 - **Hooks run outside the container.** `post_create` and `pre_remove` run on the server as the SSH user, as they run on the laptop for local agents. They come from your laptop config.
 - **Firewall the Docker bridge** if the server routes or forwards it to the outside. The sandbox's RPC bridge and proxy listen on the bridge address.
 

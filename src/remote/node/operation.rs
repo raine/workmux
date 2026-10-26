@@ -24,6 +24,8 @@ pub enum Operation {
         cleanup: bool,
         no_verify: bool,
         no_hooks: bool,
+        #[serde(default)]
+        notification: bool,
     },
 }
 
@@ -33,6 +35,10 @@ pub struct Request {
     pub operation: Operation,
     pub requested_at: u64,
     pub claimed: bool,
+    /// Made by a sandboxed agent through its supervisor. The container
+    /// cannot write the node store, so it cannot clear this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandboxed: bool,
     /// The laptop's stages so far, shown while the requester waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub progress: Vec<String>,
@@ -43,6 +49,14 @@ pub struct Request {
 pub struct Outcome {
     pub success: bool,
     pub message: String,
+}
+
+/// What a laptop worker learns when it claims a request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claim {
+    pub operation: Operation,
+    #[serde(default)]
+    pub sandboxed: bool,
 }
 
 impl Request {
@@ -68,17 +82,42 @@ pub fn validate_names(names: &[String], handle: &str) -> Result<()> {
     Ok(())
 }
 
+/// Request `operation` from a workspace pane and wait for the laptop,
+/// showing its progress.
 pub fn submit(names: &[String], operation: Operation) -> Result<()> {
     let (path, ws_id) = super::spawn::session_parent().ok_or_else(|| {
         anyhow::anyhow!("incomplete remote workspace session; run this on the laptop")
     })?;
-    validate_id(&ws_id, 'w', "workspace id")?;
     let root = NodeRoot::at(path)?;
+    let mut status = Status::new();
+    let result = request(&root, &ws_id, names, operation, false, &mut |lines| {
+        status.show(lines)
+    });
+    status.finish();
+    if let Some(message) = result? {
+        println!("{message}");
+    }
+    Ok(())
+}
+
+/// Ask the laptop to perform `operation` on workspace `ws_id`, and wait for
+/// its outcome. `show` gets every line so far: the request, then the
+/// laptop's stages. Returns the success message, or None when the
+/// workspace went away with the operation.
+pub fn request(
+    root: &NodeRoot,
+    ws_id: &str,
+    names: &[String],
+    operation: Operation,
+    sandboxed: bool,
+    show: &mut dyn FnMut(&[String]),
+) -> Result<Option<String>> {
+    validate_id(ws_id, 'w', "workspace id")?;
     let id = cache::new_id('r');
-    {
-        let _lock = root.lock_workspace(&ws_id)?;
+    let announce = {
+        let _lock = root.lock_workspace(ws_id)?;
         let mut ws = root
-            .load(&ws_id)?
+            .load(ws_id)?
             .ok_or_else(|| anyhow::anyhow!("workspace no longer exists"))?;
         validate_names(names, &ws.identity.handle)?;
         if ws
@@ -92,42 +131,43 @@ pub fn submit(names: &[String], operation: Operation) -> Result<()> {
             Operation::Remove { .. } => "Removing",
             Operation::Merge { .. } => "Merging",
         };
-        println!("{verb} '{}' on the laptop…", ws.identity.handle);
+        let announce = format!("{verb} '{}' on the laptop…", ws.identity.handle);
         ws.operation = Some(Request {
             id: id.clone(),
             operation,
             requested_at: cache::now(),
             claimed: false,
+            sandboxed,
             progress: Vec::new(),
             outcome: None,
         });
         root.save(&ws)?;
-    }
-    let mut status = Status::new();
+        announce
+    };
+    let mut lines = vec![announce];
+    show(&lines);
     loop {
         std::thread::sleep(Duration::from_millis(200));
-        let Some(ws) = root.load(&ws_id)? else {
-            status.finish();
-            return Ok(());
+        let Some(ws) = root.load(ws_id)? else {
+            return Ok(None);
         };
         let Some(request) = ws.operation.as_ref().filter(|r| r.id == id) else {
-            status.finish();
             bail!("laptop request was withdrawn");
         };
-        status.show(&request.progress);
+        lines.truncate(1);
+        lines.extend(request.progress.iter().cloned());
+        show(&lines);
         if let Some(outcome) = &request.outcome {
-            status.finish();
             if outcome.success {
-                println!("{}", outcome.message);
-                return Ok(());
+                return Ok(Some(outcome.message.clone()));
             }
             bail!("{}", outcome.message);
         }
         if !request.claimed && !request.pending(cache::now()) {
             // Claim and withdrawal serialize on the same lock and node clock.
-            if let Ok(_lock) = root.lock_workspace(&ws_id) {
-                let Some(mut ws) = root.load(&ws_id)? else {
-                    return Ok(());
+            if let Ok(_lock) = root.lock_workspace(ws_id) {
+                let Some(mut ws) = root.load(ws_id)? else {
+                    return Ok(None);
                 };
                 if ws
                     .operation
@@ -136,7 +176,6 @@ pub fn submit(names: &[String], operation: Operation) -> Result<()> {
                 {
                     ws.operation = None;
                     root.save(&ws)?;
-                    status.finish();
                     bail!("the laptop isn't connected or runs an older workmux; request withdrawn");
                 }
             }
@@ -211,7 +250,7 @@ pub struct Update {
     pub outcome: Option<Outcome>,
 }
 
-pub fn update(root: &NodeRoot, update: Update) -> Result<Operation> {
+pub fn update(root: &NodeRoot, update: Update) -> Result<Claim> {
     validate_id(&update.ws_id, 'w', "workspace id")?;
     validate_id(&update.id, 'r', "request id")?;
     // Claims and replies must survive brief contention with workspace verbs.
@@ -256,9 +295,12 @@ pub fn update(root: &NodeRoot, update: Update) -> Result<Operation> {
         }
         request.claimed = true;
     }
-    let operation = request.operation.clone();
+    let claim = Claim {
+        operation: request.operation.clone(),
+        sandboxed: request.sandboxed,
+    };
     root.save(&ws)?;
-    Ok(operation)
+    Ok(claim)
 }
 
 #[cfg(test)]
@@ -284,6 +326,7 @@ mod tests {
             operation: Operation::Remove { force: false },
             requested_at: cache::now(),
             claimed: false,
+            sandboxed: false,
             progress: Vec::new(),
             outcome: None,
         });
@@ -343,6 +386,7 @@ mod tests {
             operation: Operation::Remove { force: false },
             requested_at: 100,
             claimed: false,
+            sandboxed: false,
             progress: Vec::new(),
             outcome: None,
         };

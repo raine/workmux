@@ -120,7 +120,11 @@ fn merge_inner(
             let export = export(&node, &mut record, false)?;
             let created_branch = hydrate(context, &node, &mut record, &export)?;
             let prepared = check_copy(&record, &options, false).and_then(|()| {
-                options.stage("Setting up the laptop worktree (files, post_create)…");
+                options.stage(if options.no_hooks {
+                    "Setting up the laptop worktree (files)…"
+                } else {
+                    "Setting up the laptop worktree (files, post_create)…"
+                });
                 provision_copy(context, &record, &export.snapshot, !options.no_hooks)
             });
             if let Err(err) = prepared {

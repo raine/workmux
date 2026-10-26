@@ -18,9 +18,6 @@ pub fn run(
     notification: bool,
 ) -> Result<()> {
     if crate::remote::node::operation::in_session() {
-        if notification {
-            bail!("remote merge does not support --notification; run it on the laptop");
-        }
         return crate::remote::node::operation::submit(
             &name.map(str::to_owned).into_iter().collect::<Vec<_>>(),
             crate::remote::node::operation::Operation::Merge {
@@ -32,6 +29,7 @@ pub fn run(
                 cleanup,
                 no_verify,
                 no_hooks,
+                notification,
             },
         );
     }

@@ -515,6 +515,7 @@ mod tests {
                 operation: super::super::node::operation::Operation::Remove { force: false },
                 requested_at: 90,
                 claimed: false,
+                sandboxed: false,
                 progress: Vec::new(),
                 outcome: None,
             });
