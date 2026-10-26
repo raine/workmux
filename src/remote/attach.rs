@@ -6,6 +6,8 @@
 //! output; anything typed in between is dropped, never replayed late. When
 //! the connection is lost, the relay draws a status line on the bottom row
 //! and reconnects with backoff. A session that ended closes the pane.
+//! After the machine sleeps, the relay reconnects at once instead of waiting
+//! for ssh to notice that the old connection died.
 
 use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
@@ -15,7 +17,7 @@ use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -38,6 +40,11 @@ const MIRROR_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
 /// An attachment or stream that lasted this long resets the backoff.
 pub(super) const STABLE: Duration = Duration::from_secs(30);
+/// A wall-clock gap this long between two turns of the relay loop, which
+/// turns at least every [`MIRROR_INTERVAL`], means the machine slept or the
+/// process was suspended. The monotonic clock stops during sleep, so the
+/// wall clock is what shows it.
+const WAKE_GAP: Duration = Duration::from_secs(10);
 
 /// Undo terminal input modes the remote tmux enabled: mouse reporting,
 /// bracketed paste and focus events, and show the cursor.
@@ -81,6 +88,12 @@ pub fn classify(status: Option<i32>, stderr: &[u8], ssh_failure: Option<SshFailu
             Ending::RemoteError(detail)
         }
     }
+}
+
+/// Whether the wall clock moved far enough between two loop turns to mean
+/// the relay was asleep. A clock set backwards is not a wake.
+fn woke(last: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(last).is_ok_and(|gap| gap >= WAKE_GAP)
 }
 
 /// Seconds to wait before retry number `attempt` (0-based).
@@ -368,6 +381,7 @@ impl Relay {
         self.read_input();
         let mut connection = Some(self.connect()?);
         let mut state = State::Connecting;
+        let mut last_turn = SystemTime::now();
         loop {
             if let Some(status) = &mut self.status {
                 status.tick();
@@ -377,6 +391,29 @@ impl Relay {
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             };
+            let now = SystemTime::now();
+            // A connection that slept with the machine usually died with its
+            // network, but ssh only notices after its keepalives time out.
+            // Attaching again repaints the current screen right away. States
+            // waiting on the user, such as detached, stay as they are.
+            let retrying = match &state {
+                State::Waiting { retry_at, .. } => retry_at.is_some(),
+                State::Connecting | State::Attached { .. } => true,
+            };
+            if woke(last_turn, now) && retrying {
+                tracing::info!(ex_id = %self.ex_id, pane = self.pane, "remote attach woke from sleep; reconnecting");
+                *self.input_target.lock().unwrap() = None;
+                if let Some(old) = connection.take() {
+                    stop(old);
+                }
+                flush_input();
+                write_out(RESET_MODES);
+                self.attempt = 0;
+                connection = Some(self.connect()?);
+                state = State::Connecting;
+                self.draw(&state);
+            }
+            last_turn = now;
             match event {
                 Some(Event::Terminate) | Some(Event::InputClosed) => {
                     if let Some(connection) = connection.take() {
@@ -823,6 +860,16 @@ mod tests {
             mirror_step(Some(&None), Some(&observed(None))),
             Mirror::Nothing
         );
+    }
+
+    #[test]
+    fn a_long_wall_clock_gap_is_a_wake() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(!woke(t, t + MIRROR_INTERVAL));
+        assert!(!woke(t, t + WAKE_GAP - Duration::from_millis(1)));
+        assert!(woke(t, t + WAKE_GAP));
+        assert!(woke(t, t + Duration::from_secs(3600)));
+        assert!(!woke(t + Duration::from_secs(3600), t));
     }
 
     #[test]
