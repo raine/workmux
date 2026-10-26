@@ -965,9 +965,13 @@ pub struct Config {
     #[serde(default)]
     pub worktree_prefix: Option<String>,
 
-    /// File operations to perform after creating the worktree
+    /// File operations to perform after creating a local worktree
     #[serde(default)]
     pub files: FileConfig,
+
+    /// Supplemental files to transfer when creating a remote workspace.
+    #[serde(default)]
+    pub remote_files: FileConfig,
 
     /// Whether to auto-apply workmux status to tmux window format.
     /// Default: true
@@ -3268,6 +3272,14 @@ impl Config {
             symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
         };
 
+        merged.remote_files = FileConfig {
+            copy: merge_vec_with_placeholder(self.remote_files.copy, project.remote_files.copy),
+            symlink: merge_vec_with_placeholder(
+                self.remote_files.symlink,
+                project.remote_files.symlink,
+            ),
+        };
+
         // Status icons: per-field override
         merged.status_icons = StatusIcons {
             working: project.status_icons.working.or(self.status_icons.working),
@@ -3813,7 +3825,7 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Files
 #-------------------------------------------------------------------------------
 
-# File operations when creating a worktree.
+# File operations when creating a local worktree.
 # files:
 #   # Files to copy (useful for .env files that need to be unique).
 #   copy:
@@ -3825,6 +3837,15 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   symlink:
 #     - "<global>"
 #     - node_modules
+
+# Supplemental uploads for remote workspaces. No files are sent by default.
+# Uses the same glob and "<global>" conventions as files, independently.
+# remote_files:
+#   copy:
+#     - CLAUDE.local.md
+#   # Sources are seeded once and shared remotely, not synchronized.
+#   symlink:
+#     - shared-data
 
 #-------------------------------------------------------------------------------
 # Dashboard
@@ -4857,6 +4878,36 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(blank_error.contains("executable must not be empty"));
+    }
+
+    #[test]
+    fn remote_files_merge_independently() {
+        let global: Config = serde_yaml::from_str(
+            "files: {symlink: [local-cache]}\nremote_files: {copy: [global-copy], symlink: [global-seed]}",
+        ).unwrap();
+        for yaml in ["{}", "remote_files: {}"] {
+            let merged = global.clone().merge(serde_yaml::from_str(yaml).unwrap());
+            assert_eq!(merged.remote_files.copy.unwrap(), ["global-copy"]);
+            assert_eq!(merged.remote_files.symlink.unwrap(), ["global-seed"]);
+        }
+        let project =
+            serde_yaml::from_str("remote_files: {copy: [before, '<global>', after], symlink: []}")
+                .unwrap();
+        let merged = global.clone().merge(project);
+        assert_eq!(
+            merged.remote_files.copy.unwrap(),
+            ["before", "global-copy", "after"]
+        );
+        assert!(merged.remote_files.symlink.unwrap().is_empty());
+        assert_eq!(merged.files.symlink.unwrap(), ["local-cache"]);
+        let project = serde_yaml::from_str("remote_files: {copy: [project-copy]}").unwrap();
+        assert_eq!(
+            global.merge(project).remote_files.copy.unwrap(),
+            ["project-copy"]
+        );
+        let local: Config = serde_yaml::from_str("files: {copy: [local]}").unwrap();
+        assert!(local.remote_files.copy.is_none());
+        assert!(local.remote_files.symlink.is_none());
     }
 
     #[test]

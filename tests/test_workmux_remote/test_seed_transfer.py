@@ -69,7 +69,7 @@ def test_seed_transfer(
         {
             "panes": [{"command": "echo ready"}],
             "post_create": ["echo hooked > hook-ran"],
-            "files": {"symlink": ["cache"], "copy": ["copy.txt", "tree"]},
+            "remote_files": {"symlink": ["cache"], "copy": ["copy.txt", "tree"]},
         },
     )
     # Local-only ignore rules must also apply when the seed is a cache hit.
@@ -150,7 +150,7 @@ def test_config_relative_ignore_classification(
         app,
         {
             "panes": [{"command": "echo ready"}],
-            "files": {"copy": ["*.secret", "local*", "global*"]},
+            "remote_files": {"copy": ["*.secret", "local*", "global*"]},
         },
     )
     with (repo / ".git/info/exclude").open("a") as exclude:
@@ -188,3 +188,51 @@ def test_config_relative_ignore_classification(
     assert "/app/global file\n" in exclude
     for name in ["tracked.secret", "keep.secret", "ignored.secret"]:
         assert f"/app/{name}\n" not in exclude
+
+
+@pytest.mark.parametrize("selection", [None, {}, {"copy": [], "symlink": []}])
+def test_local_files_do_not_upload_or_reuse_remote_seeds(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    selection,
+):
+    repo = mux_repo_path
+    (repo / ".gitignore").write_text("cache\nCLAUDE.local.md\n")
+    git(repo, "add", ".gitignore")
+    (repo / "cache").mkdir()
+    (repo / "cache/data").write_text("shared")
+    (repo / "CLAUDE.local.md").write_text("local instructions")
+    project = {
+        "panes": [{"command": "echo ready"}],
+        "files": {"symlink": ["cache"], "copy": ["CLAUDE.local.md"]},
+        "remote_files": {"symlink": ["cache"]},
+    }
+    commit_project(repo, project)
+    wm(mux_server, workmux_exe_path, repo, "add seeded --remote lo")
+    [seeded] = node.workspaces()
+    seed = Path(seeded["repo_path"]) / "cache"
+    assert (seed / "data").read_text() == "shared"
+    assert not (Path(seeded["worktree_path"]) / "CLAUDE.local.md").exists()
+
+    if selection is None:
+        del project["remote_files"]
+    else:
+        project["remote_files"] = selection
+    commit_project(repo, project)
+    result = wm(mux_server, workmux_exe_path, repo, "add unselected --remote lo")
+    workspace = next(ws for ws in node.workspaces() if ws["handle"] == "unselected")
+    tree = Path(workspace["worktree_path"])
+    assert not (tree / "cache").exists()
+    assert not (tree / "cache").is_symlink()
+    assert not (tree / "CLAUDE.local.md").exists()
+    assert (seed / "data").read_text() == "shared"
+    assert ("files: local only" in result.stderr) == (
+        selection != {"copy": [], "symlink": []}
+    )
+
+    wm(mux_server, workmux_exe_path, repo, "add local --local")
+    local = repo.parent / f"{repo.name}__worktrees" / "local"
+    assert (local / "cache").is_symlink()
+    assert (local / "CLAUDE.local.md").read_text() == "local instructions"

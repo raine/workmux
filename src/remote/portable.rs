@@ -67,6 +67,15 @@ fn portable_config_with_env(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Portable {
     let mut dropped = Vec::new();
+    if config.remote_files.copy.is_none()
+        && config.remote_files.symlink.is_none()
+        && [config.files.copy.as_ref(), config.files.symlink.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|patterns| !patterns.is_empty())
+    {
+        dropped.push("files: local only; configure remote_files to send supplemental files".into());
+    }
     let mut portable = Config {
         panes: config.panes.clone(),
         post_create: config.post_create.clone(),
@@ -284,6 +293,32 @@ mod tests {
 
     fn laptop_env(name: &str) -> Option<String> {
         (name == "GITHUB_TOKEN").then(|| "ghp_secret".to_string())
+    }
+
+    #[test]
+    fn local_files_hint_only_when_remote_selection_is_unset() {
+        let mut config = Config::default();
+        for (local, remote, expected) in [
+            (None, None, false),
+            (Some(vec![]), None, false),
+            (Some(vec!["cache".into()]), None, true),
+            (Some(vec!["cache".into()]), Some(vec![]), false),
+            (Some(vec!["cache".into()]), Some(vec!["data".into()]), false),
+        ] {
+            config.files.symlink = local;
+            config.remote_files.copy = remote;
+            let portable =
+                portable_config(&config, None, RemoteIsolation::None, Path::new("/n/wt"));
+            assert_eq!(
+                portable
+                    .dropped
+                    .iter()
+                    .any(|line| line.starts_with("files:")),
+                expected
+            );
+            assert!(portable.config.files.symlink.is_none());
+            assert!(portable.config.remote_files.copy.is_none());
+        }
     }
 
     #[test]

@@ -115,15 +115,15 @@ pub struct ProvisionPayload {
     pub prompt: Option<String>,
     /// Write the prompt file without handing it to the agent.
     pub prompt_file_only: bool,
-    /// `files.copy` results, relative to the worktree.
+    /// `remote_files.copy` results, relative to the worktree.
     pub copies: Vec<FileEntry>,
-    /// Sources of `files.symlink` for the node's project directory, applied
+    /// Sources of `remote_files.symlink` for the node's project directory, applied
     /// only where that directory lacks them.
     pub seeds: Vec<FileEntry>,
     /// Sources omitted because prepare found them; rechecked before file operations.
     #[serde(default)]
     pub cached_seeds: Vec<String>,
-    /// `files.symlink` patterns, matched against the node's project directory.
+    /// `remote_files.symlink` patterns, matched against the node's project directory.
     pub symlink_patterns: Vec<String>,
     /// Transferred paths the laptop's git ignores, through rules the node
     /// lacks (global excludes, `info/exclude`) as well as `.gitignore`.

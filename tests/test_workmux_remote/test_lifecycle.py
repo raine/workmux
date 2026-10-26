@@ -32,14 +32,14 @@ pytestmark = pytest.mark.tmux_only
 
 def setup_project(repo: Path) -> str:
     """Commit a project config locally (never pushed anywhere) and leave an
-    ignored file for `files.copy`; returns the commit."""
+    ignored file for `remote_files.copy`; returns the commit."""
     project = {
         "nerdfont": False,
         "panes": [
             {"command": "echo AGENT-READY"},
             {"command": "echo SECOND-PANE", "split": "horizontal"},
         ],
-        "files": {"copy": [".env.local"]},
+        "remote_files": {"copy": [".env.local"]},
         "post_create": ["echo hooked > hook-ran.txt"],
     }
     (repo / ".workmux.yaml").write_text(yaml.dump(project))
@@ -464,7 +464,7 @@ def test_laptop_only_ignores_apply_on_the_node(
     project = {
         "nerdfont": False,
         "panes": [{"command": "echo AGENT-READY"}],
-        "files": {"copy": [".env.local"]},
+        "remote_files": {"copy": [".env.local"]},
     }
     (repo / ".workmux.yaml").write_text(yaml.dump(project))
     git(repo, "add", ".workmux.yaml")
