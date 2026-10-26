@@ -29,7 +29,7 @@ const MAX_SOCKET_PATH: usize = 100;
 
 const TMUX_CONF: &str = "\
 # Written by workmux. Sessions on this server are relayed into panes of a
-# laptop tmux window, so this server stays out of the way.
+# local tmux window, so this server stays out of the way.
 set -g prefix None
 set -g prefix2 None
 set -g status off

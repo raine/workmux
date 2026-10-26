@@ -27,7 +27,7 @@ workmux remote setup <name>
 
 - `<name>` - Remote name from `remotes:` in the global config
 
-Uploads the workmux binary for this workmux version into the remote's node root (the release, downloaded and checksum-verified on the laptop, or the configured `binary`), and installs workmux's status hooks for the supported agents in the remote user's agent directories. OpenCode's hooks are installed once the OpenCode sandbox image is on the remote. Running it again only installs what is missing. An interrupted install is recovered by the next run.
+Uploads the workmux binary for this workmux version into the remote's node root (the release, downloaded and checksum-verified on the local machine, or the configured `binary`), and installs workmux's status hooks for the supported agents in the remote user's agent directories. OpenCode's hooks are installed once the OpenCode sandbox image is on the remote. Running it again only installs what is missing. An interrupted install is recovered by the next run.
 
 Commands that need the node, such as `add --remote` and `remote login`, install it automatically, so `setup` is mostly useful as a first check, and after you make OpenCode's sandbox image available on the remote (its hooks depend on the OpenCode version in that image).
 
@@ -82,7 +82,7 @@ workmux remote login <name> claude --setup-token
 - `--import` - Copy this machine's credential files for the agent instead of logging in. Cannot be combined with `--setup-token` or extra arguments.
 - `--setup-token` - Claude only: run `claude setup-token` and keep the token it prints for every Claude agent using the remote's node root
 
-Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or directly on the host when sandboxing is off or `isolation: none` is set. Browser logins that call back to `localhost` get their ports forwarded from the laptop. See [logins and secrets](/guide/remote/logins/) for each agent's flow and the limits of `--import`.
+Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or directly on the host when sandboxing is off or `isolation: none` is set. Browser logins that call back to `localhost` get their ports forwarded from the local machine. See [logins and secrets](/guide/remote/logins/) for each agent's flow and the limits of `--import`.
 
 ## remote pull
 
@@ -121,7 +121,7 @@ workmux remote gc <name> [--dry-run | --force]
 - `--dry-run` - Only list what would be removed
 - `--force` - Remove without asking, including workspaces whose work exists only on the remote. Cannot be combined with `--dry-run`.
 
-Lists workspaces this laptop has no record of, stray worktrees, tmux sessions, containers, supervisors, refs and state files, unused node binaries, and laptop records of workspaces the remote no longer has. Then asks before removing them. Workspaces with uncommitted changes or commits beyond their base are only removed with `--force`. Without a terminal, nothing is removed unless `--force` is given. See [cleaning up a server](/guide/remote/troubleshooting/#cleaning-up-a-server).
+Lists workspaces this machine has no record of, stray worktrees, tmux sessions, containers, supervisors, refs and state files, unused node binaries, and local records of workspaces the remote no longer has. Then asks before removing them. Workspaces with uncommitted changes or commits beyond their base are only removed with `--force`. Without a terminal, nothing is removed unless `--force` is given. See [cleaning up a server](/guide/remote/troubleshooting/#cleaning-up-a-server).
 
 ## remote logs
 
@@ -136,7 +136,7 @@ workmux remote logs <name> [<request>]
 - `<name>` - Remote name from `remotes:` in the global config
 - `<request>` - Request ID, as printed in the remote pane
 
-Without a request ID, lists the saved log files for the remote. With one, prints that request's output, including hook output. Logs are kept on the laptop, need no connection to the remote, and aren't deleted automatically. See [operation logs](/guide/remote/git/#operation-logs).
+Without a request ID, lists the saved log files for the remote. With one, prints that request's output, including hook output. Logs are kept on the local machine, need no connection to the remote, and aren't deleted automatically. See [operation logs](/guide/remote/git/#operation-logs).
 
 ## Examples
 
@@ -154,7 +154,7 @@ workmux remote login devbox claude --setup-token
 # Copy Gemini's credential files from this machine
 workmux remote login devbox gemini --import
 
-# Move a remote workspace to the laptop
+# Move a remote workspace to the local machine
 workmux remote pull my-feature
 
 # Preview, then remove leftovers

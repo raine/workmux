@@ -113,11 +113,11 @@ fn on_node(request: &RpcRequest, node: &NodeWorkspace, worktree: &Path) -> Optio
             ));
         }
         RpcRequest::Merge { .. } | RpcRequest::Remove { .. } => return None,
-        RpcRequest::ClipboardRead { .. } => "the clipboard is on the laptop, which remote \
+        RpcRequest::ClipboardRead { .. } => "the clipboard is on the local machine, which remote \
              agents cannot read; copy the image into the worktree instead"
             .to_string(),
         RpcRequest::Close { .. } => {
-            format!("the window is on the laptop: run `workmux close {handle}` there")
+            format!("the window is on the local machine: run `workmux close {handle}` there")
         }
     };
     Some(RpcResponse::Error { message: refusal })
@@ -1305,7 +1305,7 @@ mod tests {
         let paste = RpcRequest::ClipboardRead {
             mime: "image/png".into(),
         };
-        assert!(refusal(&paste).contains("clipboard is on the laptop"));
+        assert!(refusal(&paste).contains("clipboard is on the local machine"));
         let close = RpcRequest::Close { name: "x".into() };
         assert!(refusal(&close).contains("`workmux close feat`"));
         assert!(on_node(&RpcRequest::Heartbeat, &node, worktree).is_none());

@@ -114,16 +114,16 @@ fn merge_inner(
             (snapshot, created_branch, None)
         }
         None => {
-            options.stage("Bringing the work to the laptop…");
+            options.stage("Bringing the work to the local machine…");
             let node = Node::connect(&spec)?;
             finish_pending(&node, &record.ws_id);
             let export = export(&node, &mut record, false)?;
             let created_branch = hydrate(context, &node, &mut record, &export)?;
             let prepared = check_copy(&record, &options, false).and_then(|()| {
                 options.stage(if options.no_hooks {
-                    "Setting up the laptop worktree (files)…"
+                    "Preparing a local copy for the merge (files)…"
                 } else {
-                    "Setting up the laptop worktree (files, post_create)…"
+                    "Preparing a local copy for the merge (files, post_create)…"
                 });
                 provision_copy(context, &record, &export.snapshot, !options.no_hooks)
             });
@@ -143,9 +143,9 @@ fn merge_inner(
             .as_ref()
             .is_some_and(|hooks| !hooks.is_empty());
     options.stage(if hooks {
-        "Running pre_merge hooks on the laptop…"
+        "Running pre_merge hooks locally…"
     } else {
-        "Merging on the laptop…"
+        "Merging locally…"
     });
     let result = workflow::merge(
         &record.handle,
@@ -711,7 +711,7 @@ fn check_copy(record: &WorkspaceRecord, options: &MergeOptions, resumed: bool) -
         && crate::git::has_staged_changes(copy)?
     {
         bail!(
-            "staged changes need an interactive commit message; commit them first or run merge on the laptop"
+            "staged changes need an interactive commit message; commit them first or run merge on the local machine"
         );
     }
     if let Some(reason) = git::unexportable(copy, &record.branch)? {

@@ -15,7 +15,7 @@ pub fn run(
     if crate::remote::node::operation::in_session() {
         if gone || all || keep_branch {
             anyhow::bail!(
-                "remote rm does not support --gone, --all or --keep-branch; run it on the laptop"
+                "remote rm does not support --gone, --all or --keep-branch; run it on the local machine"
             );
         }
         return crate::remote::node::operation::submit(

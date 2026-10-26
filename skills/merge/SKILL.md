@@ -43,7 +43,7 @@ If no base branch is configured, default to "main".
 
 If the base branch doesn't exist locally (`git rev-parse --verify --quiet
 <base-branch>` prints nothing), skip this step. This is the case in a workspace
-on a remote server, where `workmux merge --rebase` rebases on the laptop.
+on a remote server, where `workmux merge --rebase` rebases on the local machine.
 
 Rebase onto the local base branch (do NOT fetch from origin first):
 

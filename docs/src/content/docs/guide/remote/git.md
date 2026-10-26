@@ -1,9 +1,9 @@
 ---
 title: "Bringing work home"
-description: Merge, rebase and move remote workspaces back to the laptop
+description: Merge, rebase and move remote workspaces back to the local machine
 ---
 
-The laptop stays the source of truth for your repository. Work goes to the server as a commit when a workspace is created, and comes back to the laptop with `merge` or `remote pull`.
+The local machine stays the source of truth for your repository. Work goes to the server as a commit when a workspace is created, and comes back to the local machine with `merge` or `remote pull`.
 
 ## Merging
 
@@ -11,7 +11,7 @@ The laptop stays the source of truth for your repository. Work goes to the serve
 workmux merge my-feature
 ```
 
-This copies the workspace's branch, staged and unstaged changes and untracked files into a local worktree, runs your normal local merge there, then removes the remote workspace, its agent and its branch. `merge_strategy`, `--rebase`, `--squash`, `--into` and `--keep` work as for a local worktree, and `pre_merge` hooks run on the laptop.
+This copies the workspace's branch, staged and unstaged changes and untracked files into a local worktree, runs your normal local merge there, then removes the remote workspace, its agent and its branch. `merge_strategy`, `--rebase`, `--squash`, `--into` and `--keep` work as for a local worktree, and `pre_merge` hooks run on the local machine.
 
 ### Preparing the merge worktree
 
@@ -41,7 +41,7 @@ Keep setup hooks repeatable: they run for every fresh merge attempt. If setup fa
 
 ## Operation logs
 
-A merge or removal [requested from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane) runs in the background on the laptop. Its output, including hook output, is saved on the laptop:
+A merge or removal [requested from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane) runs in the background on the local machine. Its output, including hook output, is saved on the local machine:
 
 ```bash
 workmux remote logs devbox                # list log files
@@ -56,9 +56,9 @@ The pane prints the exact command for its request. Logs are private files under 
 workmux rebase my-feature
 ```
 
-Sends the laptop's base branch to the server and rebases the workspace there, committing as your laptop Git identity. The agent keeps running. Conflicts stay on the server: run `workmux open my-feature` and resolve them in the remote worktree.
+Sends the local machine's base branch to the server and rebases the workspace there, committing as your local Git identity. The agent keeps running. Conflicts stay on the server: run `workmux open my-feature` and resolve them in the remote worktree.
 
-## Moving a workspace to the laptop
+## Moving a workspace to the local machine
 
 ```bash
 workmux remote pull my-feature
@@ -78,4 +78,4 @@ An untracked nested Git repository, an unfinished merge, rebase or cherry-pick, 
 
 ## Pushing
 
-Agents on the server can't push to your Git hosting: the server has no `origin` and no credentials for it. Bring the work home with `merge` or `remote pull`, and push from the laptop.
+Agents on the server can't push to your Git hosting: the server has no `origin` and no credentials for it. Bring the work home with `merge` or `remote pull`, and push from the local machine.

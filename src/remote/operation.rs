@@ -170,7 +170,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
         );
     };
     progress(&format!(
-        "Laptop started; follow with `workmux remote logs {remote} {id}`"
+        "Started on the local machine; follow with `workmux remote logs {remote} {id}`"
     ));
     let result = (|| -> Result<()> {
         let receipt_dir = cache::remote_dir(remote)?.join("operations");
@@ -196,7 +196,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
     let outcome = match &result {
         Ok(()) => Outcome {
             success: true,
-            message: "Laptop operation completed".into(),
+            message: "Done on the local machine".into(),
         },
         Err(err) => {
             tracing::warn!("remote operation failed: {err:#}");
@@ -204,7 +204,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
             Outcome {
                 success: false,
                 message: format!(
-                    "{}; on the laptop, run `workmux remote logs {remote} {id}`",
+                    "{}; on the local machine, run `workmux remote logs {remote} {id}`",
                     refusal(err)
                 ),
             }
@@ -287,7 +287,7 @@ fn execute(
                 squash = config.merge_strategy == Some(MergeStrategy::Squash);
             }
             if squash {
-                bail!("squash needs an interactive commit message; run merge on the laptop");
+                bail!("squash needs an interactive commit message; run merge on the local machine");
             }
             // Resolve against laptop-owned branches before passing a target to
             // merge or hooks. Revision expressions and options are not branches.
@@ -323,7 +323,7 @@ fn resolve_into(record: &WorkspaceRecord, name: &str) -> Result<String> {
         .lines()
         .find(|branch| *branch == name && !branch.starts_with('-'))
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("merge target must be an existing laptop branch"))
+        .ok_or_else(|| anyhow::anyhow!("merge target must be an existing local branch"))
 }
 
 /// Never send arbitrary git output, hook output or laptop paths to the node.
@@ -337,15 +337,15 @@ fn refusal(err: &anyhow::Error) -> String {
     {
         "has uncommitted changes; commit them or explicitly use --force (rm) / --ignore-uncommitted (merge)"
     } else if text.contains("interactive") {
-        "this merge needs interaction; commit staged changes first or run merge on the laptop"
+        "this merge needs interaction; commit staged changes first or run merge on the local machine"
     } else if text.contains("conflict") {
-        "merge conflict; resolve it on the laptop, then run workmux merge there"
+        "merge conflict; resolve it on the local machine, then run workmux merge there"
     } else if text.contains("hook") || text.contains("post-create") {
-        "a laptop hook failed; inspect its output on the laptop"
-    } else if text.contains("existing laptop branch") {
-        "merge target must be an existing laptop branch"
+        "a local hook failed; inspect its output on the local machine"
+    } else if text.contains("existing local branch") {
+        "merge target must be an existing local branch"
     } else {
-        "laptop operation failed; inspect it on the laptop with workmux"
+        "the operation failed on the local machine; inspect it there with workmux"
     };
     message.into()
 }
@@ -412,7 +412,7 @@ mod tests {
         let err = anyhow::anyhow!("hook failed in /private/laptop/secret: token");
         assert_eq!(
             refusal(&err),
-            "a laptop hook failed; inspect its output on the laptop"
+            "a local hook failed; inspect its output on the local machine"
         );
         assert!(!refusal(&anyhow::anyhow!("/private/laptop/secret")).contains("secret"));
     }

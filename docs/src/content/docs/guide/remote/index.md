@@ -1,24 +1,24 @@
 ---
 title: "Remote servers"
-description: Run individual agents on an SSH-reachable Linux server while others stay on your laptop
+description: Run individual agents on an SSH-reachable Linux server while others stay on your machine
 ---
 
-workmux can run an agent on a Linux server you reach over SSH, such as a home server, a Proxmox VM or a cloud VM, while your other agents stay on the laptop. Each remote agent still gets a normal tmux window on the laptop, and shows up in the dashboard, the sidebar, `workmux status` and `workmux list` like a local one.
+workmux can run an agent on a Linux server you reach over SSH, such as a home server, a Proxmox VM or a cloud VM, while your other agents stay on the local machine. Each remote agent still gets a normal tmux window on the local machine, and shows up in the dashboard, the sidebar, `workmux status` and `workmux list` like a local one.
 
-The agent keeps running while the laptop sleeps, loses its network or closes the window. When you come back, the window reconnects by itself. When the work is done, `workmux merge` brings it home and merges it on the laptop.
+The agent keeps running while the local machine sleeps, loses its network or closes the window. When you come back, the window reconnects by itself. When the work is done, `workmux merge` brings it home and merges it on the local machine.
 
 Use a remote server when:
 
-- agents need more CPU, memory or disk than the laptop should give them
-- agents should keep working while the laptop is closed
-- you want to run more agents in parallel than the laptop handles comfortably
+- agents need more CPU, memory or disk than your machine should give them
+- agents should keep working while your machine sleeps or is offline
+- you want to run more agents in parallel than your machine handles comfortably
 
-If you only want to isolate agents on the laptop, use the [sandbox](/guide/sandbox/) instead.
+If you only want to isolate agents on the local machine, use the [sandbox](/guide/sandbox/) instead.
 
 ## How it fits together
 
-- The worktree, its panes and the agent run on the server, either directly or in a Docker container. The laptop window is a live view of them.
-- The laptop stays the source of truth for Git. A new workspace starts from a laptop commit, unpushed commits included, and its work comes back with `merge` or `remote pull`. The server never talks to your Git hosting.
+- The worktree, its panes and the agent run on the server, either directly or in a Docker container. The local window is a live view of them.
+- The local machine stays the source of truth for Git. A new workspace starts from a local commit, unpushed commits included, and its work comes back with `merge` or `remote pull`. The server never talks to your Git hosting.
 - workmux installs and updates its own copy on the server. You don't install workmux there yourself.
 - Remote agents appear in every view labelled `handle@remote`, for example `my-feature@devbox`.
 
@@ -42,7 +42,7 @@ workmux remote login devbox claude # log the agent in on the server
 workmux add my-feature --remote devbox -p "Implement the parser"
 ```
 
-The window opens on the laptop as usual. When the agent is done:
+The window opens on the local machine as usual. When the agent is done:
 
 ```bash
 workmux merge my-feature
@@ -56,7 +56,7 @@ workmux merge my-feature
 
 - Agents run directly on the server unless the sandbox is enabled. See [server or Docker](/guide/remote/setup/#server-or-docker).
 - Remote agents need tmux in window mode, and the dashboard can't create them.
-- Agents on the server can't push. Bring the work home and push from the laptop.
+- Agents on the server can't push. Bring the work home and push from the local machine.
 - Files ignored by Git, such as `node_modules` or build output, don't come home.
 - `rename`, `path`, `run` and `sync-files` don't work on remote workspaces.
 
