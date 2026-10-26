@@ -98,7 +98,7 @@ branch.
 
 ### Remotes
 
-`remotes` defines the SSH hosts that can run agents. See [remote hosts](/guide/sandbox/remote/) for setup and usage.
+`remotes` defines the SSH servers that can run agents. See [remote servers](/guide/remote/) for setup and usage.
 
 ```yaml
 # ~/.config/workmux/config.yaml
@@ -111,12 +111,12 @@ remotes:
 placement: devbox
 ```
 
-| Option                     | Description                                                                                                                            | Default                   |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `remotes.<name>.host`      | SSH destination: an alias from `~/.ssh/config` or `user@host`                                                                          | required                  |
-| `remotes.<name>.path`      | Node root on the remote: `~`, a path starting with `~/` (expanded on the remote), or an absolute path                                  | `~/.workmux-node`         |
-| `remotes.<name>.isolation` | `container` forces Docker; `none` forces host execution. See [where remote agents run](/guide/sandbox/remote/#where-remote-agents-run) | follows `sandbox.enabled` |
-| `remotes.<name>.binary`    | Local path to a Linux `workmux` binary to install instead of the matching release                                                      | none                      |
+| Option                     | Description                                                                                                            | Default                   |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `remotes.<name>.host`      | SSH destination: an alias from `~/.ssh/config` or `user@host`                                                          | required                  |
+| `remotes.<name>.path`      | Node root on the remote: `~`, a path starting with `~/` (expanded on the remote), or an absolute path                  | `~/.workmux-node`         |
+| `remotes.<name>.isolation` | `container` forces Docker; `none` forces host execution. See [server or Docker](/guide/remote/setup/#server-or-docker) | follows `sandbox.enabled` |
+| `remotes.<name>.binary`    | Local path to a Linux `workmux` binary to install instead of the matching release                                      | none                      |
 
 `remotes` is global-only: in a project's `.workmux.yaml` it is ignored with a warning. Unknown keys under a remote are an error.
 

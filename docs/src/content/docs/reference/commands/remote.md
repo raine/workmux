@@ -3,7 +3,7 @@ title: "remote"
 description: Set up, check and manage SSH remotes that run agents
 ---
 
-Commands for [remote hosts](/guide/sandbox/remote/): SSH-reachable Linux machines that run individual agents. Remotes are defined under `remotes:` in the global config (see [configuration](/guide/configuration/#remotes)). Create a remote agent with [`workmux add --remote`](/reference/commands/add/).
+Commands for [remote servers](/guide/remote/): SSH-reachable Linux machines that run individual agents. Remotes are defined under `remotes:` in the global config (see [configuration](/guide/configuration/#remotes)). Create a remote agent with [`workmux add --remote`](/reference/commands/add/).
 
 ## remote
 
@@ -59,7 +59,7 @@ Prints one row per check, with a fix for each failing row:
 | logins      | One row per configured agent, with the credential files found on the remote                               |
 | `image`     | The sandbox image of the default agent can be pulled (it is pulled as part of the check)                  |
 
-Uses the current directory's effective config, like `add`; outside a project, uses global config. See [where remote agents run](/guide/sandbox/remote/#where-remote-agents-run). Exits with status 1 when any check fails. Missing logins are warnings, not failures.
+Uses the current directory's effective config, like `add`; outside a project, uses global config. See [server or Docker](/guide/remote/setup/#server-or-docker). Exits with status 1 when any check fails. Missing logins are warnings, not failures.
 
 ## remote login
 
@@ -82,7 +82,7 @@ workmux remote login <name> claude --setup-token
 - `--import` - Copy this machine's credential files for the agent instead of logging in. Cannot be combined with `--setup-token` or extra arguments.
 - `--setup-token` - Claude only: run `claude setup-token` and keep the token it prints for every Claude agent using the remote's node root
 
-Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or directly on the host when sandboxing is off or `isolation: none` is set. Browser logins that call back to `localhost` get their ports forwarded from the laptop. See [logins and credentials](/guide/sandbox/remote/#logins-and-credentials) for each agent's flow and the limits of `--import`.
+Without `--import`, runs the agent's own login flow on the remote, attached to your terminal: in the agent's sandbox image with `container` isolation, or directly on the host when sandboxing is off or `isolation: none` is set. Browser logins that call back to `localhost` get their ports forwarded from the laptop. See [logins and secrets](/guide/remote/logins/) for each agent's flow and the limits of `--import`.
 
 ## remote pull
 
@@ -102,7 +102,7 @@ workmux remote pull <handle> [--no-hooks]
 
 Stops the remote agent, recreates the workspace as a local worktree with the same branch, staged changes, unstaged changes and untracked files, opens its window with your configured panes, and removes the remote workspace. The remote agent's conversation is not carried over; the local window starts a fresh agent. Run it from the project's repository.
 
-If the remote can't be reached after the work came home, the remote cleanup is left pending and a later command finishes it (see [merging](/guide/sandbox/remote/#merging)). See [what doesn't come home](/guide/sandbox/remote/#what-doesnt-come-home).
+If the remote can't be reached after the work came home, the remote cleanup is left pending and a later command finishes it (see [merging](/guide/remote/git/#uncommitted-work-conflicts-and-cleanup)). See [what doesn't come home](/guide/remote/git/#what-doesnt-come-home).
 
 ## remote gc
 
@@ -121,7 +121,22 @@ workmux remote gc <name> [--dry-run | --force]
 - `--dry-run` - Only list what would be removed
 - `--force` - Remove without asking, including workspaces whose work exists only on the remote. Cannot be combined with `--dry-run`.
 
-Lists workspaces this laptop has no record of, stray worktrees, tmux sessions, containers, supervisors, refs and state files, unused node binaries, and laptop records of workspaces the remote no longer has. Then asks before removing them. Workspaces with uncommitted changes or commits beyond their base are only removed with `--force`. Without a terminal, nothing is removed unless `--force` is given. See [cleaning up a remote](/guide/sandbox/remote/#cleaning-up-a-remote).
+Lists workspaces this laptop has no record of, stray worktrees, tmux sessions, containers, supervisors, refs and state files, unused node binaries, and laptop records of workspaces the remote no longer has. Then asks before removing them. Workspaces with uncommitted changes or commits beyond their base are only removed with `--force`. Without a terminal, nothing is removed unless `--force` is given. See [cleaning up a server](/guide/remote/troubleshooting/#cleaning-up-a-server).
+
+## remote logs
+
+Show the output of merges and removals requested from remote panes.
+
+```bash
+workmux remote logs <name> [<request>]
+```
+
+**Arguments:**
+
+- `<name>` - Remote name from `remotes:` in the global config
+- `<request>` - Request ID, as printed in the remote pane
+
+Without a request ID, lists the saved log files for the remote. With one, prints that request's output, including hook output. Logs are kept on the laptop, need no connection to the remote, and aren't deleted automatically. See [operation logs](/guide/remote/git/#operation-logs).
 
 ## Examples
 
