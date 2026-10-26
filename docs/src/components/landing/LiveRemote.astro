@@ -5,11 +5,17 @@
 // machine, the SSH link and devbox fill in as the session plays; clicking
 // them jumps the session to that moment.
 import './grid.css';
+
+interface Props {
+  // Grid width in cells: fewer cells draw larger text in a narrow column.
+  cols?: number;
+}
+const { cols = 96 } = Astro.props;
 ---
 
 <live-remote>
   <div class="lr-body">
-    <remote-session class="gl">
+    <remote-session class="gl" data-cols={cols}>
       <div
         class="gl-grid"
         role="img"
@@ -297,7 +303,8 @@ import './grid.css';
     --l-ease: cubic-bezier(0.23, 1, 0.32, 1);
   }
   /* The lanes are the session's progress bar. */
-  live-remote .gl .gl-chapters {
+  live-remote .gl .gl-chapters,
+  live-remote .gl .gl-time {
     display: none;
   }
   live-remote .tl-chart {
@@ -507,7 +514,7 @@ import './grid.css';
   /* Time runs top to bottom, like a log. */
   live-remote .lr-body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 24rem;
+    grid-template-columns: minmax(0, 1fr) clamp(15rem, 30cqw, 24rem);
   }
   live-remote .tl-chart {
     display: grid;
@@ -642,7 +649,7 @@ import './grid.css';
     top: -3px;
     left: -3px;
   }
-  @container (max-width: 56rem) {
+  @container (max-width: 46rem) {
     live-remote .lr-body {
       grid-template-columns: 1fr;
     }
@@ -757,6 +764,8 @@ import './grid.css';
     connectedCallback() {
       this.capEl = this.querySelector<HTMLElement>('.rt-cap span')!;
       this.sleepEl = this.querySelector<HTMLElement>('.rt-sleep')!;
+      this.cols = Number(this.dataset.cols) || COLS;
+      this.w = this.cols - 2;
       super.connectedCallback();
     }
 
@@ -977,18 +986,35 @@ import './grid.css';
       return l;
     }
 
-    shellLines(): Line[] {
-      const lines: Line[] = [];
-      for (const l of this.shell) {
-        // Long lines wrap as a terminal would.
-        const text = l.map((s) => (Array.isArray(s) ? s[0] : '')).join('');
-        if (text.length <= this.w) lines.push(l);
-        else
-          for (let i = 0; i < text.length; i += this.w)
-            lines.push([[text.slice(i, i + this.w), 't']]);
+    // Long lines wrap as a terminal would.
+    wrap(line: Line): Line[] {
+      const rows: Line[] = [[]];
+      let used = 0;
+      for (const seg of line) {
+        if (!Array.isArray(seg)) {
+          rows[rows.length - 1].push(seg);
+          used += seg.w ?? 1;
+          continue;
+        }
+        let [text, cls] = seg;
+        while (text) {
+          if (used >= this.w) {
+            rows.push([]);
+            used = 0;
+          }
+          const part = text.slice(0, this.w - used);
+          rows[rows.length - 1].push([part, cls]);
+          used += part.length;
+          text = text.slice(part.length);
+        }
       }
-      lines.push(this.promptLine(this.input, true));
-      return lines;
+      return rows;
+    }
+
+    shellLines(): Line[] {
+      return [...this.shell, this.promptLine(this.input, true)].flatMap((l) =>
+        this.wrap(l),
+      );
     }
 
     spinner(): Line {
@@ -1305,12 +1331,12 @@ import './grid.css';
           tone: 'ok',
         },
         { kind: 'mark', lane: 2, start: b.merged, label: 'removed' },
-        { kind: 'hop', lane: 1, start: b.add + 250, label: 'main @ 3f9c2a1 →' },
+        { kind: 'hop', lane: 1, start: b.add + 250, label: '3f9c2a1 →' },
         {
           kind: 'hop',
           lane: 1,
           start: b.merge + 400,
-          label: '← branch + changes',
+          label: '← branch',
           back: true,
         },
       ];

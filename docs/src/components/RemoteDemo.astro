@@ -16,7 +16,7 @@ const { caption } = Astro.props;
       <span class="lights"><i></i><i></i><i></i></span>
       <span class="title">~/code/api</span>
     </div>
-    <LiveRemote />
+    <LiveRemote cols={80} />
   </div>
   {caption && <figcaption>{caption}</figcaption>}
 </figure>

@@ -54,7 +54,11 @@ export default defineConfig({
         SocialIcons: "./src/components/HeaderLinks.astro",
         PageTitle: "./src/components/PageTitle.astro",
       },
-      customCss: ["./src/styles/theme.css", "./src/styles/code.css"],
+      customCss: [
+        "./src/styles/theme.css",
+        "./src/styles/layout.css",
+        "./src/styles/code.css",
+      ],
       head: [
         {
           tag: "meta",

@@ -1,0 +1,21 @@
+/* Wider content column so tables and live demos have room. Running text,
+   asides and code blocks stay at Starlight's default 45rem measure so lines
+   keep a comfortable length and code boxes line up with the prose around
+   them. List items that contain tables or images stay uncapped so that
+   content can use the full column; their paragraphs and code are still
+   capped. */
+:root {
+  --sl-content-width: 60rem;
+}
+
+.sl-markdown-content
+  :is(
+    p,
+    blockquote,
+    .expressive-code,
+    .starlight-aside,
+    li:not(:has(table, figure, img)),
+    .screenshot
+  ) {
+  max-width: 45rem;
+}
