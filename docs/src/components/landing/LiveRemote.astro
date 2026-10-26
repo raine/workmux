@@ -8,38 +8,40 @@ import './grid.css';
 ---
 
 <live-remote>
-  <remote-session class="gl">
-    <div
-      class="gl-grid"
-      role="img"
-      aria-label="A tmux session: workmux add --remote starts an agent on the server devbox in a new window. The local machine sleeps while the agent keeps working; on wake the window reconnects and shows the finished work, and workmux merge brings it home."
-    >
-    </div>
-    <div class="rt-sleep" aria-hidden="true">
-      <span>☾</span>
-      <b>Local machine asleep</b>
-      <small></small>
-    </div>
-    <div class="rt-cap" aria-hidden="true"><span></span></div>
-    <span class="gl-key" aria-hidden="true"></span>
-    <div class="gl-chapters"></div>
-    <span class="gl-time" aria-hidden="true"></span>
-  </remote-session>
-  <div class="tl-chart" aria-hidden="true">
-    <div class="tl-names">
-      <span data-lane="0"><b>Your machine</b><small>tmux · git</small></span>
-      <span data-lane="1" class="tl-ssh">ssh</span>
-      <span data-lane="2"><b>devbox</b><small>node · docker</small></span>
-    </div>
-    <div class="tl-track" data-k="track">
-      <div class="tl-sleep" data-k="sleep">
-        <span>☾ lid closed · 34 min</span>
+  <div class="lr-body">
+    <remote-session class="gl">
+      <div
+        class="gl-grid"
+        role="img"
+        aria-label="A tmux session: workmux add --remote starts an agent on the server devbox in a new window. The local machine sleeps while the agent keeps working; on wake the window reconnects and shows the finished work, and workmux merge brings it home."
+      >
       </div>
-      <div class="tl-guide" data-lane="0"></div>
-      <div class="tl-guide" data-lane="1"></div>
-      <div class="tl-guide" data-lane="2"></div>
-      <div class="tl-items" data-k="items"></div>
-      <div class="tl-head" data-k="head"></div>
+      <div class="rt-sleep" aria-hidden="true">
+        <span>☾</span>
+        <b>Local machine asleep</b>
+        <small></small>
+      </div>
+      <div class="rt-cap" aria-hidden="true"><span></span></div>
+      <span class="gl-key" aria-hidden="true"></span>
+      <div class="gl-chapters"></div>
+      <span class="gl-time" aria-hidden="true"></span>
+    </remote-session>
+    <div class="tl-chart" aria-hidden="true">
+      <div class="tl-names">
+        <span data-lane="0"><b>Your machine</b><small>tmux · git</small></span>
+        <span data-lane="1" class="tl-ssh">ssh</span>
+        <span data-lane="2"><b>devbox</b><small>node · docker</small></span>
+      </div>
+      <div class="tl-track" data-k="track">
+        <div class="tl-sleep" data-k="sleep">
+          <span>☾ lid closed · 34 min</span>
+        </div>
+        <div class="tl-guide" data-lane="0"></div>
+        <div class="tl-guide" data-lane="1"></div>
+        <div class="tl-guide" data-lane="2"></div>
+        <div class="tl-items" data-k="items"></div>
+        <div class="tl-head" data-k="head"></div>
+      </div>
     </div>
   </div>
 </live-remote>
@@ -279,7 +281,11 @@ import './grid.css';
 </style>
 
 <style is:global>
+  /* The timeline sits beside the session when there is room for both, and
+     under it otherwise, as in a docs column. */
   live-remote {
+    display: block;
+    container-type: inline-size;
     --l-bg: #0f1415;
     --l-1: #eaf2ef;
     --l-2: #a1b2b1;
@@ -499,7 +505,7 @@ import './grid.css';
   }
 
   /* Time runs top to bottom, like a log. */
-  live-remote {
+  live-remote .lr-body {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 24rem;
   }
@@ -636,8 +642,8 @@ import './grid.css';
     top: -3px;
     left: -3px;
   }
-  @media (max-width: 60rem) {
-    live-remote {
+  @container (max-width: 56rem) {
+    live-remote .lr-body {
       grid-template-columns: 1fr;
     }
     live-remote .tl-chart {

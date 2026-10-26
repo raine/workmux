@@ -3,9 +3,13 @@ title: "Remote servers"
 description: Run individual agents on an SSH-reachable Linux server while others stay on your machine
 ---
 
+import RemoteDemo from "../../../../components/RemoteDemo.astro";
+
 workmux can run an agent on a Linux server you reach over SSH, such as a home server, a Proxmox VM or a cloud VM, while your other agents stay on the local machine. Each remote agent still gets a normal tmux window on the local machine, and shows up in the dashboard, the sidebar, `workmux status` and `workmux list` like a local one.
 
 The agent keeps running while the local machine sleeps, loses its network or closes the window. When you come back, the window reconnects by itself. When the work is done, `workmux merge` brings it home and merges it on the local machine.
+
+<RemoteDemo caption="An agent starts on devbox, keeps working while the local machine sleeps, and merges home." />
 
 Use a remote server when:
 
