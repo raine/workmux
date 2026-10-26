@@ -48,8 +48,8 @@ pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
     };
     Ok(Some(UpdatePreview {
         label: path.display().to_string(),
-        installed: std::fs::read_to_string(&path)?,
-        bundled: EXTENSION_SOURCE.to_string(),
+        installed: extension_file::normalize_documentation_link(&std::fs::read_to_string(&path)?),
+        bundled: extension_file::normalize_documentation_link(EXTENSION_SOURCE),
     }))
 }
 
