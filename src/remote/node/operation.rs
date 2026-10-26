@@ -86,7 +86,7 @@ pub fn validate_names(names: &[String], handle: &str) -> Result<()> {
 /// showing its progress.
 pub fn submit(names: &[String], operation: Operation) -> Result<()> {
     let (path, ws_id) = super::spawn::session_parent().ok_or_else(|| {
-        anyhow::anyhow!("incomplete remote workspace session; run this on the laptop")
+        anyhow::anyhow!("incomplete remote workspace session; run this on the local machine")
     })?;
     let root = NodeRoot::at(path)?;
     let mut status = Status::new();
@@ -125,13 +125,13 @@ pub fn request(
             .as_ref()
             .is_some_and(|r| r.outcome.is_none() && (r.claimed || r.pending(cache::now())))
         {
-            bail!("a laptop operation is already pending for this workspace");
+            bail!("a request to the local machine is already pending for this workspace");
         }
         let verb = match operation {
             Operation::Remove { .. } => "Removing",
             Operation::Merge { .. } => "Merging",
         };
-        let announce = format!("{verb} '{}' on the laptop…", ws.identity.handle);
+        let announce = format!("{verb} '{}' on the local machine…", ws.identity.handle);
         ws.operation = Some(Request {
             id: id.clone(),
             operation,
@@ -152,7 +152,7 @@ pub fn request(
             return Ok(None);
         };
         let Some(request) = ws.operation.as_ref().filter(|r| r.id == id) else {
-            bail!("laptop request was withdrawn");
+            bail!("the request to the local machine was withdrawn");
         };
         lines.truncate(1);
         lines.extend(request.progress.iter().cloned());
@@ -176,7 +176,9 @@ pub fn request(
                 {
                     ws.operation = None;
                     root.save(&ws)?;
-                    bail!("the laptop isn't connected or runs an older workmux; request withdrawn");
+                    bail!(
+                        "the local machine isn't connected or runs an older workmux; request withdrawn"
+                    );
                 }
             }
         }

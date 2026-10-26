@@ -16,7 +16,7 @@ description: Prepare a Linux server, add it to your config and choose how its ag
 
 - Network access to the APIs your agents use.
 
-The server doesn't need access to GitHub: the laptop downloads the workmux release, verifies it and uploads it. What else the server needs depends on [where agents run](#server-or-docker).
+The server doesn't need access to GitHub: the local machine downloads the workmux release, verifies it and uploads it. What else the server needs depends on [where agents run](#server-or-docker).
 
 ## Add the server to your config
 
@@ -49,7 +49,7 @@ The two modes need different things on the server and behave differently in a fe
 | Agent CLIs                                | Install each one on the SSH user's login `PATH`   | Come from the sandbox image                        |
 | Also needs                                | Your project's tools, if hooks or agents use them | Docker, usable without `sudo`; access to `ghcr.io` |
 | Sandbox                                   | None, with the agent's normal permission prompts  | The [container sandbox](/guide/sandbox/container/) |
-| `workmux rm` and `merge` in a remote pane | Ask the laptop to do it                           | Agents can ask the laptop, without hooks           |
+| `workmux rm` and `merge` in a remote pane | Ask the local machine to do it                    | Agents can ask the local machine, without hooks    |
 | `sandbox.env` and `env_passthrough`       | Not used                                          | Used                                               |
 
 workmux doesn't install agents on the server and doesn't fall back to Docker: if the agent's CLI is missing on the server, `add --remote` stops before creating anything. Podman isn't supported on servers.
@@ -103,24 +103,24 @@ Where a workspace lives is decided when it is created. Later commands such as `o
 
 ## What the server uses from your config
 
-A remote workspace runs a copy of the laptop's effective config, taken when the workspace is created. The server's own workmux config and the worktree's `.workmux.yaml` are never read. `add --remote` lists every setting it didn't apply.
+A remote workspace runs a copy of the local machine's effective config, taken when the workspace is created. The server's own workmux config and the worktree's `.workmux.yaml` are never read. `add --remote` lists every setting it didn't apply.
 
-- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `files`, the status icons and format, and `hook_shell` unless it is an absolute laptop path.
+- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `files`, the status icons and format, and `hook_shell` unless it is an absolute local path.
 - **Applied in Docker mode:** `sandbox.image`, `target`, `network`, `toolchain`, `env`, `env_passthrough`, and `container.cpus`, `memory`, `group_add`, `cap_add`, `security_opt` and `excluded_files`. The sandbox is always Docker there.
-- **Not applied**, because they name laptop resources: Lima, other container runtimes, `rpc_host`, `extra_mounts`, `agent_config_dir`, `host_commands`, `container.devices` and `container.oci_runtime`.
+- **Not applied**, because they name local resources: Lima, other container runtimes, `rpc_host`, `extra_mounts`, `agent_config_dir`, `host_commands`, `container.devices` and `container.oci_runtime`.
 
 `post_create` and `pre_remove` hooks run on the server, in the remote worktree. If `add --remote` fails partway, run it again with the same arguments: it resumes and doesn't repeat hooks that already finished.
 
-`files.copy` and `files.symlink` sources are sent from the laptop, up to 64 MiB per workspace. A larger source is skipped with a warning. Symlink sources are sent once per project and then reused; they aren't kept in sync with the laptop.
+`files.copy` and `files.symlink` sources are sent from the local machine, up to 64 MiB per workspace. A larger source is skipped with a warning. Symlink sources are sent once per project and then reused; they aren't kept in sync with the local machine.
 
 ## Security
 
-Treat the server as an extension of your laptop: the SSH user runs every agent and holds their logins. Use a server or VM dedicated to agents, and treat what agents produce there as untrusted, as with a [local sandbox](/guide/sandbox/#security-model).
+Treat the server as an extension of your local machine: the SSH user runs every agent and holds their logins. Use a server or VM dedicated to agents, and treat what agents produce there as untrusted, as with a [local sandbox](/guide/sandbox/#security-model).
 
 - **No host commands.** [Host command proxying](/guide/sandbox/features/#host-command-proxying) is off on servers. In Docker mode, agents can only run what their container has.
 - **No Git credentials.** The server has no `origin`, and workmux connects without SSH agent or X11 forwarding. Anything else you give agents, such as tokens in `sandbox.env`, is up to you.
-- **Laptop actions stay on the laptop.** A remote pane or agent can ask the laptop to remove or merge its own workspace, and nothing else; hook output from that work stays on the laptop. A request from a container runs no hooks. `workmux close` and image paste fail with a message saying what to run on the laptop.
-- **Hooks run outside the container.** `post_create` and `pre_remove` run on the server as the SSH user, as they run on the laptop for local agents. They come from your laptop config.
+- **Local actions stay local.** A remote pane or agent can ask the local machine to remove or merge its own workspace, and nothing else; hook output from that work stays on the local machine. A request from a container runs no hooks. `workmux close` and image paste fail with a message saying what to run on the local machine.
+- **Hooks run outside the container.** `post_create` and `pre_remove` run on the server as the SSH user, as they run on the local machine for local agents. They come from your local config.
 - **Firewall the Docker bridge** if the server routes or forwards it to the outside. The sandbox's RPC bridge and proxy listen on the bridge address.
 
 workmux marks remote worktrees as trusted in Claude and Codex, so they start without asking whether to trust the folder. Folders you marked untrusted stay untrusted. A trusted folder lets the agent load the repository's own agent settings, such as `.codex/config.toml`.

@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 
 pub fn run(name: Option<&str>) -> Result<()> {
     if crate::remote::node::operation::in_session() {
-        anyhow::bail!("the window is on the laptop: run `workmux close <handle>` there");
+        anyhow::bail!("the window is on the local machine: run `workmux close <handle>` there");
     }
     if crate::sandbox::guest::is_sandbox_guest() {
         let name_to_close = super::resolve_name(name)?;

@@ -81,9 +81,9 @@ def test_unmerged_refuses_then_force(
         ("rm --gone", "does not support"),
         ("rm --all", "does not support"),
         ("rm --keep-branch", "does not support"),
-        ("close", "the window is on the laptop"),
+        ("close", "the window is on the local machine"),
         ("merge --squash", "needs interaction"),
-        ("merge --into main~1", "existing laptop branch"),
+        ("merge --into main~1", "existing local branch"),
     ],
 )
 def test_refusals(
@@ -180,7 +180,7 @@ def test_staged_changes_and_keep(
     wait_message(node, ex_id, "needs interaction")
     assert git(mux_repo_path, "branch", "--show-current") == "main"
     request(node, ex_id, "merge --keep --ignore-uncommitted")
-    wait_message(node, ex_id, "Laptop operation completed")
+    wait_message(node, ex_id, "Done on the local machine")
     assert git(mux_repo_path, "show", "main:work.txt") == "committed"
     assert (worktree / "staged").read_text() == "staged\n"
     assert local_records(mux_server) and node.workspaces()
@@ -206,7 +206,7 @@ def test_failed_hook_output_stays_on_laptop(
     ex_id = record["execution"]["ex_id"]
     commit_on_node(node_worktree(node, "feat"), "work.txt", "work\n")
     request(node, ex_id, "merge")
-    wait_message(node, ex_id, "a laptop hook failed")
+    wait_message(node, ex_id, "a local hook failed")
     pane = node_pane(node, ex_id)
     match = re.search(r"remote logs lo\s+(r[0-9a-f]{12})", pane)
     assert match, pane

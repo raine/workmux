@@ -168,7 +168,7 @@ The supervisor and guest communicate via JSON-lines over TCP. Each request is a 
 - `SpawnAgent` - runs `workmux add` on the host to create a new worktree and pane
 - `Exec` - runs a command on the host and streams stdout/stderr back (used by host-exec shims, including built-in `afplay`)
 - `Merge` - runs `workmux merge` on the host with hooks disabled
-- `Remove` - asks the laptop to remove a workspace on a [remote server](/guide/remote/), without hooks; refused locally, where `pre_remove` hooks would run on the host
+- `Remove` - asks the local machine to remove a workspace on a [remote server](/guide/remote/), without hooks; refused locally, where `pre_remove` hooks would run on the host
 - `ClipboardRead` - reads the host clipboard and writes image data to the shared worktree filesystem (used by `wl-paste`/`xclip` shims)
 
 Requests are authenticated with a per-session token passed via the `WM_RPC_TOKEN` environment variable.

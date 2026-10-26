@@ -62,7 +62,7 @@ Pass the handle of a workspace on a [remote server](/guide/remote/) to remove it
 
 If the remote is unreachable or no longer configured, `--force` forgets the workspace on this machine only, leaving whatever exists on the remote for [`workmux remote gc`](/reference/commands/remote/#remote-gc). `--all` and `--gone` only consider local worktrees.
 
-In a remote workspace's pane, or from its agent, `workmux rm` asks the laptop to remove that workspace. See [remove or merge from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane).
+In a remote workspace's pane, or from its agent, `workmux rm` asks the local machine to remove that workspace. See [remove or merge from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane).
 
 ## Deferred filesystem cleanup
 

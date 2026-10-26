@@ -85,7 +85,7 @@ fn portable_config_with_env(
 
     match config.hook_shell.as_deref() {
         Some([program, ..]) if Path::new(program).is_absolute() => dropped
-            .push("hook_shell: an absolute laptop path; hooks use the default shell".to_string()),
+            .push("hook_shell: an absolute local path; hooks use the default shell".to_string()),
         _ => portable.hook_shell = config.hook_shell.clone(),
     }
     if config
@@ -94,7 +94,7 @@ fn portable_config_with_env(
         .is_some_and(|agent| agent.trim_start().starts_with('/'))
     {
         dropped
-            .push("agent: an absolute laptop path is kept but may not exist on the remote".into());
+            .push("agent: an absolute local path is kept but may not exist on the remote".into());
     }
 
     let mut secrets = Secrets::default();
@@ -183,7 +183,10 @@ fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> Sandb
     let mut drop = |setting: &str, why: &str| dropped.push(format!("sandbox.{setting}: {why}"));
     let laptop_lima = sandbox.backend() == SandboxBackend::Lima;
     if laptop_lima {
-        drop("backend", "lima runs on the laptop; the remote uses docker");
+        drop(
+            "backend",
+            "lima runs on the local machine; the remote uses docker",
+        );
     }
     if sandbox.image.is_some() && laptop_lima {
         drop(
@@ -203,10 +206,10 @@ fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> Sandb
         drop("rpc_host", "the remote picks its own private address");
     }
     if sandbox.extra_mounts.as_ref().is_some_and(|m| !m.is_empty()) {
-        drop("extra_mounts", "laptop paths");
+        drop("extra_mounts", "local paths");
     }
     if sandbox.agent_config_dir.is_some() {
-        drop("agent_config_dir", "a laptop path");
+        drop("agent_config_dir", "a local path");
     }
     if sandbox
         .host_commands
@@ -223,10 +226,10 @@ fn portable_sandbox(sandbox: &SandboxConfig, dropped: &mut Vec<String>) -> Sandb
     }
     let container = &sandbox.container;
     if container.devices.as_ref().is_some_and(|d| !d.is_empty()) {
-        drop("container.devices", "laptop devices");
+        drop("container.devices", "local devices");
     }
     if container.oci_runtime.is_some() {
-        drop("container.oci_runtime", "a laptop runtime");
+        drop("container.oci_runtime", "a local runtime");
     }
 
     SandboxConfig {
