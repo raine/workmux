@@ -57,6 +57,10 @@ pub enum RpcRequest {
         no_hooks: bool,
         notification: bool,
     },
+    Remove {
+        name: String,
+        force: bool,
+    },
     Close {
         name: String,
     },
@@ -75,6 +79,7 @@ impl RpcRequest {
             RpcRequest::SpawnAgent { .. } => "SpawnAgent",
             RpcRequest::Exec { .. } => "Exec",
             RpcRequest::Merge { .. } => "Merge",
+            RpcRequest::Remove { .. } => "Remove",
             RpcRequest::Close { .. } => "Close",
             RpcRequest::ClipboardRead { .. } => "ClipboardRead",
         }
@@ -107,10 +112,7 @@ fn on_node(request: &RpcRequest, node: &NodeWorkspace, worktree: &Path) -> Optio
                 *background,
             ));
         }
-        RpcRequest::Merge { .. } => format!(
-            "merging runs on the laptop for remote workspaces: run `workmux merge {handle}` \
-             there; it brings this workspace's work home and merges it"
-        ),
+        RpcRequest::Merge { .. } | RpcRequest::Remove { .. } => return None,
         RpcRequest::ClipboardRead { .. } => "the clipboard is on the laptop, which remote \
              agents cannot read; copy the image into the worktree instead"
             .to_string(),
@@ -119,6 +121,94 @@ fn on_node(request: &RpcRequest, node: &NodeWorkspace, worktree: &Path) -> Optio
         }
     };
     Some(RpcResponse::Error { message: refusal })
+}
+
+/// The laptop operation a node supervisor requests for `request`, if any.
+fn laptop_operation(request: &RpcRequest) -> Option<crate::remote::node::operation::Operation> {
+    use crate::remote::node::operation::Operation;
+    match request {
+        RpcRequest::Remove { force, .. } => Some(Operation::Remove { force: *force }),
+        RpcRequest::Merge {
+            into,
+            rebase,
+            squash,
+            ignore_uncommitted,
+            keep,
+            cleanup,
+            no_verify,
+            no_hooks,
+            notification,
+            ..
+        } => Some(Operation::Merge {
+            into: into.clone(),
+            rebase: *rebase,
+            squash: *squash,
+            ignore_uncommitted: *ignore_uncommitted,
+            keep: *keep,
+            cleanup: *cleanup,
+            no_verify: *no_verify,
+            no_hooks: *no_hooks,
+            notification: *notification,
+        }),
+        _ => None,
+    }
+}
+
+/// Ask the laptop to perform `operation` on the guest's own workspace, as
+/// a pane on the node would, streaming the laptop's progress. The request
+/// is marked sandboxed, so the laptop runs no hooks for it. The guest
+/// cannot name another workspace: its worktree's name is its handle.
+fn handle_node_operation(
+    node: &NodeWorkspace,
+    worktree: &Path,
+    operation: crate::remote::node::operation::Operation,
+    writer: &mut impl Write,
+) -> Result<()> {
+    let handle = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut sent = 0;
+    let mut write_err = None;
+    let result = crate::remote::node::NodeRoot::at(node.root.clone()).and_then(|root| {
+        crate::remote::node::operation::request(
+            &root,
+            &node.ws_id,
+            &[handle],
+            operation,
+            true,
+            &mut |lines| {
+                for line in &lines[sent.min(lines.len())..] {
+                    let response = RpcResponse::Output {
+                        message: format!("{line}\n"),
+                    };
+                    if let Err(e) = write_response(writer, &response) {
+                        write_err.get_or_insert(e);
+                    }
+                }
+                sent = sent.max(lines.len());
+            },
+        )
+    });
+    if let Some(e) = write_err {
+        return Err(e);
+    }
+    let response = match result {
+        Ok(Some(message)) => {
+            write_response(
+                writer,
+                &RpcResponse::Output {
+                    message: format!("{message}\n"),
+                },
+            )?;
+            RpcResponse::Ok
+        }
+        Ok(None) => RpcResponse::Ok,
+        Err(e) => RpcResponse::Error {
+            message: format!("{e:#}"),
+        },
+    };
+    write_response(writer, &response)
 }
 
 /// The node workspace a node supervisor serves, from its own arguments;
@@ -355,6 +445,13 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
             continue;
         }
 
+        if let Some(node) = &ctx.node
+            && let Some(operation) = laptop_operation(&request)
+        {
+            handle_node_operation(node, &ctx.worktree_path, operation, &mut writer)?;
+            continue;
+        }
+
         // Exec and Merge require streaming multiple responses, handle separately
         if let RpcRequest::Exec {
             ref command,
@@ -513,6 +610,10 @@ fn dispatch_request(request: &RpcRequest, ctx: &RpcContext) -> RpcResponse {
             // Handled in handle_connection before dispatch (needs streaming)
             unreachable!("Merge is handled directly in handle_connection")
         }
+        RpcRequest::Remove { name, .. } => RpcResponse::Error {
+            // pre_remove hooks run on the host, and `remove` cannot skip them.
+            message: format!("removing runs hooks on the host: run `workmux rm {name}` there"),
+        },
         RpcRequest::Close { .. } => {
             // Handled in handle_connection before dispatch
             unreachable!("Close is handled directly in handle_connection")
@@ -635,7 +736,7 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
 /// existing value. RPC-spawned commands should run in a minimal, known-safe
 /// configuration -- inheriting arbitrary env-injected git config from the host
 /// is not needed and could weaken the security boundary.
-fn disable_git_hooks(cmd: &mut std::process::Command) {
+pub(crate) fn disable_git_hooks(cmd: &mut std::process::Command) {
     cmd.env_remove("GIT_CONFIG_PARAMETERS")
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
@@ -1187,7 +1288,20 @@ mod tests {
                 "notification":false}"#,
         )
         .unwrap();
-        assert!(refusal(&merge).contains("`workmux merge feat`"));
+        assert!(on_node(&merge, &node, worktree).is_none());
+        assert!(matches!(
+            laptop_operation(&merge),
+            Some(crate::remote::node::operation::Operation::Merge { .. })
+        ));
+        let remove = RpcRequest::Remove {
+            name: "x".into(),
+            force: true,
+        };
+        assert!(on_node(&remove, &node, worktree).is_none());
+        assert_eq!(
+            laptop_operation(&remove),
+            Some(crate::remote::node::operation::Operation::Remove { force: true })
+        );
         let paste = RpcRequest::ClipboardRead {
             mime: "image/png".into(),
         };
@@ -1195,6 +1309,19 @@ mod tests {
         let close = RpcRequest::Close { name: "x".into() };
         assert!(refusal(&close).contains("`workmux close feat`"));
         assert!(on_node(&RpcRequest::Heartbeat, &node, worktree).is_none());
+    }
+
+    #[test]
+    fn local_remove_is_refused_because_hooks_run_on_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = RpcRequest::Remove {
+            name: "feat".into(),
+            force: false,
+        };
+        match dispatch_request(&request, &test_context(dir.path())) {
+            RpcResponse::Error { message } => assert!(message.contains("`workmux rm feat`")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     fn test_context(worktree_path: &std::path::Path) -> RpcContext {

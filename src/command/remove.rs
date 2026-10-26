@@ -23,6 +23,15 @@ pub fn run(
             crate::remote::node::operation::Operation::Remove { force },
         );
     }
+    if crate::sandbox::guest::is_sandbox_guest() {
+        if gone || all || keep_branch || names.len() > 1 {
+            anyhow::bail!(
+                "a sandboxed agent can only remove its own workspace, without --gone, --all or --keep-branch"
+            );
+        }
+        let name = super::resolve_name(names.first().map(String::as_str))?;
+        return run_via_rpc(&name, force);
+    }
     let config = config::Config::load(None)?;
     let confirm_unmerged = config.confirm_unmerged_removal.unwrap_or(true);
 
@@ -35,6 +44,28 @@ pub fn run(
     }
 
     run_specified(names, force, keep_branch, confirm_unmerged, config)
+}
+
+/// Ask the sandbox supervisor to remove this workspace, printing its output.
+fn run_via_rpc(name: &str, force: bool) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+
+    let mut client = RpcClient::from_env()?;
+    client.send(&RpcRequest::Remove {
+        name: name.to_string(),
+        force,
+    })?;
+    loop {
+        match client.recv()? {
+            RpcResponse::Output { message } => {
+                print!("{message}");
+                io::stdout().flush().ok();
+            }
+            RpcResponse::Ok => return Ok(()),
+            RpcResponse::Error { message } => anyhow::bail!("{message}"),
+            _ => {}
+        }
+    }
 }
 
 /// Remove specific worktrees provided by user (or current if empty)

@@ -50,7 +50,7 @@ If the server is already gone, `workmux remove --force <handle>` forgets its wor
 
 **Codex asks to review hooks on the server.** Codex outside a sandbox asks once to trust workmux's status hooks. Attach to the agent and trust them; Codex asks again only when the hooks change.
 
-**`workmux: command not found` in a remote pane.** Expected in Docker mode: run the command on the laptop. On the server directly, `workmux` is on every pane's `PATH`.
+**`workmux: command not found` in a remote pane.** Expected in a Docker-mode shell pane: run the command on the laptop. The agent's container has `workmux`. On the server directly, `workmux` is on every pane's `PATH`.
 
 **`rm` or `merge` in a remote pane says the request was withdrawn.** The laptop isn't connected, or runs an older workmux. Run the command on the laptop instead.
 
@@ -66,7 +66,7 @@ If the server is already gone, `workmux remove --force <handle>` forgets its wor
 - Servers run Linux and use Docker for sandboxing; Podman, Lima and Apple Container aren't available there.
 - The dashboard can't create remote agents; use `workmux add --remote`.
 - Agents on a server can't push, read the laptop's clipboard or run host commands.
-- `rm` and `merge` from a remote pane work only for agents running directly on the server.
+- `rm` and `merge` requested from a container run without hooks.
 - Ignored files, submodule contents and agent conversations don't come home with `merge` or `remote pull`.
 - The environment snapshot is taken once per workspace.
 - Imported credentials can drift apart from the laptop's copy. `omp` logins can't be imported, and doctor can't tell whether `omp` is logged in.

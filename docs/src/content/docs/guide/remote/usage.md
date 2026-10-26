@@ -29,11 +29,11 @@ Remote workspaces use the usual commands. Run them from the project on the lapto
 Every pane in the window is a session on the server. Non-agent panes are shells on the server, or in the container with `sandbox.target: all`.
 
 - **On the server directly:** `workmux` works in every pane, including the shell left after the agent exits. It is the server's copy, which knows the pane's workspace.
-- **In Docker:** shell panes on the server have no `workmux`. Run workmux commands for the workspace on the laptop.
+- **In Docker:** shell panes on the server have no `workmux`. Run workmux commands for the workspace on the laptop. The agent's container has `workmux`, for [`merge` and `rm`](#remove-or-merge-from-a-remote-pane) and [starting agents](#agents-that-start-agents).
 
 ## Remove or merge from a remote pane
 
-In a workspace running directly on the server, type the usual commands in any of its panes:
+In a workspace running directly on the server, type the usual commands in any of its panes. An agent can run them too, including in Docker:
 
 ```bash
 workmux merge
@@ -54,12 +54,11 @@ The [log](/guide/remote/git/#operation-logs) holds the full hook output.
 
 - The laptop must be awake and connected. If it doesn't pick the request up within about 15 seconds, the request is withdrawn and the command fails with "the laptop isn't connected".
 - Only the workspace's own handle works: no name, `.`, or the handle itself.
-- Nothing can ask questions, so these are refused with a hint: removing a workspace with unmerged commits without `--force`, merging staged changes that need a commit message (commit them first), squash merges, `merge --notification`, `rm --all`, `--gone` and `--keep-branch`. `close` is refused too, because the window is on the laptop.
+- Nothing can ask questions, so these are refused with a hint: removing a workspace with unmerged commits without `--force`, merging staged changes that need a commit message (commit them first), squash merges, `rm --all`, `--gone` and `--keep-branch`. `close` is refused too, because the window is on the laptop.
 - If the merge fails, the workspace stays and the pane prints why.
+- In Docker mode, these requests run no hooks: no `post_create`, `pre_merge` or `pre_remove`, and no Git hooks, as for a [local sandbox](/guide/sandbox/#security-model). Hooks would run outside the container on code the agent wrote. Run `workmux merge <handle>` on the laptop when you want them.
 
-An agent can finish its own task this way, for example with `-p "… when the tests pass, run: workmux merge"`.
-
-In Docker mode, run `workmux merge <handle>` and `workmux rm <handle>` on the laptop. Inside the container, `merge` and `close` are refused with that hint.
+An agent can finish its own task this way, for example with `-p "… when the tests pass, run: workmux merge"` or the bundled [`/merge` skill](/guide/skills/).
 
 ## When the laptop sleeps or disconnects
 
