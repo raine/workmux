@@ -8,7 +8,7 @@ workmux uses a two-level configuration system:
 - **Global** (`~/.config/workmux/config.yaml`): Personal defaults for all projects. Run `workmux config edit` to open it in your editor.
 - **Project** (`.workmux.yaml`): Project-specific overrides
 
-Project settings override global settings. When you run workmux from a subdirectory, it walks upward to find the nearest `.workmux.yaml`, allowing nested configs for monorepos. See [Monorepos](/guide/monorepos/#nested-configuration) for details. For hook lists (`post_create`, `pre_merge`, `pre_remove`) and file operation lists (`files.copy`, `files.symlink`), you can use `"<global>"` to include global values alongside project-specific ones. Other settings like `panes` are replaced entirely when defined in the project config.
+Project settings override global settings. When you run workmux from a subdirectory, it walks upward to find the nearest `.workmux.yaml`, allowing nested configs for monorepos. See [Monorepos](/guide/monorepos/#nested-configuration) for details. For hook lists (`post_create`, `pre_merge`, `pre_remove`) and file operation lists (`files.copy`, `files.symlink`, `remote_files.copy`, `remote_files.symlink`), you can use `"<global>"` to include global values alongside project-specific ones. Other settings like `panes` are replaced entirely when defined in the project config.
 
 ## XDG Base Directory support
 
@@ -301,7 +301,7 @@ windows:
 
 ### File operations
 
-New worktrees are clean checkouts with no gitignored files (`.env`, `node_modules`, etc.). Use `files` to automatically copy or symlink what each worktree needs:
+New worktrees are clean checkouts with no gitignored files (`.env`, `node_modules`, etc.). Use `files` to automatically copy or symlink what each local worktree needs:
 
 ```yaml
 files:
@@ -312,6 +312,17 @@ files:
 ```
 
 Both `copy` and `symlink` accept glob patterns.
+
+Remote workspaces use independent `remote_files.copy` and `remote_files.symlink` lists, with no fallback to `files`. By default, only the Git checkout is transferred. Explicitly select any supplemental files you need remotely:
+
+```yaml
+remote_files:
+  copy:
+    - .env
+    - CLAUDE.local.md
+```
+
+These lists follow the same config-relative path and `"<global>"` merge rules as `files`. Remote symlink sources are uploaded once and shared, not synchronized. See [Remote supplemental files](/guide/remote/setup/#supplemental-files) for cache behavior and disabling inherited transfers.
 
 To re-apply file operations to existing worktrees (e.g., after updating the config), use [`workmux sync-files`](/reference/commands/sync-files/).
 

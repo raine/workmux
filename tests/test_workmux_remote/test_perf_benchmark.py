@@ -101,7 +101,7 @@ def test_remote_transfer_benchmark(
         repo,
         {
             "panes": [{"command": "echo READY"}],
-            "files": {"symlink": ["history", "tests/venv"]},
+            "remote_files": {"symlink": ["history", "tests/venv"]},
         },
     )
     with (repo / ".git/info/exclude").open("a") as exclude:

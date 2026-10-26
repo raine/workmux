@@ -256,7 +256,7 @@ pub(super) fn provision_worktree(
     root.save(workspace)
 }
 
-/// What the laptop sent for `files`, kept so workspaces a remote agent
+/// What the laptop sent for `remote_files`, kept so workspaces a remote agent
 /// spawns from this one get the same files without reading the agent's
 /// worktree.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -301,7 +301,7 @@ pub(super) fn load_recipe(
 
 /// Refuse to provision when a path the node writes into the worktree goes
 /// through a symlink: the config directory, the prompt file and the
-/// destinations of `files.symlink`. `files.copy` results are confined by
+/// destinations of `remote_files.symlink`. `remote_files.copy` results are confined by
 /// [`write_entries`].
 fn refuse_symlinks(
     workspace: &Workspace,
@@ -434,7 +434,7 @@ fn registered_branch(repo: &Path, path: &Path) -> Result<Option<Option<String>>>
     Ok(None)
 }
 
-/// Write `files.copy` results into the worktree, seed missing symlink
+/// Write `remote_files.copy` results into the worktree, seed missing symlink
 /// sources into the project directory, then link them.
 fn apply_files(workspace: &Workspace, seed_root: &Path, payload: &ProvisionPayload) -> Result<()> {
     let destination = workspace.working_dir().to_path_buf();

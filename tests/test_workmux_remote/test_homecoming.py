@@ -482,6 +482,7 @@ def test_merge_provisions_headless_dependencies(
     configure(
         repo,
         files={"symlink": ["dependency"]},
+        remote_files={"symlink": ["dependency"]},
         post_create=["test -L dependency && touch prepared"],
         pre_merge=["test -L dependency && test -f prepared && echo HOOK-OUTPUT"],
     )
@@ -491,6 +492,7 @@ def test_merge_provisions_headless_dependencies(
     configure(
         repo,
         files={"symlink": ["dependency"]},
+        remote_files={"symlink": ["dependency"]},
         post_create=[f"test -L dependency && touch prepared {marker}"],
         pre_merge=["test -L dependency && test -f prepared && echo HOOK-OUTPUT"],
         panes=[{"command": "exit 99"}],

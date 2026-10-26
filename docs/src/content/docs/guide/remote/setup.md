@@ -105,13 +105,45 @@ Where a workspace lives is decided when it is created. Later commands such as `o
 
 A remote workspace runs a copy of the local machine's effective config, taken when the workspace is created. The server's own workmux config and the worktree's `.workmux.yaml` are never read. `add --remote` lists every setting it didn't apply.
 
-- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `files`, the status icons and format, and `hook_shell` unless it is an absolute local path.
+- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `remote_files`, the status icons and format, and `hook_shell` unless it is an absolute local path.
 - **Applied in Docker mode:** `sandbox.image`, `target`, `network`, `toolchain`, `env`, `env_passthrough`, and `container.cpus`, `memory`, `group_add`, `cap_add`, `security_opt` and `excluded_files`. The sandbox is always Docker there.
 - **Not applied**, because they name local resources: Lima, other container runtimes, `rpc_host`, `extra_mounts`, `agent_config_dir`, `host_commands`, `container.devices` and `container.oci_runtime`.
 
 `post_create` and `pre_remove` hooks run on the server, in the remote worktree. If `add --remote` fails partway, run it again with the same arguments: it resumes and doesn't repeat hooks that already finished.
 
-`files.copy` and `files.symlink` sources are sent from the local machine, up to 64 MiB per workspace. A larger source is skipped with a warning. Symlink sources are sent once per project and then reused; they aren't kept in sync with the local machine.
+## Supplemental files
+
+The Git checkout is transferred automatically. Extra local files are sent only when selected in `remote_files`; the local `files` settings do not apply remotely.
+
+```yaml
+files:
+  symlink:
+    - tests/venv # Shared locally, never uploaded by this setting
+
+remote_files:
+  copy:
+    - .env
+    - CLAUDE.local.md
+  symlink:
+    - shared-data
+```
+
+- **`copy`** sends the current local contents into each laptop-created workspace.
+- **`symlink`** seeds a shared directory on the remote, then links from the workspace. Existing sources are reused, not refreshed. Changes through a link are shared between remote workspaces.
+
+Both lists accept globs and resolve paths relative to the configuration directory, just like `files`. Remote symlink patterns also match existing sources in the remote project's shared directory. The combined upload limit is 64 MiB per workspace; sources exceeding the remaining budget are skipped with a warning. Selecting a local symlink uploads its target's contents.
+
+Without `remote_files`, no supplemental files are uploaded, including ignored `CLAUDE.local.md`. Global `remote_files` settings are inherited independently of `files`. Project lists replace the corresponding global lists unless they include `"<global>"`. To disable both inherited lists explicitly:
+
+```yaml
+remote_files:
+  copy: []
+  symlink: []
+```
+
+An empty object (`remote_files: {}`) still inherits global lists. When local file settings exist but remote lists are unset, workmux prints a hint; explicit empty lists suppress it.
+
+Selection changes apply to new workspaces, not existing ones, and do not delete cached sources. Workspaces spawned by a remote agent reuse their parent's saved copies and symlink selections without contacting the laptop. Resuming creation does not repeat an already completed file stage.
 
 ## Security
 

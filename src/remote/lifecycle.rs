@@ -191,7 +191,7 @@ pub fn create(
             base_sha: record.base_sha.clone(),
         };
         let plan = if request.options.run_file_ops {
-            plan_files(context)?
+            plan_files(&context.config_source_dir, &config.remote_files)?
         } else {
             FilePlan::default()
         };
@@ -471,30 +471,15 @@ impl FilePlan {
 }
 
 /// Resolve names without traversing or reading the source trees.
-fn plan_files(context: &WorkflowContext) -> Result<FilePlan> {
-    use crate::workflow::file_ops::{FileOperationKind, resolve_file_operations};
-    let source = &context.config_source_dir;
-    let files_config = &context.config.files;
-    let mut plan = FilePlan {
+fn plan_files(source: &Path, files_config: &crate::config::FileConfig) -> Result<FilePlan> {
+    use crate::workflow::file_ops::resolve_file_operations;
+    Ok(FilePlan {
         patterns: files_config.symlink.clone().unwrap_or_default(),
-        ..FilePlan::default()
-    };
-    let mut sources: Vec<(PathBuf, FileOperationKind)> =
-        resolve_file_operations(source, Path::new("/"), files_config)?
+        sources: resolve_file_operations(source, Path::new("/"), files_config)?
             .into_iter()
             .map(|operation| (operation.source, operation.kind))
-            .collect();
-    let claude_local = source.join("CLAUDE.local.md");
-    if claude_local.is_file()
-        && crate::git::is_path_ignored(source, "CLAUDE.local.md")
-        && !sources.iter().any(|(path, _)| path == &claude_local)
-    {
-        sources.push((claude_local, FileOperationKind::Symlink));
-        plan.patterns.push("CLAUDE.local.md".to_string());
-    }
-
-    plan.sources = sources;
-    Ok(plan)
+            .collect(),
+    })
 }
 
 /// Collect only missing seeds, leaving the budget for bytes actually sent.
@@ -524,8 +509,8 @@ fn collect_files(
         }
         let size = tree_size(path, true)?;
         let setting = match kind {
-            FileOperationKind::Copy => "files.copy",
-            FileOperationKind::Symlink => "files.symlink",
+            FileOperationKind::Copy => "remote_files.copy",
+            FileOperationKind::Symlink => "remote_files.symlink",
         };
         if size > budget {
             eprintln!(
@@ -1212,6 +1197,26 @@ fn forget_attachments(record: &WorkspaceRecord) {
 mod transfer_tests {
     use super::*;
     use crate::workflow::file_ops::FileOperationKind::{Copy, Symlink};
+
+    #[test]
+    fn remote_plan_has_no_implicit_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("CLAUDE.local.md"), "local instructions").unwrap();
+        let mut config = crate::config::Config::default();
+        config.files.symlink = Some(vec!["[invalid-glob".into()]);
+        let plan = plan_files(dir.path(), &config.remote_files).unwrap();
+        assert!(plan.sources.is_empty());
+        assert!(plan.patterns.is_empty());
+        assert!(
+            plan.seed_paths(dir.path(), Path::new(""))
+                .unwrap()
+                .is_empty()
+        );
+        config.remote_files.copy = Some(vec!["CLAUDE.local.md".into()]);
+        let plan = plan_files(dir.path(), &config.remote_files).unwrap();
+        assert_eq!(plan.sources, [(dir.path().join("CLAUDE.local.md"), Copy)]);
+        assert!(plan.patterns.is_empty());
+    }
 
     #[test]
     fn cached_sources_are_not_read_and_copies_still_transfer() {

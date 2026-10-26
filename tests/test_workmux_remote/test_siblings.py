@@ -98,10 +98,12 @@ def test_agent_spawns_sibling(
     repo = mux_repo_path
     setup_agent_project(repo, tmp_path / "fake-agent")
     project = yaml.safe_load((repo / ".workmux.yaml").read_text())
-    project["files"] = {"copy": ["copied-binary"]}
+    project["remote_files"] = {"copy": ["copied-binary"]}
+    project["files"] = {"copy": ["local-only"]}
     commit_project(repo, project)
     with (repo / ".git/info/exclude").open("a") as exclude:
-        exclude.write("\ncopied-binary\n")
+        exclude.write("\ncopied-binary\nlocal-only\n")
+    (repo / "local-only").write_text("stay on laptop")
     binary = bytes(range(256)) * 1024
     (repo / "copied-binary").write_bytes(binary)
     (repo / "copied-binary").chmod(0o751)
@@ -139,6 +141,7 @@ def test_agent_spawns_sibling(
     assert sibling["project_id"] == parent["project_id"]
     sib_tree = Path(sibling["worktree_path"])
     assert (sib_tree / "parent.txt").is_file()
+    assert not (sib_tree / "local-only").exists()
     assert (sib_tree / "copied-binary").read_bytes() == binary
     assert (sib_tree / "copied-binary").stat().st_mode & 0o777 == 0o751
     assert git(sib_tree, "branch", "--show-current") == "sib"
