@@ -167,8 +167,11 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
     /// Whether to show the "New: workmux sidebar" tip in the tab header
     pub show_sidebar_tip: bool,
-    /// Whether to show the remote servers tip in the agents footer
+    /// Whether the agents footer may show the remote servers tip; it is
+    /// drawn only when the footer has room for it.
     pub show_remote_tip: bool,
+    /// Whether this session has counted a drawn remote servers tip.
+    remote_tip_counted: bool,
     /// Pane IDs of agents detected as interrupted by the sidebar daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pending command palette state (shown in command palette modal)
@@ -307,6 +310,7 @@ impl App {
             status_message: None,
             show_sidebar_tip,
             show_remote_tip,
+            remote_tip_counted: false,
             interrupted_pane_ids: std::collections::HashSet::new(),
             pending_command_palette: None,
             pending_row_context: None,
@@ -480,7 +484,7 @@ fn should_show_remote_tip(mux: &dyn Multiplexer, config: &Config) -> bool {
     mux.name() == "tmux"
         && !crate::remote::node::operation::in_session()
         && !crate::sandbox::guest::is_sandbox_guest()
-        && crate::tips::should_show_remote_tip(!config.remotes.is_empty())
+        && crate::tips::remote_tip_due(!config.remotes.is_empty())
 }
 
 fn load_sleeping_pane_ids(mux: &dyn Multiplexer) -> HashSet<String> {

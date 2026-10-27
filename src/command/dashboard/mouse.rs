@@ -10,8 +10,8 @@ use super::app::{
     ViewMode,
 };
 use super::layout::{
-    FOOTER_HELP_WIDTH, REMOTE_TIP_GUIDE_COLUMNS, REMOTE_TIP_HIDE_COLUMNS, dashboard_content_areas,
-    dashboard_outer_areas, remote_tip_area,
+    FOOTER_HELP_WIDTH, REMOTE_TIP_GUIDE_COLUMNS, REMOTE_TIP_HIDE_COLUMNS, RemoteTipFooter,
+    dashboard_content_areas, dashboard_outer_areas, remote_tip_footer,
 };
 use crate::config::DashboardLayout;
 
@@ -500,31 +500,53 @@ fn dashboard_footer_target(app: &App, column: u16) -> MouseTarget {
         _ => {}
     }
 
-    let items = match app.active_tab {
-        DashboardTab::Agents => agent_footer_items(app),
-        DashboardTab::Worktrees => worktree_footer_items(app),
-    };
-    if let Some(tip) = visible_remote_tip_area(app)
-        && let Some(target) = remote_tip_target(tip, column)
-    {
-        return target;
+    let footer = dashboard_outer_areas(app.terminal_area)[2];
+    match app.active_tab {
+        DashboardTab::Agents if remote_tip_may_show(app) => {
+            agent_footer_target_with_tip(footer, agent_footer_items(app), column)
+        }
+        DashboardTab::Agents => footer_target_at(footer.x + 2, column, &agent_footer_items(app)),
+        DashboardTab::Worktrees => {
+            footer_target_at(footer.x + 2, column, &worktree_footer_items(app))
+        }
     }
-    footer_target_at(app.terminal_area.x + 2, column, &items)
 }
 
-/// Where the remote servers tip is on screen, if the agents footer shows it:
-/// the footer must be in its normal mode and leave room after the key hints.
-pub(super) fn visible_remote_tip_area(app: &App) -> Option<Rect> {
-    if !app.show_remote_tip
-        || app.active_tab != DashboardTab::Agents
-        || app.filter_active
-        || app.input_mode
-        || app.status_message.is_some()
-    {
+/// Whether the agents footer is in the state that draws the remote servers
+/// tip, if it has room for it.
+fn remote_tip_may_show(app: &App) -> bool {
+    app.show_remote_tip
+        && app.active_tab == DashboardTab::Agents
+        && !app.filter_active
+        && !app.input_mode
+        && app.status_message.is_none()
+}
+
+/// The agents footer layout with the remote servers tip, while it is on
+/// screen.
+pub(super) fn visible_remote_tip_footer(app: &App) -> Option<RemoteTipFooter> {
+    if !remote_tip_may_show(app) {
         return None;
     }
     let footer = dashboard_outer_areas(app.terminal_area)[2];
-    remote_tip_area(footer, footer_hints_width(&agent_footer_items(app)))
+    remote_tip_footer(footer, &item_widths(&agent_footer_items(app)))
+}
+
+/// Hit-test an agents footer that shows the remote servers tip when it fits,
+/// in place of the hints it displaces.
+fn agent_footer_target_with_tip(footer: Rect, items: Vec<FooterItem>, column: u16) -> MouseTarget {
+    let Some(layout) = remote_tip_footer(footer, &item_widths(&items)) else {
+        return footer_target_at(footer.x + 2, column, &items);
+    };
+    if let Some(target) = remote_tip_target(layout.tip, column) {
+        return target;
+    }
+    let kept: Vec<FooterItem> = items
+        .into_iter()
+        .zip(&layout.keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect();
+    footer_target_at(footer.x + 2, column, &kept)
 }
 
 fn remote_tip_target(tip: Rect, column: u16) -> Option<MouseTarget> {
@@ -541,11 +563,8 @@ fn remote_tip_target(tip: Rect, column: u16) -> Option<MouseTarget> {
     })
 }
 
-/// Width of the rendered key hints: two leading spaces, then the items
-/// separated by ` │ `.
-fn footer_hints_width(items: &[FooterItem]) -> u16 {
-    let text: usize = items.iter().map(|item| item.text.width()).sum();
-    (2 + text + 3 * items.len().saturating_sub(1)) as u16
+fn item_widths(items: &[FooterItem]) -> Vec<u16> {
+    items.iter().map(|item| item.text.width() as u16).collect()
 }
 
 fn filter_footer_target(start: u16, column: u16, filter_width: usize) -> MouseTarget {
@@ -907,42 +926,82 @@ mod tests {
 
     use crate::command::dashboard::layout::REMOTE_TIP_WIDTH;
 
+    /// The agents footer hints as the dashboard lists them with no filter.
     fn agent_items() -> Vec<FooterItem> {
         vec![
             FooterItem::action("i Input", Action::EnterInputMode),
+            FooterItem::action("d Diff", Action::LoadWipDiff),
+            FooterItem::action("o PR", Action::OpenPr),
+            FooterItem::label("1-9 Jump"),
+            FooterItem::action("s Sort (priority)", Action::CycleSortMode),
+            FooterItem::action("F Scope (all)", Action::ToggleScopeFilter),
+            FooterItem::action("f Stale (shown)", Action::ToggleStaleFilter),
+            FooterItem::action("Tab Worktrees", Action::SwitchTab),
             FooterItem::action("q Quit", Action::Quit),
         ]
     }
 
-    #[test]
-    fn footer_hints_width_counts_leading_space_and_separators() {
-        assert_eq!(footer_hints_width(&agent_items()), 2 + 7 + 3 + 6);
-        assert_eq!(footer_hints_width(&[]), 2);
+    fn tip_target(width: u16, column: u16) -> MouseTarget {
+        agent_footer_target_with_tip(Rect::new(0, 23, width, 1), agent_items(), column)
     }
 
     #[test]
-    fn remote_tip_keys_are_hit_tested() {
-        let footer = Rect::new(0, 23, 100, 1);
-        let tip = remote_tip_area(footer, footer_hints_width(&agent_items())).unwrap();
-        let tip_x = 100 - FOOTER_HELP_WIDTH - REMOTE_TIP_WIDTH;
-        assert_eq!(tip.x, tip_x);
-        let target = |offset: u16| remote_tip_target(tip, tip_x + offset);
+    fn remote_tip_keys_are_hit_tested_at_every_width_that_shows_it() {
+        for width in [170, 120, 80] {
+            let tip_x = width - FOOTER_HELP_WIDTH - REMOTE_TIP_WIDTH;
+            assert_eq!(tip_target(width, tip_x), MouseTarget::None, "{width}");
+            for offset in [
+                REMOTE_TIP_GUIDE_COLUMNS.start,
+                REMOTE_TIP_GUIDE_COLUMNS.end - 1,
+            ] {
+                assert_eq!(
+                    tip_target(width, tip_x + offset),
+                    MouseTarget::Action(Action::OpenRemoteGuide),
+                    "{width}"
+                );
+            }
+            assert_eq!(
+                tip_target(width, tip_x + REMOTE_TIP_HIDE_COLUMNS.start),
+                MouseTarget::Action(Action::DismissRemoteTip),
+                "{width}"
+            );
+        }
+    }
 
-        assert_eq!(target(0), Some(MouseTarget::None));
+    #[test]
+    fn hints_beside_the_tip_follow_the_compact_footer() {
+        // At 80 columns only `Tab Worktrees │ q Quit` stay beside the tip,
+        // so they move left into the space of the dropped hints.
+        assert_eq!(tip_target(80, 2), MouseTarget::Action(Action::SwitchTab));
         assert_eq!(
-            target(REMOTE_TIP_GUIDE_COLUMNS.start),
-            Some(MouseTarget::Action(Action::OpenRemoteGuide))
+            tip_target(80, 2 + 13 + 3),
+            MouseTarget::Action(Action::Quit)
+        );
+        // At 120 columns Sort, Scope and Stale give way; Tab follows Jump.
+        let tab = 2 + 7 + 3 + 6 + 3 + 4 + 3 + 8 + 3;
+        assert_eq!(tip_target(120, tab), MouseTarget::Action(Action::SwitchTab));
+    }
+
+    #[test]
+    fn very_narrow_footers_keep_their_hints_without_the_tip() {
+        let footer = Rect::new(0, 23, 50, 1);
+        assert_eq!(
+            remote_tip_footer(footer, &item_widths(&agent_items())),
+            None
         );
         assert_eq!(
-            target(REMOTE_TIP_GUIDE_COLUMNS.end - 1),
-            Some(MouseTarget::Action(Action::OpenRemoteGuide))
+            tip_target(50, 2),
+            MouseTarget::Action(Action::EnterInputMode)
         );
-        assert_eq!(
-            target(REMOTE_TIP_HIDE_COLUMNS.start),
-            Some(MouseTarget::Action(Action::DismissRemoteTip))
-        );
-        assert_eq!(remote_tip_target(tip, tip_x - 1), None);
-        assert_eq!(remote_tip_target(tip, tip.right()), None);
+        for column in 0..50 {
+            assert!(
+                !matches!(
+                    tip_target(50, column),
+                    MouseTarget::Action(Action::OpenRemoteGuide | Action::DismissRemoteTip)
+                ),
+                "{column}"
+            );
+        }
     }
 
     #[test]
