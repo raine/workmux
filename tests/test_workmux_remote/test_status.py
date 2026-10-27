@@ -449,6 +449,85 @@ def test_views_list_remote_agents_beside_local_ones(
     wait_for_pane_output(env, window, "applied-working", timeout=20)
 
 
+def test_dashboard_machine_column_follows_remote_agents(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    tmp_path: Path,
+):
+    env = mux_server
+    repo = mux_repo_path
+    exe = workmux_exe_path
+    env.env.update(LOOPBACK)
+    for name, value in LOOPBACK.items():
+        env.tmux(["set-environment", "-g", name, value])
+
+    agent = FakeAgent(tmp_path)
+    setup_agent_project(repo, agent)
+
+    # A local agent in the runner pane.
+    runner_pane = env.runner_pane_id
+    assert runner_pane is not None
+    env.env["TMUX"] = f"{env.socket_path},0,0"
+
+    def report_local() -> None:
+        env.env["TMUX_PANE"] = runner_pane
+        env.run_command([str(exe), "set-window-status", "working"], cwd=repo)
+        del env.env["TMUX_PANE"]
+
+    report_local()
+
+    env.tmux(["new-window", "-d", "-n", "dash", "-c", str(repo), f"{exe} dashboard"])
+    env.tmux(["resize-window", "-t", "dash", "-x", "160"])
+
+    def dashboard() -> str:
+        return env.tmux(["capture-pane", "-p", "-t", "dash"]).stdout
+
+    def header(screen: str) -> str:
+        return next((line for line in screen.splitlines() if "Worktree " in line), "")
+
+    def machine(screen: str, text: str) -> Optional[str]:
+        """The Machine cell of the row whose worktree cell starts with `text`."""
+        start = header(screen).find("Machine")
+        worktree = header(screen).find("Worktree")
+        row = next(
+            (line for line in screen.splitlines() if line[worktree:].startswith(text)),
+            None,
+        )
+        if start < 0 or row is None:
+            return None
+        cell = row[start:].split()
+        return cell[0] if cell else None
+
+    # Only local agents: the table has no Machine column.
+    assert poll_until(lambda: "main" in dashboard(), timeout=20), dashboard()
+    assert "Machine" not in header(dashboard()), dashboard()
+
+    window = get_window_name("mc")
+    wm(env, exe, repo, "add mc --remote lo")
+    wait_for_pane_output(env, window, "FAKE-AGENT-READY", timeout=20)
+    agent.do("working")
+    wait_for_pane_output(env, window, "applied-working", timeout=10)
+    report_local()
+
+    # A remote agent appears: the column names its remote, and local agents.
+    assert poll_until(
+        lambda: machine(dashboard(), "mc@lo") == "lo"
+        and machine(dashboard(), "main") == "local",
+        timeout=20,
+    ), dashboard()
+
+    # The remote agent goes away, and the column with it.
+    wm(env, exe, repo, "remove --force mc")
+    assert poll_until(
+        lambda: "mc@lo" not in dashboard()
+        and "main" in dashboard()
+        and "Machine" not in header(dashboard()),
+        timeout=20,
+    ), dashboard()
+
+
 def test_resurrect_reattaches_without_restarting_the_agent(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,

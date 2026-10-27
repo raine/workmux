@@ -144,6 +144,7 @@ struct AgentRowData {
     worktree_suffix: String,
     is_main: bool,
     is_current: bool,
+    machine: String,
     git_spans: Vec<(String, Style)>,
     pr_spans: Option<Vec<(String, Style)>>,
     pr_title: String,
@@ -159,6 +160,7 @@ struct AgentRowData {
 struct AgentColumnWidths {
     project: u16,
     worktree: u16,
+    machine: u16,
     git: u16,
     pr: u16,
     pr_title: u16,
@@ -168,13 +170,22 @@ struct AgentColumnWidths {
 }
 
 /// Columns to render, given the configured order. The PR column carries content
-/// only once an agent has GitHub status, so it drops out until then, unless it
-/// is the only thing left to show and dropping it would blank the table.
-fn visible_columns(configured: &[AgentColumn], show_pr_column: bool) -> Vec<AgentColumn> {
+/// only once an agent has GitHub status, and the Machine column only while an
+/// agent is remote, so each drops out until then, unless dropping them would
+/// blank the table.
+fn visible_columns(
+    configured: &[AgentColumn],
+    show_pr_column: bool,
+    show_machine_column: bool,
+) -> Vec<AgentColumn> {
     let visible: Vec<AgentColumn> = configured
         .iter()
         .copied()
-        .filter(|column| *column != AgentColumn::Pr || show_pr_column)
+        .filter(|column| match column {
+            AgentColumn::Pr => show_pr_column,
+            AgentColumn::Machine => show_machine_column,
+            _ => true,
+        })
         .collect();
 
     if visible.is_empty() {
@@ -207,6 +218,7 @@ fn agent_cell(column: AgentColumn, row: &AgentRowData, palette: &ThemePalette) -
             };
             Cell::from(worktree_line)
         }
+        AgentColumn::Machine => Cell::from(row.machine.clone()),
         AgentColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
         AgentColumn::Pr => Cell::from(format::spans_to_line(
             row.pr_spans.clone().unwrap_or_default(),
@@ -265,6 +277,7 @@ fn agent_column_constraints(
             AgentColumn::Number => Constraint::Length(2), // jump key
             AgentColumn::Project => Constraint::Length(widths.project), // auto-sized
             AgentColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
+            AgentColumn::Machine => Constraint::Length(widths.machine), // auto-sized
             AgentColumn::Git => Constraint::Length(widths.git), // auto-sized
             AgentColumn::Pr => Constraint::Length(widths.pr), // auto-sized
             AgentColumn::PrTitle if index == last_column => Constraint::Fill(1),
@@ -303,6 +316,7 @@ fn build_agent_table(
             AgentColumn::Number => format::ResourceHeaderCell::Plain("#"),
             AgentColumn::Project => format::ResourceHeaderCell::Plain("Project"),
             AgentColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
+            AgentColumn::Machine => format::ResourceHeaderCell::Plain("Machine"),
             AgentColumn::Git => format::ResourceHeaderCell::Git,
             AgentColumn::Pr => format::ResourceHeaderCell::Pr,
             AgentColumn::PrTitle => format::ResourceHeaderCell::Plain("PR Title"),
@@ -352,7 +366,13 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
-    let columns = visible_columns(&app.config.dashboard.agent_columns(), show_pr_column);
+    // Show the machine column when at least one listed agent is remote.
+    let show_machine_column = app.agents.iter().any(|agent| agent.remote.is_some());
+    let columns = visible_columns(
+        &app.config.dashboard.agent_columns(),
+        show_pr_column,
+        show_machine_column,
+    );
 
     // Group agents by (session, window_name) to detect multi-pane windows
     let mut window_groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
@@ -478,6 +498,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 worktree_suffix,
                 is_main,
                 is_current,
+                machine: agent.remote.as_ref().map_or_else(
+                    || "local".to_string(),
+                    |remote| truncate(&remote.at.remote, 20),
+                ),
                 git_spans,
                 pr_spans,
                 pr_title,
@@ -505,6 +529,9 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|r| r.worktree_display.clone())
         .collect();
     let max_worktree_width = format::calc_column_width(&worktree_names, 8, 25, 1);
+
+    let machines: Vec<String> = row_data.iter().map(|r| r.machine.clone()).collect();
+    let max_machine_width = format::calc_column_width(&machines, 7, 20, 1);
 
     // Calculate max git status width (sum of all span character counts)
     // Use chars().count() instead of len() because Nerd Font icons are multi-byte
@@ -551,6 +578,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     let widths = AgentColumnWidths {
         project: max_project_width,
         worktree: max_worktree_width,
+        machine: max_machine_width,
         git: max_git_width as u16,
         pr: max_pr_width as u16,
         pr_title: max_pr_title_width,
@@ -898,6 +926,7 @@ mod tests {
             worktree_suffix: String::new(),
             is_main: false,
             is_current: false,
+            machine: "devbox".to_string(),
             git_spans: vec![("+1".to_string(), Style::default())],
             pr_spans: Some(vec![("#7".to_string(), Style::default())]),
             pr_title: "fix the dashboard".to_string(),
@@ -919,6 +948,7 @@ mod tests {
             AgentColumnWidths {
                 project: 8,
                 worktree: 9,
+                machine: 8,
                 git: 6,
                 pr: 5,
                 pr_title: 20,
@@ -952,6 +982,7 @@ mod tests {
         AgentColumnWidths {
             project: 8,
             worktree: 9,
+            machine: 8,
             git: 6,
             pr: 5,
             pr_title: 20,
@@ -1025,10 +1056,15 @@ mod tests {
         AgentColumn::Project,
     ];
 
+    /// Default columns while every agent is local and has GitHub status.
+    fn local_default_columns() -> Vec<AgentColumn> {
+        visible_columns(&crate::config::DEFAULT_AGENT_COLUMNS, true, false)
+    }
+
     #[test]
     fn agents_table_header_follows_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 0),
+            render_line(&local_default_columns(), 0),
             "#  Project  Worktree  Git    PR    Status   Time       Title"
         );
         assert_eq!(
@@ -1040,7 +1076,7 @@ mod tests {
     #[test]
     fn agents_table_rows_follow_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 1),
+            render_line(&local_default_columns(), 1),
             "1  proj     wt        +1     #7    work     00:42      the title"
         );
         assert_eq!(render_line(&REORDERED, 1), "the title    work     1  proj");
@@ -1096,22 +1132,57 @@ mod tests {
     }
 
     #[test]
+    fn agents_table_shows_machine_beside_worktree_by_default() {
+        let columns = visible_columns(&crate::config::DEFAULT_AGENT_COLUMNS, true, true);
+        assert_eq!(
+            render_line(&columns, 0),
+            "#  Project  Worktree  Machine  Git    PR    Status   Time       Title"
+        );
+        assert_eq!(
+            render_line(&columns, 1),
+            "1  proj     wt        devbox   +1     #7    work     00:42      the title"
+        );
+    }
+
+    #[test]
     fn pr_column_hidden_until_an_agent_has_github_status() {
         assert_eq!(
-            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], false),
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], false, true),
             vec![AgentColumn::Worktree]
         );
         assert_eq!(
-            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], true),
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], true, true),
             vec![AgentColumn::Worktree, AgentColumn::Pr]
         );
     }
 
     #[test]
-    fn hiding_the_pr_column_never_empties_the_table() {
+    fn machine_column_hidden_until_an_agent_is_remote() {
+        let configured = [AgentColumn::Worktree, AgentColumn::Machine];
         assert_eq!(
-            visible_columns(&[AgentColumn::Pr], false),
+            visible_columns(&configured, true, false),
+            vec![AgentColumn::Worktree]
+        );
+        assert_eq!(
+            visible_columns(&configured, true, true),
+            vec![AgentColumn::Worktree, AgentColumn::Machine]
+        );
+        // Leaving machine out of the configured list keeps it hidden.
+        assert_eq!(
+            visible_columns(&[AgentColumn::Worktree], true, true),
+            vec![AgentColumn::Worktree]
+        );
+    }
+
+    #[test]
+    fn hiding_conditional_columns_never_empties_the_table() {
+        assert_eq!(
+            visible_columns(&[AgentColumn::Pr], false, false),
             vec![AgentColumn::Pr]
+        );
+        assert_eq!(
+            visible_columns(&[AgentColumn::Machine], false, false),
+            vec![AgentColumn::Machine]
         );
     }
 }
