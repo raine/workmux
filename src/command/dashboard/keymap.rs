@@ -67,6 +67,9 @@ fn dashboard_normal_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('o') => Some(Action::OpenPr),
         KeyCode::Char('O') => Some(Action::OpenPrChecks),
         KeyCode::Char('b') => Some(Action::ShowBaseBranchPicker),
+        // Act only while the remote servers footer tip is on screen.
+        KeyCode::Char('g') => Some(Action::OpenRemoteGuide),
+        KeyCode::Char('x') => Some(Action::DismissRemoteTip),
         KeyCode::Char('X') => Some(Action::KillSelected),
         KeyCode::Char('r') => Some(Action::RemoveSelectedWorktree),
         KeyCode::Char('R') => Some(Action::StartSweep),
@@ -305,6 +308,22 @@ pub fn help_rows(ctx: Context, exit_key: InputExitKey) -> Vec<(String, &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_tip_keys_belong_to_the_agents_view() {
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(
+            dashboard_normal_key(key('g')),
+            Some(Action::OpenRemoteGuide)
+        );
+        assert_eq!(
+            dashboard_normal_key(key('x')),
+            Some(Action::DismissRemoteTip)
+        );
+        assert_eq!(dashboard_normal_key(key('X')), Some(Action::KillSelected));
+        assert_eq!(worktree_normal_key(key('g')), None);
+        assert_eq!(worktree_normal_key(key('x')), None);
+    }
 
     #[test]
     fn configured_exit_key_is_consumed_and_escape_is_forwarded() {

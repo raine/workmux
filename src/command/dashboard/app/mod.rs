@@ -167,6 +167,8 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
     /// Whether to show the "New: workmux sidebar" tip in the tab header
     pub show_sidebar_tip: bool,
+    /// Whether to show the remote servers tip in the agents footer
+    pub show_remote_tip: bool,
     /// Pane IDs of agents detected as interrupted by the sidebar daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pending command palette state (shown in command palette modal)
@@ -229,6 +231,9 @@ impl App {
         let check_statuses = crate::github::load_check_cache();
         let hide_stale = load_hide_stale();
         let last_pane_id = load_last_pane_id();
+        // One feature tip at a time: the remote tip waits for the sidebar tip.
+        let show_sidebar_tip = crate::tips::should_show_sidebar_tip();
+        let show_remote_tip = !show_sidebar_tip && should_show_remote_tip(mux.as_ref(), &config);
 
         let mut app = Self {
             terminal_area: Rect::default(),
@@ -300,7 +305,8 @@ impl App {
             worktree_preview: None,
             worktree_preview_path: None,
             status_message: None,
-            show_sidebar_tip: crate::tips::should_show_sidebar_tip(),
+            show_sidebar_tip,
+            show_remote_tip,
             interrupted_pane_ids: std::collections::HashSet::new(),
             pending_command_palette: None,
             pending_row_context: None,
@@ -466,6 +472,15 @@ impl App {
             }
         }
     }
+}
+
+/// Remote agents run in tmux windows on the local machine, so the tip only
+/// shows in a local tmux dashboard.
+fn should_show_remote_tip(mux: &dyn Multiplexer, config: &Config) -> bool {
+    mux.name() == "tmux"
+        && !crate::remote::node::operation::in_session()
+        && !crate::sandbox::guest::is_sandbox_guest()
+        && crate::tips::should_show_remote_tip(!config.remotes.is_empty())
 }
 
 fn load_sleeping_pane_ids(mux: &dyn Multiplexer) -> HashSet<String> {

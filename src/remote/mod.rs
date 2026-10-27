@@ -19,6 +19,7 @@ pub mod host;
 pub mod install;
 pub mod lifecycle;
 pub mod node;
+pub mod notice;
 pub mod observe;
 pub mod operation;
 pub mod portable;
