@@ -9,7 +9,10 @@ use super::app::{
     App, DashboardTab, MouseRowClick, MouseRowId, PaletteCommand, RowContextKind, RowContextMenu,
     ViewMode,
 };
-use super::layout::{dashboard_content_areas, dashboard_outer_areas};
+use super::layout::{
+    FOOTER_HELP_WIDTH, REMOTE_TIP_GUIDE_COLUMNS, REMOTE_TIP_HIDE_COLUMNS, dashboard_content_areas,
+    dashboard_outer_areas, remote_tip_area,
+};
 use crate::config::DashboardLayout;
 
 const TABLE_HEADER_HEIGHT: u16 = 1;
@@ -465,7 +468,7 @@ fn dashboard_surface_target(
 }
 
 fn dashboard_footer_target(app: &App, column: u16) -> MouseTarget {
-    if column >= app.terminal_area.right().saturating_sub(7) {
+    if column >= app.terminal_area.right().saturating_sub(FOOTER_HELP_WIDTH) {
         return MouseTarget::Action(Action::ShowHelp);
     }
     if app.status_message.is_some() {
@@ -501,7 +504,48 @@ fn dashboard_footer_target(app: &App, column: u16) -> MouseTarget {
         DashboardTab::Agents => agent_footer_items(app),
         DashboardTab::Worktrees => worktree_footer_items(app),
     };
+    if let Some(tip) = visible_remote_tip_area(app)
+        && let Some(target) = remote_tip_target(tip, column)
+    {
+        return target;
+    }
     footer_target_at(app.terminal_area.x + 2, column, &items)
+}
+
+/// Where the remote servers tip is on screen, if the agents footer shows it:
+/// the footer must be in its normal mode and leave room after the key hints.
+pub(super) fn visible_remote_tip_area(app: &App) -> Option<Rect> {
+    if !app.show_remote_tip
+        || app.active_tab != DashboardTab::Agents
+        || app.filter_active
+        || app.input_mode
+        || app.status_message.is_some()
+    {
+        return None;
+    }
+    let footer = dashboard_outer_areas(app.terminal_area)[2];
+    remote_tip_area(footer, footer_hints_width(&agent_footer_items(app)))
+}
+
+fn remote_tip_target(tip: Rect, column: u16) -> Option<MouseTarget> {
+    if !(tip.x..tip.right()).contains(&column) {
+        return None;
+    }
+    let offset = column - tip.x;
+    Some(if REMOTE_TIP_GUIDE_COLUMNS.contains(&offset) {
+        MouseTarget::Action(Action::OpenRemoteGuide)
+    } else if REMOTE_TIP_HIDE_COLUMNS.contains(&offset) {
+        MouseTarget::Action(Action::DismissRemoteTip)
+    } else {
+        MouseTarget::None
+    })
+}
+
+/// Width of the rendered key hints: two leading spaces, then the items
+/// separated by ` │ `.
+fn footer_hints_width(items: &[FooterItem]) -> u16 {
+    let text: usize = items.iter().map(|item| item.text.width()).sum();
+    (2 + text + 3 * items.len().saturating_sub(1)) as u16
 }
 
 fn filter_footer_target(start: u16, column: u16, filter_width: usize) -> MouseTarget {
@@ -859,6 +903,46 @@ mod tests {
             footer_target_at(2, 22, &items),
             MouseTarget::Action(Action::Quit)
         );
+    }
+
+    use crate::command::dashboard::layout::REMOTE_TIP_WIDTH;
+
+    fn agent_items() -> Vec<FooterItem> {
+        vec![
+            FooterItem::action("i Input", Action::EnterInputMode),
+            FooterItem::action("q Quit", Action::Quit),
+        ]
+    }
+
+    #[test]
+    fn footer_hints_width_counts_leading_space_and_separators() {
+        assert_eq!(footer_hints_width(&agent_items()), 2 + 7 + 3 + 6);
+        assert_eq!(footer_hints_width(&[]), 2);
+    }
+
+    #[test]
+    fn remote_tip_keys_are_hit_tested() {
+        let footer = Rect::new(0, 23, 100, 1);
+        let tip = remote_tip_area(footer, footer_hints_width(&agent_items())).unwrap();
+        let tip_x = 100 - FOOTER_HELP_WIDTH - REMOTE_TIP_WIDTH;
+        assert_eq!(tip.x, tip_x);
+        let target = |offset: u16| remote_tip_target(tip, tip_x + offset);
+
+        assert_eq!(target(0), Some(MouseTarget::None));
+        assert_eq!(
+            target(REMOTE_TIP_GUIDE_COLUMNS.start),
+            Some(MouseTarget::Action(Action::OpenRemoteGuide))
+        );
+        assert_eq!(
+            target(REMOTE_TIP_GUIDE_COLUMNS.end - 1),
+            Some(MouseTarget::Action(Action::OpenRemoteGuide))
+        );
+        assert_eq!(
+            target(REMOTE_TIP_HIDE_COLUMNS.start),
+            Some(MouseTarget::Action(Action::DismissRemoteTip))
+        );
+        assert_eq!(remote_tip_target(tip, tip_x - 1), None);
+        assert_eq!(remote_tip_target(tip, tip.right()), None);
     }
 
     #[test]

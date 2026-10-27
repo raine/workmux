@@ -667,13 +667,7 @@ impl App {
         match pr {
             Some(ref pr) if pr.url.is_some() => {
                 let url = make_url(pr.url.as_ref().unwrap());
-
-                #[cfg(target_os = "macos")]
-                let cmd = "open";
-                #[cfg(not(target_os = "macos"))]
-                let cmd = "xdg-open";
-
-                if let Err(e) = std::process::Command::new(cmd).arg(&url).spawn() {
+                if let Err(e) = open_url(&url) {
                     self.status_message = Some((
                         format!("Failed to open browser: {e}"),
                         std::time::Instant::now(),
@@ -694,6 +688,52 @@ impl App {
             }
         }
     }
+
+    /// Open the remote servers guide and retire the tip. When no browser
+    /// opens, the tip stays and the footer shows the address instead. Does
+    /// nothing unless the tip is on screen.
+    pub fn open_remote_guide(&mut self) {
+        if super::super::mouse::visible_remote_tip_area(self).is_none() {
+            return;
+        }
+        let url = crate::tips::REMOTE_GUIDE_URL;
+        let message = match open_url(url) {
+            Ok(()) => {
+                self.show_remote_tip = false;
+                crate::tips::dismiss_remote_tip();
+                format!("Opened {url}")
+            }
+            Err(e) => format!("Failed to open browser: {e}. Guide: {url}"),
+        };
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
+    /// Hide the remote servers tip for good. Does nothing unless the tip is
+    /// on screen.
+    pub fn dismiss_remote_tip(&mut self) {
+        if super::super::mouse::visible_remote_tip_area(self).is_none() {
+            return;
+        }
+        self.show_remote_tip = false;
+        crate::tips::dismiss_remote_tip();
+        self.status_message = Some((
+            format!(
+                "Remote servers tip hidden. Guide: {}",
+                crate::tips::REMOTE_GUIDE_URL
+            ),
+            std::time::Instant::now(),
+        ));
+    }
+}
+
+/// Open `url` in the default browser.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let cmd = "xdg-open";
+
+    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
 }
 
 #[cfg(test)]

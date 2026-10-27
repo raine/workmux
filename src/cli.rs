@@ -963,6 +963,19 @@ fn should_check_update(cmd: &Commands) -> bool {
     !is_headless_add(cmd) && matches!(cmd, Commands::Add { .. })
 }
 
+/// Check if the command may end with the one-time remote servers notice.
+/// JSON output and headless runs (`add --json` requires `--headless`) are
+/// read by scripts and agents, so they never do.
+fn should_announce_remotes(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Add {
+            headless: false,
+            ..
+        } | Commands::List { json: false, .. }
+    )
+}
+
 // --- Public Entry Point ---
 pub fn run() -> Result<()> {
     let cli = match Cli::try_parse() {
@@ -1046,7 +1059,10 @@ pub fn run() -> Result<()> {
         command::update::check_and_notify(&cfg);
     }
 
-    match cli.command {
+    let announce_remotes = config_ok && should_announce_remotes(&cli.command);
+    let remotes_configured = !cfg.remotes.is_empty();
+
+    let result = match cli.command {
         Commands::DeferredCleanup {
             worktree_path,
             branch_name,
@@ -1392,7 +1408,12 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Commands::CheckUpdate => command::update::run_background_check(),
+    };
+
+    if announce_remotes && result.is_ok() {
+        crate::remote::notice::show_once(remotes_configured);
     }
+    result
 }
 
 /// Refuse `command` for names that are remote workspaces.
@@ -1482,6 +1503,26 @@ fn print_fish_dynamic_completion() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_notice_only_follows_human_facing_commands() {
+        let announces =
+            |args: &[&str]| should_announce_remotes(&Cli::try_parse_from(args).unwrap().command);
+        assert!(announces(&["workmux", "add", "feat"]));
+        assert!(announces(&["workmux", "list"]));
+        assert!(!announces(&[
+            "workmux",
+            "add",
+            "feat",
+            "--headless",
+            "--json"
+        ]));
+        assert!(!announces(&["workmux", "list", "--json"]));
+        assert!(!announces(&["workmux", "status"]));
+        assert!(!announces(&["workmux", "dashboard"]));
+        assert!(!announces(&["workmux", "set-window-status", "working"]));
+        assert!(!announces(&["workmux", "remote"]));
+    }
 
     #[test]
     fn add_continue_accepts_prompt() {

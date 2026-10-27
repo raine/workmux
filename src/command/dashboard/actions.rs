@@ -34,6 +34,8 @@ pub enum Action {
     IncreasePreviewSize,
     DecreasePreviewSize,
     LoadWipDiff,
+    OpenRemoteGuide,
+    DismissRemoteTip,
     SendCommitDashboard,
     TriggerMergeDashboard,
     KillSelected,
@@ -225,6 +227,14 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
         }
         Action::KillSelected => {
             app.kill_selected();
+            false
+        }
+        Action::OpenRemoteGuide => {
+            app.open_remote_guide();
+            false
+        }
+        Action::DismissRemoteTip => {
+            app.dismiss_remote_tip();
             false
         }
 
