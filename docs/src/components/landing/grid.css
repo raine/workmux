@@ -1,0 +1,223 @@
+/* A terminal grid played as a loop (grid.ts): cells, box drawing, and the
+   keycap, chapter bar and clock laid over it. */
+
+.gl {
+  position: relative;
+  display: block;
+  container-type: inline-size;
+  background: #111;
+  color: #d4d4d4;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* --adv is the font's measured advance width in em, so --cols cells (the
+   grid plus 1.25 cells of padding per side) fill the frame. */
+.gl .gl-grid {
+  position: relative;
+  padding: 1.25ch;
+  font-family: "Iosevka Live", ui-monospace, Menlo, monospace;
+  font-size: calc(100cqw / (var(--cols) * var(--adv, 0.5)));
+  font-variant-ligatures: none;
+  font-kerning: none;
+  line-height: 2.6ch;
+  white-space: pre;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Each row repaints on its own, so a changed row never invalidates its
+   neighbours. */
+.gl .r {
+  height: 2.6ch;
+  overflow: hidden;
+  contain: strict;
+}
+.gl .r span {
+  display: inline-block;
+  height: 100%;
+  overflow: hidden;
+  vertical-align: top;
+}
+.gl .r .g,
+.gl .r .rg {
+  overflow: visible;
+}
+.gl .r .g {
+  text-align: center;
+}
+.gl .g i {
+  position: relative;
+  font-style: normal;
+}
+.gl .e i {
+  font-size: 0.86em;
+  font-family:
+    "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+.gl .g svg {
+  width: 0.95em;
+  height: 0.95em;
+  vertical-align: -0.14em;
+}
+
+/* box drawing */
+.gl .hl {
+  background: linear-gradient(currentColor, currentColor) 0 50% / 100% 1px
+    no-repeat;
+}
+.gl .vl {
+  background: linear-gradient(currentColor, currentColor) 50% 0 / 1px 100%
+    no-repeat;
+}
+.gl .c1 {
+  background:
+    linear-gradient(currentColor, currentColor) 100% 50% / 50% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 100% / 1px 50% no-repeat;
+}
+.gl .c2 {
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 50% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 100% / 1px 50% no-repeat;
+}
+.gl .c3 {
+  background:
+    linear-gradient(currentColor, currentColor) 100% 50% / 50% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 0 / 1px 50% no-repeat;
+}
+.gl .c4 {
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 50% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 0 / 1px 50% no-repeat;
+}
+/* ┬ */
+.gl .td {
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 100% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 100% / 1px 50% no-repeat;
+}
+/* ┴ */
+.gl .tu {
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 100% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 0 / 1px 50% no-repeat;
+}
+/* ▌, a status stripe */
+.gl .bar {
+  background: linear-gradient(currentColor, currentColor) 0 0 / 0.55ch 100%
+    no-repeat;
+}
+
+.gl .b {
+  font-weight: 700;
+}
+.gl .it {
+  font-style: italic;
+}
+.gl .dim {
+  opacity: 0.55;
+}
+
+/* The key just pressed, as a keycap in the corner. */
+.gl .gl-key {
+  position: absolute;
+  right: 3%;
+  bottom: 9%;
+  min-width: 2.4em;
+  padding: 0.45em 0.7em 0.55em;
+  border-radius: 0.45em;
+  background: #f4f4f2;
+  box-shadow:
+    0 -2px 0 rgb(0 0 0 / 0.18) inset,
+    0 8px 20px -6px rgb(0 0 0 / 0.6);
+  color: #1a1a1a;
+  font:
+    600 clamp(0.75rem, 1.5cqw, 0.9375rem) / 1 "Iosevka Live",
+    ui-monospace,
+    Menlo,
+    monospace;
+  text-align: center;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(0.3em) scale(0.92);
+  transition:
+    opacity 160ms ease-out,
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  pointer-events: none;
+}
+.gl .gl-key[data-on] {
+  opacity: 1;
+  transform: none;
+}
+.gl .gl-key[data-down] {
+  transform: translateY(1px) scale(0.96);
+}
+
+/* Chapters of the loop as a thin line along the bottom edge, each segment
+   as wide as the chapter is long. Segments seek on click. */
+.gl .gl-chapters {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 3px;
+}
+.gl .gl-ch {
+  flex: var(--w) 1 0;
+  height: 10px;
+  padding: 7px 0 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.gl .gl-ch i {
+  display: block;
+  height: 3px;
+  background:
+    linear-gradient(#48d9be, #48d9be) 0 0 / var(--p, 0%) 100% no-repeat,
+    rgb(255 255 255 / 0.1);
+  transition: height 160ms ease-out;
+}
+.gl .gl-ch:hover i {
+  height: 5px;
+  margin-top: -2px;
+}
+.gl .gl-time {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  background: rgb(17 17 17 / 0.85);
+  color: #7a7a7a;
+  font:
+    500 0.6875rem/1 Inter,
+    ui-sans-serif,
+    system-ui,
+    sans-serif;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* Light look whenever the page is light. */
+html[data-theme="light"] .gl {
+  background: #fbfbfa;
+  color: #2f3337;
+}
+html[data-theme="light"] .gl .gl-key {
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.08) inset,
+    0 -2px 0 rgb(0 0 0 / 0.1) inset,
+    0 8px 20px -8px rgb(16 32 30 / 0.35);
+}
+html[data-theme="light"] .gl .gl-ch i {
+  background:
+    linear-gradient(#13a090, #13a090) 0 0 / var(--p, 0%) 100% no-repeat,
+    rgb(0 0 0 / 0.08);
+}
+html[data-theme="light"] .gl .gl-time {
+  background: rgb(251 251 250 / 0.9);
+  color: #8a8f95;
+}

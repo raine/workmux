@@ -534,9 +534,57 @@ pub enum SidebarEnterAction {
     Select,
 }
 
+/// A named sidebar scope. Lists and filter fields are combined with OR.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidebarView {
+    pub name: String,
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    #[serde(default)]
+    pub project_dirs: Vec<String>,
+    #[serde(default)]
+    pub other: bool,
+}
+
+pub fn validate_sidebar_views(views: &[SidebarView]) -> anyhow::Result<()> {
+    let mut names = std::collections::HashSet::new();
+    let mut other = false;
+    for view in views {
+        anyhow::ensure!(
+            !view.name.trim().is_empty()
+                && view.name == view.name.trim()
+                && !view.name.chars().any(char::is_control)
+                && view.name != "All"
+                && names.insert(&view.name),
+            "sidebar view names must be unique, nonempty, single-line, trimmed and not All"
+        );
+        let has_filters = !view.sessions.is_empty() || !view.project_dirs.is_empty();
+        anyhow::ensure!(
+            view.other != has_filters,
+            "sidebar view {:?}: use filters or other: true, exclusively",
+            view.name
+        );
+        anyhow::ensure!(
+            !view.other || !other,
+            "only one sidebar Other view is allowed"
+        );
+        other |= view.other;
+        for dir in &view.project_dirs {
+            anyhow::ensure!(
+                crate::util::expand_tilde(dir).is_absolute(),
+                "sidebar project_dirs must be absolute or start with ~/: {dir}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Configuration for the sidebar.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct SidebarConfig {
+    /// Named scopes, in cycle order. Global configuration only.
+    pub views: Option<Vec<SidebarView>>,
     /// Position of the sidebar pane. Default: left.
     pub position: Option<SidebarPosition>,
 
@@ -2978,6 +3026,7 @@ impl Config {
         if config.hook_shell.is_none() {
             config.hook_shell = Some(vec!["bash".to_string(), "-c".to_string()]);
         }
+        validate_sidebar_views(config.sidebar.views.as_deref().unwrap_or_default())?;
         validate_hook_shell(config.hook_shell.as_deref())?;
 
         config
@@ -3221,6 +3270,7 @@ impl Config {
 
         // Sidebar config: per-field override
         merged.sidebar = SidebarConfig {
+            views: self.sidebar.views.clone(),
             position: project.sidebar.position.or(self.sidebar.position),
             width: project.sidebar.width.or(self.sidebar.width),
             height: project.sidebar.height.or(self.sidebar.height),
@@ -4950,6 +5000,17 @@ sidebar:
                 color: Some("#ff8c00".to_string()),
             }))
         );
+    }
+
+    #[test]
+    fn project_configuration_cannot_replace_global_views() {
+        let global: Config =
+            serde_yaml::from_str("sidebar:\n  views:\n    - {name: Global, sessions: [foo]}\n")
+                .unwrap();
+        let local: Config =
+            serde_yaml::from_str("sidebar:\n  views:\n    - {name: Local, sessions: [bar]}\n")
+                .unwrap();
+        assert_eq!(global.merge(local).sidebar.views.unwrap()[0].name, "Global");
     }
 
     #[test]

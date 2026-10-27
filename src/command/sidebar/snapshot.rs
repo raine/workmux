@@ -32,6 +32,8 @@ pub struct SidebarSnapshot {
     pub layout_mode: SidebarLayoutMode,
     #[serde(default)]
     pub filter_mode: SidebarFilterMode,
+    #[serde(default)]
+    pub window_views: HashMap<String, super::view::WindowView>,
     pub active_windows: HashSet<(String, String)>,
     #[serde(default)]
     pub active_pane_ids: HashSet<String>,
@@ -422,6 +424,7 @@ pub(crate) fn build_snapshot(input: SnapshotInputs) -> SidebarSnapshot {
         .collect();
 
     SidebarSnapshot {
+        window_views: HashMap::new(),
         position,
         layout_mode,
         filter_mode,

@@ -2,7 +2,7 @@
  * Workmux status tracking extension for pi.
  *
  * Reports agent status to workmux for tmux window status display.
- * See: https://workmux.raine.dev/guide/status-tracking
+ * See: https://workmux.dev/guide/status-tracking
  */
 
 import { spawn } from "node:child_process";

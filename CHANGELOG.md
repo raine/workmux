@@ -3,6 +3,7 @@ title: "Changelog"
 description: Release notes and version history for workmux
 editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ---
+
 <!-- skipped: v0.1.167 -->
 <!-- skipped: v0.1.161 -->
 <!-- skipped: v0.1.160 -->
@@ -21,9 +22,18 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.277 (2026-10-23)
 
-- Show which project each agent belongs to in `workmux status --all`, plus its tmux session when the session name differs from the project.
+<!-- highlight: Sidebar views -->
+
+- **New!** Scope the sidebar to selected sessions or project directories with `sidebar.views`. Each window shows the view matching its own agent; press `V` or run `workmux sidebar view on|off` to toggle views across all sidebars. See the [sidebar guide](https://workmux.dev/guide/sidebar/#named-views).
+- Fork Pi conversations into new worktrees with `workmux add --fork`. ([#337](https://github.com/raine/workmux/issues/337))
+- UX: Show which project each agent belongs to in `workmux status --all`, plus its tmux session when the session name differs from the project.
+- UX: Keep finished agents out of the sidebar's stale section until you review them.
+- UX: Clear an agent's manual sleep when it starts new work.
+- Fix: Stop `--auto-name` from saving throwaway sessions to the agent's history for the built-in Claude, Codex, Pi and OMP commands.
+- Fix `--auto-name` with Codex failing for ChatGPT accounts by switching the default model to `gpt-6-luna`.
+- Fix sidebars resizing each other in a loop and burning CPU when many windows are open.
 
 ## v0.1.276 (2026-10-14)
 
@@ -45,9 +55,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.272 (2026-10-09)
 
-- Reduce sidebar background CPU use by avoiding repeated Git calculations and project config lookups.
-- Reduce memory use for workmux commands and sidebar clients.
-- Reset sidebar scrolling to the top when focusing an agent or returning to its window.
+- Perf: Reduce sidebar background CPU use by avoiding repeated Git calculations and project config lookups.
+- Perf: Reduce memory use for workmux commands and sidebar clients.
+- UX: Reset sidebar scrolling to the top when focusing an agent or returning to its window.
 - Fix agents inheriting another repository's project config, and automatically pick up newly created or replaced project configs in the sidebar.
 
 ## v0.1.271 (2026-10-04)
@@ -68,39 +78,39 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.268 (2026-09-26)
 
-- Prevent unrelated Claude background sessions from overwriting an interactive pane's status and session identity, while preserving status tracking for attached `/bg` continuations. ([#300](https://github.com/raine/workmux/issues/300))
+- Fix: Prevent unrelated Claude background sessions from overwriting an interactive pane's status and session identity, while preserving status tracking for attached `/bg` continuations. ([#300](https://github.com/raine/workmux/issues/300))
 
 ## v0.1.267 (2026-09-25)
 
 - Configure when agents become stale in the dashboard and sidebar with `stale_after`, using seconds or durations such as `90m` or `5h`. ([#298](https://github.com/raine/workmux/issues/298))
-- Keep the dashboard responsive while removing worktrees, with a deleting indicator and clear feedback if removal fails or continues in the background.
+- UX: Keep the dashboard responsive while removing worktrees, with a deleting indicator and clear feedback if removal fails or continues in the background.
 
 ## v0.1.266 (2026-09-22)
 
-- Allow sidebar widths as narrow as one column for compact icon-only layouts, preserving widths below 10 columns when configured or resized. ([#297](https://github.com/raine/workmux/issues/297))
+- UX: Allow sidebar widths as narrow as one column for compact icon-only layouts, preserving widths below 10 columns when configured or resized. ([#297](https://github.com/raine/workmux/issues/297))
 
 ## v0.1.265 (2026-09-22)
 
-- New! Group the sidebar by project or tmux session and fold away stale agents, off by default. See the [sidebar guide](https://workmux.raine.dev/guide/sidebar/#grouping).
+- New! Group the sidebar by project or tmux session and fold away stale agents, off by default. See the [sidebar guide](https://workmux.dev/guide/sidebar/#grouping).
 - Sort sidebar agents by attention needed with `sidebar.sort: priority`, placing waiting and done agents first. ([#285](https://github.com/raine/workmux/issues/285), [#289](https://github.com/raine/workmux/pull/289))
-- Show the pull request number beside its check status in the sidebar's default templates. ([#289](https://github.com/raine/workmux/pull/289))
+- UX: Show the pull request number beside its check status in the sidebar's default templates. ([#289](https://github.com/raine/workmux/pull/289))
 - Fix terminal resizing making tmux temporarily unresponsive when many windows have sidebars.
 
 ## v0.1.264 (2026-09-21)
 
 - Add an opt-in `window` column to the dashboard's agent table for showing tmux window indexes. ([#227](https://github.com/raine/workmux/pull/227))
-- Show more of long worktree and branch names when the dashboard has room. ([#281](https://github.com/raine/workmux/pull/281))
-- Keep the dashboard open when `Esc` is pressed in its main views; use `q` or `Ctrl+C` to quit. ([#104](https://github.com/raine/workmux/pull/104))
+- UX: Show more of long worktree and branch names when the dashboard has room. ([#281](https://github.com/raine/workmux/pull/281))
+- UX: Keep the dashboard open when `Esc` is pressed in its main views; use `q` or `Ctrl+C` to quit. ([#104](https://github.com/raine/workmux/pull/104))
 - Install shell completions automatically with Homebrew. ([#284](https://github.com/raine/workmux/pull/284))
 - Fix the sidebar failing to start on macOS when long temporary or custom tmux socket paths exceed Unix socket limits. ([#293](https://github.com/raine/workmux/issues/293))
-- Keep Pi panes marked as working throughout automatic compaction when delegated activity tracking is enabled, preserving the elapsed timer until the continuation finishes.
-- Enable the fast `node_modules` cleanup on worktree removal in monorepos where the lockfile lives in a subdirectory, such as `dashboard/pnpm-lock.yaml`, instead of only at the project root.
-- Keep the fast `node_modules` cleanup when a project defines its own `pre_remove` commands by listing `"<cleanup-node-modules>"` among them. Previously any `pre_remove` entry replaced the cleanup entirely. See the [lifecycle hooks guide](https://workmux.raine.dev/guide/configuration#lifecycle-hooks)
+- Fix: Keep Pi panes marked as working throughout automatic compaction when delegated activity tracking is enabled, preserving the elapsed timer until the continuation finishes.
+- UX: Enable the fast `node_modules` cleanup on worktree removal in monorepos where the lockfile lives in a subdirectory, such as `dashboard/pnpm-lock.yaml`, instead of only at the project root.
+- UX: Keep the fast `node_modules` cleanup when a project defines its own `pre_remove` commands by listing `"<cleanup-node-modules>"` among them. Previously any `pre_remove` entry replaced the cleanup entirely. See the [lifecycle hooks guide](https://workmux.dev/guide/configuration#lifecycle-hooks)
 
 ## v0.1.263 (2026-09-16)
 
 - Fix dashboard removal and sweep actions targeting the wrong worktree when managing multiple projects. ([#272](https://github.com/raine/workmux/pull/272))
-- Prevent Pi and Oh My Pi status integrations from overwriting each other, and stop Oh My Pi from briefly showing waiting while tools start.
+- Fix: Prevent Pi and Oh My Pi status integrations from overwriting each other, and stop Oh My Pi from briefly showing waiting while tools start.
 - Fix `post_create` hooks receiving an incorrect `WM_PROJECT_ROOT` when using nested or alternate configs outside the repository. ([#283](https://github.com/raine/workmux/issues/283))
 - Add `default_session` to name a session that clients return to when a workmux session closes in session mode, instead of whichever session each client viewed previously. ([#278](https://github.com/raine/workmux/pull/278))
 
@@ -114,15 +124,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Fix worktree creation failing in repositories with symlinked or hard-linked Git hooks outside container sandboxes. ([#274](https://github.com/raine/workmux/issues/274))
 - Fix `workmux set-window-status clear` leaving stale agent status in the sidebar.
 
-## v0.1.260 (2026-09-11
+## v0.1.260 (2026-09-11)
 
 - Create worktrees without a terminal multiplexer using `workmux add --headless`, with file operations and setup hooks included. Add `--json` for automation, and attach later with `workmux open`.
 - Hide or reorder columns in the dashboard's Worktrees tab with `dashboard.worktree_columns`. ([#270](https://github.com/raine/workmux/issues/270))
-- Keep Pi agents marked as working while delegated children are active, even after the parent finishes its turn. See https://github.com/raine/pi-suba for more.
+- UX: Keep Pi agents marked as working while delegated children are active, even after the parent finishes its turn. See https://github.com/raine/pi-suba for more.
 
 ## v0.1.259 (2026-09-08)
 
-- Show how many agents remain below the visible area in the sidebar's tile view.
+- UX: Show how many agents remain below the visible area in the sidebar's tile view.
 - Fix worktree cleanup giving up when background processes keep writing files. You may find files left behind by previous removals in hidden `.workmux_trash_*` directories alongside your worktrees.
 
 ## v0.1.258 (2026-09-07)
@@ -137,26 +147,26 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Resume an agent's previous session when recreating a worktree at the same path with `workmux add --continue`, optionally supplying a follow-up prompt.
 - Fix `workmux send` failing to deliver multiline messages and single-line Codex prompts on Kitty. ([#268](https://github.com/raine/workmux/issues/268))
-- Report missing executables selected with `--agent` before creating branches or worktrees for local launches.
+- UX: Report missing executables selected with `--agent` before creating branches or worktrees for local launches.
 - Select an agent with `-a` or `--agent` in the worktree skill, and preserve attachment paths in delegated prompts.
-- Reuse agents' existing conversations for follow-up work with the coordinator skill, including after worktrees are merged or removed.
+- UX: Reuse agents' existing conversations for follow-up work with the coordinator skill, including after worktrees are merged or removed.
 
 ## v0.1.255 (2026-09-05)
 
-- Improve sidebar performance without sacrificing responsiveness:
+- Perf: Improve sidebar performance without sacrificing responsiveness:
   - Cut background Git status CPU by 74% in benchmarks.
   - Cut GitHub status refresh CPU by 60% in benchmarks.
   - Cut tmux observation CPU by 26% in a large-session benchmark.
-- Show accurate Git status for agents in nested directories, shared repositories,
+- Fix: Show accurate Git status for agents in nested directories, shared repositories,
   and linked worktrees while ignoring directories outside Git repositories.
-- Keep agent sessions available to resurrect after multiplexer restarts and
+- UX: Keep agent sessions available to resurrect after multiplexer restarts and
   workmux upgrades without accumulating duplicate history.
 
 ## v0.1.254 (2026-09-03)
 
 - Fix `workmux send` leaving prompts unsubmitted in active Codex panes.
   ([#261](https://github.com/raine/workmux/issues/261))
-- Speed up sandbox startup for repositories with large local Git configurations.
+- Perf: Speed up sandbox startup for repositories with large local Git configurations.
   ([#266](https://github.com/raine/workmux/pull/266))
 
 ## v0.1.253 (2026-09-02)
@@ -176,9 +186,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Fix: Generate concise branch names for question-style `--auto-name` prompts, and
   reject invalid model responses before creating a worktree.
   ([#264](https://github.com/raine/workmux/issues/264))
-- Harden multiplexer command execution and worktree cleanup against untrusted
+- UX: Harden multiplexer command execution and worktree cleanup against untrusted
   shell text, repository-controlled Git hooks, and filesystem target replacement.
-- Clear completed or waiting status immediately when the agent pane is already
+- UX: Clear completed or waiting status immediately when the agent pane is already
   focused.
 
 ## v0.1.250 (2026-08-30)
@@ -189,9 +199,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.249 (2026-08-30)
 
-- Improve sidebar performance by reducing startup latency, idle wakeups, tmux
+- Perf: Improve sidebar performance by reducing startup latency, idle wakeups, tmux
   polling, and rendering overhead.
-- Register agent panes on startup so they appear immediately in the sidebar and
+- UX: Register agent panes on startup so they appear immediately in the sidebar and
   dashboard. (Agent harness support varies.)
 
 ## v0.1.248 (2026-08-26)
@@ -213,9 +223,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   percentages.
 - Fix sidebar colors failing to update after configuration changes and stale
   selections lingering after switching agents.
-- Raise the deny-mode network proxy connection limit, make it configurable,
+- UX: Raise the deny-mode network proxy connection limit, make it configurable,
   and return an HTTP 503 response when the proxy reaches capacity.
-- Restore `workmux add` for Git LFS repositories while keeping shared Git
+- Fix: Restore `workmux add` for Git LFS repositories while keeping shared Git
   configuration and hooks read-only in container sandboxes.
   ([#256](https://github.com/raine/workmux/issues/256),
   [#258](https://github.com/raine/workmux/issues/258))
@@ -259,7 +269,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   ([#225](https://github.com/raine/workmux/pull/225))
 - `workmux add --pr` accepts pull request URLs from GitHub Enterprise
   installations, not only github.com.
-- Passing `-a`/`--agent` no longer replaces explicitly configured pane commands
+- Fix: Passing `-a`/`--agent` no longer replaces explicitly configured pane commands
   such as `nvim`, which also stops a second agent from being spawned. The agent
   goes into a plain shell pane, and layouts where every pane has a command are
   left as they are. ([#243](https://github.com/raine/workmux/issues/243))
@@ -269,7 +279,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.242 (2026-08-20)
 
-- `workmux setup` installs the Copilot CLI status hook once at the user level
+- UX: `workmux setup` installs the Copilot CLI status hook once at the user level
   (`~/.copilot/hooks/workmux-status.json`), so pane status tracking works in
   every repository without per-repository setup. Requires Copilot CLI 0.0.422 or
   later, and unrelated hooks in that file are preserved. If a repository still
@@ -278,81 +288,81 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.241 (2026-08-20)
 
-- Harden Git handling across sandbox backends. Container guests can no longer
+- UX: Harden Git handling across sandbox backends. Container guests can no longer
   modify shared Git configuration or hooks, while normal commits and branch
   operations continue to work. Workmux host Git operations also ignore
   repository-controlled hooks and executable Git settings.
-- Freeze the effective configuration when a sandbox session starts, preventing
+- UX: Freeze the effective configuration when a sandbox session starts, preventing
   guest changes to `.workmux.yaml` from altering host-side spawn, status, merge,
   or close operations during that session.
 
 ## v0.1.240 (2026-08-19)
 
-- Apply configured pane `percentage` values in the Kitty backend, so layouts
+- Fix: Apply configured pane `percentage` values in the Kitty backend, so layouts
   split the same way they do in tmux. Percentage sizing requires Kitty's
   `splits` layout; absolute `size` values remain unsupported there.
   ([#239](https://github.com/raine/workmux/issues/239))
-- Treat custom tmux `status_icons` as plain text when clearing a status on pane
+- Fix: Treat custom tmux `status_icons` as plain text when clearing a status on pane
   focus, so icons containing tmux syntax work as written.
 
 ## v0.1.239 (2026-08-18)
 
 - Set `sidebar.dim_stale: false` to keep stale sidebar rows in their normal status colors instead of dimming them. ([#234](https://github.com/raine/workmux/pull/234))
-- Keep OpenCode panes marked as working while any parent or subagent session is active, and avoid false completion indicators from untracked or deleted sessions. ([#235](https://github.com/raine/workmux/pull/235))
-- Detect outdated Pi and Oh My Pi status extensions during `workmux setup` and offer to replace them, preventing excessive status update processes from older extensions.
+- Fix: Keep OpenCode panes marked as working while any parent or subagent session is active, and avoid false completion indicators from untracked or deleted sessions. ([#235](https://github.com/raine/workmux/pull/235))
+- UX: Detect outdated Pi and Oh My Pi status extensions during `workmux setup` and offer to replace them, preventing excessive status update processes from older extensions.
 
 ## v0.1.237 (2026-08-09)
 
-- Make `workmux status --json` return a versioned observation object instead of
+- Breaking: Make `workmux status --json` return a versioned observation object instead of
   an array, with scope and state-file diagnostics. Unresolved explicit targets
   return partial results with a nonzero exit status. ([#210](https://github.com/raine/workmux/issues/210))
-- Treat `<global>` as empty when the corresponding global hook or file-operation
+- Fix: Treat `<global>` as empty when the corresponding global hook or file-operation
   list is unset, allowing shared project configs to work without matching global
   values. ([#224](https://github.com/raine/workmux/issues/224))
 
 ## v0.1.236 (2026-08-08)
 
 - Show working, waiting, and done status icons in Zellij tab titles. ([#220](https://github.com/raine/workmux/pull/220))
-- Keep agent status updates tied to the correct pane when background hooks run without `TMUX_PANE` (seems to happens with Claude Code occasionally).
-- Track Codex subagents through new dedicated stop hooks, keeping the pane marked as working until the root turn finishes.
-- Place new tmux windows in the session whose pane paths best match the current directory when pane context is unavailable, and return an actionable error when multiple sessions match equally well.
+- Fix: Keep agent status updates tied to the correct pane when background hooks run without `TMUX_PANE` (seems to happens with Claude Code occasionally).
+- UX: Track Codex subagents through new dedicated stop hooks, keeping the pane marked as working until the root turn finishes.
+- UX: Place new tmux windows in the session whose pane paths best match the current directory when pane context is unavailable, and return an actionable error when multiple sessions match equally well.
 
 ## v0.1.235 (2026-08-07)
 
-- Close and remove the correct tmux windows even after they are renamed, without affecting unrelated windows that reuse the original name. ([#212](https://github.com/raine/workmux/issues/212))
-- Redraw the full sidebar cleanly after terminal resizes, preventing fragments of the previous layout from remaining on screen.
-- Prevent sidebar auto-exit from killing the active pane in another window. ([#219](https://github.com/raine/workmux/issues/219))
+- Fix: Close and remove the correct tmux windows even after they are renamed, without affecting unrelated windows that reuse the original name. ([#212](https://github.com/raine/workmux/issues/212))
+- Fix: Redraw the full sidebar cleanly after terminal resizes, preventing fragments of the previous layout from remaining on screen.
+- Fix: Prevent sidebar auto-exit from killing the active pane in another window. ([#219](https://github.com/raine/workmux/issues/219))
 
 ## v0.1.234 (2026-08-04)
 
 - Sort sidebar rows by recent activity or tmux window order with `sidebar.sort`, and show native tmux window numbers in custom layouts with `{window_index}`. ([#214](https://github.com/raine/workmux/issues/214)) ([#215](https://github.com/raine/workmux/pull/215))
-- Prevent filesystem reads from triggering continuous sidebar refreshes on Linux, eliminating config reload loops and unnecessary CPU use. ([#217](https://github.com/raine/workmux/issues/217)) ([#218](https://github.com/raine/workmux/pull/218))
-- Keep agent views available and clean up stale state when a tmux pane disappears. ([#213](https://github.com/raine/workmux/issues/213))
-- Preserve the exact spelling and capitalization of parent tmux session names passed to `workmux add` or `workmux open`.
-- Accept branch names from automatic naming commands that exit without reading the prompt from stdin.
-- Let bundled agent skills dispatch cross-project worktrees directly into the requested tmux session without an intermediate window.
+- Fix: Prevent filesystem reads from triggering continuous sidebar refreshes on Linux, eliminating config reload loops and unnecessary CPU use. ([#217](https://github.com/raine/workmux/issues/217)) ([#218](https://github.com/raine/workmux/pull/218))
+- Fix: Keep agent views available and clean up stale state when a tmux pane disappears. ([#213](https://github.com/raine/workmux/issues/213))
+- Fix: Preserve the exact spelling and capitalization of parent tmux session names passed to `workmux add` or `workmux open`.
+- Fix: Accept branch names from automatic naming commands that exit without reading the prompt from stdin.
+- UX: Let bundled agent skills dispatch cross-project worktrees directly into the requested tmux session without an intermediate window.
 
 ## v0.1.233 (2026-08-02)
 
-- Preserve valid auto-generated Git branch names, including slash-separated names such as `fix/issue-123`. ([#206](https://github.com/raine/workmux/issues/206))
-- Include agent type, working directory, tmux session and window, and last-update time in `workmux status --json`. ([#210](https://github.com/raine/workmux/issues/210))
-- Keep agents visible in status views when a tmux pane query fails temporarily. ([#209](https://github.com/raine/workmux/issues/209))
+- Fix: Preserve valid auto-generated Git branch names, including slash-separated names such as `fix/issue-123`. ([#206](https://github.com/raine/workmux/issues/206))
+- UX: Include agent type, working directory, tmux session and window, and last-update time in `workmux status --json`. ([#210](https://github.com/raine/workmux/issues/210))
+- Fix: Keep agents visible in status views when a tmux pane query fails temporarily. ([#209](https://github.com/raine/workmux/issues/209))
 
 ## v0.1.232 (2026-07-31)
 
 - Use the mouse throughout the dashboard to switch tabs, select or open rows, run actions, scroll previews and diffs, and navigate files.
 - Show GitHub checks for remote branches without pull requests in the sidebar and dashboard, including failure indicators for main branches.
-- Keep sidebar GitHub status refreshes efficient across linked worktrees, reducing redundant requests for the same repository.
-- Keep the dashboard's current-session filter tied to the active tmux session when opened in a popup.
-- Make dashboard selections and elapsed times easier to scan with clearer highlighting and subdued long-running timers.
+- Perf: Keep sidebar GitHub status refreshes efficient across linked worktrees, reducing redundant requests for the same repository.
+- Fix: Keep the dashboard's current-session filter tied to the active tmux session when opened in a popup.
+- UX: Make dashboard selections and elapsed times easier to scan with clearer highlighting and subdued long-running timers.
 
 ## v0.1.231 (2026-07-28)
 
-- Clear acknowledged waiting or completed statuses from the sidebar immediately when you focus an agent pane.
+- UX: Clear acknowledged waiting or completed statuses from the sidebar immediately when you focus an agent pane.
 
 ## v0.1.230 (2026-07-28)
 
-- Prevent `workmux merge` from deleting the main worktree when its branch is selected as the merge source. ([#204](https://github.com/raine/workmux/issues/204))
+- Fix: Prevent `workmux merge` from deleting the main worktree when its branch is selected as the merge source. ([#204](https://github.com/raine/workmux/issues/204))
 
 ## v0.1.229 (2026-07-26)
 
@@ -361,41 +371,41 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ## v0.1.228 (2026-07-26)
 
 - Use Antigravity CLI (`agy`) with automatic detection, prompt injection, branch name generation, and status tracking setup. ([#168](https://github.com/raine/workmux/issues/168)) ([#183](https://github.com/raine/workmux/pull/183))
-- See Codex permission prompts as waiting in the sidebar and dashboard. ([#197](https://github.com/raine/workmux/issues/197))
+- UX: See Codex permission prompts as waiting in the sidebar and dashboard. ([#197](https://github.com/raine/workmux/issues/197))
 - Set `base_branch: auto` to create new worktrees from each repository's effective main branch. ([#199](https://github.com/raine/workmux/issues/199))
 
 ## v0.1.227 (2026-07-26)
 
-- Prevent stale sidebar pane cleanup from displaying harmless tmux errors.
+- Fix: Prevent stale sidebar pane cleanup from displaying harmless tmux errors.
 
 ## v0.1.226 (2026-07-25)
 
-- Show linked worktree ages in `workmux list` when using Linux musl builds.
+- Fix: Show linked worktree ages in `workmux list` when using Linux musl builds.
 
 ## v0.1.225 (2026-07-23)
 
 - Configure Zellij worktrees with stacked panes and custom pane names. ([#190](https://github.com/raine/workmux/pull/190))
-- Keep sidebar idle CPU usage low when no pull request data is available.
+- Perf: Keep sidebar idle CPU usage low when no pull request data is available.
 
 ## v0.1.224 (2026-07-18)
 
 - Check out a pull request by passing its full GitHub URL to `workmux add --pr`, in addition to using its number.
-- Keep the configured top sidebar height accurate when tmux pane titles are shown.
+- Fix: Keep the configured top sidebar height accurate when tmux pane titles are shown.
 
 ## v0.1.223 (2026-07-17)
 
-- Update the sidebar's active agent marker more quickly when navigation hotkeys switch tmux windows.
-- Let the bundled merge and rebase skills safely include or preserve staged, unstaged, and untracked changes.
-- Merge completed agents sooner in coordinated workflows instead of waiting for every agent to finish.
+- UX: Update the sidebar's active agent marker more quickly when navigation hotkeys switch tmux windows.
+- UX: Let the bundled merge and rebase skills safely include or preserve staged, unstaged, and untracked changes.
+- UX: Merge completed agents sooner in coordinated workflows instead of waiting for every agent to finish.
 
 ## v0.1.222 (2026-07-15)
 
-- Keep dashboard refreshes responsive after multiplexer restarts while preserving agent state for `workmux resurrect`.
+- UX: Keep dashboard refreshes responsive after multiplexer restarts while preserving agent state for `workmux resurrect`.
 
 ## v0.1.221 (2026-07-13)
 
-- Ask for confirmation before quitting the sidebar, preventing accidental quit keypresses from closing all sidebar panes.
-- Keep the dashboard display intact when pre-remove hooks print output during worktree removal or bulk sweeps.
+- UX: Ask for confirmation before quitting the sidebar, preventing accidental quit keypresses from closing all sidebar panes.
+- Fix: Keep the dashboard display intact when pre-remove hooks print output during worktree removal or bulk sweeps.
 
 ## v0.1.220 (2026-07-12)
 
@@ -403,46 +413,46 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.219 (2026-07-12)
 
-- The bundled workmux skill can guide coding agents to check out GitHub pull requests into new worktrees with `workmux add --pr`.
+- UX: The bundled workmux skill can guide coding agents to check out GitHub pull requests into new worktrees with `workmux add --pr`.
 
 ## v0.1.218 (2026-07-02)
 
 - Add a sidebar filter for switching between all sessions and the current tmux session, with jump navigation that works across sessions. ([#124](https://github.com/raine/workmux/pull/124))
 - Add `window_placement` to choose whether new tmux windows open next to the current window or at the right edge of the session.
-- Keep PR numbers and states visible in `workmux list --pr` when GitHub check rollup queries fail.
-- Make concurrent agent state writes safer, preventing overlapping updates from clobbering each other. ([#188](https://github.com/raine/workmux/pull/188))
-- Keep Nix package builds reliable in sandboxed build environments.
+- Fix: Keep PR numbers and states visible in `workmux list --pr` when GitHub check rollup queries fail.
+- Fix: Make concurrent agent state writes safer, preventing overlapping updates from clobbering each other. ([#188](https://github.com/raine/workmux/pull/188))
+- Fix: Keep Nix package builds reliable in sandboxed build environments.
 
 ## v0.1.217 (2026-06-29)
 
-- Keep the sidebar spinner moving while panes are active. ([#180](https://github.com/raine/workmux/issues/180))
-- Respect configured sidebar width and height instead of replacing them with synced resize values. ([#172](https://github.com/raine/workmux/pull/172))
-- Install the Pi agent sandbox from the current package name. ([#179](https://github.com/raine/workmux/pull/179))
-- Recover automatically when a tmux resize leaves the sidebar excessively wide.
+- Fix: Keep the sidebar spinner moving while panes are active. ([#180](https://github.com/raine/workmux/issues/180))
+- Fix: Respect configured sidebar width and height instead of replacing them with synced resize values. ([#172](https://github.com/raine/workmux/pull/172))
+- Fix: Install the Pi agent sandbox from the current package name. ([#179](https://github.com/raine/workmux/pull/179))
+- Fix: Recover automatically when a tmux resize leaves the sidebar excessively wide.
 
 ## v0.1.216 (2026-06-28)
 
 - Fix Codex status tracking when hooks run without tmux environment details, so Codex agents appear in `workmux list` and the sidebar. ([#187](https://github.com/raine/workmux/issues/187))
-- Keep Codex sidebar status accurate for subagents, so panes stay working while parent work continues and clear when the root turn finishes. ([#170](https://github.com/raine/workmux/issues/170))
+- Fix: Keep Codex sidebar status accurate for subagents, so panes stay working while parent work continues and clear when the root turn finishes. ([#170](https://github.com/raine/workmux/issues/170))
 
 ## v0.1.215 (2026-06-26)
 
-- Place new tmux windows from `workmux add` immediately beside the calling window, keeping new worktrees easy to find.
+- UX: Place new tmux windows from `workmux add` immediately beside the calling window, keeping new worktrees easy to find.
 
 ## v0.1.214 (2026-06-26)
 
 - Add `workmux rebase` to rebase a worktree onto its saved base branch, with automatic fallback to the configured main branch.
 - Add `workmux sidebar --position <left|top>` to choose sidebar placement when enabling the sidebar.
-- Add structured [named agent profiles](https://workmux.raine.dev/guide/agents#named-agents) with separate `type`, `command`, `args`, and `env` fields, including `from_env` values and `<agent:name>` pane placeholders.
-- Keep named agent profiles stable across repeated launches, so profile commands and arguments are not mutated between runs.
-- Preserve the current tmux focus when merging a worktree from an inactive window.
-- Place new tmux windows beside the current window for more predictable navigation.
+- Add structured [named agent profiles](https://workmux.dev/guide/agents#named-agents) with separate `type`, `command`, `args`, and `env` fields, including `from_env` values and `<agent:name>` pane placeholders.
+- Fix: Keep named agent profiles stable across repeated launches, so profile commands and arguments are not mutated between runs.
+- Fix: Preserve the current tmux focus when merging a worktree from an inactive window.
+- UX: Place new tmux windows beside the current window for more predictable navigation.
 
 ## v0.1.213 (2026-06-12)
 
 - Add first-party Oh My Pi (`omp`) support for prompt injection, status setup with waiting detection, skills, and sandbox credential mounts. ([#177](https://github.com/raine/workmux/pull/177))
 - Fix dashboard paste handling so pasted input is processed reliably. ([#178](https://github.com/raine/workmux/issues/178))
-- Refresh the sidebar immediately after removing a worktree.
+- UX: Refresh the sidebar immediately after removing a worktree.
 
 ## v0.1.212 (2026-06-06)
 
@@ -453,32 +463,32 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.211 (2026-05-22)
 
-- Respect each repository's configured base branch when adding worktrees from the dashboard.
-- Keep dashboard worktree creation and PR checkout actions tied to the selected repository instead of the shell's current repository.
+- Fix: Respect each repository's configured base branch when adding worktrees from the dashboard.
+- Fix: Keep dashboard worktree creation and PR checkout actions tied to the selected repository instead of the shell's current repository.
 
 ## v0.1.210 (2026-05-22)
 
 - Add custom tmux target names for `workmux add` and `workmux open`, so the worktree directory can stay separate from the window or session name. ([#139](https://github.com/raine/workmux/issues/139))
 - Allow window-mode worktrees to open inside a chosen parent tmux session.
-- Keep sidebar PR status tied to the correct branch, avoiding stale PR details on base branches.
+- Fix: Keep sidebar PR status tied to the correct branch, avoiding stale PR details on base branches.
 
 ## v0.1.209 (2026-05-19)
 
 - Allow `workmux merge` to keep the worktree, window, and branch by default with `merge_keep: true`.
 - Add `workmux merge --cleanup` to clean up for a single merge when keep-by-default behavior is enabled.
-- Document how worktree dispatch should handle tasks that target another project.
+- UX: Document how worktree dispatch should handle tasks that target another project.
 
 ## v0.1.208 (2026-05-15)
 
 - Add a horizontal top bar option for the sidebar, with configurable height and chip width
 - Allow showing PR status and checks in sidebar
-- Make sidebar template errors visible in sidebar
-- Improve sidebar loading, sync, spacing, and horizontal layout behavior
+- UX: Make sidebar template errors visible in sidebar
+- UX: Improve sidebar loading, sync, spacing, and horizontal layout behavior
 
 ## v0.1.207 (2026-05-13)
 
 - Fix `workmux merge` falling back incorrectly when a saved base branch only exists as a remote ref
-- Update the Pi sandbox image to install the current Pi agent package ([#165](https://github.com/raine/workmux/pull/165))
+- Fix: Update the Pi sandbox image to install the current Pi agent package ([#165](https://github.com/raine/workmux/pull/165))
 
 ## v0.1.206 (2026-05-12)
 
@@ -487,34 +497,34 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.205 (2026-05-12)
 
-- Update Codex setup to enable hooks with the current `hooks` feature flag. ([#164](https://github.com/raine/workmux/issues/164))
+- Fix: Update Codex setup to enable hooks with the current `hooks` feature flag. ([#164](https://github.com/raine/workmux/issues/164))
 
 ## v0.1.204 (2026-05-09)
 
-- Allow `workmux add --pr` to reuse an existing local PR branch when it does not already have a worktree. ([#163](https://github.com/raine/workmux/issues/163))
+- UX: Allow `workmux add --pr` to reuse an existing local PR branch when it does not already have a worktree. ([#163](https://github.com/raine/workmux/issues/163))
 
 ## v0.1.203 (2026-05-08)
 
-- Stop treating ordinary single-worktree prompts as MiniJinja templates
-- Let stale worktree directories be removed even when their Git metadata is missing, while still protecting branches unless `--keep-branch` is used.
+- Fix: Stop treating ordinary single-worktree prompts as MiniJinja templates
+- UX: Let stale worktree directories be removed even when their Git metadata is missing, while still protecting branches unless `--keep-branch` is used.
 
 ## v0.1.202 (2026-05-05)
 
-- Respect `CLAUDE_CONFIG_DIR` when installing Claude Code hooks, so custom Claude config locations are honored.
+- Fix: Respect `CLAUDE_CONFIG_DIR` when installing Claude Code hooks, so custom Claude config locations are honored.
 
 ## v0.1.201 (2026-05-05)
 
-- Keep sidebar layouts in sync immediately after terminal resizes, including inactive tmux windows.
+- Fix: Keep sidebar layouts in sync immediately after terminal resizes, including inactive tmux windows.
 - Fix prompt delivery for custom named agents that specify an agent type.
 
 ## v0.1.200 (2026-05-04)
 
 - Allow `workmux close` to work from inside sandboxed worktrees by forwarding the request to the host. ([#158](https://github.com/raine/workmux/issues/158))
-- Use the host workmux configuration for sandbox-launched host commands, avoiding accidental reuse of sandbox guest settings.
+- Fix: Use the host workmux configuration for sandbox-launched host commands, avoiding accidental reuse of sandbox guest settings.
 
 ## v0.1.199 (2026-05-04)
 
-- Keep sidebar widths synchronized across tmux windows after manual resizing and terminal resize events.
+- Fix: Keep sidebar widths synchronized across tmux windows after manual resizing and terminal resize events.
 
 ## v0.1.198 (2026-05-02)
 
@@ -522,7 +532,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.197 (2026-05-02)
 
-- Respect `CLAUDE_CONFIG_DIR` when installing skills, so custom Claude config locations are honored. ([#157](https://github.com/raine/workmux/issues/157))
+- Fix: Respect `CLAUDE_CONFIG_DIR` when installing skills, so custom Claude config locations are honored. ([#157](https://github.com/raine/workmux/issues/157))
 
 ## v0.1.196 (2026-05-01)
 
@@ -530,23 +540,23 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.195 (2026-05-01)
 
-- Keep compact sidebar status icons aligned even when icons have different widths
+- Fix: Keep compact sidebar status icons aligned even when icons have different widths
 
 ## v0.1.194 (2026-05-01)
 
-- Add `WORKMUX_DISABLE_SET_WINDOW_STATUS=1` to let nested agents skip status hook updates when launched from inside another agent pane. See the [status tracking guide](https://workmux.raine.dev/guide/status-tracking)
+- Add `WORKMUX_DISABLE_SET_WINDOW_STATUS=1` to let nested agents skip status hook updates when launched from inside another agent pane. See the [status tracking guide](https://workmux.dev/guide/status-tracking)
 
 ## v0.1.191 (2026-04-30)
 
 - Allow sandbox deny-mode domains to opt in to trusted private network destinations, such as VPN-hosted package mirrors, while keeping loopback and link-local addresses blocked
-- Keep sidebar tile rows stable when template fields are empty, so optional details no longer collapse and shift tile heights unexpectedly
+- Fix: Keep sidebar tile rows stable when template fields are empty, so optional details no longer collapse and shift tile heights unexpectedly
 
 ## v0.1.190 (2026-04-29)
 
-- Add sidebar template customization, letting you choose which labels, git stats, timers, and status details appear in compact and tile layouts. See the [sidebar customization guide](https://workmux.raine.dev/guide/sidebar/customization)
+- Add sidebar template customization, letting you choose which labels, git stats, timers, and status details appear in compact and tile layouts. See the [sidebar customization guide](https://workmux.dev/guide/sidebar/customization)
 - Add customizable per-agent sidebar icons and colors, with built-in defaults for Claude, Codex, OpenCode, Gemini, Pi, Kiro, Vibe, and Copilot
 - Support tmux-style colors and attributes inside sidebar templates
-- Improve sidebar rendering for git stats, elapsed time, row highlighting, and synchronized width across windows
+- UX: Improve sidebar rendering for git stats, elapsed time, row highlighting, and synchronized width across windows
 
 ## v0.1.189 (2026-04-27)
 
@@ -566,7 +576,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Show a progress overlay when sweeping multiple worktrees in the dashboard,
   instead of freezing silently for several seconds
-- Truncate long worktree names in the dashboard so they no longer overflow the
+- UX: Truncate long worktree names in the dashboard so they no longer overflow the
   panel
 - Fix panics caused by Unicode characters in worktree names being truncated at
   non-character boundaries
@@ -585,9 +595,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   from sandboxed containers by shadowing them with `/dev/null` (e.g. `.env`,
   `.env.local`). Configurable only in your global config for security
   ([#134](https://github.com/raine/workmux/pull/134))
-- Restrict `excluded_files` to global config only, preventing malicious projects
+- Breaking: Restrict `excluded_files` to global config only, preventing malicious projects
   from disabling file masking via their own `.workmux.yaml`
-- Skip `excluded_files` gracefully with a clear warning on runtimes that do not
+- UX: Skip `excluded_files` gracefully with a clear warning on runtimes that do not
   support file-level bind mounts (Apple Container)
 - Fix sandbox relative gitdir path resolution and improve warning messages for
   directory entries
@@ -641,7 +651,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.179 (2026-04-09)
 
-- Respect the XDG Base Directory Specification for config, cache, and state
+- Breaking: Respect the XDG Base Directory Specification for config, cache, and state
   paths. Custom `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` values
   are now honored, with automatic fallback to defaults. Existing setups continue
   to work without changes. ([#126](https://github.com/raine/workmux/issues/126))
@@ -663,7 +673,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Fix pi agent exiting immediately after prompt injection instead of staying in
   interactive mode ([#118](https://github.com/raine/workmux/issues/118)
-- Clean up worktree-not-found error messages
+- UX: Clean up worktree-not-found error messages
 
 ## v0.1.175 (2026-04-03)
 
@@ -687,7 +697,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.172 (2026-04-02)
 
-- Automatically pull sandbox images when missing or stale, removing the need for
+- UX: Automatically pull sandbox images when missing or stale, removing the need for
   manual `workmux sandbox pull`
   ([#115](https://github.com/raine/workmux/issues/115))
 - Fix `sandbox.host_commands` shims not available in agents that use login
@@ -700,11 +710,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   stop updating
 - Fix sidebar width being too narrow in some windows when the sidebar was first
   opened from a smaller terminal
-- Make project name more readable in sidebar tiles
+- UX: Make project name more readable in sidebar tiles
 
 ## v0.1.170 (2026-04-01)
 
-- Fail early with a clear error when the sandbox image is missing from the
+- UX: Fail early with a clear error when the sandbox image is missing from the
   selected runtime's store ([#111](https://github.com/raine/workmux/issues/111))
 
 ## v0.1.169 (2026-04-01)
@@ -734,7 +744,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   changes ([#107](https://github.com/raine/workmux/issues/107))
 - Fix Codex binary not found in Apple Container sandbox
   ([#106](https://github.com/raine/workmux/issues/106))
-- Improve worktree name detection in the dashboard and sidebar, especially when
+- UX: Improve worktree name detection in the dashboard and sidebar, especially when
   running in generic tmux sessions
   ([#103](https://github.com/raine/workmux/pull/103))
 
@@ -753,7 +763,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Add `sandbox.env` config option for setting explicit environment variables
   inside sandboxed agents, with values redacted in debug logs
   ([#100](https://github.com/raine/workmux/pull/100))
-- Detect interrupted agents via pane inactivity and show interruption status in
+- UX: Detect interrupted agents via pane inactivity and show interruption status in
   the sidebar and dashboard with elapsed time since interruption
 - Fix sidebar incorrectly showing all agents as done when only one finishes
 
@@ -768,27 +778,27 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Add `sidebar`: an always-visible agent status panel in a tmux side pane,
   showing live status, git diff stats, and elapsed timers for all agents across
   windows. Toggle with `workmux sidebar`. See the
-  [sidebar guide](https://workmux.raine.dev/guide/sidebar/)
+  [sidebar guide](https://workmux.dev/guide/sidebar/)
   - Two layout modes: tiles (default) and compact, switchable with `v` or via
     `sidebar.layout` in config
   - Click, scroll, or use keyboard navigation (`j`/`k`/`Enter`) to jump between
     agents
   - Width adapts to terminal size and reflows on resize
-- Show a rebase indicator icon when a git rebase is in progress
+- UX: Show a rebase indicator icon when a git rebase is in progress
 
 ## v0.1.157 (2026-03-28)
 
 - Fix `last-done` sometimes navigating to the wrong agent when multiple agents
   finish close together
-- `last-done` cycling is now reliable across repeated invocations, persisting
+- Fix: `last-done` cycling is now reliable across repeated invocations, persisting
   state so the cycle survives even if the sorted order shifts
 
 ## v0.1.156 (2026-03-27)
 
-- Dashboard now uses configured `main_branch` for diff base detection
+- Fix: Dashboard now uses configured `main_branch` for diff base detection
   ([#97](https://github.com/raine/workmux/issues/97))
 - Fix PR status fetch being delayed 30 seconds on dashboard open
-- `workmux last-done` now includes waiting agents
+- UX: `workmux last-done` now includes waiting agents
 
 ## v0.1.154 (2026-03-27)
 
@@ -800,7 +810,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Fix incorrect guest home directory with Lima 2.1.0, which changed the path
   from `.linux` to `.guest` ([#92](https://github.com/raine/workmux/issues/92))
 - Dashboard: add `r` hotkey to remove worktree from the agents tab
-- Dashboard: show spinner on PR column header while fetching
+- UX: Dashboard: show spinner on PR column header while fetching
 - Fix Nix build by adding missing output hashes for crossterm git dependency
 
 ## v0.1.152 (2026-03-25)
@@ -811,11 +821,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Dashboard: add worktree creation modal with fzf-style branch picker, fuzzy
   search, tab completion, and the ability to checkout open pull requests
   directly via Ctrl+p or by typing a PR number
-- Dashboard: dim background behind modal overlays for better visual focus
+- UX: Dashboard: dim background behind modal overlays for better visual focus
 
 ## v0.1.151 (2026-03-25)
 
-- Dashboard: fix immediate exit on startup caused by a stray Enter keypress from
+- Fix: Dashboard: fix immediate exit on startup caused by a stray Enter keypress from
   launching the command being processed before the UI was ready
 
 ## v0.1.150 (2026-03-25)
@@ -827,7 +837,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.149 (2026-03-24)
 
-- Dashboard: show elapsed time for pending PR checks and the name of failing
+- UX: Dashboard: show elapsed time for pending PR checks and the name of failing
   checks across all views (PR column, agents pane, worktree info panel)
 
 ## v0.1.148 (2026-03-24)
@@ -836,7 +846,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   from either the worktrees or agents tab
 - Dashboard: open PR checks page in browser with `O` (shift-o) to quickly see
   why checks failed
-- Dashboard: agent task descriptions now stay up to date in real time instead of
+- UX: Dashboard: agent task descriptions now stay up to date in real time instead of
   showing the initial title
 - Fix a crash caused by mouse coordinate overflow when using tmux 3.6a
 
@@ -853,7 +863,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Dashboard: add age column to worktree table
 - Dashboard: add close mux window action (`c`) to stop an agent while keeping
   the worktree
-- Dashboard: redesigned worktree preview with info panel and styled git log
+- UX: Dashboard: redesigned worktree preview with info panel and styled git log
 
 ## v0.1.145 (2026-03-23)
 
@@ -887,7 +897,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Add `--prompt-file-only` flag for editors with embedded agents (e.g., neovim
   with an agent plugin) that consume prompts from the filesystem instead of pane
   injection ([#82](https://github.com/raine/workmux/issues/82))
-- `workmux open` now accepts multiple worktree names in a single command (e.g.,
+- UX: `workmux open` now accepts multiple worktree names in a single command (e.g.,
   `workmux open foo bar`)
 
 ## v0.1.140 (2026-03-17)
@@ -898,10 +908,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ## v0.1.139 (2026-03-16)
 
 - Add configurable theme for dashboard
-- Auto-detect dark/light mode from terminal background
+- UX: Auto-detect dark/light mode from terminal background
 - Press `T` (shift+t) in the dashboard to cycle through color schemes; selection
   persists to config
-- Redesign dashboard footer
+- UX: Redesign dashboard footer
 
 ## v0.1.138 (2026-03-14)
 
@@ -929,11 +939,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.134 (2026-03-09)
 
-- Apple Container sandboxes now default to 16 GB memory limit, preventing OOM
+- UX: Apple Container sandboxes now default to 16 GB memory limit, preventing OOM
   kills during heavy workloads. Memory and CPU limits are configurable via
   `container.memory` and `container.cpus` in your config
   ([#77](https://github.com/raine/workmux/issues/77))
-- Fork PRs checked out with `--pr` now automatically prefix the local branch
+- UX: Fork PRs checked out with `--pr` now automatically prefix the local branch
   name with the fork owner (e.g., `forkowner-main`), preventing conflicts when
   the fork's branch name matches an existing local branch
 
@@ -942,7 +952,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Fixed OpenCode plugin's waiting (💬) status not triggering when the agent
   requests permission or asks a multiple-choice question, caused by event name
   changes in OpenCode v2 ([#75](https://github.com/raine/workmux/pull/75))
-- Added logging for branch name auto-generation
+- UX: Added logging for branch name auto-generation
 
 ## v0.1.132 (2026-03-06)
 
@@ -959,7 +969,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Dashboard now has a scope filter (toggle with `F`) to show only agents in the
   current session or all agents across sessions
   ([#74](https://github.com/raine/workmux/issues/74))
-- `workmux setup` now offers to install bundled skills (merge, rebase, worktree,
+- UX: `workmux setup` now offers to install bundled skills (merge, rebase, worktree,
   coordinator) during the first-run wizard
 - Agents can now communicate across projects using the coordinator skill
 - Fixed session mode not being detected correctly when reopening a worktree
@@ -967,21 +977,21 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.130 (2026-03-04)
 
-- Window names are now automatically suffixed with the project directory name
+- Breaking: Window names are now automatically suffixed with the project directory name
   when a name collision is detected across different repositories, avoiding
   errors when multiple repos use the same worktree name. Explicit names set via
   `--name` are not modified ([#70](https://github.com/raine/workmux/issue/70))
 
 ## v0.1.129 (2026-03-02)
 
-- Branch name generation now automatically uses your configured AI agent
+- UX: Branch name generation now automatically uses your configured AI agent
   (Claude, Gemini, Codex, or OpenCode) instead of requiring the `llm` CLI to be
   installed ([#68](https://github.com/raine/workmux/pull/68))
   - **Note**: This is a breaking change. If you were previously using `llm` to
     generate branch names. Add `auto_name.command: 'llm'` to your global config.
 - New `auto_name.command` config option lets you specify a custom command for
   branch name generation
-- `workmux rm` no longer fails with "cannot delete branch used by worktree" when
+- Fix: `workmux rm` no longer fails with "cannot delete branch used by worktree" when
   a previous `workmux add` was interrupted mid-creation
 - Fixed zsh completions not working when installed via fpath autoloading
   ([#65](https://github.com/raine/workmux/pull/65))
@@ -993,7 +1003,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.128 (2026-03-01)
 
-- Dashboard now renders colored status icons correctly instead of showing raw
+- Fix: Dashboard now renders colored status icons correctly instead of showing raw
   tmux color codes as literal text
   ([#66](https://github.com/raine/workmux/issues/66))
 
@@ -1011,7 +1021,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   releases. Downloads the latest version, verifies checksums, and replaces the
   binary in place. Homebrew-managed installs are detected and directed to use
   `brew upgrade` instead
-- workmux now automatically checks for updates in the background and shows a
+- UX: workmux now automatically checks for updates in the background and shows a
   notification when a newer version is available. Checks happen at most once per
   day during `workmux add`. Disable with `auto_update_check: false` in config or
   by setting the `WORKMUX_NO_UPDATE_CHECK` environment variable
@@ -1031,7 +1041,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added experimental Zellij backend support. Zellij is auto-detected when
   running inside a Zellij session. Requires Zellij built from source (uses
   unreleased features). See the
-  [Zellij guide](https://workmux.raine.dev/guide/zellij) for details and known
+  [Zellij guide](https://workmux.dev/guide/zellij) for details and known
   limitations (contributed by [@Infonautica](https://github.com/Infonautica))
 
 ## v0.1.123 (2026-02-24)
@@ -1042,13 +1052,13 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.122 (2026-02-23)
 
-- Fork branch references (e.g., `someuser:feature`) now prefix the local branch
+- UX: Fork branch references (e.g., `someuser:feature`) now prefix the local branch
   name with the fork owner (`someuser-feature`), preventing conflicts with
   existing branches like `main`
 
 ## v0.1.120 (2026-02-21)
 
-- Built-in agents (`claude`, `gemini`, `codex`, `opencode`) are now
+- UX: Built-in agents (`claude`, `gemini`, `codex`, `opencode`) are now
   auto-detected in pane commands, so prompt injection works without the
   `<agent>` placeholder or a matching `agent` config. Just use the agent name
   directly as the pane command (e.g., `command: "codex --yolo"`) and prompts are
@@ -1088,7 +1098,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.114 (2026-02-15)
 
-- Sandbox: Host git identity (user.name, user.email) is now automatically
+- UX: Sandbox: Host git identity (user.name, user.email) is now automatically
   available inside sandbox environments, so git commits from sandboxed agents
   use the correct author
 
@@ -1097,7 +1107,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added sandbox support for running agents in isolated environments. Two
   backends: containers (Docker/Podman) for ephemeral sessions, and Lima VMs for
   persistent machines with built-in Nix/Devbox toolchain support. See the
-  [sandbox guide](https://workmux.raine.dev/guide/sandbox/) for setup.
+  [sandbox guide](https://workmux.dev/guide/sandbox/) for setup.
 
 ## v0.1.111 (2026-02-12)
 
@@ -1110,7 +1120,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Added kitty as an alternative terminal backend -- detected automatically when
   running inside kitty
-- Improved window cleanup handling for non-tmux backends
+- UX: Improved window cleanup handling for non-tmux backends
 
 ## v0.1.109 (2026-02-09)
 
@@ -1128,16 +1138,16 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.108 (2026-02-07)
 
-- The `list` command now shows an AGENT column displaying the status of agents
+- UX: The `list` command now shows an AGENT column displaying the status of agents
   running in each worktree (working, waiting, done icons)
 - Added positional arguments to `list` for filtering by worktree handle or
   branch name
-- When piping output, agent status icons are replaced with text labels for
+- UX: When piping output, agent status icons are replaced with text labels for
   compatibility with scripts
 
 ## v0.1.107 (2026-02-04)
 
-- Shell autocompletion now suggests worktree names for the `close` command
+- UX: Shell autocompletion now suggests worktree names for the `close` command
   (bash, zsh, fish) ([#47](https://github.com/raine/workmux/issues/47))
 
 ## v0.1.106 (2026-02-04)
@@ -1148,7 +1158,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.105 (2026-01-31)
 
-- Nerdfont setup now handles read-only config files gracefully (e.g., when
+- Fix: Nerdfont setup now handles read-only config files gracefully (e.g., when
   symlinked to a Nix store), showing a helpful message instead of failing
 
 ## v0.1.104 (2026-01-31)
@@ -1158,25 +1168,25 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.103 (2026-01-30)
 
-- Dashboard now shows PR status column with number and state icon (open, merged,
+- UX: Dashboard now shows PR status column with number and state icon (open, merged,
   closed, draft) for each agent's worktree
-- Dashboard displays CI/CD check status alongside PRs with pass/fail/pending
+- UX: Dashboard displays CI/CD check status alongside PRs with pass/fail/pending
   icons. Enable `dashboard.show_check_counts` to show pass/total counts
 - Added last-agent toggle (Tab key in dashboard, `workmux last-agent` CLI) to
   quickly switch between current and previous agent
 - Added `auto_name.background` config option to always run `--auto-name` agents
   in background mode
-- Improved dashboard startup performance
+- Perf: Improved dashboard startup performance
 
 ## v0.1.102 (2026-01-29)
 
-- Moved internal state management from tmux-specific mechanisms to
+- UX: Moved internal state management from tmux-specific mechanisms to
   filesystem-based JSON storage, laying the groundwork for multi-backend support
 - Added experimental WezTerm backend support. workmux auto-detects the backend
   from environment variables. See the
-  [WezTerm guide](https://workmux.raine.dev/guide/wezterm) for setup
+  [WezTerm guide](https://workmux.dev/guide/wezterm) for setup
   instructions. (contributed by [@JeremyBYU](https://github.com/JeremyBYU))
-- New worktrees now automatically get a symlink to a gitignored
+- UX: New worktrees now automatically get a symlink to a gitignored
   `CLAUDE.local.md` from your main worktree, so your local Claude Code
   instructions are available without manual setup
 
@@ -1197,14 +1207,14 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.99 (2026-01-24)
 
-- Dashboard: Detect and clear working agents that have stalled, for example due
+- UX: Dashboard: Detect and clear working agents that have stalled, for example due
   to being interrupted
 - Fixed `last-done` command intermittently failing when switching to recently
   completed agents
 
 ## v0.1.98 (2026-01-23)
 
-- Tmux window names now use a nerdfont git branch icon as the default prefix
+- UX: Tmux window names now use a nerdfont git branch icon as the default prefix
   when nerdfonts are available, replacing the previous "wm-" prefix. This can be
   overridden with `window_prefix`
 - Fixed cleanup commands outputting noise to the terminal after merging or
@@ -1220,7 +1230,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.96 (2026-01-20)
 
-- Reduced crate download size by excluding unnecessary files from the published
+- Perf: Reduced crate download size by excluding unnecessary files from the published
   package
 
 ## v0.1.95 (2026-01-20)
@@ -1239,15 +1249,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.93 (2026-01-15)
 
-- Added Nix flake (https://workmux.raine.dev/guide/nix)
+- Added Nix flake (https://workmux.dev/guide/nix)
 - Fixed bash completion not passing arguments to the fallback completion
   function
 
 ## v0.1.92 (2026-01-14)
 
-- Duplicate windows created with `open --new` are now placed immediately after
+- UX: Duplicate windows created with `open --new` are now placed immediately after
   the original window instead of at the end of the window list
-- `open --new` can now be run without a name argument when inside a worktree,
+- UX: `open --new` can now be run without a name argument when inside a worktree,
   inferring the current worktree automatically
 
 ## v0.1.91 (2026-01-14)
@@ -1262,7 +1272,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.88 (2026-01-13)
 
-- The `merge` command now works when the target branch is checked out in a
+- UX: The `merge` command now works when the target branch is checked out in a
   linked worktree ([#29](https://github.com/raine/workmux/issues/29))
 
 ## v0.1.87 (2026-01-13)
@@ -1275,45 +1285,45 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.86 (2026-01-11)
 
-- Dashboard: Preview pane size is now configurable via config file, CLI flag
+- UX: Dashboard: Preview pane size is now configurable via config file, CLI flag
   (`--preview-size`/`-P`), or interactively with `+`/`-` keys
 
 ## v0.1.85 (2026-01-11)
 
-- Dashboard: Selection now stays on the same agent when the list reorders due to
+- UX: Dashboard: Selection now stays on the same agent when the list reorders due to
   status changes or sorting
 
 ## v0.1.84 (2026-01-11)
 
-- Dashboard: Improved file list layout with full paths and right-aligned stats
+- UX: Dashboard: Improved file list layout with full paths and right-aligned stats
 
 ## v0.1.83 (2026-01-10)
 
 - Dashboard: Added file list sidebar to diff and patch views
 - Dashboard: Added Ctrl+D/U scrolling in patch mode
-- Dashboard: Improved diff coloring fallback when delta is not available
+- UX: Dashboard: Improved diff coloring fallback when delta is not available
 
 ## v0.1.81 (2026-01-10)
 
 - Dashboard: Added help screen accessible with `?` key, showing keybindings for
   each view (dashboard, diff, patch mode)
 - Dashboard: Added mouse scroll support in diff views
-- Dashboard: The active worktree is now highlighted with a subtle background and
+- UX: Dashboard: The active worktree is now highlighted with a subtle background and
   white text for easier identification
-- Dashboard: Git column header shows a spinner while refreshing
+- UX: Dashboard: Git column header shows a spinner while refreshing
 - Fixed agent status not showing "working" when launching with a prompt (works
   around
   [Claude Code v2.0.77 regression](https://github.com/anthropics/claude-code/issues/17284))
 
 ## v0.1.80 (2026-01-09)
 
-- Dashboard: Commit and merge actions are now configurable via
+- UX: Dashboard: Commit and merge actions are now configurable via
   `dashboard.commit` and `dashboard.merge` in your config file
 
 ## v0.1.79 (2026-01-09)
 
-- Dashboard: Fixed patch mode showing already-staged hunks
-- Dashboard: Uncommitted changes are now shown for the main worktree
+- Fix: Dashboard: Fixed patch mode showing already-staged hunks
+- UX: Dashboard: Uncommitted changes are now shown for the main worktree
 
 ## v0.1.78 (2026-01-08)
 
@@ -1323,29 +1333,29 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Dashboard: Added hunk commenting for review workflows
 - Dashboard: Added diff browsing with `d` to view uncommitted changes and `D`
   for committed changes (toggle between WIP/review views with Tab)
-- Dashboard: Diffs now use delta for syntax highlighting when available, with
+- UX: Dashboard: Diffs now use delta for syntax highlighting when available, with
   fallback coloring
 - Dashboard: Added filter to hide stale agents with `f` key (persists across
   sessions)
 - Dashboard: Added `c` to commit and `m` to merge directly from the main view
-- Dashboard: Working agents now show an animated spinner
+- UX: Dashboard: Working agents now show an animated spinner
 
 ## v0.1.77 (2026-01-07)
 
 - Dashboard: Added git status column showing diff stats (+/- lines), conflict
   indicator, dirty state, and ahead/behind counts for each worktree
-- Dashboard: Non-default base branches (not main/master) are now displayed in
+- UX: Dashboard: Non-default base branches (not main/master) are now displayed in
   the git column
 - Added `--notification` flag to `merge` command to show a system notification
   on successful merge
 
 ## v0.1.76 (2026-01-07)
 
-- Dashboard: Renamed "Agent" column to "Worktree" for clarity; non-workmux
+- UX: Dashboard: Renamed "Agent" column to "Worktree" for clarity; non-workmux
   agents now display "main" instead of their window name
-- The `merge` command now auto-detects the base branch from when the worktree
+- UX: The `merge` command now auto-detects the base branch from when the worktree
   was created, instead of always defaulting to main
-- Window status icons for "waiting" and "done" again auto-clear when returning
+- Fix: Window status icons for "waiting" and "done" again auto-clear when returning
   to the pane
 
 ## v0.1.75 (2026-01-06)
@@ -1355,13 +1365,13 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.74 (2026-01-06)
 
-- Dashboard: Stale agents (inactive for over an hour) now show a timer icon
+- UX: Dashboard: Stale agents (inactive for over an hour) now show a timer icon
   instead of "stale"
-- Dashboard: Preview updates are now faster in input mode
+- Perf: Dashboard: Preview updates are now faster in input mode
 
 ## v0.1.72 (2026-01-06)
 
-- Renamed "status popup" to "dashboard"
+- Breaking: Renamed "status popup" to "dashboard"
 
 ## v0.1.71 (2026-01-06)
 
@@ -1370,8 +1380,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added input mode: press `i` to send keystrokes directly to the selected
   agent's pane without switching windows, press Escape to exit
 - Added preview scrolling with Ctrl+U/D
-- Agents are now automatically removed from the status list when they exit
-- Priority sorting now uses elapsed time as a tiebreaker
+- UX: Agents are now automatically removed from the status list when they exit
+- UX: Priority sorting now uses elapsed time as a tiebreaker
 
 ## v0.1.70 (2026-01-06)
 
@@ -1385,7 +1395,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added `status` command: a TUI dashboard for monitoring all active agents
   across tmux sessions, with quick-jump keys (1-9), peek mode, and keyboard
   navigation
-- The "done" (✅) status no longer gets replaced by "waiting" (💬) when Claude
+- Fix: The "done" (✅) status no longer gets replaced by "waiting" (💬) when Claude
   sends idle prompts, so completed sessions stay marked as done
 
 ## v0.1.68 (2026-01-05)
@@ -1394,36 +1404,36 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.67 (2026-01-04)
 
-- Improved compatibility with non-POSIX shells like nushell
-- Commands for starting agent with a prompt no longer pollute shell history
+- UX: Improved compatibility with non-POSIX shells like nushell
+- UX: Commands for starting agent with a prompt no longer pollute shell history
 
 ## v0.1.66 (2026-01-03)
 
 - Added `--no-verify` (`-n`) flag to `merge` command to skip pre-merge hooks
-- The `merge` command now works when run from subdirectories within a worktree
+- UX: The `merge` command now works when run from subdirectories within a worktree
 
 ## v0.1.65 (2026-01-02)
 
-- The `open` command now switches to an existing window by default instead of
+- Breaking: The `open` command now switches to an existing window by default instead of
   erroring when a window already exists
 - Added `--new` (`-n`) flag to `open` command to force opening a duplicate
   window (creates suffix like `-2`, `-3`)
-- The `open` command now supports prompts via `-p`, `-P`, and `-e` flags,
+- UX: The `open` command now supports prompts via `-p`, `-P`, and `-e` flags,
   matching the `add` command
 
 ## v0.1.63 (2026-01-02)
 
-- Linux binaries now use musl for better compatibility across different Linux
+- UX: Linux binaries now use musl for better compatibility across different Linux
   distributions
 
 ## v0.1.62 (2025-12-29)
 
-- The `merge` command with `--keep` no longer requires a clean worktree, since
+- UX: The `merge` command with `--keep` no longer requires a clean worktree, since
   the worktree won't be deleted anyway
 
 ## v0.1.61 (2025-12-27)
 
-- Log files are now stored in the XDG state directory
+- Breaking: Log files are now stored in the XDG state directory
   (`~/.local/state/workmux/`)
 
 ## v0.1.60 (2025-12-26)
@@ -1438,7 +1448,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added `pre_remove` hook that runs before worktree removal, with environment
   variables (`WM_HANDLE`, `WM_WORKTREE_PATH`, `WM_PROJECT_ROOT`) for backup or
   cleanup workflows
-- The `post_create` hook now receives `WM_WORKTREE_PATH` and `WM_PROJECT_ROOT`
+- UX: The `post_create` hook now receives `WM_WORKTREE_PATH` and `WM_PROJECT_ROOT`
   environment variables, matching the other hooks
 
 ## v0.1.57 (2025-12-23)
@@ -1448,12 +1458,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.55 (2025-12-21)
 
-- The `merge` command now allows untracked files in the target worktree, only
+- UX: The `merge` command now allows untracked files in the target worktree, only
   blocking when there are uncommitted changes to tracked files
 
 ## v0.1.54 (2025-12-17)
 
-- The `remove` command now accepts multiple worktree names, allowing you to
+- UX: The `remove` command now accepts multiple worktree names, allowing you to
   clean up several worktrees in a single command (e.g.,
   `workmux rm feature-a feature-b`)
 
@@ -1462,7 +1472,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added JSON lines support for stdin input: pipe JSON objects to `workmux add`
   and each key automatically becomes a template variable, making it easy to use
   structured data from tools like `jq` in prompts and branch names
-- Template errors now show which variables are missing and list available ones,
+- UX: Template errors now show which variables are missing and list available ones,
   helping catch typos in branch name templates or prompts before worktrees are
   created
 - Fixed "directory already exists" errors when creating worktrees after a
@@ -1497,12 +1507,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added `--all` flag to `remove` command to remove all worktrees at once (except
   the main worktree), with safety checks for uncommitted changes and unmerged
   commits
-- Now shows an error when using `-p`/`--prompt` without an agent pane
+- UX: Now shows an error when using `-p`/`--prompt` without an agent pane
   configured, instead of silently ignoring the prompt
 
 ## v0.1.48 (2025-12-10)
 
-- Removed automatic `node_modules` symlink default for Node.js projects
+- Breaking: Removed automatic `node_modules` symlink default for Node.js projects
 
 ## v0.1.47 (2025-12-09)
 
@@ -1517,19 +1527,19 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.45 (2025-12-08)
 
-- Shell completions now suggest proper values for `--base`, `--into`, and
+- UX: Shell completions now suggest proper values for `--base`, `--into`, and
   `--prompt-file` flags (bash, zsh)
 - Fixed an error with the `pre_delete` hook when removing worktrees that were
   manually deleted from the filesystem
 
 ## v0.1.44 (2025-12-06)
 
-- In agent status tracking, the "waiting" (💬) status icon now auto-clears
+- UX: In agent status tracking, the "waiting" (💬) status icon now auto-clears
   window is focused, matching the behavior of the "done" (✅️) status.
 
 ## v0.1.43 (2025-12-05)
 
-- Improved the default config template generated by `workmux init`
+- UX: Improved the default config template generated by `workmux init`
 
 ## v0.1.42 (2025-12-05)
 
@@ -1537,7 +1547,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.41 (2025-12-04)
 
-- Commands `open`, `path`, `remove`, and `merge` now accept worktree names (the
+- UX: Commands `open`, `path`, `remove`, and `merge` now accept worktree names (the
   directory name shown in tmux) in addition to branch names, making it easier to
   work with worktrees when the directory name differs from the branch
 
@@ -1551,7 +1561,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.39 (2025-12-03)
 
-- New worktree windows are now inserted after the last workmux window instead of
+- UX: New worktree windows are now inserted after the last workmux window instead of
   at the end of the window list, keeping your worktree windows grouped together
 
 ## v0.1.38 (2025-12-03)
@@ -1570,7 +1580,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   main (e.g., `workmux merge feature --into develop`)
 - Fixed config loading and file operations when running commands from inside a
   worktree
-- Removed `--delete-remote` flag from `merge` and `remove` commands
+- Breaking: Removed `--delete-remote` flag from `merge` and `remove` commands
 
 ## v0.1.35 (2025-12-01)
 
@@ -1609,15 +1619,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ## v0.1.30 (2025-11-27)
 
 - Added nushell support for pane startup commands
-- Improved reliability of pane command execution across different shells
+- UX: Improved reliability of pane command execution across different shells
 
 ## v0.1.29 (2025-11-26)
 
-- Shell completions now suggest git branch names when using the `add` command
+- UX: Shell completions now suggest git branch names when using the `add` command
 
 ## v0.1.28 (2025-11-26)
 
-- Shell completions now dynamically suggest branch names when pressing TAB for
+- UX: Shell completions now dynamically suggest branch names when pressing TAB for
   `open`, `merge`, and `remove` commands (bash, zsh, fish)
 
 ## v0.1.26 (2025-11-25)
@@ -1626,14 +1636,14 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   worktree
 - Fixed version managers (nvm, pnpm, mise, etc.) being shadowed by stale PATH
   entries when running pane commands
-- Improved list output with cleaner table formatting and relative paths
+- UX: Improved list output with cleaner table formatting and relative paths
 - Fixed duplicate command announcement when running merge workflow
 
 ## v0.1.24 (2025-11-22)
 
 - Fixed "can't find pane: 0" errors when using `pane-base-index 1` in tmux
   configuration
-- Merge conflicts now abort cleanly, keeping your main worktree in a usable
+- UX: Merge conflicts now abort cleanly, keeping your main worktree in a usable
   state with guidance on how to resolve
 
 ## v0.1.23 (2025-11-22)
@@ -1642,7 +1652,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   worktree, useful for verifying the merge before removing the branch
 - Fixed a bug where multi-agent worktrees had incorrect agent configuration for
   worktrees after the first one
-- After closing a worktree (merge or remove), the terminal now navigates back to
+- UX: After closing a worktree (merge or remove), the terminal now navigates back to
   the main worktree instead of staying in the deleted directory
 
 ## v0.1.22 (2025-11-21)
@@ -1658,14 +1668,14 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.21 (2025-11-18)
 
-- Switched templating engine from Tera to MiniJinja (Jinja2-compatible) for
+- Breaking: Switched templating engine from Tera to MiniJinja (Jinja2-compatible) for
   branch names and prompts. Existing templates should work unchanged.
 
 ## v0.1.20 (2025-11-18)
 
 - Fixed prompts starting with a dash (e.g. "- foo") being incorrectly
   interpreted as CLI flags
-- The `rm` command now automatically uses the correct base branch that was used
+- UX: The `rm` command now automatically uses the correct base branch that was used
   when the worktree was created, instead of defaulting to the main branch
 
 ## v0.1.19 (2025-11-17)
@@ -1680,9 +1690,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## v0.1.18 (2025-11-17)
 
-- New branches now default to branching from your currently checked out branch
+- Breaking: New branches now default to branching from your currently checked out branch
   instead of the main branch's remote tracking branch
-- Removed the `--from-current` flag (no longer needed since this is now the
+- Breaking: Removed the `--from-current` flag (no longer needed since this is now the
   default behavior)
 
 ## v0.1.17 (2025-11-17)
@@ -1701,7 +1711,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added configurable agent support with `--agent` (`-a`) flag and config option
 - Added flags to skip setup steps: `--no-hooks`, `--no-file-ops`,
   `--no-pane-cmds`
-- Defaulted to current branch as base for `workmux add` (errors on detached HEAD
+- Breaking: Defaulted to current branch as base for `workmux add` (errors on detached HEAD
   without explicit `--base`)
 - Fixed aliases containing `<agent>` placeholder not resolving correctly
 
@@ -1736,17 +1746,17 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added `pre_delete` hooks that run before worktree deletion, with automatic
   detection of Node.js projects to fast-delete `node_modules` directories in the
   background
-- Pane commands now keep an interactive shell open after completion, and panes
+- UX: Pane commands now keep an interactive shell open after completion, and panes
   can be created without a command (just a shell)
 - Added `target` option for panes to split from any existing pane, not just the
   most recent one
-- Tmux panes now use login shells for consistent environment across all panes
-- The `create` command now displays which base branch was used
-- Improved validation for pane configurations with helpful error messages
+- UX: Tmux panes now use login shells for consistent environment across all panes
+- UX: The `create` command now displays which base branch was used
+- UX: Improved validation for pane configurations with helpful error messages
 
 ## v0.1.10 (2025-11-09)
 
-- Post-create hooks now run before the tmux window opens, so the new window
+- UX: Post-create hooks now run before the tmux window opens, so the new window
   appears ready to use instead of showing setup commands running
 
 ## v0.1.9 (2025-11-09)
@@ -1772,7 +1782,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Added `--from` flag to `add` command to specify which branch, commit, or tag
   to branch from
 - Fixed `rm` command failing when run from within the worktree being removed
-- New worktree branches no longer track a remote upstream by default
+- Breaking: New worktree branches no longer track a remote upstream by default
 
 ## v0.1.3 (2025-11-06)
 
@@ -1780,7 +1790,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   defaults in `~/.config/workmux/config.yaml` that apply across all projects
 - Project configs can inherit from global settings using `<global>` placeholder
   in lists
-- After merging or removing a worktree, automatically switches to the main
+- UX: After merging or removing a worktree, automatically switches to the main
   branch tmux window if it exists
 - Fixed an issue where removing a worktree could fail if the current directory
   was inside that worktree
@@ -1798,9 +1808,9 @@ Initial release.
 - Added `claude prune` command to clean up stale worktree entries from Claude's
   config
 - Added configurable window name prefix via `window_prefix` setting
-- Allowed `remove` command to work without arguments to remove the current
+- UX: Allowed `remove` command to work without arguments to remove the current
   branch
-- Shell completion now works with command aliases
+- UX: Shell completion now works with command aliases
 - Fixed merge command not cleaning up worktrees after merging
 - Fixed worktree deletion issues when running from within the worktree
 - Fixed new branches being incorrectly flagged as unmerged

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://workmux.raine.dev/sitemap-index.xml
+Sitemap: https://workmux.dev/sitemap-index.xml

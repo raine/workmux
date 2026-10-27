@@ -3,14 +3,16 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightLlmsTxt from "starlight-llms-txt";
+import changelogReleases from "./plugins/changelog-releases.mjs";
 
-const site = "https://workmux.raine.dev";
+const site = "https://workmux.dev";
 const socialImage = `${site}/social-preview.png`;
 
 export default defineConfig({
   site,
   trailingSlash: "always",
   build: { format: "directory" },
+  markdown: { remarkPlugins: [changelogReleases] },
   image: {
     layout: "constrained",
     responsiveStyles: true,
@@ -79,10 +81,6 @@ export default defineConfig({
         {
           tag: "script",
           attrs: { src: "/image-zoom.js", defer: true },
-        },
-        {
-          tag: "script",
-          attrs: { src: "/video-player.js", defer: true },
         },
       ],
       sidebar: [

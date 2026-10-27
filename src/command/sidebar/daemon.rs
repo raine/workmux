@@ -51,6 +51,7 @@ struct TmuxState {
     position: Option<String>,
     layout: Option<String>,
     filter: Option<String>,
+    views_enabled: Option<String>,
     sleeping_panes: Option<String>,
     group_by: Option<String>,
     expanded_groups: Option<String>,
@@ -71,6 +72,7 @@ fn query_tmux_state(tmux: &TmuxBackend) -> Result<TmuxState> {
         position: snapshot.position,
         layout: snapshot.layout,
         filter: snapshot.filter,
+        views_enabled: snapshot.views_enabled,
         sleeping_panes: snapshot.sleeping_panes,
         group_by: snapshot.group_by,
         expanded_groups: snapshot.expanded_groups,
@@ -108,6 +110,7 @@ fn snapshots_equal(
         position: _,
         layout_mode: _,
         filter_mode: _,
+        window_views: _,
         active_windows: _,
         active_pane_ids: _,
         window_pane_counts: _,
@@ -128,6 +131,7 @@ fn snapshots_equal(
     left.position == right.position
         && left.layout_mode == right.layout_mode
         && left.filter_mode == right.filter_mode
+        && left.window_views == right.window_views
         && left.active_windows == right.active_windows
         && left.active_pane_ids == right.active_pane_ids
         && left.window_pane_counts == right.window_pane_counts
@@ -2222,6 +2226,7 @@ pub fn run() -> Result<()> {
     let instance_id = mux.instance_id();
     let tmux = TmuxBackend::for_socket(&instance_id);
     let config = Arc::new(Mutex::new(Config::load(None)?));
+    let mut view_projects = super::view::ProjectCache::default();
     // Captured at startup and intentionally not live-reloaded. tmux's
     // @workmux_pane_status holds the icon string itself; build_snapshot
     // compares pane statuses to these exact strings to suppress stale
@@ -2272,6 +2277,7 @@ pub fn run() -> Result<()> {
     let mut publish_pending = false;
     let mut last_client_seen = Instant::now();
     let mut last_agent_list = String::new();
+    let mut last_window_views = HashMap::new();
     let mut last_health_log = Instant::now();
     let mut project_config_cache = ProjectConfigCache::default();
     let mut seen_config_version = 0;
@@ -2435,6 +2441,40 @@ pub fn run() -> Result<()> {
             }
             last_interrupted = output.next_interrupted;
             output.snapshot.config_version = config_version.load(Ordering::Relaxed);
+            {
+                let cfg = config.lock().unwrap();
+                let views = cfg.sidebar.views.as_deref().unwrap_or_default();
+                output.snapshot.window_views = view_projects.window_views(
+                    views,
+                    &output.snapshot.agents,
+                    &tmux_state.live_panes,
+                    &tmux_state.active_pane_ids,
+                    super::view::is_enabled(tmux_state.views_enabled.as_deref()),
+                );
+            }
+            for window in tmux_state.window_pane_counts.keys() {
+                let scope = output.snapshot.window_views.get(window).cloned();
+                if last_window_views.get(window) != Some(&scope) {
+                    let result = match &scope {
+                        Some(scope) => tmux.set_window_option(
+                            window,
+                            super::view::SCOPE_OPTION,
+                            &serde_json::to_string(scope)?,
+                        ),
+                        None => tmux.unset_window_option(window, super::view::SCOPE_OPTION),
+                    };
+                    match result {
+                        Ok(()) => {
+                            last_window_views.insert(window.clone(), scope);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to publish sidebar window view")
+                        }
+                    }
+                }
+            }
+            last_window_views
+                .retain(|window, _| tmux_state.window_pane_counts.contains_key(window));
             server.broadcast(&output.snapshot);
 
             let stale_threshold = output.snapshot.stale_threshold_secs;
@@ -3307,6 +3347,7 @@ mod tests {
 
     fn empty_snapshot() -> super::super::snapshot::SidebarSnapshot {
         super::super::snapshot::SidebarSnapshot {
+            window_views: HashMap::new(),
             position: SidebarPosition::Left,
             layout_mode: SidebarLayoutMode::Tiles,
             filter_mode: SidebarFilterMode::None,
@@ -3368,6 +3409,15 @@ mod tests {
         variants.push(changed);
         let mut changed = original.clone();
         changed.filter_mode = SidebarFilterMode::Session;
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.window_views.insert(
+            "@1".into(),
+            super::super::view::WindowView {
+                name: "Work".into(),
+                pane_ids: HashSet::from(["%1".into()]),
+            },
+        );
         variants.push(changed);
         let mut changed = original.clone();
         changed.active_windows.insert(("s".into(), "@1".into()));
@@ -4753,6 +4803,7 @@ mod tests {
                         position: None,
                         layout: None,
                         filter: None,
+                        views_enabled: None,
                         sleeping_panes: None,
                         group_by: None,
                         expanded_groups: None,

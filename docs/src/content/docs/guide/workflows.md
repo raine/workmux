@@ -61,7 +61,7 @@ See [Skills](/guide/skills/#worktree) for the skill setup.
 
 ### Forking conversations
 
-When you want a new worktree agent to pick up where the current conversation left off, use `--fork` (Claude Code and Codex):
+When you want a new worktree agent to pick up where the current conversation left off, use `--fork` (Claude Code, Codex, and Pi):
 
 ```bash
 workmux add -A --fork
@@ -79,9 +79,11 @@ To fork a specific session (not the most recent), use `--fork=<session-id>` with
 workmux add my-branch --fork=abc123
 ```
 
-Supports Claude Code and Codex conversations. The parent conversation is left as it was, so forking never disturbs the worktree you started from.
+Supports Claude Code, Codex, and Pi conversations. The parent conversation is left as it was, so forking never disturbs the worktree you started from.
 
-Claude Code has no cross-project resume, so workmux copies the conversation files into the new worktree's project directory and launches `claude --resume <session-id>`. Codex forks natively, so workmux resolves which session to fork and launches `codex fork -C <worktree> <session-id>`, which keeps the forked conversation in the new worktree.
+Claude Code has no cross-project resume, so workmux copies the conversation files into the new worktree's project directory and launches `claude --resume <session-id>`. Codex forks natively, so workmux resolves which session to fork and launches `codex fork -C <worktree> <session-id>`, which keeps the forked conversation in the new worktree. Pi also forks natively: workmux launches `pi --fork <session-path>` in the new worktree. Pi must support the `--fork` CLI option.
+
+Pi session discovery uses `~/.pi/agent/sessions` (or `$PI_CODING_AGENT_DIR/sessions`) and matches the session’s recorded working directory to the source worktree root. For a custom session store, export `PI_CODING_AGENT_SESSION_DIR` when running workmux; Pi’s `--session-dir` flag and `sessionDir` setting are not read by workmux.
 
 ### Coordinating multiple agents
 

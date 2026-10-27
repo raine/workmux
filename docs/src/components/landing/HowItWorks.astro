@@ -1,0 +1,173 @@
+<section class="how">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>Ten commands become two.</h2>
+    <div class="vs">
+      <div class="col">
+        <p class="lab">By hand</p>
+        <pre><code><span>$</span> git worktree add ../myapp__worktrees/fix-login -b fix-login
+<span>$</span> cp .env ../myapp__worktrees/fix-login/
+<span>$</span> cd ../myapp__worktrees/fix-login
+<span>$</span> tmux new-window -n fix-login
+<span>$</span> tmux split-window -h "pnpm install && pnpm run dev"
+<span>$</span> claude "Fix the login redirect"
+<i># later</i>
+<span>$</span> git checkout main && git merge fix-login
+<span>$</span> git worktree remove ../myapp__worktrees/fix-login
+<span>$</span> git branch -d fix-login
+<span>$</span> tmux kill-window -t fix-login</code></pre>
+      </div>
+      <div class="col hi">
+        <p class="lab">With workmux</p>
+        <pre><code><span>$</span> workmux add fix-login -p "Fix the login redirect"
+<i># later</i>
+<span>$</span> workmux merge</code></pre>
+        <ul class="perks">
+          <li>
+            Files to copy and panes to start come from <code>.workmux.yaml</code
+            >
+          </li>
+          <li>Every agent's status shows in the sidebar and dashboard</li>
+          <li>Repeat for as many tasks as you can keep up with</li>
+        </ul>
+        <a class="arrow" href="/guide/quick-start/">Quick start →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .how {
+    padding: 7.5rem 0 0;
+  }
+
+  .wrap {
+    width: min(76rem, 100% - 3rem);
+    margin-inline: auto;
+  }
+
+  .eyebrow {
+    margin: 0 0 0.75rem;
+    color: var(--accent);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  h2 {
+    max-width: 40rem;
+    margin: 0 0 3rem;
+    font-size: clamp(1.875rem, 3.4vw, 2.75rem);
+    font-weight: 650;
+    letter-spacing: -0.035em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+
+  code {
+    font-family: var(--mono);
+  }
+
+  .arrow {
+    color: var(--accent);
+    font-weight: 550;
+    text-decoration: none;
+  }
+
+  .arrow:hover {
+    text-decoration: underline;
+  }
+
+  .vs {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  .col {
+    min-width: 0;
+    padding: 1.75rem;
+    border: 1px solid var(--line);
+    border-radius: 1.25rem;
+    background: var(--surface);
+  }
+
+  .hi {
+    display: flex;
+    flex-direction: column;
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    background: linear-gradient(180deg, var(--accent-soft), var(--surface) 65%);
+  }
+
+  .lab {
+    margin: 0 0 1rem;
+    color: var(--text-3);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .hi .lab {
+    color: var(--accent);
+  }
+
+  .vs pre {
+    margin: 0;
+    font: 0.8125rem/1.85 var(--mono);
+    overflow-x: auto;
+  }
+
+  .vs pre span,
+  .vs pre i {
+    color: var(--text-3);
+    font-style: normal;
+  }
+
+  .col:not(.hi) pre {
+    color: var(--text-2);
+  }
+
+  .hi pre {
+    font-size: 0.875rem;
+  }
+
+  .hi pre span {
+    color: var(--accent);
+  }
+
+  .perks {
+    display: grid;
+    gap: 0.625rem;
+    margin: 1.75rem 0;
+    padding: 1.5rem 0 0;
+    border-top: 1px solid var(--line);
+    list-style: none;
+    font-size: 0.9375rem;
+  }
+
+  .perks li {
+    display: flex;
+    gap: 0.625rem;
+  }
+
+  .perks li::before {
+    content: '✓';
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .perks code {
+    font-size: 0.875em;
+  }
+
+  .hi .arrow {
+    margin-top: auto;
+    font-size: 0.9375rem;
+  }
+
+  @media (max-width: 60rem) {
+    .vs {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

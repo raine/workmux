@@ -302,6 +302,7 @@ it the way you move to any tmux pane, or click it.
 | `g`/`G` | Jump to first/last        |
 | `v`     | Toggle layout mode        |
 | `f`     | Toggle session filter     |
+| `V`     | Toggle rule-based views   |
 | `t`     | Toggle grouping           |
 | `h`/`l` | Unfold/fold current group |
 | `s`     | Toggle the current fold   |
@@ -319,7 +320,8 @@ Enter falls back to focusing its agent pane. Mouse clicks always focus the pane.
 
 By default, the sidebar shows agents across all tmux sessions. With the sidebar
 focused, press `f` to show only agents in the same tmux session as the current
-window; press `f` again to return to all sessions.
+window; press `f` again to include other sessions. If views are enabled,
+the window's matching rules still apply.
 
 The filter also applies to agent navigation hotkeys (`next`/`prev`/`jump`), so
 `Alt+j`/`Alt+k` cycle through the current session when the session filter is
@@ -330,8 +332,21 @@ You can also toggle the filter from the command line:
 ```bash
 workmux sidebar filter          # Toggle between none and session
 workmux sidebar filter session  # Filter to current session
-workmux sidebar filter none     # Show all agents (no filter)
+workmux sidebar filter none     # Turn off the session filter
 ```
+
+### Named views
+
+Configure `sidebar.views` to show agents from selected sessions or project
+directories. Each window automatically shows the view matching its own agent.
+Use `other: true` for a view containing everything that does not match your
+other views.
+
+Press `V` to turn views off across all sidebars and show all agents. Press it
+again to restore each window's matching view. You can also use
+`workmux sidebar view on` or `workmux sidebar view off`.
+See [Named views](/reference/commands/sidebar/#named-views) for configuration
+and matching rules.
 
 ### Sleeping agents
 

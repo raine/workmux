@@ -1,0 +1,3066 @@
+---
+// A live tmux session rendered as a character grid: the workmux sidebar,
+// agent windows, and worktrees created with workmux add and /worktree.
+
+// Rendered empty so the frame has its full height before the script runs;
+// must match ROWS in the script.
+const ROWS = 36;
+---
+
+<live-tmux class="lt">
+  <div
+    class="lt-grid"
+    role="img"
+    aria-label="A tmux session with the workmux sidebar: worktrees are created with workmux add and an agent's /worktree skill, an agent's question is answered from the sidebar, and finished work is merged with /merge, which closes its window"
+  >
+    {Array.from({ length: ROWS }, () => <div class="r" />)}
+  </div>
+  <div class="lt-cap" aria-hidden="true"></div>
+  <div class="lt-chapters"></div>
+  <span class="lt-time" aria-hidden="true"></span>
+</live-tmux>
+
+<style is:global>
+  live-tmux {
+    position: relative;
+    display: block;
+    container-type: inline-size;
+    background: #111;
+    color: #d4d4d4;
+    cursor: default;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* The grid is 156 cells plus 1.25 cells of padding per side; --adv is the
+     font's measured advance width in em, so the grid fills the frame and
+     keeps the same cell aspect ratio. */
+  live-tmux .lt-grid {
+    position: relative;
+    padding: 1.25ch;
+    font-family: 'Iosevka Live', ui-monospace, Menlo, monospace;
+    font-size: calc(100cqw / (158.5 * var(--adv, 0.5)));
+    font-variant-ligatures: none;
+    font-kerning: none;
+    line-height: 2.6ch;
+    white-space: pre;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* The pointer's tip sits at its box's top-left corner, placed in cell
+     coordinates from the grid's padding edge. */
+  /* What is happening right now, floating over the bottom of the session.
+     The outgoing pill drifts up and fades while the next one rises in. */
+  live-tmux .lt-cap {
+    position: absolute;
+    bottom: 5.3%;
+    left: 0;
+    right: 0;
+    height: 2.5em;
+    pointer-events: none;
+    font:
+      500 clamp(0.75rem, 1.15cqw, 0.9375rem) / 1 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+  }
+
+  live-tmux .lt-cap span {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    padding: 0.75em 1.25em;
+    border-radius: 999px;
+    background: rgb(16 22 23 / 0.82);
+    box-shadow:
+      0 0 0 1px rgb(72 217 190 / 0.28) inset,
+      0 12px 32px -8px rgb(0 0 0 / 0.7);
+    -webkit-backdrop-filter: blur(10px) saturate(1.3);
+    backdrop-filter: blur(10px) saturate(1.3);
+    color: #eef4f2;
+    white-space: nowrap;
+    transform: translateX(-50%);
+    animation: lt-cap-in 420ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  }
+
+  live-tmux .lt-cap span[data-out] {
+    animation: lt-cap-out 240ms ease-out both;
+  }
+
+  live-tmux .lt-cap code {
+    color: #48d9be;
+    font-family: 'Iosevka Live', ui-monospace, Menlo, monospace;
+    font-size: 1.05em;
+  }
+
+  @keyframes lt-cap-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, 0.75em) scale(0.96);
+      filter: blur(4px);
+    }
+  }
+
+  @keyframes lt-cap-out {
+    to {
+      opacity: 0;
+      transform: translate(-50%, -0.6em) scale(0.98);
+      filter: blur(4px);
+    }
+  }
+
+  /* Chapters of the loop as a thin line along the bottom edge, each segment
+     as wide as the chapter is long. Segments seek on click. */
+  live-tmux .lt-chapters {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    gap: 3px;
+  }
+
+  live-tmux .lt-ch {
+    flex: var(--w) 1 0;
+    height: 10px;
+    padding: 7px 0 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+
+  live-tmux .lt-ch i {
+    display: block;
+    height: 3px;
+    background:
+      linear-gradient(#48d9be, #48d9be) 0 0 / var(--p, 0%) 100% no-repeat,
+      rgb(255 255 255 / 0.1);
+    transition: height 160ms ease-out;
+  }
+
+  live-tmux .lt-ch:hover i {
+    height: 5px;
+    margin-top: -2px;
+  }
+
+  live-tmux .lt-time {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.75rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 999px;
+    background: rgb(17 17 17 / 0.85);
+    color: #7a7a7a;
+    font:
+      500 0.6875rem/1 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+
+  live-tmux .lt-mouse {
+    position: absolute;
+    top: 1.25ch;
+    left: 1.25ch;
+    width: 2ch;
+    height: 3.1ch;
+    opacity: 0;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / 0.45));
+    transition: opacity 160ms ease-out;
+    will-change: transform;
+  }
+  live-tmux .lt-mouse[data-on] {
+    opacity: 1;
+  }
+  live-tmux .lt-mouse svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    transform-origin: 0 0;
+    transition: transform 90ms ease-out;
+  }
+  live-tmux .lt-mouse[data-down] svg {
+    transform: scale(0.86);
+  }
+
+  live-tmux .lt-hint {
+    position: absolute;
+    top: 1.25ch;
+    left: 1.25ch;
+    padding: 0.35em 0.7em;
+    border-radius: 0.5em;
+    background: #48d9be;
+    color: #06201b;
+    font:
+      600 clamp(10px, 1.1cqw, 13px) / 1.2 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    box-shadow: 0 6px 18px -6px rgb(0 0 0 / 0.6);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(var(--x), var(--y)) rotate(-4deg) scale(0.9);
+    transform-origin: 0 50%;
+    transition:
+      opacity 200ms ease-out,
+      transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  live-tmux .lt-hint[data-on] {
+    opacity: 1;
+    transform: translate(var(--x), var(--y)) rotate(-4deg);
+  }
+
+  /* Each row repaints on its own, so a changed row never invalidates its
+     neighbours. */
+  live-tmux .r {
+    height: 2.6ch;
+    overflow: hidden;
+    contain: strict;
+  }
+
+  live-tmux .r span {
+    display: inline-block;
+    height: 100%;
+    overflow: hidden;
+    vertical-align: top;
+  }
+
+  live-tmux .r .g,
+  live-tmux .r .rg {
+    overflow: visible;
+    text-align: center;
+  }
+
+  live-tmux .g i {
+    position: relative;
+    font-style: normal;
+  }
+
+  live-tmux .e i {
+    font-size: 0.86em;
+    font-family:
+      'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+  }
+
+  live-tmux .g svg {
+    width: 0.9em;
+    height: 0.9em;
+    vertical-align: -0.12em;
+  }
+
+  /* box drawing */
+  live-tmux .hl {
+    background: linear-gradient(currentColor, currentColor) 0 50% / 100% 1px
+      no-repeat;
+  }
+  live-tmux .vl {
+    background: linear-gradient(currentColor, currentColor) 50% 0 / 1px 100%
+      no-repeat;
+  }
+  live-tmux .ctd {
+    background:
+      linear-gradient(currentColor, currentColor) 0 50% / 100% 1px no-repeat,
+      linear-gradient(currentColor, currentColor) 50% 100% / 1px 50% no-repeat;
+  }
+  live-tmux .ctr {
+    background:
+      linear-gradient(#3c3c3c, #3c3c3c) 100% 50% / 50% 1px no-repeat,
+      linear-gradient(currentColor, currentColor) 50% 0 / 1px 100% no-repeat;
+  }
+  live-tmux .bar {
+    background: linear-gradient(currentColor, currentColor) 0 0 / 0.55ch 100%
+      no-repeat;
+  }
+
+  live-tmux .b {
+    font-weight: 700;
+  }
+  live-tmux .it {
+    font-style: italic;
+  }
+
+  /* text */
+  live-tmux .t {
+    color: #d4d4d4;
+  }
+  live-tmux .w {
+    color: #f0f0f0;
+  }
+  live-tmux .d {
+    color: #9b9b9b;
+  }
+  live-tmux .dd {
+    color: #7a7a78;
+  }
+  live-tmux .code {
+    color: #a9c3f2;
+  }
+  live-tmux .ok {
+    color: #9fd49a;
+  }
+  live-tmux .sg {
+    color: #e0896d;
+  }
+  live-tmux .sv {
+    color: #e59d80;
+  }
+  live-tmux .sv2 {
+    color: #f7d2bf;
+  }
+  live-tmux .fr {
+    color: #ecc3c7;
+  }
+  live-tmux .fa {
+    color: #c2e6be;
+  }
+  live-tmux .up {
+    color: #b0b0b0;
+  }
+  live-tmux .Bcur {
+    background-color: #c6c6c6;
+  }
+
+  /* zsh */
+  live-tmux .shp {
+    color: #82aaff;
+  }
+  live-tmux .shb {
+    color: #6c7383;
+  }
+  live-tmux .shc {
+    color: #c4a8f2;
+  }
+  live-tmux .shs {
+    color: #e6c384;
+  }
+
+  /* tmux chrome */
+  live-tmux .la {
+    color: #b6d698;
+  }
+  live-tmux .lg {
+    color: #3c3c3c;
+  }
+  live-tmux .lr {
+    color: #5a5a5a;
+  }
+  live-tmux .ta {
+    color: #c5e8a6;
+  }
+  live-tmux .tg {
+    color: #575757;
+  }
+  live-tmux .stl {
+    color: #b8cc7e;
+  }
+  live-tmux .stw {
+    color: #e8e8e8;
+  }
+  live-tmux .wa {
+    color: #151515;
+  }
+  live-tmux .clk {
+    color: #c3d48f;
+  }
+
+  /* sidebar */
+  live-tmux .lsep {
+    color: #363b47;
+  }
+  live-tmux .sn {
+    color: #e8edf5;
+  }
+  live-tmux .stm {
+    color: #dfe5ee;
+  }
+  live-tmux .sp {
+    color: #6c7383;
+  }
+  live-tmux .sm {
+    color: #727989;
+  }
+  live-tmux .sa {
+    color: #7d917a;
+  }
+  live-tmux .sd {
+    color: #917580;
+  }
+  live-tmux .sa2 {
+    color: #b4dca6;
+  }
+  live-tmux .sd2 {
+    color: #e2a2b0;
+  }
+  live-tmux .spn {
+    color: #c4aff2;
+  }
+  live-tmux .si {
+    color: #4e4d59;
+  }
+  live-tmux .sk {
+    color: #9addd4;
+  }
+  live-tmux .gh {
+    color: #c9d3e3;
+  }
+  live-tmux .sst {
+    color: #646a78;
+  }
+  live-tmux .Bband {
+    background-color: #1a1e29;
+  }
+  live-tmux .bw {
+    color: #9addd4;
+  }
+  live-tmux .bq {
+    color: #c4a8f2;
+  }
+  live-tmux .bdn {
+    color: #b3d89a;
+  }
+  live-tmux .bi {
+    color: #6d7186;
+  }
+
+  /* nvim */
+  live-tmux .nf {
+    color: #c0caf5;
+  }
+  live-tmux .nu {
+    color: #c9dcef;
+  }
+  live-tmux .nm {
+    color: #a9b8e8;
+  }
+  live-tmux .nt {
+    color: #9fd3e6;
+  }
+  live-tmux .nt2 {
+    color: #7aaabd;
+  }
+  live-tmux .np {
+    color: #ad9ae6;
+    font-style: italic;
+  }
+  live-tmux .nc {
+    color: #5f6690;
+    font-style: italic;
+  }
+  live-tmux .nv {
+    color: #e9b38e;
+  }
+  live-tmux .nfl {
+    color: #b4e6dc;
+  }
+  live-tmux .nk {
+    color: #bea9f2;
+  }
+  live-tmux .nfn {
+    color: #9fb3ee;
+  }
+  live-tmux .ns {
+    color: #d99fae;
+  }
+  live-tmux .no {
+    color: #89ddff;
+  }
+  live-tmux .nst {
+    color: #9ece6a;
+  }
+  live-tmux .ln {
+    color: #3b4261;
+  }
+  live-tmux .lnc {
+    color: #e8a875;
+    font-weight: 700;
+  }
+  live-tmux .sl {
+    color: #b6b6b6;
+  }
+  live-tmux .pc {
+    color: #e8e8e8;
+  }
+  live-tmux .ps {
+    color: #1c1c1c;
+  }
+
+  /* dev server */
+  live-tmux .vg {
+    color: #c2d88f;
+  }
+  live-tmux .va {
+    color: #a7c27a;
+  }
+  live-tmux .vu {
+    color: #9ee0cf;
+  }
+  live-tmux .vw {
+    color: #d6d6d6;
+  }
+  live-tmux .vd {
+    color: #8a8a8a;
+  }
+
+  /* backgrounds */
+  live-tmux .Bag {
+    background-color: #161616;
+  }
+  live-tmux .Bsel {
+    background-color: #262c3c;
+  }
+  live-tmux .Bnv {
+    background-color: #1a1b26;
+  }
+  live-tmux .Bcl {
+    background-color: #2a2d41;
+  }
+  live-tmux .Bsl {
+    background-color: #303030;
+  }
+  live-tmux .Bpc {
+    background-color: #5a5a5a;
+  }
+  live-tmux .Bps {
+    background-color: #bbde3c;
+  }
+  live-tmux .Bwa {
+    background-color: #aec579;
+  }
+  live-tmux .Bdr {
+    background-color: #3d2327;
+  }
+  live-tmux .Bda {
+    background-color: #1f3a26;
+  }
+  live-tmux .Bup {
+    background-color: #262626;
+  }
+
+  /* Light look whenever the page is light: the same roles on a paper
+     background. */
+  html[data-theme='light'] live-tmux {
+    background: #fbfbfa;
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-tmux .t {
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-tmux .w {
+    color: #111418;
+  }
+  html[data-theme='light'] live-tmux .d {
+    color: #6b7076;
+  }
+  html[data-theme='light'] live-tmux .dd {
+    color: #8a8f95;
+  }
+  html[data-theme='light'] live-tmux .code {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] live-tmux .ok {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-tmux .sg {
+    color: #b4532f;
+  }
+  html[data-theme='light'] live-tmux .sv {
+    color: #b85c38;
+  }
+  html[data-theme='light'] live-tmux .sv2 {
+    color: #8a4a2c;
+  }
+  html[data-theme='light'] live-tmux .fr {
+    color: #9f2b36;
+  }
+  html[data-theme='light'] live-tmux .fa {
+    color: #2f6b33;
+  }
+  html[data-theme='light'] live-tmux .up {
+    color: #555a60;
+  }
+  html[data-theme='light'] live-tmux .Bcur {
+    background-color: #3a3f45;
+  }
+  html[data-theme='light'] live-tmux .shp {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] live-tmux .shb {
+    color: #8a8f99;
+  }
+  html[data-theme='light'] live-tmux .shc {
+    color: #7a4fc2;
+  }
+  html[data-theme='light'] live-tmux .shs {
+    color: #9a6a12;
+  }
+  html[data-theme='light'] live-tmux .la {
+    color: #4f7a21;
+  }
+  html[data-theme='light'] live-tmux .lg {
+    color: #d6d6d6;
+  }
+  html[data-theme='light'] live-tmux .lr {
+    color: #c8c8c8;
+  }
+  html[data-theme='light'] live-tmux .ta {
+    color: #3f6f1a;
+  }
+  html[data-theme='light'] live-tmux .tg {
+    color: #b8b8b8;
+  }
+  html[data-theme='light'] live-tmux .stl {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] live-tmux .stw {
+    color: #24292f;
+  }
+  html[data-theme='light'] live-tmux .clk {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] live-tmux .lsep {
+    color: #d8dce3;
+  }
+  html[data-theme='light'] live-tmux .sn {
+    color: #1d2330;
+  }
+  html[data-theme='light'] live-tmux .stm {
+    color: #2b3240;
+  }
+  html[data-theme='light'] live-tmux .sp {
+    color: #8a909c;
+  }
+  html[data-theme='light'] live-tmux .sm {
+    color: #7b8291;
+  }
+  html[data-theme='light'] live-tmux .sa {
+    color: #4f7a4a;
+  }
+  html[data-theme='light'] live-tmux .sd {
+    color: #9a5363;
+  }
+  html[data-theme='light'] live-tmux .sa2 {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-tmux .sd2 {
+    color: #b4405a;
+  }
+  html[data-theme='light'] live-tmux .spn {
+    color: #7a4fc2;
+  }
+  html[data-theme='light'] live-tmux .si {
+    color: #b3b6be;
+  }
+  html[data-theme='light'] live-tmux .sk {
+    color: #138a7c;
+  }
+  html[data-theme='light'] live-tmux .gh {
+    color: #2b3445;
+  }
+  html[data-theme='light'] live-tmux .sst {
+    color: #8a909c;
+  }
+  html[data-theme='light'] live-tmux .Bband {
+    background-color: #eef1f5;
+  }
+  html[data-theme='light'] live-tmux .bw {
+    color: #13a090;
+  }
+  html[data-theme='light'] live-tmux .bq {
+    color: #8a5cd0;
+  }
+  html[data-theme='light'] live-tmux .bdn {
+    color: #4f9a2a;
+  }
+  html[data-theme='light'] live-tmux .bi {
+    color: #a0a4b0;
+  }
+  html[data-theme='light'] live-tmux .nf {
+    color: #343b58;
+  }
+  html[data-theme='light'] live-tmux .nu {
+    color: #3d4f73;
+  }
+  html[data-theme='light'] live-tmux .nm {
+    color: #4a5a9a;
+  }
+  html[data-theme='light'] live-tmux .nt {
+    color: #166b8a;
+  }
+  html[data-theme='light'] live-tmux .nt2 {
+    color: #4a7e92;
+  }
+  html[data-theme='light'] live-tmux .np {
+    color: #6e4fc0;
+  }
+  html[data-theme='light'] live-tmux .nc {
+    color: #8c93a8;
+  }
+  html[data-theme='light'] live-tmux .nv {
+    color: #a3501f;
+  }
+  html[data-theme='light'] live-tmux .nfl {
+    color: #138a7c;
+  }
+  html[data-theme='light'] live-tmux .nk {
+    color: #7a4fc2;
+  }
+  html[data-theme='light'] live-tmux .nfn {
+    color: #2e5bb8;
+  }
+  html[data-theme='light'] live-tmux .ns {
+    color: #b23b5a;
+  }
+  html[data-theme='light'] live-tmux .no {
+    color: #0f6f9f;
+  }
+  html[data-theme='light'] live-tmux .nst {
+    color: #4b7a1a;
+  }
+  html[data-theme='light'] live-tmux .ln {
+    color: #b8bccb;
+  }
+  html[data-theme='light'] live-tmux .lnc {
+    color: #b35a12;
+  }
+  html[data-theme='light'] live-tmux .sl {
+    color: #3a3f45;
+  }
+  html[data-theme='light'] live-tmux .pc {
+    color: #24292f;
+  }
+  html[data-theme='light'] live-tmux .vg {
+    color: #4f7a21;
+  }
+  html[data-theme='light'] live-tmux .va {
+    color: #5f7f2a;
+  }
+  html[data-theme='light'] live-tmux .vu {
+    color: #138a7c;
+  }
+  html[data-theme='light'] live-tmux .vw {
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-tmux .vd {
+    color: #7b8086;
+  }
+  html[data-theme='light'] live-tmux .Bag {
+    background-color: #f3f3f2;
+  }
+  html[data-theme='light'] live-tmux .Bsel {
+    background-color: #e3e8f3;
+  }
+  html[data-theme='light'] live-tmux .Bnv {
+    background-color: #f5f6fa;
+  }
+  html[data-theme='light'] live-tmux .Bcl {
+    background-color: #e6e9f3;
+  }
+  html[data-theme='light'] live-tmux .Bsl {
+    background-color: #e8e8e8;
+  }
+  html[data-theme='light'] live-tmux .Bpc {
+    background-color: #c8c8c8;
+  }
+  html[data-theme='light'] live-tmux .Bdr {
+    background-color: #fbe3e5;
+  }
+  html[data-theme='light'] live-tmux .Bda {
+    background-color: #e2f3e2;
+  }
+  html[data-theme='light'] live-tmux .Bup {
+    background-color: #ececec;
+  }
+  html[data-theme='light'] live-tmux .ctr {
+    background:
+      linear-gradient(#d6d6d6, #d6d6d6) 100% 50% / 50% 1px no-repeat,
+      linear-gradient(currentColor, currentColor) 50% 0 / 1px 100% no-repeat;
+  }
+  html[data-theme='light'] live-tmux .lt-cap span {
+    background: rgb(255 255 255 / 0.86);
+    box-shadow:
+      0 0 0 1px rgb(19 160 144 / 0.3) inset,
+      0 12px 32px -10px rgb(16 32 30 / 0.3);
+    color: #1d2330;
+  }
+  html[data-theme='light'] live-tmux .lt-cap code {
+    color: #0b7d6e;
+  }
+  html[data-theme='light'] live-tmux .lt-ch i {
+    background:
+      linear-gradient(#13a090, #13a090) 0 0 / var(--p, 0%) 100% no-repeat,
+      rgb(0 0 0 / 0.08);
+  }
+  html[data-theme='light'] live-tmux .lt-time {
+    background: rgb(251 251 250 / 0.9);
+    color: #8a8f95;
+  }
+</style>
+
+<script>
+  type Seg =
+    [string, string] | { svg: keyof typeof SVG; cls: string; w?: number };
+  type Line = Seg[];
+
+  const COLS = 156;
+  const ROWS = 36;
+  const SB = 30; // sidebar: cols 0-29, border at 30
+  const AG = 65; // agent: cols 31-95, border at 96
+  const RT = 59; // right: cols 97-155
+  const TRANSCRIPT_ROWS = 27;
+  const TEXT_W = 61;
+  const OUT_W = 55;
+  const TICK = 100; // animation frame length: spinners, cursor blink
+  const STEP = 25; // redraw interval, short enough for smooth typing
+
+  // The sidebar's status glyphs, drawn from the Nerd Font icons it uses:
+  // nf-fa-comment, nf-md-check_circle_outline and nf-md-sleep.
+  const SVG = {
+    nfWait:
+      '<svg viewBox="0 0 1792 1792" style="width:1.05em;height:1.05em"><path fill="currentColor" d="M1792 896q0 174-120 321.5t-326 233-450 85.5q-70 0-145-8-198 175-460 242-49 14-114 22-17 2-30.5-9t-17.5-29v-1q-3-4-.5-12t2-10 4.5-9.5l6-9 7-8.5 8-9q7-8 31-34.5t34.5-38 31-39.5 32.5-51 27-59 26-76q-157-89-247.5-220t-90.5-281q0-130 71-248.5t191-204.5 286-136.5 348-50.5q244 0 450 85.5t326 233 120 321.5z"/></svg>',
+    nfDone:
+      '<svg viewBox="0 0 24 24" style="width:1.15em;height:1.15em;vertical-align:-0.2em"><path fill="currentColor" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2m0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8m4.59-12.42L10 14.17l-2.59-2.58L6 13l4 4 8-8z"/></svg>',
+    nfSleep:
+      '<svg viewBox="0 0 24 24" style="width:1.1em;height:1.1em;vertical-align:-0.18em"><path fill="currentColor" d="M23 12h-6v-2l3.39-4H17V4h6v2l-3.38 4H23zm-8 4H9v-2l3.39-4H9V8h6v2l-3.38 4H15zm-8 4H1v-2l3.39-4H1v-2h6v2l-3.38 4H7z"/></svg>',
+    pencil:
+      '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M11.7 1.3a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.9 13.1l-3.6 1 1-3.6z"/></svg>',
+    branch:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="6" cy="19" r="2.4"/><circle cx="6" cy="5" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2M18 9.4c0 5-6 4.6-11 7.6"/></svg>',
+    rust: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5" stroke-width="2.6" stroke-dasharray="1.9 1.4"/><circle cx="8" cy="8" r="2.4" stroke-width="1.6"/></svg>',
+  };
+
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const cw = (ch: string) => {
+    const c = ch.codePointAt(0)!;
+    return c >= 0x1f000 || c === 0x2705 ? 2 : 1;
+  };
+  // Text that is all ASCII is one cell per character.
+  const ASCII = /^[\x00-\x7f]*$/;
+  const strW = (s: string) => {
+    if (ASCII.test(s)) return s.length;
+    let n = 0;
+    for (const ch of s) n += cw(ch);
+    return n;
+  };
+  const segW = (s: Seg) => (Array.isArray(s) ? strW(s[0]) : (s.w ?? 1));
+  const lineW = (l: Line) => l.reduce((n, s) => n + segW(s), 0);
+  const sp = (n: number, cls = ''): Seg => [' '.repeat(Math.max(0, n)), cls];
+  const hasBg = (cls: string) => /(^| )B/.test(cls);
+
+  // Clip or pad a line to exactly `width` cells, painting `bg` where no
+  // segment sets its own background.
+  function fit(line: Line, width: number, bg = ''): Line {
+    const out: Line = [];
+    let used = 0;
+    const add = (cls: string) => (bg && !hasBg(cls) ? `${cls} ${bg}` : cls);
+    for (const s of line) {
+      if (used >= width) break;
+      if (!Array.isArray(s)) {
+        const w = s.w ?? 1;
+        if (used + w > width) break;
+        out.push({ ...s, cls: add(s.cls) });
+        used += w;
+        continue;
+      }
+      if (used + s[0].length <= width && ASCII.test(s[0])) {
+        if (s[0]) out.push([s[0], add(s[1])]);
+        used += s[0].length;
+        continue;
+      }
+      let txt = '';
+      for (const ch of s[0]) {
+        const w = cw(ch);
+        if (used + w > width) break;
+        txt += ch;
+        used += w;
+      }
+      if (txt) out.push([txt, add(s[1])]);
+    }
+    if (used < width) out.push(sp(width - used, bg));
+    return out;
+  }
+
+  function html(line: Line): string {
+    let out = '';
+    let runCls = '';
+    let runTxt = '';
+    let runW = 0;
+    const flush = () => {
+      if (runW)
+        out += `<span class="${runCls}" style="width:${runW}ch">${esc(runTxt)}</span>`;
+      runTxt = '';
+      runW = 0;
+    };
+    for (const s of line) {
+      if (!Array.isArray(s)) {
+        flush();
+        out += `<span class="${s.cls} g" style="width:${s.w ?? 1}ch">${SVG[s.svg]}</span>`;
+        continue;
+      }
+      const [txt, cls] = s;
+      if (ASCII.test(txt)) {
+        if (!txt) continue;
+        if (cls !== runCls) flush();
+        runCls = cls;
+        runTxt += txt;
+        runW += txt.length;
+        continue;
+      }
+      for (const ch of txt) {
+        if (ch.codePointAt(0)! < 0x80) {
+          if (cls !== runCls) flush();
+          runCls = cls;
+          runTxt += ch;
+          runW++;
+        } else {
+          flush();
+          const w = cw(ch);
+          out += `<span class="${cls} g${w === 2 ? ' e' : ''}" style="width:${w}ch"><i>${ch}</i></span>`;
+        }
+      }
+    }
+    flush();
+    return out;
+  }
+
+  // Greedy word wrap for text with `inline code` spans.
+  function wrap(text: string, width: number): Line[] {
+    const words: Seg[][] = [];
+    text.split(/(`[^`]+`)/).forEach((part, i) => {
+      const cls = i % 2 ? 'code' : 't';
+      const body = i % 2 ? part.slice(1, -1) : part;
+      body.split(/( )/).forEach((tok) => {
+        if (tok === '') return;
+        if (tok === ' ') words.push([]);
+        else {
+          if (!words.length) words.push([]);
+          words[words.length - 1].push([tok, cls]);
+        }
+      });
+    });
+    const lines: Line[] = [];
+    let cur: Line = [];
+    let w = 0;
+    for (const word of words) {
+      if (!word.length) continue;
+      const ww = lineW(word);
+      if (w && w + 1 + ww > width) {
+        lines.push(cur);
+        cur = [];
+        w = 0;
+      }
+      if (w) {
+        cur.push([' ', 't']);
+        w++;
+      }
+      cur.push(...word);
+      w += ww;
+    }
+    if (cur.length) lines.push(cur);
+    return lines;
+  }
+
+  function chop(text: string, width: number): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < text.length; i += width)
+      out.push(text.slice(i, i + width));
+    return out;
+  }
+
+  // ---------------------------------------------------------------- nvim
+
+  const NVIM_SRC = [
+    'use anyhow::{Result, anyhow};',
+    'use std::collections::HashMap;',
+    'use std::path::{Path, PathBuf};',
+    '',
+    'use crate::git;',
+    'use crate::multiplexer::{AgentPane, Multiplexer};',
+    'use crate::state::StateStore;',
+    'use crate::util::canon_or_self;',
+    '',
+    '/// Parsed agent target selector.',
+    'enum AgentSelector {',
+    '    /// Plain name, resolved locally first then globally.',
+    '    Local(String),',
+    '    /// Qualified `project:handle` for cross-project targeting.',
+    '    Qualified { project: String, handle: String },',
+    '}',
+    '',
+    'impl AgentSelector {',
+    '    fn parse(s: &str) -> Self {',
+    '        // Colon is invalid in git branch/ref names, so it is unambiguous.',
+    "        if let Some((project, handle)) = s.split_once(':')",
+    '            && !project.is_empty()',
+    '            && !handle.is_empty()',
+    '        {',
+    '            return Self::Qualified {',
+  ];
+  const ITALIC_KW = new Set([
+    'crate',
+    'enum',
+    'impl',
+    'if',
+    'let',
+    'return',
+    'for',
+    'in',
+    'match',
+  ]);
+  const VARIANTS = new Set(['Local', 'Qualified']);
+
+  function rust(src: string, bg: string): Line {
+    const c = src.indexOf('//');
+    if (c >= 0)
+      return [
+        [src.slice(0, c), bg],
+        [src.slice(c), `nc ${bg}`],
+      ];
+    const out: Line = [];
+    const re =
+      /(\s+)|('[^']*')|([A-Za-z_][A-Za-z0-9_]*)|(::|->|&&|[&!=.])|(.)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+      const [tok, ws, str, id, op] = m;
+      const rest = src.slice(re.lastIndex);
+      let cls = 'nf';
+      if (ws) cls = '';
+      else if (str) cls = 'nst';
+      else if (op) cls = op === '::' || op === '.' ? 'nf' : 'no';
+      else if (id) {
+        if (id === 'use') cls = 'nu';
+        else if (id === 'fn') cls = 'nk';
+        else if (id === 'Self') cls = 'ns';
+        else if (id === 'String' || id === 'str') cls = 'nt2';
+        else if (ITALIC_KW.has(id)) cls = 'np';
+        else if (VARIANTS.has(id)) cls = 'nv';
+        else if (/^[A-Z]/.test(id)) cls = 'nt';
+        else if (rest.startsWith('(')) cls = 'nfn';
+        else if (/^: [A-Z]/.test(rest) && id.length > 1) cls = 'nfl';
+        else if (rest.startsWith('::') || src.slice(0, m.index).endsWith('::'))
+          cls = 'nm';
+      }
+      out.push([tok, cls ? `${cls} ${bg}` : bg]);
+    }
+    return out;
+  }
+
+  const CURSOR_LINE = 20;
+  const NVIM: Line[] = NVIM_SRC.map((src, i) => {
+    const n = i + 1;
+    const cur = n === CURSOR_LINE;
+    const num: Seg = [String(n).padStart(3) + ' ', cur ? 'lnc Bnv' : 'ln Bnv'];
+    const code = fit(
+      rust(src, cur ? 'Bcl' : 'Bnv'),
+      RT - 4,
+      cur ? 'Bcl' : 'Bnv',
+    );
+    return [num, ...code];
+  });
+
+  function spread(left: Line, right: Line, width: number, bg: string): Line {
+    return [...left, sp(width - lineW(left) - lineW(right), bg), ...right];
+  }
+
+  const NVIM_STATUS = spread(
+    [[' s/w/agent_resolve.rs', 'sl Bsl']],
+    [
+      ['utf-8  🐧 ', 'sl Bsl'],
+      { svg: 'rust', cls: 'sl Bsl' },
+      ['rust ', 'sl Bsl'],
+      [' 9% ', 'pc Bpc'],
+      ['  20:2  ', 'ps Bps b'],
+    ],
+    RT,
+    'Bsl',
+  );
+
+  const VITE: Line[] = [
+    [sp(2), ['vitepress', 'vg b'], [' v2.0.0-alpha.15', 'vg']],
+    [],
+    [
+      sp(2),
+      ['➜', 'va'],
+      sp(2),
+      ['Local', 'vw b'],
+      [':   ', 'vw'],
+      ['http://localhost:', 'vu'],
+      ['5173', 'vu b'],
+      ['/', 'vu'],
+    ],
+    [
+      sp(2),
+      ['➜', 'va'],
+      sp(2),
+      ['Network', 'vd b'],
+      [': use ', 'vd'],
+      ['--host', 'vw b'],
+      [' to expose', 'vd'],
+    ],
+    [
+      sp(2),
+      ['➜', 'va'],
+      sp(2),
+      ['press ', 'vd'],
+      ['h', 'vw b'],
+      [' to show help', 'vd'],
+    ],
+  ];
+
+  // -------------------------------------------------------------- sidebar
+
+  // 'new' is an agent that has started but not yet reported a status.
+  type State = 'work' | 'wait' | 'done' | 'idle' | 'new';
+  type Phase = { st: State; msg?: string; dur: number };
+  interface Agent {
+    name: string;
+    proj: string;
+    st: State;
+    since: number;
+    add: number;
+    del: number;
+    uadd: number;
+    udel: number;
+    msg: string;
+    cycle?: Phase[];
+    loopFrom?: number;
+    phase?: number;
+    phaseEnd?: number;
+    nextEdit?: number;
+  }
+
+  const BAR: Record<State, string> = {
+    work: 'bw',
+    wait: 'bq',
+    done: 'bdn',
+    idle: 'bi',
+    new: 'bi',
+  };
+  const ICON: Record<Exclude<State, 'work'>, Seg> = {
+    wait: { svg: 'nfWait', cls: 'bq', w: 2 },
+    done: { svg: 'nfDone', cls: 'bdn', w: 2 },
+    idle: { svg: 'nfSleep', cls: 'si', w: 2 },
+    new: ['  ', ''],
+  };
+
+  // The sidebar's own working spinner.
+  const SPINNER = ['⠋⠙', '⠙⠹', '⠹⠸', '⠸⠼', '⠼⠴', '⠴⠦', '⠦⠧', '⠧⠇', '⠇⠏', '⠏⠋'];
+  const spinner = (frame: number) => SPINNER[frame % SPINNER.length];
+
+  function ago(ms: number) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s >= 86400) return `${Math.floor(s / 86400)}d`;
+    if (s >= 3600) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  function clip(s: string, w: number) {
+    return strW(s) <= w ? s : s.slice(0, w - 1).trimEnd() + '…';
+  }
+
+  // ---------------------------------------------------------------- agent
+
+  type Block =
+    | { k: 'raw'; lines: Line[] }
+    | { k: 'msg'; text: string }
+    | { k: 'dim'; text: string }
+    | { k: 'user'; text: string }
+    | { k: 'worked'; text: string }
+    | { k: 'tool'; name: string; arg: string; st: 'run' | 'ok'; out: Line[] }
+    | { k: 'search'; st: 'run' | 'ok'; run: string; ok: string; file: string };
+
+  const fmtDur = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+  const fmtTok = (n: number) =>
+    n < 1000 ? String(Math.floor(n)) : `${(n / 1000).toFixed(1)}k`;
+
+  const diffLine = (n: number, mk: ' ' | '-' | '+', code: string): Line => {
+    const bg = mk === '-' ? 'Bdr' : mk === '+' ? 'Bda' : '';
+    const fg = mk === '-' ? 'fr' : mk === '+' ? 'fa' : 'dd';
+    const b = bg ? ` ${bg}` : '';
+    return [
+      [String(n).padStart(4), `dd${b}`],
+      [` ${mk} `, `${fg}${b}`],
+      [code.padEnd(OUT_W - 7), `${fg}${b}`],
+    ];
+  };
+
+  const updated = (
+    file: string,
+    add: number,
+    del: number,
+    diff: Line[],
+  ): Line[] => {
+    const head: Line = [
+      ['Updated ', 't'],
+      [file, 'b t'],
+      [' with ', 't'],
+    ];
+    if (add)
+      head.push(
+        [String(add), 'b t'],
+        [add === 1 ? ' addition' : ' additions', 't'],
+      );
+    if (add && del) head.push([' and ', 't']);
+    if (del)
+      head.push(
+        [String(del), 'b t'],
+        [del === 1 ? ' removal' : ' removals', 't'],
+      );
+    if (lineW(head) <= OUT_W) return [head, ...diff];
+    const [, , , ...rest] = head;
+    return [head.slice(0, 2), [['with ', 't'], ...rest], ...diff];
+  };
+
+  const textOut = (text: string): Line[] =>
+    chop(text, OUT_W).map((l) => [[l, 't']]);
+  const RUNNING: Line[] = [[['Running…', 'd']]];
+
+  const DIFF_ALL: Line[] = [
+    diffLine(40, ' ', 'pub fn install_skills(root: &Path) -> Result<()> {'),
+    diffLine(41, '-', '    let agents = [Agent::Claude, Agent::Codex];'),
+    diffLine(42, '-', '    for agent in agents {'),
+    diffLine(41, '+', '    for agent in Agent::ALL {'),
+    diffLine(42, ' ', '        let dir = agent.skills_dir(root);'),
+  ];
+
+  const HISTORY: Block[] = [
+    {
+      k: 'raw',
+      lines: [
+        [['       112', 'dd']],
+        [
+          ['       113 ', 'dd'],
+          ['/// Install status tracking for the given agen', 'dd'],
+        ],
+        [['           t.', 'dd']],
+      ],
+    },
+    {
+      k: 'msg',
+      text: 'Now check if `Agent::ALL` can also simplify the `install` function:',
+    },
+    { k: 'dim', text: 'Searched for 1 pattern (ctrl+o to expand)' },
+    {
+      k: 'tool',
+      name: 'Bash',
+      arg: 'just check 2>&1',
+      st: 'ok',
+      out: [
+        [['test result: ok. 830 passed; 0 failed; 0 ignored; 0 me', 't']],
+        [['asured; 0 filtered out; finished in 1.03s', 't']],
+      ],
+    },
+    {
+      k: 'msg',
+      text: 'All 830 tests pass. Now let me also check if there are other places that manually enumerate all agents that could use `Agent::ALL`.',
+    },
+    { k: 'dim', text: 'Searched for 1 pattern (ctrl+o to expand)' },
+    {
+      k: 'msg',
+      text: 'Good, no other places manually enumerate all agents. Let me also check for uses of the `Agent` enum in tests and config to see if `ALL` would be useful elsewhere.',
+    },
+  ];
+
+  const FONT_FAMILY = 'Iosevka Live';
+
+  const SPIN_GLYPHS = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+
+  type Step = [number, () => number | void];
+  type Spin = { on: boolean; verb: string; start: number; tokens: number };
+  type ToolBlock = Block & { k: 'tool' };
+  type SearchBlock = Block & { k: 'search' };
+
+  // Width of a pane that spans everything right of the sidebar.
+  const MAIN_W = AG + 1 + RT;
+
+  const CHAPTERS = ['workmux add', '/worktree', 'Agent needs input', '/merge'];
+  const fmtClock = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+
+  function wrapPlain(text: string, width: number): string[] {
+    const out: string[] = [];
+    let cur = '';
+    for (const w of text.split(' ')) {
+      if (cur && cur.length + 1 + w.length > width) {
+        out.push(cur);
+        cur = w;
+      } else cur = cur ? `${cur} ${w}` : w;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  // zsh with a two-line prompt and syntax highlighting.
+  const PROMPT_TOP: Line = [
+    ['~/code/workmux', 'shp'],
+    [' main', 'shb'],
+  ];
+  const shellCmd = (cmd: string): Line => {
+    const out: Line = [['❯ ', 'shc']];
+    cmd.split(/("[^"]*"?)/).forEach((part, i) => {
+      if (!part) return;
+      if (i % 2) out.push([part, 'shs']);
+      else {
+        const m = /^(\S+)(.*)$/s.exec(part);
+        if (m && out.length === 1) out.push([m[1], 'ok'], [m[2], 't']);
+        else out.push([part, 't']);
+      }
+    });
+    return out;
+  };
+
+  // The pane this repo's .workmux.yaml splits beside the agent.
+  const BUN: [number, Line][] = [
+    [
+      300,
+      [
+        ['bun install', 'b w'],
+        [' v1.2.21 (7c45ed97)', 'd'],
+      ],
+    ],
+    [900, []],
+    [
+      80,
+      [
+        ['+ ', 'ok'],
+        ['@astrojs/starlight', 't'],
+        ['@0.36.0', 'd'],
+      ],
+    ],
+    [
+      80,
+      [
+        ['+ ', 'ok'],
+        ['astro', 't'],
+        ['@5.14.1', 'd'],
+      ],
+    ],
+    [
+      80,
+      [
+        ['+ ', 'ok'],
+        ['sharp', 't'],
+        ['@0.34.4', 'd'],
+      ],
+    ],
+    [
+      80,
+      [
+        ['+ ', 'ok'],
+        ['starlight-links-validator', 't'],
+        ['@0.17.2', 'd'],
+      ],
+    ],
+    [
+      80,
+      [
+        ['+ ', 'ok'],
+        ['starlight-llms-txt', 't'],
+        ['@0.6.0', 'd'],
+      ],
+    ],
+    [80, []],
+    [
+      200,
+      [
+        ['412', 'ok b'],
+        [' packages installed ', 't'],
+        ['[2.84s]', 'd'],
+      ],
+    ],
+  ];
+
+  // Claude Code folds tool output past a few lines.
+  const ADD_OUT: Line[] = [
+    [['Running setup commands...', 't']],
+    [
+      ['✓ ', 'ok'],
+      ['Setup complete', 't'],
+    ],
+    [['… +3 lines (ctrl+o to expand)', 'd']],
+  ];
+
+  const DISPATCH =
+    '/worktree document per-agent overrides, and add a kitty test';
+
+  const POINTER =
+    '<svg viewBox="0 0 13 20"><path d="M1 1v15.6l3.8-3.7 2.5 5.9 2.6-1.1-2.5-5.8h5.4z" fill="#111" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+
+  // Fast off the mark, long settle onto the target, the way a hand moves.
+  const easeMove = (p: number) => {
+    const k = 0.3; // share of the move spent accelerating
+    if (p < k) return (0.5 * p * p) / k;
+    const q = (p - k) / (1 - k);
+    return 0.5 * k + (1 - 0.5 * k) * (1 - Math.pow(1 - q, 3));
+  };
+
+  class Claude {
+    blocks: Block[] = [];
+    spin: Spin = { on: false, verb: '', start: 0, tokens: 0 };
+    input = '';
+    // A pending question to the user; `choice` marks the answer as pressed.
+    ask: {
+      head: string;
+      question: string;
+      options: [string, string][];
+    } | null = null;
+    choice = false;
+    constructor(
+      public host: LiveTmux,
+      public agent: Agent,
+    ) {}
+
+    push<B extends Block>(b: B): B {
+      this.blocks.push(b);
+      if (this.blocks.length > 40)
+        this.blocks.splice(0, this.blocks.length - 40);
+      return b;
+    }
+
+    tool(name: string, arg: string, out: Line[] = []) {
+      return this.push({ k: 'tool', name, arg, st: 'run', out } as ToolBlock);
+    }
+
+    start(verb: string) {
+      this.spin = { on: true, verb, start: this.host.t, tokens: 0 };
+      this.host.setState(this.agent, 'work');
+    }
+
+    finish() {
+      this.push({
+        k: 'worked',
+        text: `Worked for ${fmtDur(this.host.t - this.spin.start)}`,
+      });
+      this.spin.on = false;
+      this.host.setState(this.agent, 'done');
+    }
+
+    type(text: string): number {
+      return this.host.typeInto((s) => (this.input = s), text);
+    }
+
+    submit(prompt: string, title: string, verb: string) {
+      this.input = '';
+      this.push({ k: 'user', text: prompt });
+      this.agent.msg = title;
+      this.start(verb);
+    }
+  }
+
+  interface Win {
+    idx: number; // tmux window index; closing a window leaves a gap
+    name: string;
+    kind: 'shell' | 'config' | 'task';
+    agent?: Agent;
+    cc?: Claude;
+    side?: { lines: Line[]; cmd: string };
+    seen: boolean;
+  }
+
+  class LiveTmux extends HTMLElement {
+    t = 0;
+    timer = 0;
+    visible = false;
+    rows: HTMLDivElement[] = [];
+    // Each row's panes as last drawn, so a frame rewrites only the panes
+    // that changed.
+    cache: string[][] = [];
+    io?: IntersectionObserver;
+    queue: { at: number; fn: () => void }[] = [];
+    grouped: Line[] = [];
+    agents: Agent[] = [];
+    wins: Win[] = [];
+    cur = 1;
+    last = 2;
+    sh = { lines: [] as Line[], input: '', cmd: 'zsh', busy: false };
+    // Pointer position in cells (x = column, y = row) along a curved path.
+    mouse = {
+      x: 70,
+      y: 18,
+      sx: 70,
+      sy: 18,
+      cx: 70,
+      cy: 18,
+      tx: 70,
+      ty: 18,
+      t0: 0,
+      dur: 0,
+      on: false,
+      down: false,
+    };
+    hint = { on: false, x: 0, y: 0, shown: false };
+    tileRows = new Map<Agent, number>();
+    // Typing rhythm and pointer jitter come from a seeded generator, so every
+    // loop runs to the same length and the chapter bar can be measured once.
+    seed = 1;
+    loopT0 = 0;
+    loops = 0;
+    marks: number[] = [];
+    total = 0;
+    chapterEls: HTMLElement[] = [];
+    timeEl?: HTMLElement;
+    caption = '';
+    capEl?: HTMLElement;
+    capShown = '';
+    pointer?: HTMLElement;
+    hintEl?: HTMLElement;
+    drawn = '';
+    // Set at the moment that best stands for the whole loop, the frame shown
+    // when motion is reduced.
+    poster = false;
+    onVis = () => this.sync();
+
+    connectedCallback() {
+      const grid = this.querySelector('.lt-grid')!;
+      this.rows = [...grid.querySelectorAll<HTMLDivElement>(':scope > .r')];
+      this.pointer = document.createElement('div');
+      this.pointer.className = 'lt-mouse';
+      this.pointer.innerHTML = POINTER;
+      this.hintEl = document.createElement('div');
+      this.hintEl.className = 'lt-hint';
+      this.hintEl.textContent = 'yes, the mouse works too';
+      grid.append(this.pointer, this.hintEl);
+      this.fitFont(grid as HTMLElement);
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        for (const el of this.querySelectorAll<HTMLElement>(
+          '.lt-cap, .lt-chapters, .lt-time',
+        ))
+          el.hidden = true;
+        this.reset();
+        while (!this.poster && this.t < 120000) this.tick(false);
+        this.paint();
+        return;
+      }
+      this.measure();
+      this.buildBar();
+      this.reset();
+      this.paint();
+      this.io = new IntersectionObserver(([e]) => {
+        this.visible = e.isIntersecting;
+        this.sync();
+      });
+      this.io.observe(this);
+      document.addEventListener('visibilitychange', this.onVis);
+    }
+
+    // Play one loop without drawing to learn where each chapter starts and how
+    // long the whole loop runs.
+    measure() {
+      this.reset();
+      const n = this.loops;
+      const t0 = this.t;
+      while (this.loops === n && this.t - t0 < 180000) this.tick(false);
+      this.total = this.t - t0;
+    }
+
+    buildBar() {
+      this.capEl = this.querySelector<HTMLElement>('.lt-cap')!;
+      const box = this.querySelector('.lt-chapters')!;
+      this.timeEl = this.querySelector<HTMLElement>('.lt-time')!;
+      this.chapterEls = CHAPTERS.map((label, i) => {
+        const end = this.marks[i + 1] ?? this.total;
+        const b = document.createElement('button');
+        b.className = 'lt-ch';
+        b.type = 'button';
+        b.style.setProperty('--w', String(end - this.marks[i]));
+        b.innerHTML = '<i></i>';
+        b.title = label;
+        b.setAttribute('aria-label', `Jump to ${label}`);
+        // A pointer click seeks to the point under it; keyboard activation
+        // (detail 0) jumps to the chapter's start.
+        b.addEventListener('click', (e) => {
+          const r = b.getBoundingClientRect();
+          const f = e.detail
+            ? Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+            : 0;
+          this.seek(this.marks[i] + f * (end - this.marks[i]));
+        });
+        box.append(b);
+        return b;
+      });
+    }
+
+    // Jump to a point in the loop by replaying it from the start undrawn.
+    seek(ms: number) {
+      this.reset();
+      while (this.t - this.loopT0 < ms) this.tick(false);
+      this.paint();
+    }
+
+    // Caption text; `backticks` mark commands.
+    say(text: string) {
+      this.caption = text;
+    }
+
+    drawCaption() {
+      const box = this.capEl;
+      if (!box || this.capShown === this.caption) return;
+      this.capShown = this.caption;
+      for (const old of box.querySelectorAll('span:not([data-out])')) {
+        old.setAttribute('data-out', '');
+        setTimeout(() => old.remove(), 260);
+      }
+      if (!this.caption) return;
+      const span = document.createElement('span');
+      this.caption.split('`').forEach((part, i) => {
+        if (!part) return;
+        if (i % 2) {
+          const c = document.createElement('code');
+          c.textContent = part;
+          span.append(c);
+        } else span.append(part);
+      });
+      box.append(span);
+    }
+
+    mark(i: number) {
+      this.marks[i] = this.t - this.loopT0;
+    }
+
+    rand(): number {
+      this.seed = (this.seed * 16807) % 2147483647;
+      return (this.seed - 1) / 2147483646;
+    }
+
+    drawBar() {
+      if (!this.timeEl) return;
+      const el = Math.min(this.t - this.loopT0, this.total);
+      this.chapterEls.forEach((b, i) => {
+        const start = this.marks[i];
+        const end = this.marks[i + 1] ?? this.total;
+        const p = Math.max(0, Math.min(1, (el - start) / (end - start)));
+        b.style.setProperty('--p', `${(p * 100).toFixed(1)}%`);
+        b.toggleAttribute('data-on', el >= start && el < end);
+      });
+      const text = `${fmtClock(el)} / ${fmtClock(this.total)}`;
+      if (this.timeEl.textContent !== text) this.timeEl.textContent = text;
+    }
+
+    // Measure the advance width once the font is in, so the grid fills the
+    // frame exactly.
+    fitFont(grid: HTMLElement) {
+      const family = FONT_FAMILY;
+      const measure = () => {
+        const probe = document.createElement('span');
+        probe.textContent = '0'.repeat(100);
+        probe.style.cssText =
+          'position:absolute;visibility:hidden;font-size:100px;line-height:1';
+        grid.append(probe);
+        const adv = probe.getBoundingClientRect().width / 10000;
+        probe.remove();
+        if (adv > 0) grid.style.setProperty('--adv', adv.toFixed(4));
+      };
+      measure();
+      Promise.all(
+        [
+          `16px "${family}"`,
+          `bold 16px "${family}"`,
+          `italic 16px "${family}"`,
+        ].map((f) => document.fonts.load(f)),
+      ).then(measure, () => {});
+    }
+
+    disconnectedCallback() {
+      this.io?.disconnect();
+      document.removeEventListener('visibilitychange', this.onVis);
+      clearInterval(this.timer);
+      this.timer = 0;
+    }
+
+    sync() {
+      const run = this.visible && !document.hidden;
+      if (run && !this.timer)
+        this.timer = window.setInterval(() => this.tick(), STEP);
+      if (!run && this.timer) {
+        clearInterval(this.timer);
+        this.timer = 0;
+      }
+    }
+
+    reset() {
+      const t = this.t;
+      this.queue = [];
+      this.seed = 1;
+      this.loopT0 = t;
+      this.loops++;
+      this.mark(0);
+      this.say('Start a task from your main checkout with `workmux add`');
+      const work = (
+        ph: Phase[],
+        loopFrom = 1,
+      ): Pick<Agent, 'cycle' | 'loopFrom' | 'phase' | 'phaseEnd'> => ({
+        cycle: ph,
+        loopFrom,
+        phase: 0,
+        phaseEnd: t + ph[0].dur,
+      });
+      this.agents = [
+        {
+          name: 'agents-config',
+          proj: 'workmux',
+          st: 'work',
+          since: t - 110000,
+          add: 46,
+          del: 11,
+          uadd: 28,
+          udel: 3,
+          msg: 'Adding per-agent config overrides',
+        },
+        {
+          name: 'opencode',
+          proj: 'consult-llm',
+          st: 'work',
+          since: t - 152000,
+          add: 0,
+          del: 0,
+          uadd: 127,
+          udel: 23,
+          msg: 'Adding opencode backend support',
+          ...work([
+            { st: 'work', dur: 16000 },
+            { st: 'wait', msg: 'Keep the v1 session fallback?', dur: 13000 },
+            { st: 'work', msg: 'Wiring opencode session resume', dur: 26000 },
+            { st: 'wait', msg: 'Run the integration suite now?', dur: 12000 },
+            { st: 'work', msg: 'Adding opencode backend support', dur: 24000 },
+          ]),
+        },
+        {
+          name: 'batch-processing',
+          proj: 'anki-llm',
+          st: 'wait',
+          since: t - 370000,
+          add: 0,
+          del: 0,
+          uadd: 0,
+          udel: 0,
+          msg: 'Refactoring queue handler',
+          ...work([
+            { st: 'wait', dur: 8000 },
+            { st: 'work', msg: 'Refactoring queue handler', dur: 21000 },
+            { st: 'done', msg: 'Queue handler refactored', dur: 24000 },
+            { st: 'work', msg: 'Adding retry with backoff', dur: 22000 },
+            { st: 'wait', msg: 'Retry failed jobs on startup?', dur: 14000 },
+          ]),
+        },
+        {
+          name: 'auto-layout',
+          proj: 'workmux',
+          st: 'done',
+          since: t - 545000,
+          add: 318,
+          del: 87,
+          uadd: 0,
+          udel: 0,
+          msg: 'Implementing automatic layout',
+        },
+        {
+          name: 'history-filter',
+          proj: 'consult-llm',
+          st: 'idle',
+          since: t - 3700000,
+          add: 153,
+          del: 41,
+          uadd: 0,
+          udel: 0,
+          msg: 'Adding date range filter',
+        },
+        {
+          name: 'bluetooth-reconnect',
+          proj: 'WalkingMate',
+          st: 'idle',
+          since: t - 3900000,
+          add: 0,
+          del: 0,
+          uadd: 0,
+          udel: 0,
+          msg: 'Auto-reconnect on disconnect',
+        },
+        // The worktree building this very demo.
+        {
+          name: 'live-tmux-demo',
+          proj: 'workmux',
+          st: 'work',
+          since: t - 64000,
+          add: 0,
+          del: 0,
+          uadd: 212,
+          udel: 38,
+          msg: 'Editing this',
+          ...work(
+            [
+              { st: 'work', msg: 'Editing this', dur: 27000 },
+              { st: 'wait', msg: 'Like this?', dur: 11000 },
+              { st: 'work', msg: 'Adding a tile', dur: 30000 },
+            ],
+            0,
+          ),
+        },
+        {
+          name: 'step-goal-sync',
+          proj: 'WalkingMate',
+          st: 'idle',
+          since: t - 2 * 86400000,
+          add: 0,
+          del: 0,
+          uadd: 0,
+          udel: 0,
+          msg: 'Sync step goals to watch',
+        },
+      ];
+      const by = (name: string) => this.agents.find((a) => a.name === name)!;
+
+      const cfg = new Claude(this, by('agents-config'));
+      cfg.blocks = [
+        ...HISTORY,
+        {
+          k: 'dim',
+          text: 'Searched for 1 pattern, read 1 file (ctrl+o to expand)',
+        },
+        {
+          k: 'msg',
+          text: "`src/skills.rs` still keeps a hardcoded agent list. I'll switch it to `Agent::ALL` so new agents get their skills automatically.",
+        },
+        {
+          k: 'tool',
+          name: 'Update',
+          arg: 'src/skills.rs',
+          st: 'ok',
+          out: updated('src/skills.rs', 1, 2, DIFF_ALL),
+        },
+        {
+          k: 'tool',
+          name: 'Bash',
+          arg: 'just check 2>&1',
+          st: 'ok',
+          out: textOut(
+            'test result: ok. 830 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s',
+          ),
+        },
+        {
+          k: 'msg',
+          text: 'All 830 tests pass. `install_skills` now iterates `Agent::ALL`, so adding an agent no longer means touching the installer.',
+        },
+        { k: 'worked', text: 'Worked for 1m 25s' },
+      ];
+      cfg.agent.st = 'done';
+      cfg.agent.msg = 'Skills follow Agent::ALL';
+      cfg.agent.since = t - 95000;
+
+      this.wins = [
+        { idx: 1, name: 'main', kind: 'shell', seen: true },
+        {
+          idx: 2,
+          name: 'agents-config',
+          kind: 'config',
+          agent: cfg.agent,
+          cc: cfg,
+          seen: false,
+        },
+        {
+          idx: 3,
+          name: 'auto-layout',
+          kind: 'task',
+          agent: by('auto-layout'),
+          seen: true,
+        },
+      ];
+      this.cur = 0;
+      this.last = 1;
+      this.poster = false;
+      this.mouse.on = this.mouse.down = false;
+      this.hint.on = this.hint.shown = false;
+      this.sh = {
+        lines: [
+          PROMPT_TOP,
+          shellCmd('git pull'),
+          [['Already up to date.', 't']],
+          [],
+        ],
+        input: '',
+        cmd: 'zsh',
+        busy: false,
+      };
+      this.play(this.scenario(cfg));
+    }
+
+    // ------------------------------------------------------- scheduling
+
+    later(ms: number, fn: () => void) {
+      this.queue.push({ at: this.t + ms, fn });
+      this.queue.sort((a, b) => a.at - b.at);
+    }
+
+    play(steps: Step[], then?: () => void) {
+      const next = (i: number) => {
+        if (i >= steps.length) return then?.();
+        const [delay, fn] = steps[i];
+        this.later(delay, () => {
+          const extra = fn() || 0;
+          if (extra) this.later(extra, () => next(i + 1));
+          else next(i + 1);
+        });
+      };
+      next(0);
+    }
+
+    tick(draw = true) {
+      this.t += STEP;
+      while (this.queue.length && this.queue[0].at <= this.t)
+        this.queue.shift()!.fn();
+      for (const w of this.wins)
+        if (w.cc?.spin.on)
+          w.cc.spin.tokens += ((6 + Math.random() * 22) * STEP) / TICK;
+      for (const a of this.agents) this.advance(a);
+      this.stepMouse();
+      if (draw) this.paint();
+    }
+
+    advance(a: Agent) {
+      if (a.cycle && this.t >= a.phaseEnd!) {
+        a.phase = a.phase! + 1 >= a.cycle.length ? a.loopFrom! : a.phase! + 1;
+        const ph = a.cycle[a.phase];
+        a.st = ph.st;
+        if (ph.msg) a.msg = ph.msg;
+        a.since = this.t;
+        a.phaseEnd = this.t + ph.dur;
+      }
+      if (a.cycle && a.st === 'work' && this.t >= (a.nextEdit ?? 0)) {
+        a.nextEdit = this.t + 2500 + Math.random() * 3500;
+        if (this.t > 0) {
+          a.uadd += 1 + Math.floor(Math.random() * 9);
+          a.udel += Math.floor(Math.random() * 3);
+        }
+      }
+    }
+
+    setState(a: Agent, st: State) {
+      a.st = st;
+      a.since = this.t;
+      const w = this.wins.find((w) => w.agent === a);
+      if (w && st === 'done') w.seen = false;
+    }
+
+    // tmux select-window: the last window is what `-` marks in the status bar.
+    go(i: number) {
+      if (i === this.cur) return;
+      this.last = this.cur;
+      this.cur = i;
+      this.wins[i].seen = true;
+    }
+
+    // Glide the pointer to a cell along a slight arc; returns the duration.
+    moveTo(x: number, y: number): number {
+      const m = this.mouse;
+      if (!m.on) {
+        m.x = 74;
+        m.y = 20;
+        m.on = true;
+      }
+      const dx = x - m.x;
+      const dy = (y - m.y) * 2.6;
+      const dist = Math.hypot(dx, dy);
+      const dur = Math.round(Math.min(1300, 520 + dist * 6.5) / STEP) * STEP;
+      // Bow the path to one side, as a wrist pivot does.
+      const bow = 0.18 * dist;
+      Object.assign(m, {
+        sx: m.x,
+        sy: m.y,
+        tx: x,
+        ty: y,
+        cx: (m.x + x) / 2 + (dy / dist) * bow,
+        cy: (m.y + y) / 2 - ((dx / dist) * bow) / 2.6,
+        t0: this.t,
+        dur,
+      });
+      return dur + 180;
+    }
+
+    // Point at an agent's tile in the sidebar.
+    moveToAgent(a: Agent): number {
+      this.groupedSidebar(Math.floor(this.t / TICK));
+      const row = this.tileRows.get(a) ?? 1;
+      return this.moveTo(13 + this.rand() * 4, row + 0.55);
+    }
+
+    press(then: () => void, hint = false): number {
+      const m = this.mouse;
+      m.down = true;
+      this.later(130, () => {
+        m.down = false;
+        then();
+        if (hint && !this.hint.shown) {
+          Object.assign(this.hint, {
+            on: true,
+            shown: true,
+            x: m.x - 6,
+            y: m.y + 2.3,
+          });
+          this.later(2800, () => (this.hint.on = false));
+        }
+      });
+      return 130;
+    }
+
+    stepMouse() {
+      const m = this.mouse;
+      if (!m.dur || this.t > m.t0 + m.dur + STEP) return;
+      const p = easeMove(Math.min(1, (this.t - m.t0) / m.dur));
+      const u = 1 - p;
+      m.x = u * u * m.sx + 2 * u * p * m.cx + p * p * m.tx;
+      m.y = u * u * m.sy + 2 * u * p * m.cy + p * p * m.ty;
+    }
+
+    drawMouse() {
+      const m = this.mouse;
+      const h = this.hint;
+      const key = `${m.x.toFixed(2)},${m.y.toFixed(2)},${m.on},${m.down},${h.on}`;
+      if (key === this.drawn || !this.pointer || !this.hintEl) return;
+      this.drawn = key;
+      this.pointer.style.transform = `translate(${m.x}ch, ${m.y * 2.6}ch)`;
+      this.pointer.toggleAttribute('data-on', m.on);
+      this.pointer.toggleAttribute('data-down', m.down);
+      this.hintEl.style.setProperty('--x', `${h.x}ch`);
+      this.hintEl.style.setProperty('--y', `${h.y * 2.6}ch`);
+      this.hintEl.toggleAttribute('data-on', h.on);
+    }
+
+    typeInto(set: (s: string) => void, text: string): number {
+      // macOS hides the pointer once you start typing.
+      this.later(60, () => (this.mouse.on = false));
+      let at = 0;
+      for (let i = 1; i <= text.length; i++) {
+        at += 22 + this.rand() * 38;
+        this.later(at, () => set(text.slice(0, i)));
+      }
+      return at + 350;
+    }
+
+    // A window created by `workmux add`: the agent starts on its prompt
+    // beside the setup pane from .workmux.yaml.
+    // Without a prompt the agent sits at an empty input with no status yet.
+    spawn(name: string, prompt: string | null, msg: string, verb: string): Win {
+      const a: Agent = {
+        name,
+        proj: 'workmux',
+        st: 'new',
+        since: this.t,
+        add: 0,
+        del: 0,
+        uadd: 0,
+        udel: 0,
+        msg,
+        cycle: [{ st: 'work', dur: 600000 }],
+        loopFrom: 0,
+        phase: 0,
+        phaseEnd: this.t + 600000,
+        nextEdit: this.t + 4000,
+      };
+      this.agents.push(a);
+      const cc = new Claude(this, a);
+      if (prompt !== null) {
+        cc.push({ k: 'user', text: prompt });
+        cc.start(verb);
+      }
+      const side = { lines: [] as Line[], cmd: 'bun' };
+      const idx = Math.max(...this.wins.map((w) => w.idx)) + 1;
+      const w: Win = {
+        idx,
+        name,
+        kind: 'task',
+        agent: a,
+        cc,
+        side,
+        seen: true,
+      };
+      this.wins.push(w);
+      this.play(
+        BUN.map(([d, l]): Step => [d, () => void side.lines.push(l)]),
+        () =>
+          this.later(400, () => {
+            side.cmd = 'zsh';
+            side.lines.push(
+              [],
+              [
+                [`~/code/workmux__worktrees/${name}`, 'shp'],
+                [` ${name}`, 'shb'],
+              ],
+              [['❯', 'shc']],
+            );
+          }),
+      );
+      return w;
+    }
+
+    // The window and its agent go away, as after `workmux merge`; tmux falls
+    // back to the last window.
+    despawn(w: Win) {
+      const i = this.wins.indexOf(w);
+      const last = this.wins[this.last];
+      this.wins.splice(i, 1);
+      this.agents = this.agents.filter((a) => a !== w.agent);
+      const to = last && last !== w ? this.wins.indexOf(last) : 0;
+      this.cur = to;
+      this.last = to === 0 ? 1 : 0;
+      this.wins[to].seen = true;
+    }
+
+    // ------------------------------------------------------------ story
+
+    scenario(cfg: Claude): Step[] {
+      let flaky: Win;
+      let kitty: Win;
+      let w1: ToolBlock;
+      let w2: ToolBlock;
+      let cur: ToolBlock;
+      const sh = this.sh;
+      const ADD = 'workmux add fix-flaky-tests';
+      const FIX =
+        'The sidebar snapshot test fails now and then on CI. Find out why and make it deterministic.';
+      const idxOf = (w: Win) => this.wins.indexOf(w);
+      return [
+        // 1. From the main checkout, open a worktree with `workmux add` and
+        // brief its agent there.
+        [1400, () => this.typeInto((s) => (sh.input = s), ADD)],
+        [
+          0,
+          () => {
+            sh.lines.push(PROMPT_TOP, shellCmd(ADD));
+            sh.input = '';
+            sh.busy = true;
+            sh.cmd = 'workmux';
+          },
+        ],
+        [500, () => void sh.lines.push([['Running setup commands...', 't']])],
+        [
+          800,
+          () =>
+            void sh.lines.push([
+              ['✓ ', 'ok'],
+              ['Setup complete', 't'],
+            ]),
+        ],
+        [
+          300,
+          () => {
+            // Until the first prompt the tile shows the agent's pane title.
+            flaky = this.spawn('fix-flaky-tests', null, 'claude', '');
+            this.go(idxOf(flaky));
+            this.say(
+              'It gets its own worktree and window, with the agent and setup commands',
+            );
+            sh.lines.push(
+              [
+                ['✓ ', 'ok'],
+                [
+                  "Successfully created worktree and tmux window for 'fix-flaky-tests'",
+                  't',
+                ],
+              ],
+              [['  Base: main', 't']],
+              [
+                [
+                  '  Worktree: /Users/you/code/workmux__worktrees/fix-flaky-tests',
+                  't',
+                ],
+              ],
+              [],
+            );
+            sh.busy = false;
+            sh.cmd = 'zsh';
+          },
+        ],
+
+        [1100, () => flaky.cc!.type(FIX)],
+        [
+          0,
+          () => {
+            flaky.cc!.submit(
+              FIX,
+              'Fixing flaky snapshot test',
+              'Investigating',
+            );
+            this.say('Prompt the agent and get on with something else');
+            this.play(this.flaky(flaky.cc!));
+          },
+        ],
+
+        // 2. Leave it working; hand two more tasks to an agent's /worktree skill.
+        [
+          5000,
+          () => {
+            this.mark(1);
+            this.go(1);
+            this.say(
+              'Or let an agent hand off tasks with the `/worktree` skill',
+            );
+          },
+        ],
+        [900, () => cfg.type(DISPATCH)],
+        [
+          0,
+          () =>
+            cfg.submit(DISPATCH, 'Dispatching two worktrees', 'Orchestrating'),
+        ],
+        [
+          1200,
+          () => {
+            w1 = cfg.tool(
+              'Bash',
+              'tmpfile=$(mktemp).md && cat > "$tmpfile" <<\'EOF\'…',
+            );
+            w2 = cfg.tool(
+              'Bash',
+              'tmpfile=$(mktemp).md && cat > "$tmpfile" <<\'EOF\'…',
+            );
+          },
+        ],
+        [
+          700,
+          () => {
+            w1.st = w2.st = 'ok';
+            w1.out = [[['/tmp/tmp.Q7xK2m.md', 't']]];
+            w2.out = [[['/tmp/tmp.Lp3wZd.md', 't']]];
+          },
+        ],
+        [
+          900,
+          () => {
+            w1 = cfg.tool(
+              'Bash',
+              'workmux add override-docs -b -P /tmp/tmp.Q7xK2m.md',
+              RUNNING,
+            );
+            w2 = cfg.tool(
+              'Bash',
+              'workmux add kitty-test -b -P /tmp/tmp.Lp3wZd.md',
+              RUNNING,
+            );
+          },
+        ],
+        [
+          1400,
+          () => {
+            w1.st = w2.st = 'ok';
+            w1.out = w2.out = ADD_OUT;
+            this.say('Two more worktrees, each with its own window and agent');
+            const docs = this.spawn(
+              'override-docs',
+              'Document the per-agent config overrides in docs/src/content/docs/guide/configuration.md, with a YAML example for each agent.',
+              'Documenting agent overrides',
+              'Reading',
+            );
+            this.play(this.docs(docs.cc!));
+            kitty = this.spawn(
+              'kitty-test',
+              'Add an integration test for the kitty backend that creates a window, sends a command and reads the output back.',
+              'Adding kitty backend test',
+              'Scheming',
+            );
+            this.play(this.kitty(kitty.cc!));
+          },
+        ],
+        [
+          900,
+          () =>
+            void cfg.push({
+              k: 'msg',
+              text: 'Started `override-docs` and `kitty-test`, each in its own worktree and window.',
+            }),
+        ],
+        [
+          700,
+          () => {
+            cfg.agent.msg = 'Started two worktrees';
+            cfg.finish();
+            this.poster = true;
+          },
+        ],
+
+        // 3. kitty-test stops to ask; click its tile and answer.
+        [3300, () => this.moveToAgent(kitty.agent!)],
+        [
+          120,
+          () =>
+            this.press(() => {
+              this.go(idxOf(kitty));
+              this.say('Click its tile to jump straight there and answer');
+            }, true),
+        ],
+        [
+          2600,
+          () => {
+            const cc = kitty.cc!;
+            cc.choice = true;
+          },
+        ],
+        [
+          350,
+          () => {
+            const cc = kitty.cc!;
+            cc.ask = null;
+            cc.push({
+              k: 'raw',
+              lines: [
+                [
+                  ['● ', 'w'],
+                  ["User answered Claude's questions:", 't'],
+                ],
+                [
+                  ['  ⎿  · ', 'd'],
+                  [
+                    'How should the integration test get a kitty to talk to? ',
+                    'd',
+                  ],
+                  ['→ Start its own kitty', 't'],
+                ],
+              ],
+            });
+            cc.agent.msg = 'Adding kitty backend test';
+            cc.start('Scheming');
+          },
+        ],
+        [
+          1200,
+          () =>
+            void kitty.cc!.push({
+              k: 'msg',
+              text: 'The test will launch kitty with `allow_remote_control` on a temporary socket and close it when done.',
+            }),
+        ],
+        [
+          1400,
+          () =>
+            void (cur = kitty.cc!.tool('Write', 'tests/kitty_roundtrip.rs')),
+        ],
+        [
+          1100,
+          () => {
+            cur.st = 'ok';
+            cur.out = [
+              [
+                ['Wrote ', 't'],
+                ['64', 'b t'],
+                [' lines to ', 't'],
+                ['tests/kitty_roundtrip.rs', 'b t'],
+              ],
+            ];
+            kitty.agent!.uadd += 64;
+          },
+        ],
+
+        // 4. fix-flaky-tests finished meanwhile: merge it, and its window goes away.
+        [
+          1800,
+          () => {
+            this.mark(3);
+            this.say(
+              '`fix-flaky-tests` is done. Review it and merge with `/merge`',
+            );
+            return this.moveToAgent(flaky.agent!);
+          },
+        ],
+        [120, () => this.press(() => this.go(idxOf(flaky)))],
+        [1300, () => flaky.cc!.type('/merge')],
+        [0, () => flaky.cc!.submit('/merge', 'Merging into main', 'Finagling')],
+        [
+          1100,
+          () =>
+            void (cur = flaky.cc!.tool(
+              'Bash',
+              'git add -A && git commit -m "fix flaky sidebar snapshot test"',
+              RUNNING,
+            )),
+        ],
+        [
+          900,
+          () => {
+            cur.st = 'ok';
+            cur.out = [
+              [
+                [
+                  '[fix-flaky-tests 3f9c2a1] fix flaky sidebar snapshot test',
+                  't',
+                ],
+              ],
+              [[' 1 file changed, 1 insertion(+), 1 deletion(-)', 't']],
+            ];
+            const a = flaky.agent!;
+            a.add += a.uadd;
+            a.del += a.udel;
+            a.uadd = a.udel = 0;
+          },
+        ],
+        [
+          900,
+          () => void (cur = flaky.cc!.tool('Bash', 'git rebase main', RUNNING)),
+        ],
+        [
+          800,
+          () => {
+            cur.st = 'ok';
+            cur.out = textOut(
+              'Successfully rebased and updated refs/heads/fix-flaky-tests.',
+            );
+          },
+        ],
+        [
+          900,
+          () =>
+            void (cur = flaky.cc!.tool(
+              'Bash',
+              'workmux merge --rebase --notification',
+              RUNNING,
+            )),
+        ],
+        [
+          1300,
+          () => {
+            cur.st = 'ok';
+            cur.out = [
+              [["Merging 'fix-flaky-tests' into 'main'...", 't']],
+              [
+                ['✓ ', 'ok'],
+                ["Merged 'fix-flaky-tests'", 't'],
+              ],
+              [
+                ['✓ ', 'ok'],
+                [
+                  "Successfully merged 'fix-flaky-tests'; cleanup scheduled",
+                  't',
+                ],
+              ],
+            ];
+          },
+        ],
+        [
+          1500,
+          () => {
+            this.despawn(flaky);
+            this.say(
+              'Merged into main, and its worktree and window are cleaned up',
+            );
+          },
+        ],
+
+        // 5. Let it sit, then start over.
+        [6000, () => this.reset()],
+      ];
+    }
+
+    flaky(cc: Claude): Step[] {
+      let s: SearchBlock;
+      let cur: ToolBlock;
+      return [
+        [
+          2500,
+          () =>
+            void (s = cc.push({
+              k: 'search',
+              st: 'run',
+              run: 'Searching for 1 pattern, reading 2 files…',
+              ok: 'Searched for 1 pattern, read 2 files',
+              file: 'src/command/sidebar/ui.rs',
+            })),
+        ],
+        [4000, () => void (s.st = 'ok')],
+        [
+          800,
+          () =>
+            void cc.push({
+              k: 'msg',
+              text: "The snapshot includes the elapsed timer, which can tick between render and assert. I'll pin the clock so the output is stable.",
+            }),
+        ],
+        [
+          2400,
+          () => void (cur = cc.tool('Update', 'src/command/sidebar/ui.rs')),
+        ],
+        [
+          1000,
+          () => {
+            cur.st = 'ok';
+            cur.out = updated('src/command/sidebar/ui.rs', 1, 1, [
+              diffLine(412, '-', '    let app = App::new(state);'),
+              diffLine(412, '+', '    let app = App::new(state).at(T0);'),
+            ]);
+            cc.agent.uadd += 1;
+            cc.agent.udel += 1;
+          },
+        ],
+        [
+          2400,
+          () => void (cur = cc.tool('Bash', 'cargo test sidebar', RUNNING)),
+        ],
+        [
+          9000,
+          () => {
+            cur.st = 'ok';
+            cur.out = textOut(
+              'test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 791 filtered out; finished in 0.41s',
+            );
+          },
+        ],
+        [
+          900,
+          () =>
+            void cc.push({
+              k: 'msg',
+              text: 'All 42 sidebar tests pass, and the snapshot no longer depends on the wall clock.',
+            }),
+        ],
+        [
+          900,
+          () => {
+            cc.agent.msg = 'Pinned the snapshot clock';
+            this.say('Meanwhile `fix-flaky-tests` finished, marked ✅');
+            cc.finish();
+          },
+        ],
+      ];
+    }
+
+    docs(cc: Claude): Step[] {
+      let s: SearchBlock;
+      let cur: ToolBlock;
+      return [
+        [
+          1600,
+          () =>
+            void (s = cc.push({
+              k: 'search',
+              st: 'run',
+              run: 'Searching for 2 patterns, reading 2 files…',
+              ok: 'Searched for 2 patterns, read 2 files',
+              file: 'src/config/agent.rs',
+            })),
+        ],
+        [2400, () => void (s.st = 'ok')],
+        [
+          900,
+          () =>
+            void cc.push({
+              k: 'msg',
+              text: "Overrides are keyed by agent name under `agents:`. I'll add a section after the agent options with one example per agent.",
+            }),
+        ],
+        [
+          1500,
+          () =>
+            void (cur = cc.tool(
+              'Update',
+              'docs/src/content/docs/guide/configuration.md',
+            )),
+        ],
+        [
+          1100,
+          () => {
+            cur.st = 'ok';
+            cur.out = [
+              [
+                ['Updated ', 't'],
+                ['configuration.md', 'b t'],
+                [' with ', 't'],
+                ['38', 'b t'],
+                [' additions', 't'],
+              ],
+            ];
+            cc.agent.uadd += 38;
+          },
+        ],
+      ];
+    }
+
+    // Works briefly, then stops on a permission prompt until someone answers.
+    kitty(cc: Claude): Step[] {
+      let s: SearchBlock;
+      return [
+        [
+          1200,
+          () =>
+            void (s = cc.push({
+              k: 'search',
+              st: 'run',
+              run: 'Searching for 2 patterns, reading 3 files…',
+              ok: 'Searched for 2 patterns, read 3 files',
+              file: 'src/multiplexer/kitty.rs',
+            })),
+        ],
+        [1800, () => void (s.st = 'ok')],
+        [
+          700,
+          () =>
+            void cc.push({
+              k: 'msg',
+              text: 'The kitty backend drives kitty through `kitten @`, which only works with remote control turned on.',
+            }),
+        ],
+        [
+          900,
+          () => {
+            cc.ask = {
+              head: 'Test setup',
+              question:
+                'How should the integration test get a kitty to talk to?',
+              options: [
+                [
+                  'Start its own kitty',
+                  'Launch a throwaway instance with remote control on',
+                ],
+                [
+                  'Use the running kitty',
+                  'Skip the test unless KITTY_LISTEN_ON is set',
+                ],
+              ],
+            };
+            cc.choice = false;
+            cc.spin.on = false;
+            this.mark(2);
+            this.say('An agent has a question, and the sidebar flags it');
+            cc.agent.msg = 'Which kitty should the test use?';
+            this.setState(cc.agent, 'wait');
+          },
+        ],
+      ];
+    }
+
+    // ---------------------------------------------------------- drawing
+
+    blink() {
+      return Math.floor(this.t / 500) % 2 === 0;
+    }
+
+    blockLines(b: Block): Line[] {
+      const bullet = (cls: string): Seg => ['●', cls];
+      const runBullet = (): Seg => (this.blink() ? bullet('d') : [' ', '']);
+      switch (b.k) {
+        case 'raw':
+          return b.lines;
+        case 'msg':
+          return wrap(b.text, TEXT_W).map((l, i) => [
+            i ? sp(2) : bullet('w'),
+            ...(i ? [] : [sp(1)]),
+            ...l,
+          ]);
+        case 'dim':
+          return [[sp(2), [b.text, 'd']]];
+        case 'worked':
+          return [
+            [
+              ['✻ ', 'd'],
+              [b.text, 'd'],
+            ],
+          ];
+        case 'user':
+          return wrapPlain(b.text, AG - 3).map((l, i): Line => [
+            [(i ? '  ' : '> ') + l.padEnd(AG - 3), 'up Bup'],
+          ]);
+        case 'search':
+          return b.st === 'run'
+            ? [
+                [
+                  runBullet(),
+                  sp(1),
+                  [b.run, 'w'],
+                  [' (ctrl+o to expand)', 'd'],
+                ],
+                [
+                  ['  ⎿  ', 'd'],
+                  [b.file, 't'],
+                ],
+              ]
+            : [[sp(2), [`${b.ok} (ctrl+o to expand)`, 'd']]];
+        case 'tool':
+          return [
+            [
+              b.st === 'run' ? runBullet() : bullet('ok'),
+              sp(1),
+              [b.name, 'b w'],
+              [`(${b.arg})`, 't'],
+            ],
+            ...b.out.map((l, i): Line => [[i ? '     ' : '  ⎿  ', 'd'], ...l]),
+          ];
+      }
+    }
+
+    transcript(cc: Claude): Line[] {
+      const flat: Line[] = [];
+      for (const b of cc.blocks) {
+        if (flat.length) flat.push([]);
+        flat.push(...this.blockLines(b));
+      }
+      flat.push([]);
+      if (!cc.ask)
+        return flat.slice(-(TRANSCRIPT_ROWS + 1 - this.inputLines(cc).length));
+      // The question replaces the input box at the bottom of the pane.
+      const q = cc.ask;
+      flat.push(
+        [sp(AG, 'hl lr')],
+        [sp(1), [` ☐ ${q.head} `, 'up Bup']],
+        [],
+        ...wrapPlain(q.question, AG - 2).map((l): Line => [sp(1), [l, 'b w']]),
+        [],
+      );
+      q.options.forEach(([label, desc], i) => {
+        const sel = i === 0;
+        flat.push(
+          [
+            [sel ? ' ❯ ' : '   ', 'code'],
+            [`${i + 1}. ${label}`, sel ? (cc.choice ? 'code b' : 'code') : 't'],
+          ],
+          [[`      ${desc}`, 'd']],
+        );
+      });
+      flat.push(
+        [[`   ${q.options.length + 1}. Type something.`, 't']],
+        [],
+        [[' Enter to select · ↑/↓ to navigate · Esc to cancel', 'd']],
+      );
+      return flat.slice(-(ROWS - 3));
+    }
+
+    spinnerLine(cc: Claude): Line {
+      const s = cc.spin;
+      if (!s.on) return [];
+      const frame = Math.floor(this.t / TICK);
+      const glyph = SPIN_GLYPHS[frame % SPIN_GLYPHS.length];
+      const hot = (frame % (s.verb.length + 12)) - 3;
+      const verb: Line = [...s.verb].map((ch, i) => [
+        ch,
+        Math.abs(i - hot) <= 1 ? 'sv2' : 'sv',
+      ]);
+      return [
+        [glyph, 'sg'],
+        sp(1),
+        ...verb,
+        ['…', 'sv'],
+        [` (${fmtDur(this.t - s.start)} · ↓ ${fmtTok(s.tokens)} tokens)`, 'd'],
+      ];
+    }
+
+    // The input box wraps its text and grows upward, taking rows from the
+    // transcript.
+    inputLines(cc: Claude): Line[] {
+      const rows = wrapPlain(cc.input, AG - 3);
+      if (!rows.length) rows.push('');
+      return rows.map((l, i): Line => [
+        [i ? '  ' : '❯ ', 'd'],
+        [l, 't'],
+        ...(i === rows.length - 1 ? [[' ', 'Bcur'] as Seg] : []),
+      ]);
+    }
+
+    // The agent pane from its first row down: the transcript's tail, then
+    // the spinner and input box, or the question in their place.
+    agentLines(cc: Claude): Line[] {
+      const tr = this.transcript(cc);
+      if (cc.ask) return tr;
+      const input = this.inputLines(cc);
+      const top = TRANSCRIPT_ROWS + 1 - input.length;
+      return [
+        ...Array.from({ length: top }, (_, i) => tr[i] ?? []),
+        this.spinnerLine(cc),
+        [],
+        [sp(AG, 'hl lr')],
+        ...input,
+        [sp(AG, 'hl lr')],
+        [sp(2), [cc.spin.on ? 'esc to interrupt' : '? for shortcuts', 'd']],
+      ];
+    }
+
+    // The shell pane from its first row down.
+    shellLines(): Line[] {
+      const sh = this.sh;
+      const input: Line = [
+        ...(sh.input ? shellCmd(sh.input) : shellCmd('').slice(0, 1)),
+        [' ', 'Bcur'],
+      ];
+      const lines: Line[] = sh.busy
+        ? sh.lines
+        : [...sh.lines, PROMPT_TOP, input];
+      return lines.slice(-(ROWS - 2));
+    }
+
+    tileRow(a: Agent, k: number, frame: number, sel: boolean): Line {
+      const idle = a.st === 'idle';
+      const fresh = a.st === 'new';
+      const W = SB - 6; // text spans cols 5-28
+      const lead: Line = [sp(1, `bar ${BAR[a.st]}`)];
+      if (k === 0) {
+        const icon: Seg = a.st === 'work' ? [spinner(frame), 'sk'] : ICON[a.st];
+        const time = ago(this.t - a.since);
+        const name = clip(a.name, W - time.length - 1);
+        const nameCls = idle ? 'si' : sel ? 'sn b' : 'sn';
+        return [
+          ...lead,
+          sp(1),
+          icon,
+          sp(1),
+          [name, nameCls],
+          sp(W - strW(name) - time.length),
+          [time, idle ? 'si' : fresh ? 'sm' : 'stm'],
+          sp(1),
+        ];
+      }
+      const diff: Line = [];
+      if (a.add || a.del)
+        diff.push([`+${a.add}`, idle ? 'si' : 'sa'], sp(1), [
+          `-${a.del}`,
+          idle ? 'si' : 'sd',
+        ]);
+      if (a.uadd || a.udel) {
+        if (diff.length) diff.push(sp(1));
+        diff.push(
+          { svg: 'pencil', cls: 'spn', w: 2 },
+          [`+${a.uadd}`, 'sa2'],
+          sp(1),
+          [`-${a.udel}`, 'sd2'],
+        );
+      }
+      const dw = lineW(diff);
+      // The second line leaves out the project, which the group header
+      // already names, and shows the pane title beside the diff instead.
+      const left = clip(a.msg, W - dw - (dw ? 1 : 0));
+      return [
+        ...lead,
+        sp(4),
+        [left, idle ? 'si' : 'sm'],
+        sp(W - strW(left) - dw),
+        ...diff,
+        sp(1),
+      ];
+    }
+
+    // Sidebar grouped by project: banded headers, live agents as two-line
+    // tiles, stale agents folded into a tail or, for groups with nothing live,
+    // listed one line each under a STALE rule.
+    groupedSidebar(frame: number): Line[] {
+      const by = (name: string) => this.agents.find((a) => a.name === name)!;
+      const sel = this.wins[this.cur].agent;
+      const div: Line = [sp(SB, 'hl lsep')];
+      const header = (label: string, count: number, chevron = ''): Line => {
+        const cnt = String(count);
+        const lead: Line = chevron
+          ? [[`${chevron} `, 'sst Bband']]
+          : [sp(2, 'Bband')];
+        return [
+          ...lead,
+          [label, 'gh b Bband'],
+          sp(SB - 3 - label.length - cnt.length, 'Bband'),
+          [cnt, 'sp Bband'],
+          sp(1, 'Bband'),
+        ];
+      };
+      const tile = (a: Agent) =>
+        [0, 1].map((k) =>
+          fit(
+            this.tileRow(a, k, frame, a === sel),
+            SB,
+            a === sel ? 'Bsel' : '',
+          ),
+        );
+      const dormant = (a: Agent): Line => {
+        const time = ago(this.t - a.since);
+        const W = SB - 6;
+        const name = clip(a.name, W - time.length - 1);
+        return [
+          sp(1, 'bar bi'),
+          sp(1),
+          { svg: 'nfSleep', cls: 'sst', w: 2 },
+          sp(1),
+          [name, 'sst'],
+          sp(W - strW(name) - time.length),
+          [time, 'sst'],
+          sp(1),
+        ];
+      };
+      const rule = (label: string): Line => {
+        const text = ` ${label} `;
+        const left = Math.floor((SB - text.length) / 2);
+        return [
+          sp(left, 'hl lsep'),
+          [text, 'sp'],
+          sp(SB - text.length - left, 'hl lsep'),
+        ];
+      };
+      const wm = this.agents.filter((a) => a.proj === 'workmux');
+
+      // Screen row of each tile's first line, for pointing at it.
+      const lines: Line[] = [];
+      this.tileRows.clear();
+      const add = (...ls: Line[]) => void lines.push(...ls);
+      const addTile = (a: Agent) => {
+        this.tileRows.set(a, lines.length + 1);
+        add(...tile(a));
+      };
+
+      add(header('workmux', wm.length));
+      for (const a of wm) {
+        addTile(a);
+        add(div);
+      }
+      add(header('consult-llm', 2));
+      addTile(by('opencode'));
+      add(div, [['  ▸ 1 stale', 'sst']], div, header('anki-llm', 1));
+      addTile(by('batch-processing'));
+      add(
+        rule('STALE'),
+        header('WalkingMate', 2, '▾'),
+        dormant(by('bluetooth-reconnect')),
+        dormant(by('step-goal-sync')),
+        div,
+        header('aven', 4, '▸'),
+      );
+      return lines;
+    }
+
+    sidebarRow(r: number): Line {
+      return this.grouped[r - 1] ?? [];
+    }
+
+    rightRow(r: number): Line {
+      if (r <= 25) return NVIM[r - 1];
+      if (r === 26) return NVIM_STATUS;
+      if (r === 27) return [sp(RT, 'Bnv')];
+      if (r === 28)
+        return [
+          sp(2, 'hl lg'),
+          sp(1),
+          ['3: just', 'tg'],
+          sp(1),
+          sp(RT - 11, 'hl lg'),
+        ];
+      return VITE[r - 29] ?? [];
+    }
+
+    sideRow(w: Win, r: number): Line {
+      const l = w.side?.lines[r - 1];
+      return l ? [sp(1), ...l] : [];
+    }
+
+    paneTitle(w: number, label: string, active: boolean): Line {
+      const l = active ? 'hl la' : 'hl lg';
+      return [
+        sp(2, l),
+        sp(1),
+        [label, active ? 'ta' : 'tg'],
+        sp(1),
+        sp(w - label.length - 4, l),
+      ];
+    }
+
+    winIcon(w: Win, active: boolean): string {
+      const st = w.agent?.st;
+      if (st === 'work') return '🤖';
+      if (st === 'wait') return '💬';
+      if (st === 'done' && (active || !w.seen)) return '✅';
+      return '';
+    }
+
+    statusBar(): Line {
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, '0');
+      const clock = `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${p(d.getHours())}:${p(d.getMinutes())}`;
+      const left: Line = [['workmux', 'stl']];
+      this.wins.forEach((w, i) => {
+        const active = i === this.cur;
+        const icon = this.winIcon(w, active);
+        const flag = active ? '*' : i === this.last ? '-' : '';
+        const c = active ? 'wa Bwa' : 'stw';
+        left.push(sp(active || i - 1 === this.cur ? 1 : 2));
+        if (w.kind === 'shell') {
+          left.push([`${w.idx}:${w.name}${flag}`, c]);
+          return;
+        }
+        left.push([`${w.idx}:`, c], { svg: 'branch', cls: c }, [
+          ` ${w.name}`,
+          c,
+        ]);
+        if (icon) left.push([' ', c], [icon, active ? 'Bwa' : '']);
+        left.push([flag, c]);
+      });
+      return spread(left, [[clock, 'clk']], COLS, '');
+    }
+
+    paint() {
+      // Lets the page label the panes of whichever window is showing.
+      const kind = this.wins[this.cur].kind;
+      if (this.dataset.win !== kind) this.dataset.win = kind;
+      this.drawBar();
+      this.drawCaption();
+      const frame = Math.floor(this.t / TICK);
+      const w = this.wins[this.cur];
+      const agent = w.cc ? this.agentLines(w.cc) : [];
+      const shell = w.kind === 'shell' ? this.shellLines() : [];
+      this.grouped = this.groupedSidebar(frame);
+      for (let r = 0; r < ROWS; r++) {
+        // Each pane is its own fixed-width box, so sub-pixel rounding inside
+        // one pane never shifts the borders from row to row.
+        let panes: [Line, number][];
+        if (r === ROWS - 1) {
+          panes = [[this.statusBar(), COLS]];
+        } else if (w.kind === 'shell') {
+          panes =
+            r === 0
+              ? [
+                  [this.paneTitle(SB, '0: workmux', false), SB],
+                  [[sp(1, 'ctd la')], 1],
+                  [this.paneTitle(MAIN_W, `1: ${this.sh.cmd}`, true), MAIN_W],
+                ]
+              : [
+                  [fit(this.sidebarRow(r), SB), SB],
+                  [[sp(1, 'vl la')], 1],
+                  [fit(shell[r - 1] ?? [], MAIN_W), MAIN_W],
+                ];
+        } else if (r === 0) {
+          const right =
+            w.kind === 'config' ? '2: nvim' : `2: ${w.side?.cmd ?? 'zsh'}`;
+          panes = [
+            [this.paneTitle(SB, '0: workmux', false), SB],
+            [[sp(1, 'ctd la')], 1],
+            [this.paneTitle(AG, '1: claude', true), AG],
+            [[sp(1, 'ctd la')], 1],
+            [this.paneTitle(RT, right, false), RT],
+          ];
+        } else {
+          const cfg = w.kind === 'config';
+          panes = [
+            [fit(this.sidebarRow(r), SB), SB],
+            [[sp(1, 'vl la')], 1],
+            [fit(agent[r - 1] ?? [], AG, 'Bag'), AG],
+            [[sp(1, cfg && r === 28 ? 'ctr la' : 'vl la')], 1],
+            [fit(cfg ? this.rightRow(r) : this.sideRow(w, r), RT), RT],
+          ];
+        }
+        const next = panes.map(
+          ([line, w]) =>
+            `<span class="rg" style="width:${w}ch">${html(fit(line, w))}</span>`,
+        );
+        const prev = this.cache[r];
+        if (prev?.length === next.length) {
+          const els = this.rows[r].children;
+          next.forEach((h, i) => {
+            if (h !== prev[i]) els[i].outerHTML = h;
+          });
+        } else {
+          this.rows[r].innerHTML = next.join('');
+        }
+        this.cache[r] = next;
+      }
+      this.drawMouse();
+    }
+  }
+
+  if (!customElements.get('live-tmux')) {
+    customElements.define('live-tmux', LiveTmux);
+  }
+</script>

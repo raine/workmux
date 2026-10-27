@@ -1,9 +1,9 @@
 ---
 name: workmux
-description: Reference for the workmux CLI that manages git worktrees and
-  tmux windows as isolated development environments. Use when the user
-  mentions workmux, worktrees, or parallel agent workflows.
-disable-model-invocation: true
+description: Manage terminal agents, git worktrees, and tmux sessions with
+  workmux. Use when the user asks to open or start an agent in a project,
+  check running agents or their progress in a tmux session, or work with
+  workmux, worktrees, or parallel agent workflows.
 ---
 
 # workmux
@@ -16,6 +16,54 @@ terminal state, and AI agent.
 "/workmux add ..."), you are a dispatcher.** Write prompt files and run
 commands. Do NOT explore, read, or research the codebase first. Use
 context you already have. The worktree agent does all the work.
+
+## Opening agents in projects
+
+When the user asks to open or start a new agent in `<project>`, treat the
+project name as a tmux session name. Resolve the project's directory, reuse
+that tmux session if it exists, and create it if it does not. Start the agent
+in a new window in that session, with the project directory as its working
+directory. Use the agent requested by the user or the configured default.
+This means a terminal agent in tmux, not a new chat in the assistant app.
+
+For an existing session:
+
+```bash
+tmux new-window -d -P -F '#{window_id}' -t <project> -n <name> \
+  -c <project-path> <agent>
+```
+
+If the session does not exist, create it with the agent in its first window:
+
+```bash
+tmux new-session -d -P -F '#{window_id}' -s <project> -n <name> \
+  -c <project-path> <agent>
+```
+
+Use tmux session metadata to resolve existing project paths, for example
+`tmux list-sessions -F '#{session_name}\t#{session_path}'`. Avoid directory
+listings when that metadata already supplies the path. Create windows with
+`tmux new-window -d -P -F '#{window_id}' ...` to return the new window ID;
+use that ID for subsequent operations instead of listing windows again.
+When switching is requested, batch the client lookup and switch into one
+tool call. Switch only when requested. Avoid redundant verification calls
+when the command's successful result already confirms the operation.
+
+When a separate worktree would clearly benefit the task, use `workmux add`
+from the target repository instead. Pass `--parent-session <project>` to
+place the agent in the intended tmux session. Use the configured default
+agent, or pass `-a <agent>` when the user requests a specific agent. Workmux
+creates the parent session if needed. Otherwise, use the existing project
+checkout.
+
+## Checking agent status
+
+Reuse known sessions, paths, and handles. If handles are unknown, inspect
+the session's coordinator or dashboard first.
+
+Batch `workmux status` and `workmux capture <handle> -n 50` for relevant
+agents in one tool call. Skip idle shells and unrelated projects. Report
+task, progress, blockers, and completion evidence; stop when clear.
 
 ## Key Concepts
 

@@ -883,6 +883,12 @@ pub enum SidebarAction {
         #[arg(value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         index: u64,
     },
+    /// Toggle rule-based views for all sidebars, or explicitly turn them on/off.
+    View {
+        /// on: each window uses its matching view; off: show all agents
+        #[arg(value_name = "MODE", value_parser = ["on", "off"])]
+        mode: Option<String>,
+    },
     /// Set sidebar filter mode. Toggles if no mode given.
     Filter {
         /// Filter mode: "none"/"all" or "session"/"project"
@@ -1258,6 +1264,9 @@ pub fn run() -> Result<()> {
             }
             Some(SidebarAction::Jump { index }) => {
                 command::sidebar::navigate(command::sidebar::NavAction::Jump(index as usize))
+            }
+            Some(SidebarAction::View { mode }) => {
+                command::sidebar::view::set_enabled(mode.as_deref())
             }
             Some(SidebarAction::Filter { mode }) => {
                 command::sidebar::set_filter_mode(mode.as_deref())

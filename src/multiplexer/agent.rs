@@ -103,7 +103,7 @@ impl AgentProfile for ClaudeProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("claude --model haiku -p")
+        Some("claude --model haiku --no-session-persistence -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -203,7 +203,7 @@ impl AgentProfile for CodexProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some(r#"codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini"#)
+        Some(r#"codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna"#)
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -319,7 +319,7 @@ impl AgentProfile for PiProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("pi -p")
+        Some("pi --no-session -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -343,7 +343,7 @@ impl AgentProfile for OmpProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("omp -p")
+        Some("omp --no-session -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -688,7 +688,10 @@ mod tests {
             profile.skip_permissions_flag(),
             Some("--dangerously-skip-permissions")
         );
-        assert_eq!(profile.auto_name_command(), Some("claude --model haiku -p"));
+        assert_eq!(
+            profile.auto_name_command(),
+            Some("claude --model haiku --no-session-persistence -p")
+        );
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
@@ -759,7 +762,7 @@ mod tests {
         assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
         assert_eq!(
             profile.auto_name_command(),
-            Some(r#"codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini"#)
+            Some(r#"codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna"#)
         );
         assert_eq!(profile.continue_flag(), Some("resume --last"));
     }
@@ -829,7 +832,7 @@ mod tests {
         assert!(profile.needs_auto_status());
         assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
         assert_eq!(profile.skip_permissions_flag(), None);
-        assert_eq!(profile.auto_name_command(), Some("pi -p"));
+        assert_eq!(profile.auto_name_command(), Some("pi --no-session -p"));
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
@@ -841,7 +844,7 @@ mod tests {
         assert!(profile.needs_auto_status());
         assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
         assert_eq!(profile.skip_permissions_flag(), None);
-        assert_eq!(profile.auto_name_command(), Some("omp -p"));
+        assert_eq!(profile.auto_name_command(), Some("omp --no-session -p"));
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 

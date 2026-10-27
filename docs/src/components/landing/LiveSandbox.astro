@@ -1,0 +1,415 @@
+---
+// An agent running in a workmux container sandbox, rendered as a character
+// grid: asked about host credentials, it probes its surroundings and finds
+// only the project mounted.
+import './grid.css';
+---
+
+<live-sandbox class="gl">
+  <div
+    class="gl-grid"
+    role="img"
+    aria-label="An agent running in a workmux container sandbox with permission prompts bypassed. Asked whether it can reach SSH keys or cloud credentials, it finds it is in a Linux container whose home directory holds only the project, and that the main checkout is read-only."
+  >
+  </div>
+  <span class="gl-key" aria-hidden="true"></span>
+</live-sandbox>
+
+<style is:global>
+  live-sandbox .t {
+    color: #d4d4d4;
+  }
+  live-sandbox .w {
+    color: #f0f0f0;
+  }
+  live-sandbox .d {
+    color: #9b9b9b;
+  }
+  live-sandbox .code {
+    color: #a9c3f2;
+  }
+  live-sandbox .ok {
+    color: #9fd49a;
+  }
+  live-sandbox .er {
+    color: #f08b8b;
+  }
+  live-sandbox .sg {
+    color: #e0896d;
+  }
+  live-sandbox .sv {
+    color: #e59d80;
+  }
+  live-sandbox .sv2 {
+    color: #f7d2bf;
+  }
+  live-sandbox .up {
+    color: #b0b0b0;
+  }
+  live-sandbox .pm {
+    color: #e2a2b0;
+  }
+  live-sandbox .lr {
+    color: #5a5a5a;
+  }
+  live-sandbox .Bup {
+    background-color: #262626;
+  }
+  live-sandbox .Bcur {
+    background-color: #c6c6c6;
+  }
+
+  /* tmux */
+  live-sandbox .stl {
+    color: #b8cc7e;
+  }
+  live-sandbox .stw {
+    color: #e8e8e8;
+  }
+  live-sandbox .wa {
+    color: #151515;
+  }
+  live-sandbox .Bwa {
+    background-color: #aec579;
+  }
+  live-sandbox .clk {
+    color: #c3d48f;
+  }
+
+  html[data-theme='light'] live-sandbox .t {
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-sandbox .w {
+    color: #111418;
+  }
+  html[data-theme='light'] live-sandbox .d {
+    color: #6b7076;
+  }
+  html[data-theme='light'] live-sandbox .code {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] live-sandbox .ok {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-sandbox .er {
+    color: #b3261e;
+  }
+  html[data-theme='light'] live-sandbox .sg {
+    color: #b4532f;
+  }
+  html[data-theme='light'] live-sandbox .sv {
+    color: #b85c38;
+  }
+  html[data-theme='light'] live-sandbox .sv2 {
+    color: #8a4a2c;
+  }
+  html[data-theme='light'] live-sandbox .up {
+    color: #555a60;
+  }
+  html[data-theme='light'] live-sandbox .pm {
+    color: #b4405a;
+  }
+  html[data-theme='light'] live-sandbox .lr {
+    color: #c8c8c8;
+  }
+  html[data-theme='light'] live-sandbox .Bup {
+    background-color: #ececec;
+  }
+  html[data-theme='light'] live-sandbox .Bcur {
+    background-color: #3a3f45;
+  }
+  html[data-theme='light'] live-sandbox .stl {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] live-sandbox .stw {
+    color: #24292f;
+  }
+  html[data-theme='light'] live-sandbox .clk {
+    color: #5a7a1a;
+  }
+</style>
+
+<script>
+  import { GridLoop, fit, html, lineW, sp, spread, wrapPlain } from './grid';
+  import type { Line, Seg } from './grid';
+
+  const COLS = 72;
+  const ROWS = 22;
+  const W = COLS - 2; // the agent's width inside a one-cell margin
+  const TICK = 100;
+
+  const SVG: Record<string, string> = {
+    branch:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="6" cy="19" r="2.4"/><circle cx="6" cy="5" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2M18 9.4c0 5-6 4.6-11 7.6"/></svg>',
+  };
+  const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+
+  const PROMPT = 'Can you reach my SSH keys or cloud credentials?';
+  const ANSWER =
+    "No. I'm in a Linux container, and your home directory holds only the project mount: no `~/.ssh`, no cloud credentials. The main checkout is read-only, so my edits stay in this worktree.";
+
+  type Tool = { name: string; arg: string; done: boolean; out: Line[] };
+  type Block =
+    | { k: 'user'; text: string }
+    | { k: 'tool'; tool: Tool }
+    | { k: 'msg'; text: string }
+    | { k: 'worked'; text: string };
+
+  // Greedy word wrap for text with `inline code` spans.
+  function wrap(text: string, width: number): Line[] {
+    const words: Line[] = [];
+    text.split(/(`[^`]+`)/).forEach((part, i) => {
+      const cls = i % 2 ? 'code' : 't';
+      const body = i % 2 ? part.slice(1, -1) : part;
+      body.split(/( )/).forEach((tok) => {
+        if (tok === '') return;
+        if (tok === ' ') words.push([]);
+        else {
+          if (!words.length) words.push([]);
+          words[words.length - 1].push([tok, cls]);
+        }
+      });
+    });
+    const lines: Line[] = [];
+    let cur: Line = [];
+    let w = 0;
+    for (const word of words) {
+      if (!word.length) continue;
+      const ww = lineW(word);
+      if (w && w + 1 + ww > width) {
+        lines.push(cur);
+        cur = [];
+        w = 0;
+      }
+      if (w) {
+        cur.push([' ', 't']);
+        w++;
+      }
+      cur.push(...word);
+      w += ww;
+    }
+    if (cur.length) lines.push(cur);
+    return lines;
+  }
+
+  class LiveSandbox extends GridLoop {
+    cols = COLS;
+    rowCount = ROWS;
+    chapters: string[] = [];
+    blocks: Block[] = [];
+    input = '';
+    working = false;
+    spinAt = 0;
+    tokens = 0;
+    // The answer streams in: `shown` of its characters are on screen.
+    answer: { k: 'msg'; text: string } | null = null;
+    shown = 0;
+
+    reset() {
+      this.begin();
+      this.blocks = [];
+      this.input = '';
+      this.working = false;
+      this.answer = null;
+      this.shown = 0;
+      const tool = (name: string, arg: string, out: Line[]) => {
+        const t: Tool = { name, arg, done: false, out: [] };
+        this.blocks.push({ k: 'tool', tool: t });
+        this.later(650, () => {
+          t.done = true;
+          t.out = out;
+        });
+      };
+      this.play([
+        [700, () => this.type(PROMPT)],
+        [
+          0,
+          () => {
+            this.key('⏎');
+            this.input = '';
+            this.blocks.push({ k: 'user', text: PROMPT });
+            this.working = true;
+            this.spinAt = this.t;
+            this.tokens = 0;
+          },
+        ],
+        [
+          1300,
+          () =>
+            tool('Bash', 'uname -sm; ls -A /Users/me', [
+              [['Linux aarch64', 't']],
+              [['code', 't']],
+            ]),
+        ],
+        [
+          1300,
+          () =>
+            tool('Bash', 'touch ../../api/probe', [
+              [
+                [
+                  "touch: cannot touch '../../api/probe': Read-only file system",
+                  'er',
+                ],
+              ],
+            ]),
+        ],
+        [
+          1500,
+          () => {
+            this.answer = { k: 'msg', text: '' };
+            this.blocks.push(this.answer);
+            return Math.ceil(ANSWER.length / 3) * 25 + 200;
+          },
+        ],
+        [
+          0,
+          () => {
+            const s = Math.round((this.t - this.spinAt) / 1000);
+            this.working = false;
+            this.blocks.push({ k: 'worked', text: `Worked for ${s}s` });
+            this.poster = true;
+          },
+        ],
+        [7000, () => this.reset()],
+      ]);
+    }
+
+    type(text: string): number {
+      let at = 0;
+      for (let i = 1; i <= text.length; i++) {
+        at += 22 + this.rand() * 38;
+        this.later(at, () => (this.input = text.slice(0, i)));
+      }
+      return at + 350;
+    }
+
+    advance() {
+      if (this.working) this.tokens += 9;
+      const a = this.answer;
+      if (a && this.shown < ANSWER.length) {
+        this.shown = Math.min(ANSWER.length, this.shown + 3);
+        // Cut at a word break so half-open code spans never show.
+        const cut = ANSWER.lastIndexOf(' ', this.shown);
+        a.text =
+          this.shown === ANSWER.length
+            ? ANSWER
+            : ANSWER.slice(0, Math.max(0, cut));
+      }
+    }
+
+    blink() {
+      return Math.floor(this.t / 500) % 2 === 0;
+    }
+
+    blockLines(b: Block): Line[] {
+      switch (b.k) {
+        case 'user':
+          return wrapPlain(b.text, W - 2).map((l, i): Line => [
+            [(i ? '  ' : '> ') + l.padEnd(W - 2), 'up Bup'],
+          ]);
+        case 'tool': {
+          const t = b.tool;
+          const bullet: Seg = t.done
+            ? ['●', 'ok']
+            : this.blink()
+              ? ['●', 'd']
+              : [' ', ''];
+          const out = t.done ? t.out : [[['Running…', 'd']] as Line];
+          return [
+            [bullet, sp(1), [t.name, 'b w'], [`(${t.arg})`, 't']],
+            ...out.map((l, i): Line => [[i ? '     ' : '  ⎿  ', 'd'], ...l]),
+          ];
+        }
+        case 'msg':
+          return wrap(b.text, W - 2).map((l, i): Line => [
+            [i ? '  ' : '● ', 'w'],
+            ...l,
+          ]);
+        case 'worked':
+          return [
+            [
+              ['✻ ', 'd'],
+              [b.text, 'd'],
+            ],
+          ];
+      }
+    }
+
+    spinnerLine(): Line {
+      if (!this.working) return [];
+      const frame = Math.floor(this.t / TICK);
+      const verb = 'Checking';
+      const hot = (frame % (verb.length + 12)) - 3;
+      const secs = Math.floor((this.t - this.spinAt) / 1000);
+      return [
+        [SPIN[frame % SPIN.length], 'sg'],
+        sp(1),
+        ...[...verb].map((ch, i): Seg => [
+          ch,
+          Math.abs(i - hot) <= 1 ? 'sv2' : 'sv',
+        ]),
+        ['…', 'sv'],
+        [` (${secs}s · ↓ ${(this.tokens / 1000).toFixed(1)}k tokens)`, 'd'],
+      ];
+    }
+
+    // The agent from the top of its pane: transcript, then the input box
+    // and the footer that marks permission prompts as bypassed.
+    agentLines(): Line[] {
+      const lines: Line[] = [[]];
+      for (const b of this.blocks) {
+        lines.push(...this.blockLines(b), []);
+      }
+      if (this.working) lines.push(this.spinnerLine(), []);
+      const rule: Line = [sp(W, 'hl lr')];
+      lines.push(
+        rule,
+        [
+          ['❯ ', 'd'],
+          [this.input, 't'],
+          [' ', 'Bcur'],
+        ],
+        rule,
+        [
+          ['  ⏵⏵ ', 'pm'],
+          ['bypass permissions on', 'pm'],
+          [' (shift+tab to cycle)', 'd'],
+        ],
+      );
+      return lines.slice(-(ROWS - 1));
+    }
+
+    statusBar(): Line {
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, '0');
+      const clock = `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${p(d.getHours())}:${p(d.getMinutes())}`;
+      const c = 'wa Bwa';
+      const icon = this.working ? '🤖' : this.blocks.length ? '✅' : '';
+      const win: Line = [
+        ['2:', c],
+        { svg: 'branch', cls: c },
+        [' auth-refresh', c],
+      ];
+      if (icon) win.push([' ', c], [icon, 'Bwa']);
+      win.push(['*', c]);
+      return spread(
+        [['api', 'stl'], sp(1), ['1:main-', 'stw'], sp(1), ...win],
+        [[clock, 'clk']],
+        COLS,
+      );
+    }
+
+    frame(): string[] {
+      const agent = this.agentLines();
+      const rows: string[] = [];
+      for (let r = 0; r < ROWS - 1; r++)
+        rows.push(html(fit([sp(1), ...(agent[r] ?? [])], COLS), SVG));
+      rows.push(html(fit(this.statusBar(), COLS), SVG));
+      return rows;
+    }
+  }
+
+  if (!customElements.get('live-sandbox')) {
+    customElements.define('live-sandbox', LiveSandbox);
+  }
+</script>

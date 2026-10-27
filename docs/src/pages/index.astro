@@ -1,40 +1,144 @@
 ---
-import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
-import Hero from '../components/home/Hero.astro';
-import HeroScreenshot from '../components/home/HeroScreenshot.astro';
-import Why from '../components/home/Why.astro';
-import PainPoints from '../components/home/PainPoints.astro';
-import Demo from '../components/home/Demo.astro';
-import Sandbox from '../components/home/Sandbox.astro';
-import Dashboard from '../components/home/Dashboard.astro';
-import Workflows from '../components/home/Workflows.astro';
-import Testimonials from '../components/home/Testimonials.astro';
-import Cta from '../components/home/Cta.astro';
-import '../styles/home.css';
+import Landing from '../components/landing/Landing.astro';
+import '../components/landing/fonts.css';
+
+const title = 'workmux - parallel AI agents in your terminal';
+const description =
+  'Terminal-first workflow for parallel AI agents using git worktrees';
+const site = Astro.site!.href.replace(/\/$/, '');
+const url = new URL(Astro.url.pathname, Astro.site).href;
+const image = `${site}/social-preview.png`;
 ---
 
-<StarlightPage
-  frontmatter={{
-    title: 'workmux - parallel AI agents in your terminal',
-    description:
-      'Terminal-first workflow for parallel AI agents using git worktrees',
-    template: 'splash',
-    tableOfContents: false,
-    pagefind: false,
-    editUrl: false,
-  }}
-  hasSidebar={false}
->
-  <div class="mono-editorial">
-    <Hero />
-    <HeroScreenshot />
-    <Why />
-    <PainPoints />
-    <Demo />
-    <Sandbox />
-    <Dashboard />
-    <Workflows />
-    <Testimonials />
-    <Cta />
-  </div>
-</StarlightPage>
+<!doctype html>
+<html lang="en-US" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={url} />
+    <link rel="icon" href="/branch-icon.svg" type="image/svg+xml" />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="workmux" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={url} />
+    <meta property="og:image" content={image} />
+    <meta property="og:image:width" content="2560" />
+    <meta property="og:image:height" content="1280" />
+    <meta
+      property="og:image:alt"
+      content="The tmux workflow for parallel agents: a tmux session with the workmux sidebar tracking each agent"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={image} />
+    <link
+      rel="preload"
+      href="/fonts/inter-roman-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/mr-dafoe-the.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/iosevka-regular.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <script is:inline>
+      // The theme the docs pages store, or the system's, set before first
+      // paint.
+      (() => {
+        const stored = localStorage.getItem('starlight-theme');
+        document.documentElement.dataset.theme =
+          stored === 'light' || stored === 'dark'
+            ? stored
+            : matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark';
+      })();
+    </script>
+  </head>
+  <body>
+    <Landing />
+  </body>
+</html>
+
+<script>
+  // Theme toggle, copy buttons and tab groups, delegated from the document.
+  document.addEventListener('click', async (e) => {
+    const target = e.target as Element;
+    if (target.closest('[data-theme-toggle]')) {
+      const next =
+        document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('starlight-theme', next);
+      return;
+    }
+    const copy = target.closest<HTMLElement>('[data-copy]');
+    if (copy) {
+      const panel = copy
+        .closest('[data-tabs]')
+        ?.querySelector('[data-panel]:not([hidden]) [data-cmd]');
+      const text = panel?.textContent ?? copy.dataset.copy ?? '';
+      try {
+        await navigator.clipboard.writeText(text.trim());
+      } catch {}
+      copy.setAttribute('data-copied', '');
+      clearTimeout(Number(copy.dataset.timer));
+      copy.dataset.timer = String(
+        setTimeout(() => copy.removeAttribute('data-copied'), 1600),
+      );
+      return;
+    }
+    const tab = target.closest<HTMLElement>('[data-tab]');
+    const group = tab?.closest('[data-tabs]');
+    if (!tab || !group) return;
+    const own = (el: Element) => el.closest('[data-tabs]') === group;
+    for (const t of group.querySelectorAll<HTMLElement>('[data-tab]')) {
+      if (!own(t)) continue;
+      const on = t.dataset.tab === tab.dataset.tab;
+      t.toggleAttribute('data-active', on);
+      t.setAttribute('aria-selected', String(on));
+    }
+    for (const p of group.querySelectorAll<HTMLElement>('[data-panel]')) {
+      if (own(p)) p.hidden = p.dataset.panel !== tab.dataset.tab;
+    }
+  });
+</script>
+
+<style is:global>
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  img,
+  video {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+  [hidden] {
+    display: none !important;
+  }
+</style>

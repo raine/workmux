@@ -33,7 +33,7 @@ pub trait ConversationForker: Send + Sync {
     ///
     /// Agents that scope conversations by project directory copy the session
     /// there; agents that fork natively leave the stored session alone.
-    /// Returns the session UUID for resume args.
+    /// Returns the session ID or path for resume args.
     fn prepare_fork(&self, session: &SessionInfo, target_worktree: &Path) -> Result<String>;
 
     /// CLI args that resume a specific session in `worktree_path`
@@ -152,6 +152,129 @@ impl ConversationForker for ClaudeForker {
         // The conversation was copied into the target worktree's project
         // directory, so Claude resumes it wherever it is launched.
         vec!["--resume".to_string(), session_id.to_string()]
+    }
+}
+
+/// Pi forks natively from a transcript path into the launch directory.
+pub struct PiForker {
+    agent_dir: PathBuf,
+    session_dir: Option<PathBuf>,
+}
+
+impl PiForker {
+    pub fn new() -> Self {
+        let env_path = |name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| crate::util::expand_tilde(&value))
+        };
+        Self {
+            agent_dir: env_path("PI_CODING_AGENT_DIR").unwrap_or_else(|| {
+                home::home_dir()
+                    .expect("could not determine home directory")
+                    .join(".pi/agent")
+            }),
+            session_dir: env_path("PI_CODING_AGENT_SESSION_DIR"),
+        }
+    }
+
+    fn list_sessions(&self, worktree_path: &Path) -> Result<Vec<SessionInfo>> {
+        let dirs = if let Some(dir) = &self.session_dir {
+            vec![dir.clone()]
+        } else {
+            let root = self.agent_dir.join("sessions");
+            if !root.is_dir() {
+                return Ok(Vec::new());
+            }
+            // Read session headers rather than reproducing Pi's path encoding.
+            // This also handles sessions created through a symlink to the project.
+            fs::read_dir(root)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?
+        };
+        let mut sessions = Vec::new();
+        for dir in dirs {
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+                    || !entry.file_type()?.is_file()
+                {
+                    continue;
+                }
+                let mut head = String::new();
+                BufReader::new(fs::File::open(&path)?).read_line(&mut head)?;
+                let Ok(header) = serde_json::from_str::<serde_json::Value>(&head) else {
+                    continue;
+                };
+                let Some(id) = header
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                let Some(cwd) = header.get("cwd").and_then(|cwd| cwd.as_str()) else {
+                    continue;
+                };
+                if header.get("type").and_then(|kind| kind.as_str()) != Some("session")
+                    || !paths_match(Path::new(cwd), worktree_path)
+                {
+                    continue;
+                }
+                sessions.push(SessionInfo {
+                    id: id.to_string(),
+                    path,
+                    timestamp: entry.metadata()?.modified()?,
+                });
+            }
+        }
+        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(a.path.cmp(&b.path)));
+        Ok(sessions)
+    }
+}
+
+impl ConversationForker for PiForker {
+    fn find_latest_conversation(&self, worktree_path: &Path) -> Result<Option<SessionInfo>> {
+        Ok(self.list_sessions(worktree_path)?.into_iter().next())
+    }
+
+    fn find_conversation(
+        &self,
+        worktree_path: &Path,
+        session_id: &str,
+    ) -> Result<Option<SessionInfo>> {
+        let matches: Vec<_> = self
+            .list_sessions(worktree_path)?
+            .into_iter()
+            .filter(|session| session.id.starts_with(session_id))
+            .collect();
+        if let Some(exact) = matches.iter().find(|session| session.id == session_id) {
+            return Ok(Some(exact.clone()));
+        }
+        if matches.len() > 1 {
+            bail!(
+                "Multiple conversations match '{}'. Use a longer session ID prefix.",
+                session_id
+            );
+        }
+        Ok(matches.into_iter().next())
+    }
+
+    fn prepare_fork(&self, session: &SessionInfo, _target_worktree: &Path) -> Result<String> {
+        let path = session
+            .path
+            .canonicalize()
+            .context("Pi conversation file no longer exists")?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    fn resume_args(&self, session_path: &str, _worktree_path: &Path) -> Vec<String> {
+        vec!["--fork".to_string(), session_path.to_string()]
     }
 }
 
@@ -396,6 +519,7 @@ pub fn resolve_forker(agent_name: &str) -> Option<Box<dyn ConversationForker>> {
     match name.as_str() {
         "claude" => Some(Box::new(ClaudeForker::new())),
         "codex" => Some(Box::new(CodexForker::new())),
+        "pi" => Some(Box::new(PiForker::new())),
         _ => None,
     }
 }
@@ -484,6 +608,148 @@ mod tests {
             .list_sessions(Path::new("/nonexistent/path"))
             .unwrap();
         assert!(sessions.is_empty());
+    }
+
+    // === Pi ===
+
+    fn write_pi_session(dir: &Path, id: &str, cwd: &Path) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("2026-01-01T00-00-00-000Z_{id}.jsonl"));
+        let header = serde_json::json!({
+            "type": "session", "version": 3, "id": id,
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": cwd,
+        });
+        fs::write(&path, format!("{header}\n{{\"type\":\"message\"}}\n")).unwrap();
+        path
+    }
+
+    fn pi_forker(agent_dir: &Path) -> PiForker {
+        PiForker {
+            agent_dir: agent_dir.to_path_buf(),
+            session_dir: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_forker_pi() {
+        for name in ["pi", "Pi", "/usr/local/bin/pi --flag"] {
+            assert!(resolve_forker(name).is_some());
+        }
+    }
+
+    #[test]
+    fn pi_latest_filters_headers_and_orders_by_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forker = pi_forker(tmp.path());
+        let cwd = Path::new("/test/project");
+        assert!(forker.find_latest_conversation(cwd).unwrap().is_none());
+        let dir = tmp.path().join("sessions/--test-project--");
+        let old = write_pi_session(&dir, "old", cwd);
+        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        let latest = write_pi_session(&dir, "latest", cwd);
+        write_pi_session(&dir, "other-project", Path::new("/other"));
+        fs::write(dir.join("invalid.jsonl"), "not json\n").unwrap();
+        fs::write(dir.join("empty.jsonl"), "").unwrap();
+        fs::write(
+            dir.join("wrong-type.jsonl"),
+            r#"{"type":"message","id":"bad","cwd":"/test/project"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("missing-id.jsonl"),
+            r#"{"type":"session","cwd":"/test/project"}"#,
+        )
+        .unwrap();
+        fs::create_dir(dir.join("directory.jsonl")).unwrap();
+        assert_eq!(forker.list_sessions(cwd).unwrap().len(), 2);
+        assert_eq!(
+            forker.find_latest_conversation(cwd).unwrap().unwrap().path,
+            latest
+        );
+        assert!(
+            forker
+                .find_conversation(cwd, "other-project")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pi_exact_prefix_ambiguous_and_missing_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forker = pi_forker(tmp.path());
+        let dir = tmp.path().join("sessions/--test--");
+        let cwd = Path::new("/test");
+        write_pi_session(&dir, "abc", cwd);
+        write_pi_session(&dir, "abc-def", cwd);
+        assert_eq!(
+            forker.find_conversation(cwd, "abc").unwrap().unwrap().id,
+            "abc"
+        );
+        assert_eq!(
+            forker.find_conversation(cwd, "abc-d").unwrap().unwrap().id,
+            "abc-def"
+        );
+        assert!(
+            forker
+                .find_conversation(cwd, "ab")
+                .unwrap_err()
+                .to_string()
+                .contains("longer session ID prefix")
+        );
+        assert!(forker.find_conversation(cwd, "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn pi_custom_session_dir_filters_cwd_and_overrides_default_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/test");
+        let custom = tmp.path().join("custom sessions");
+        let forker = PiForker {
+            agent_dir: tmp.path().to_path_buf(),
+            session_dir: Some(custom.clone()),
+        };
+        assert!(forker.find_latest_conversation(cwd).unwrap().is_none());
+        write_pi_session(&custom, "custom", cwd);
+        write_pi_session(&custom, "other", Path::new("/other"));
+        write_pi_session(&tmp.path().join("sessions/default"), "default", cwd);
+        let sessions = forker.list_sessions(cwd).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "custom");
+    }
+
+    #[test]
+    fn pi_prepares_absolute_path_without_copying_or_changing_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forker = pi_forker(tmp.path());
+        let cwd = Path::new("/test");
+        let path = write_pi_session(&tmp.path().join("sessions/path with 'quotes'"), "id", cwd);
+        let original = fs::read(&path).unwrap();
+        let session = forker.find_latest_conversation(cwd).unwrap().unwrap();
+        let target = tmp.path().join("target");
+        let source = forker.prepare_fork(&session, &target).unwrap();
+        assert_eq!(Path::new(&source), path.canonicalize().unwrap());
+        assert_eq!(
+            forker.resume_args(&source, &target),
+            vec!["--fork", &source]
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!target.exists());
+        fs::remove_file(path).unwrap();
+        assert!(forker.prepare_fork(&session, &target).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_matches_project_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        fs::create_dir(&cwd).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&cwd, &alias).unwrap();
+        let forker = pi_forker(tmp.path());
+        write_pi_session(&tmp.path().join("sessions/alias"), "id", &alias);
+        assert!(forker.find_latest_conversation(&cwd).unwrap().is_some());
     }
 
     // === Codex ===

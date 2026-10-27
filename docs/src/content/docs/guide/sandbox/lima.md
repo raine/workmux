@@ -62,7 +62,7 @@ sandbox:
 | `backend`                                    | `container`        | Set to `lima` for VM sandboxing                                                                                             |
 | `lima.isolation`                             | `project`          | `project` (one VM per repo) or `shared` (single global VM)                                                                  |
 | `lima.projects_dir`                          | -                  | Required for `shared` isolation: parent directory of all projects                                                           |
-| `image`                                      | Debian 12          | Custom qcow2 image URL or `file://` path. **Global config only.**                                                           |
+| `image`                                      | Debian 13          | Custom qcow2 image URL or `file://` path. **Global config only.**                                                           |
 | `lima.skip_default_provision`                | `false`            | Skip built-in provisioning (system deps + tool install)                                                                     |
 | `lima.accept_reduced_git_metadata_isolation` | `false`            | Accept Lima's reduced Git metadata guarantee without an interactive prompt                                                  |
 | `lima.cpus`                                  | `4`                | Number of CPUs for Lima VMs                                                                                                 |
@@ -196,7 +196,7 @@ sandbox:
     skip_default_provision: true
 ```
 
-When `image` is set, it replaces the default Debian 12 genericcloud image. The value can be a `file://` path to a local qcow2 image or an HTTP(S) URL.
+When `image` is set, it replaces the default Debian 13 genericcloud image. The value can be a `file://` path to a local qcow2 image or an HTTP(S) URL.
 
 When `skip_default_provision` is true, the built-in provisioning steps are skipped:
 

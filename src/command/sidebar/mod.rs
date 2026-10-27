@@ -29,6 +29,7 @@ mod runtime;
 mod snapshot;
 mod template;
 mod ui;
+pub(crate) mod view;
 
 use crate::cmd::Cmd;
 use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
@@ -44,6 +45,9 @@ use self::panes::{
 };
 
 const SIDEBAR_ROLE_VALUE: &str = "sidebar";
+/// Pane option holding the extent the last layout reflow gave a sidebar.
+/// A sidebar resized to this extent was resized by workmux, not by the user.
+const SIDEBAR_APPLIED_SIZE_OPTION: &str = "@workmux_sidebar_applied_size";
 const MIN_WIDTH: u16 = 25;
 const MAX_WIDTH: u16 = 50;
 const MAX_SANE_WIDTH: u16 = 80;
@@ -1017,6 +1021,35 @@ pub fn navigate(action: NavAction) -> Result<()> {
         return Err(anyhow!("Sidebar requires tmux"));
     }
 
+    // Resolve the caller's window even if another client is focused elsewhere.
+    let current_window_id = view::current_window()?;
+    let current_window_id = current_window_id.as_str();
+    let caller_pane = std::env::var("TMUX_PANE").ok();
+    let current_pane_id = Cmd::new("tmux")
+        .args(&[
+            "display-message",
+            "-p",
+            "-t",
+            caller_pane.as_deref().unwrap_or(current_window_id),
+            "#{pane_id}",
+        ])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+    let current_pane_id = current_pane_id.trim();
+    let pane_window_ids = pane_window_ids();
+    let pane_session_ids = pane_session_ids();
+    let current_session = Cmd::new("tmux")
+        .args(&[
+            "display-message",
+            "-p",
+            "-t",
+            current_window_id,
+            "#{session_name}",
+        ])
+        .run_and_capture_stdout()
+        .unwrap_or_default();
+    let current_session = current_session.trim();
+
     let agents_str = Cmd::new("tmux")
         .args(&["show-option", "-gqv", "@workmux_sidebar_agents"])
         .run_and_capture_stdout()
@@ -1034,24 +1067,9 @@ pub fn navigate(action: NavAction) -> Result<()> {
         anyhow::bail!("no sidebar agents found");
     }
 
-    // Find current pane/window context
-    let current_pane_id = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{pane_id}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default();
-    let current_pane_id = current_pane_id.trim();
-    let current_window_id = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{window_id}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default();
-    let current_window_id = current_window_id.trim();
-    let pane_window_ids = pane_window_ids();
-    let pane_session_ids = pane_session_ids();
-    let current_session = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{session_name}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default();
-    let current_session = current_session.trim();
+    if let Some(scope) = view::read_scope(current_window_id) {
+        panes.retain(|pane| scope.pane_ids.contains(*pane));
+    }
 
     // Apply session filter if active.
     if read_sidebar_filter_mode() == app::SidebarFilterMode::Session {

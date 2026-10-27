@@ -1,0 +1,1880 @@
+---
+import { Image } from 'astro:assets';
+import {
+  install,
+  latest,
+  starsPromise,
+  testimonials,
+  version,
+  videos,
+  workflows,
+} from './data';
+import v1 from '../../assets/videos/ww1wykxJps8.webp';
+import v2 from '../../assets/videos/7uumknh43rM.webp';
+import v3 from '../../assets/videos/0RGyt3EDP-E.webp';
+import SourceIcon from './SourceIcon.astro';
+import HowItWorks from './HowItWorks.astro';
+import LiveTmux from './LiveTmux.astro';
+import LiveDashboard from './LiveDashboard.astro';
+import LiveSidebar from './LiveSidebar.astro';
+import LiveSandbox from './LiveSandbox.astro';
+
+const videoThumbs = [v1, v2, v3];
+const methods = ['brew', 'curl', 'cargo'].map((id) =>
+  install.find((m) => m.id === id)!,
+);
+const stars = await starsPromise;
+
+const tour = [
+  {
+    id: 'dashboard',
+    tab: 'Dashboard',
+    title: 'See which agent needs you.',
+    body: 'A tmux popup that lists every agent across projects with status, diff size and elapsed time. Preview output and reply without switching windows.',
+    points: [
+      'Sort by recency or project',
+      'Live preview of agent output',
+      'Send input with one key',
+    ],
+    href: '/guide/dashboard/',
+  },
+  {
+    id: 'sidebar',
+    tab: 'Sidebar',
+    title: 'Keep the whole fleet in view.',
+    body: 'A persistent column in every window shows each agent’s status and its latest message, so you notice questions as they come up.',
+    points: [
+      'Working, waiting and done states',
+      'Grouped by project',
+      'Tiles, compact or top-bar layouts',
+    ],
+    href: '/guide/sidebar/',
+  },
+];
+
+const skills = [
+  { name: '/workmux', body: 'Teach the agent how to use workmux' },
+  { name: '/merge', body: 'Commit, rebase and merge the branch' },
+  { name: '/rebase', body: 'Rebase with smart conflict resolution' },
+  { name: '/worktree', body: 'Delegate tasks to parallel worktrees' },
+  { name: '/coordinator', body: 'Orchestrate several agents at once' },
+];
+const featured = testimonials[0];
+const wall = testimonials.slice(1);
+---
+
+<div class="w-root">
+  <header class="w-nav">
+    <div class="w-wrap w-nav-inner">
+      <a class="w-brand" href="/">
+        <img src="/branch-icon.svg" alt="" width="22" height="22" />
+        workmux
+      </a>
+      <nav class="w-links" aria-label="Site">
+        <a href="/guide/">Docs</a>
+        <a href="/guide/workflows/">Workflows</a>
+        <a href="/changelog/">Changelog</a>
+      </nav>
+      <div class="w-nav-right">
+        <a class="w-gh" href="https://github.com/raine/workmux">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            aria-hidden="true"
+            ><path
+              d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.8-.26.8-.58v-2.23c-3.34.73-4.03-1.42-4.03-1.42-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.49 1 .11-.78.42-1.31.76-1.6-2.67-.31-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.3-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.62-5.48 5.92.43.37.82 1.1.82 2.22v3.29c0 .32.19.7.8.58C20.57 21.8 24 17.3 24 12 24 5.37 18.63 0 12 0z"
+            ></path></svg
+          >
+          {stars ?? 'GitHub'}
+        </a>
+        <button class="w-theme" data-theme-toggle aria-label="Toggle theme">
+          <svg
+            class="w-sun"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+            ><circle cx="12" cy="12" r="4"></circle><path
+              d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+            ></path></svg
+          >
+          <svg
+            class="w-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+            ><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg
+          >
+        </button>
+        <a class="w-btn w-btn-sm" href="/guide/quick-start/">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <section class="w-hero">
+    <div class="w-wrap">
+      <a class="w-pill" href="/changelog/">
+        <span class="w-pill-tag">{version}</span>
+        {latest}
+        <span aria-hidden="true">→</span>
+      </a>
+      <div class="w-hero-grid">
+        <div>
+          <h1>
+            <span class="w-the">The</span>tmux<sup class="w-ast">*</sup> workflow<br
+            /><span>for parallel agents.</span>
+          </h1>
+          <p class="w-fn">
+            * Also some support for <a href="/guide/wezterm/">WezTerm</a>,{' '}
+            <a href="/guide/kitty/">kitty</a> and <a href="/guide/zellij/"
+              >Zellij</a
+            >.
+          </p>
+        </div>
+        <div class="w-hero-side">
+          <p class="w-lede">
+            Give every task its own git worktree and tmux window. See which
+            agents are working or waiting on you, and merge finished work with
+            one command.
+          </p>
+          <div class="w-install" data-tabs>
+            <div class="w-itabs" role="tablist" aria-label="Install method">
+              <span class="w-ilabel">Install with</span>
+              {
+                methods.map((m, i) => (
+                  <button
+                    role="tab"
+                    data-tab={m.id}
+                    data-active={i === 0 ? '' : undefined}
+                    aria-selected={i === 0 ? 'true' : 'false'}
+                  >
+                    {m.label}
+                  </button>
+                ))
+              }
+            </div>
+            <div class="w-cmd">
+              {
+                methods.map((m, i) => (
+                  <code data-panel={m.id} hidden={i !== 0}>
+                    <span data-cmd>{m.cmd}</span>
+                  </code>
+                ))
+              }
+              <button
+                class="w-copy"
+                data-copy
+                aria-label="Copy install command"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                  ><rect x="9" y="9" width="12" height="12" rx="2"></rect><path
+                    d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg
+                >
+                <span class="w-copied">Copied</span>
+              </button>
+            </div>
+          </div>
+          <div class="w-actions">
+            <a class="w-btn" href="/guide/quick-start/">Get started</a>
+            <a class="w-quiet" href="/guide/installation/"
+              >Other install methods</a
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <figure class="w-showcase">
+      <ul class="w-notes" aria-hidden="true">
+        <li class="w-note-wm" style="--x: 10%"><span>workmux sidebar</span></li>
+        <li data-for="config task" style="--x: 41%"><span>Your agent</span></li>
+        <li data-for="config" style="--x: 81%">
+          <span>nvim and a dev server</span>
+        </li>
+        <li data-for="task" style="--x: 81%">
+          <span>Any panes you configure</span>
+        </li>
+        <li data-for="shell" style="--x: 60%"><span>A plain shell</span></li>
+      </ul>
+      <div class="w-frame">
+        <div class="w-titlebar" aria-hidden="true">
+          <span class="w-lights"><i></i><i></i><i></i></span>
+          <span class="w-title">~/code/workmux</span>
+        </div>
+        <LiveTmux />
+      </div>
+      <figcaption class="w-cap">
+        Same tmux you already use. workmux gives each agent its own worktree and
+        window, and keeps track of all of them in the sidebar.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section class="w-qmark">
+    <div class="w-wrap w-qmark-inner">
+      <span class="w-qmark-glyph" aria-hidden="true">“</span>
+      <figure>
+        <blockquote>{featured.quote}</blockquote>
+        <figcaption>
+          <SourceIcon source={featured.source} size={16} />
+          <a href={featured.href}>{featured.author}</a>
+          <span>on {featured.source}</span>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="w-section w-vsec">
+    <div class="w-wrap">
+      <div class="w-vhead w-vhead-top">
+        <h3>Community videos</h3>
+        <p>
+          Some kind people have made videos about workmux on YouTube. If you're
+          looking for a demo, check them out.
+        </p>
+      </div>
+      <ul class="w-videos">
+        {
+          videos.map((v, i) => (
+            <li>
+              <a href={v.href}>
+                <span class="w-thumb">
+                  <Image
+                    src={videoThumbs[i]}
+                    alt=""
+                    widths={[480, 960]}
+                    sizes="(max-width: 60rem) 100vw, 24rem"
+                  />
+                  <i aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.4-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z" />
+                    </svg>
+                  </i>
+                </span>
+                <span>
+                  <b>{v.title}</b>
+                  <small>{v.author} · YouTube</small>
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <HowItWorks />
+
+  <section class="w-section">
+    <div class="w-wrap">
+      <p class="w-eyebrow">Product tour</p>
+      <h2>Built for watching many agents at once.</h2>
+      <div class="w-tour" data-tabs>
+        <div class="w-seg" role="tablist">
+          {
+            tour.map((t, i) => (
+              <button
+                role="tab"
+                data-tab={t.id}
+                data-active={i === 0 ? '' : undefined}
+                aria-selected={i === 0 ? 'true' : 'false'}
+              >
+                {t.tab}
+              </button>
+            ))
+          }
+        </div>
+        {
+          tour.map((t, i) => (
+            <div class="w-tour-panel" data-panel={t.id} hidden={i !== 0}>
+              <div class="w-tour-copy">
+                <h3>{t.title}</h3>
+                <p>{t.body}</p>
+                <ul>
+                  {t.points.map((p) => (
+                    <li>{p}</li>
+                  ))}
+                </ul>
+                <a class="w-arrow" href={t.href}>
+                  Read the {t.tab.toLowerCase()} guide →
+                </a>
+              </div>
+              <div class="w-frame w-tour-live">
+                {t.id === 'dashboard' ? <LiveDashboard /> : <LiveSidebar />}
+              </div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="w-section">
+    <div class="w-wrap w-duo">
+      <article class="w-card">
+        <p class="w-eyebrow">Setup</p>
+        <h3>Ready the moment it opens.</h3>
+        <p>
+          New worktrees are clean checkouts. Copy in what git leaves out, like
+          <code>.env</code>, and let each pane install and start what it runs.
+        </p>
+        <div class="w-yaml">
+          <p class="w-file">.workmux.yaml</p>
+          <pre><code><span class="w-k">files</span>:
+  <span class="w-k">copy</span>:
+    - .env
+<span class="w-k">panes</span>:
+  - <span class="w-k">command</span>: &lt;agent&gt;
+    <span class="w-k">focus</span>: true
+  - <span class="w-k">command</span>: pnpm install &amp;&amp; pnpm run dev
+    <span class="w-k">split</span>: horizontal</code></pre>
+        </div>
+        <a class="w-arrow" href="/guide/configuration/">Configuration →</a>
+      </article>
+      <article class="w-card">
+        <p class="w-eyebrow">Sandbox</p>
+        <h3>Unattended agents, contained.</h3>
+        <p>
+          Run agents in a container or Lima VM scoped to the worktree. Host
+          keys, credentials and files stay outside.
+        </p>
+        <a class="w-arrow" href="/guide/sandbox/">Sandbox guide →</a>
+        <div class="w-frame w-card-live">
+          <div class="w-titlebar" aria-hidden="true">
+            <span class="w-lights"><i></i><i></i><i></i></span>
+            <span class="w-title">~/code/api__worktrees/auth-refresh</span>
+          </div>
+          <LiveSandbox />
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="w-section">
+    <div class="w-wrap">
+      <div class="w-split-head">
+        <div>
+          <p class="w-eyebrow">Workflows</p>
+          <h2>Start with one agent. Grow into many.</h2>
+        </div>
+        <p>
+          The same tool works for a single task, a subtask spun off from a
+          running agent, or a coordinator that plans and merges a whole
+          refactor.
+        </p>
+      </div>
+      <div class="w-flows">
+        {
+          workflows.map((w, i) => (
+            <article>
+              <p class="w-flow-n">
+                0{i + 1}
+                <span
+                  class:list={[
+                    'w-kind',
+                    { 'w-kind-skill': w.kind === 'Skill' },
+                  ]}
+                >
+                  {w.kind}
+                </span>
+              </p>
+              <h3>{w.name}</h3>
+              <p>{w.body}</p>
+              <code>
+                <span>{w.prompt}</span> {w.command}
+              </code>
+              <a class="w-arrow" href={w.href}>
+                {w.kind === 'Skill'
+                  ? `The ${w.link} skill`
+                  : `${w.link} reference`}{' '}
+                →
+              </a>
+            </article>
+          ))
+        }
+      </div>
+      <div class="w-skills">
+        <div class="w-skills-head">
+          <div>
+            <h3>Skills for your agent</h3>
+            <p>
+              Let agents commit, merge, rebase and delegate for you. Works with
+              any coding agent that supports skills.
+            </p>
+          </div>
+          <div class="w-skills-cmd">
+            <code>workmux setup --skills</code>
+            <button
+              class="w-copy"
+              data-copy="workmux setup --skills"
+              aria-label="Copy skills install command"
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                aria-hidden="true"
+                ><rect x="9" y="9" width="12" height="12" rx="2"></rect><path
+                  d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg
+              >
+              <span class="w-copied">Copied</span>
+            </button>
+          </div>
+        </div>
+        <ul aria-label="Skills">
+          {
+            skills.map((k) => (
+              <li>
+                <a href={`/guide/skills/#${k.name.slice(1)}`}>
+                  <code>{k.name}</code>
+                  <span>{k.body}</span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="w-section">
+    <div class="w-wrap">
+      <p class="w-eyebrow">Community</p>
+      <h2>Loved by people who live in the terminal.</h2>
+      <div class="w-vmarq">
+        {
+          [0, 1].map((copy) => (
+            <ul aria-hidden={copy === 1 ? 'true' : undefined}>
+              {wall.map((t) => (
+                <li>
+                  <p>{t.quote}</p>
+                  <a href={t.href} tabindex={copy === 1 ? '-1' : undefined}>
+                    <SourceIcon source={t.source} />
+                    {t.author}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="w-cta">
+    <div class="w-wrap w-cta-inner">
+      <div>
+        <h2>Bring parallel agents to your terminal.</h2>
+        <p>Free and open source. Works with tmux, kitty, WezTerm and Zellij.</p>
+      </div>
+      <div class="w-cta-side" data-tabs>
+        <div class="w-seg w-seg-sm" role="tablist">
+          {
+            install.map((m, i) => (
+              <button
+                role="tab"
+                data-tab={m.id}
+                data-active={i === 1 ? '' : undefined}
+                aria-selected={i === 1 ? 'true' : 'false'}
+              >
+                {m.label}
+              </button>
+            ))
+          }
+        </div>
+        <div class="w-cmd">
+          {
+            install.map((m, i) => (
+              <code data-panel={m.id} hidden={i !== 1}>
+                <span data-cmd>{m.cmd}</span>
+              </code>
+            ))
+          }
+          <button class="w-copy" data-copy aria-label="Copy install command">
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+              ><rect x="9" y="9" width="12" height="12" rx="2"></rect><path
+                d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg
+            >
+            <span class="w-copied">Copied</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="w-foot">
+    <div class="w-wrap w-foot-inner">
+      <div class="w-foot-brand">
+        <img src="/branch-icon.svg" alt="" width="20" height="20" />
+        <span>workmux</span>
+        <small>by <a href="https://raine.dev/">Raine Virta</a></small>
+      </div>
+      <nav aria-label="Footer">
+        <div>
+          <b>Docs</b><a href="/guide/quick-start/">Quick start</a><a
+            href="/guide/configuration/">Configuration</a
+          ><a href="/reference/commands/">Commands</a>
+        </div>
+        <div>
+          <b>Features</b><a href="/guide/dashboard/">Dashboard</a><a
+            href="/guide/sidebar/">Sidebar</a
+          ><a href="/guide/sandbox/">Sandbox</a>
+        </div>
+        <div>
+          <b>Project</b><a href="https://github.com/raine/workmux">GitHub</a><a
+            href="/changelog/">Changelog</a
+          ><a href="/llms.txt">llms.txt</a>
+        </div>
+      </nav>
+    </div>
+  </footer>
+</div>
+
+<style>
+  .w-root {
+    --canvas: #f6f8f7;
+    --surface: #ffffff;
+    --sunken: #eef2f0;
+    --text-1: #172325;
+    --text-2: #526465;
+    --text-3: #7d8d8d;
+    --line: #d8e2de;
+    --accent: #087f70;
+    --accent-fill: #087f70;
+    --on-accent: #ffffff;
+    --accent-soft: #dff3ee;
+    --sans: Inter, ui-sans-serif, system-ui, sans-serif;
+    --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    --ease: cubic-bezier(0.23, 1, 0.32, 1);
+    --shadow:
+      0 1px 2px rgb(16 32 30 / 0.06), 0 24px 60px -24px rgb(16 32 30 / 0.28);
+    min-height: 100vh;
+    padding-bottom: 5rem;
+    color: var(--text-1);
+    background: var(--canvas);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
+  }
+
+  :global(html[data-theme='dark']) .w-root {
+    --canvas: #0d1213;
+    --surface: #151d1f;
+    --sunken: #11181a;
+    --text-1: #eaf2ef;
+    --text-2: #a1b2b1;
+    --text-3: #6f8281;
+    --line: #253235;
+    --accent: #48d9be;
+    --accent-fill: #48d9be;
+    --on-accent: #06201b;
+    --accent-soft: #0f2e29;
+    --shadow:
+      0 0 0 1px rgb(255 255 255 / 0.03) inset,
+      0 30px 80px -24px rgb(0 0 0 / 0.7);
+  }
+
+  .w-root a {
+    color: inherit;
+  }
+
+  /* Keyboard focus only; pointer clicks leave no ring. */
+  .w-root :global(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .w-wrap {
+    width: min(76rem, 100% - 3rem);
+    margin-inline: auto;
+  }
+
+  /* nav */
+  .w-nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+    background: color-mix(in srgb, var(--canvas) 80%, transparent);
+    backdrop-filter: blur(14px) saturate(1.4);
+  }
+
+  .w-nav-inner {
+    display: flex;
+    gap: 2.5rem;
+    align-items: center;
+    height: 3.75rem;
+  }
+
+  .w-brand {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+  }
+
+  .w-links {
+    display: flex;
+    gap: 1.75rem;
+    font-size: 0.875rem;
+  }
+
+  .w-links a,
+  .w-gh {
+    color: var(--text-2) !important;
+    text-decoration: none;
+    transition: color 120ms ease-out;
+  }
+
+  .w-links a:hover,
+  .w-gh:hover {
+    color: var(--text-1) !important;
+  }
+
+  .w-nav-right {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-left: auto;
+  }
+
+  .w-gh {
+    display: flex;
+    gap: 0.375rem;
+    align-items: center;
+    font-size: 0.875rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .w-theme {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border: 0;
+    border-radius: 0.5rem;
+    color: var(--text-2);
+    background: none;
+    cursor: pointer;
+  }
+
+  .w-theme:hover {
+    background: var(--sunken);
+  }
+
+  .w-moon,
+  :global(html[data-theme='dark']) .w-sun {
+    display: none;
+  }
+
+  :global(html[data-theme='dark']) .w-moon {
+    display: block;
+  }
+
+  .w-btn {
+    display: inline-flex;
+    gap: 0.5rem;
+    align-items: center;
+    height: 2.75rem;
+    padding: 0 1.125rem;
+    border-radius: 0.625rem;
+    font-size: 0.9375rem;
+    font-weight: 550;
+    text-decoration: none;
+    white-space: nowrap;
+    transition:
+      transform 160ms ease-out,
+      background-color 160ms ease-out,
+      border-color 160ms ease-out;
+  }
+
+  .w-btn {
+    color: var(--on-accent) !important;
+    background: var(--accent-fill);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.2) inset;
+  }
+
+  .w-btn:hover {
+    background: color-mix(in srgb, var(--accent-fill) 88%, black);
+  }
+
+  .w-btn-sm {
+    height: 2.125rem;
+    padding: 0 0.875rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+  }
+
+  .w-btn:active {
+    transform: scale(0.97);
+  }
+
+  .w-quiet {
+    color: var(--text-3) !important;
+    font-size: 0.875rem;
+  }
+
+  /* hero */
+  .w-hero {
+    padding: 4.5rem 0 0;
+    background:
+      radial-gradient(
+        60rem 30rem at 70% -10%,
+        var(--accent-soft),
+        transparent 70%
+      ),
+      var(--canvas);
+  }
+
+  .w-pill {
+    display: inline-flex;
+    gap: 0.625rem;
+    align-items: center;
+    padding: 0.25rem 0.75rem 0.25rem 0.25rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--text-2) !important;
+    background: var(--surface);
+    font-size: 0.8125rem;
+    text-decoration: none;
+    transition: border-color 150ms ease-out;
+  }
+
+  .w-pill:hover {
+    border-color: var(--accent);
+  }
+
+  .w-pill-tag {
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .w-hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+    gap: 4rem;
+    align-items: start;
+    margin-top: 2rem;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(2.75rem, 6vw, 4.75rem);
+    font-weight: 650;
+    letter-spacing: -0.045em;
+    line-height: 1.02;
+  }
+
+  h1 span {
+    color: var(--text-3);
+  }
+
+  /* The headline's article in a retro script, slanted against "tmux" and
+     sitting on its baseline. */
+  h1 .w-the {
+    position: relative;
+    z-index: 1;
+    display: inline-block;
+    margin-right: 0.14em;
+    color: var(--text-1);
+    font-family: 'Mr Dafoe', cursive;
+    font-size: 0.8em;
+    font-weight: 400;
+    letter-spacing: 0;
+    transform: rotate(-8deg);
+  }
+
+  .w-ast {
+    position: relative;
+    top: -0.05em;
+    margin-left: 0.02em;
+    color: var(--accent);
+    font-size: 0.5em;
+    font-weight: 600;
+    vertical-align: super;
+    line-height: 0;
+  }
+
+  .w-fn {
+    margin: 1.25rem 0 0;
+    color: var(--text-3);
+    font-size: 0.8125rem;
+  }
+
+  .w-fn a {
+    color: var(--text-2);
+    text-decoration-color: var(--line);
+    text-underline-offset: 0.2em;
+  }
+
+  .w-fn a:hover {
+    color: var(--accent);
+  }
+
+  .w-lede {
+    margin: 0 0 1.5rem;
+    color: var(--text-2);
+    font-size: 1.0625rem;
+  }
+
+  .w-cmd {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.375rem 0.375rem 0.375rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: 0.625rem;
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 0.8125rem;
+  }
+
+  .w-cmd code {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+
+  .w-cmd code::before {
+    content: '$ ';
+    color: var(--text-3);
+  }
+
+  .w-copy {
+    position: relative;
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border: 0;
+    border-radius: 0.375rem;
+    color: var(--text-2);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .w-copy:hover {
+    background: var(--sunken);
+  }
+
+  .w-copied {
+    position: absolute;
+    bottom: calc(100% + 0.375rem);
+    left: 50%;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.375rem;
+    color: var(--canvas);
+    background: var(--text-1);
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    opacity: 0;
+    transform: translate(-50%, 0.25rem);
+    transition:
+      opacity 150ms ease-out,
+      transform 150ms ease-out;
+    pointer-events: none;
+  }
+
+  .w-copy[data-copied] .w-copied {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  .w-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin-top: 1.25rem;
+  }
+
+  .w-actions .w-quiet {
+    margin-left: 0.5rem;
+  }
+
+  /* As wide as fits while the labels, title bar and terminal (1.65:1)
+     stay within the window's height below the sticky nav, down to a
+     readable minimum. */
+  .w-showcase {
+    width: min(100rem, 100% - 2rem, max(56rem, (100svh - 11.5rem) * 1.65));
+    margin: 4rem auto 0;
+  }
+
+  .w-notes {
+    position: relative;
+    height: 3.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .w-notes li {
+    position: absolute;
+    left: var(--x);
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    transform: translateX(-50%);
+    color: var(--text-2);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  /* Pane labels follow the window the live session shows. */
+  .w-notes li[data-for] {
+    opacity: 0;
+    translate: 0 0.25rem;
+    transition:
+      opacity 220ms ease-out,
+      translate 220ms var(--ease);
+  }
+
+  .w-showcase:has(live-tmux[data-win='config']) li[data-for~='config'],
+  .w-showcase:has(live-tmux[data-win='task']) li[data-for~='task'],
+  .w-showcase:has(live-tmux[data-win='shell']) li[data-for~='shell'],
+  .w-showcase:not(:has(live-tmux)) li[data-for~='config'] {
+    opacity: 1;
+    translate: 0 0;
+  }
+
+  .w-notes li::after {
+    content: '';
+    width: 1px;
+    height: 1.25rem;
+    margin-top: 0.375rem;
+    background: linear-gradient(var(--accent), transparent);
+  }
+
+  .w-frame {
+    border: 1px solid var(--line);
+    border-radius: 0.875rem;
+    background: #141414;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+
+  .w-frame img,
+  .w-frame video {
+    width: 100%;
+  }
+
+  .w-cap {
+    max-width: 60rem;
+    margin: 1rem auto 0;
+    color: var(--text-2);
+    font-size: 0.875rem;
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  /* terminal chrome */
+  .w-titlebar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 2.25rem;
+    border-bottom: 1px solid #222;
+    background: #1b1b1b;
+  }
+
+  .w-lights {
+    position: absolute;
+    left: 0.875rem;
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .w-lights i {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+    background: #ff5f57;
+  }
+
+  .w-lights i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .w-lights i:nth-child(3) {
+    background: #28c840;
+  }
+
+  .w-title {
+    color: #8a8a8a;
+    font-size: 0.8125rem;
+  }
+
+  :global(html[data-theme='light']) .w-frame {
+    background: #fbfbfa;
+  }
+
+  :global(html[data-theme='light']) .w-frame .w-titlebar {
+    border-bottom-color: #e2e2e0;
+    background: #efefed;
+  }
+
+  :global(html[data-theme='light']) .w-frame .w-title {
+    color: #6b6b6b;
+  }
+
+  .w-notes .w-note-wm {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* sections */
+  .w-section {
+    padding: 7.5rem 0 0;
+  }
+
+  /* Sections skip rendering while far from the viewport, so each live
+     terminal repaints a short page rather than the whole one. The hero is
+     on screen first and its terminal's shadow spills past its bottom
+     edge, which the paint containment would clip. */
+  .w-root > :global(:is(section:not(.w-hero), footer)) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 40rem;
+  }
+
+  .w-eyebrow {
+    margin: 0 0 0.75rem;
+    color: var(--accent);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  h2 {
+    max-width: 40rem;
+    margin: 0 0 3rem;
+    font-size: clamp(1.875rem, 3.4vw, 2.75rem);
+    font-weight: 650;
+    letter-spacing: -0.035em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+
+  h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+  }
+  .w-flows code {
+    display: block;
+    padding: 0.625rem 0.875rem;
+    border-radius: 0.5rem;
+    background: var(--sunken);
+    font-family: var(--mono);
+    font-size: 0.8125rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  /* tour */
+  .w-seg {
+    display: inline-flex;
+    gap: 0.125rem;
+    padding: 0.25rem;
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    background: var(--sunken);
+  }
+
+  .w-seg button {
+    padding: 0.5rem 1rem;
+    border: 0;
+    border-radius: 0.5rem;
+    color: var(--text-2);
+    background: transparent;
+    font: 500 0.875rem var(--sans);
+    cursor: pointer;
+    transition: color 120ms ease-out;
+  }
+
+  .w-seg button:hover {
+    color: var(--text-1);
+  }
+
+  .w-seg button[data-active] {
+    color: var(--text-1);
+    background: var(--surface);
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.08),
+      0 0 0 1px var(--line);
+  }
+
+  .w-seg-sm button {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+  }
+
+  .w-tour-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+    gap: 3.5rem;
+    align-items: center;
+    margin-top: 2.5rem;
+    animation: w-fade 200ms ease-out;
+  }
+
+  @keyframes w-fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .w-tour-copy h3 {
+    font-size: 1.5rem;
+    letter-spacing: -0.025em;
+  }
+
+  .w-tour-copy p {
+    color: var(--text-2);
+  }
+
+  .w-tour-copy ul {
+    margin: 1.5rem 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .w-tour-copy li {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--line);
+    font-size: 0.9375rem;
+  }
+
+  .w-tour-copy li::before {
+    content: '';
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .w-arrow {
+    color: var(--accent) !important;
+    font-size: 0.9375rem;
+    font-weight: 550;
+    text-decoration: none;
+  }
+
+  .w-arrow:hover {
+    text-decoration: underline;
+  }
+
+  /* setup + sandbox */
+  .w-duo {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .w-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    padding: 2rem;
+    border: 1px solid var(--line);
+    border-radius: 1.25rem;
+    background: var(--surface);
+  }
+
+  .w-card h3 {
+    font-size: 1.375rem;
+    letter-spacing: -0.025em;
+  }
+
+  .w-card p {
+    color: var(--text-2);
+    font-size: 0.9375rem;
+  }
+
+  .w-card p {
+    margin: 0 0 1rem;
+  }
+
+  .w-card-live {
+    align-self: stretch;
+    margin-top: 1.75rem;
+    box-shadow: none;
+  }
+
+  .w-yaml {
+    flex: 1;
+    align-self: stretch;
+    order: 1;
+    margin-top: 1.75rem;
+    border: 1px solid var(--line);
+    border-radius: 0.875rem;
+    background: var(--sunken);
+    overflow: hidden;
+  }
+
+  .w-card .w-file {
+    margin: 0;
+    padding: 0.625rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+  }
+
+  .w-yaml pre {
+    margin: 0;
+    padding: 1rem 1.25rem;
+    font-family: var(--mono);
+    font-size: 0.8125rem;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+
+  .w-card .w-eyebrow {
+    margin-bottom: 0.75rem;
+    color: var(--accent);
+  }
+
+  .w-k {
+    color: var(--accent);
+  }
+
+  /* workflows */
+  .w-split-head {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4rem;
+    align-items: end;
+    margin-bottom: 3rem;
+  }
+
+  .w-split-head h2 {
+    margin: 0;
+  }
+
+  .w-split-head > p {
+    margin: 0;
+    color: var(--text-2);
+  }
+
+  .w-flows {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--line);
+  }
+  .w-flows article {
+    min-width: 0;
+  }
+
+  .w-flows article {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .w-flows code {
+    align-self: stretch;
+    margin-bottom: 1rem;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+  }
+
+  .w-flows .w-arrow {
+    margin-top: auto;
+    font-size: 0.875rem;
+  }
+
+  .w-kind {
+    margin-left: 0.5rem;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--text-2);
+    font-family: var(--sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .w-kind-skill {
+    border-color: transparent;
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .w-skills {
+    margin-top: 3rem;
+    border: 1px solid var(--line);
+    border-radius: 1rem;
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .w-skills-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem 2.5rem;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem 1.75rem;
+  }
+
+  .w-skills h3 {
+    margin: 0 0 0.25rem;
+    font-size: 1rem;
+  }
+
+  .w-skills-head p {
+    margin: 0;
+    color: var(--text-2);
+    font-size: 0.875rem;
+  }
+
+  .w-skills ul {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+    list-style: none;
+  }
+
+  .w-skills li + li {
+    border-left: 1px solid var(--line);
+  }
+
+  .w-skills ul a {
+    display: grid;
+    gap: 0.25rem;
+    height: 100%;
+    padding: 1.125rem 1.75rem 1.25rem;
+    text-decoration: none;
+    transition: background-color 150ms ease-out;
+  }
+
+  .w-skills ul a:hover {
+    background: var(--sunken);
+  }
+
+  .w-skills ul code {
+    color: var(--accent);
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .w-skills ul span {
+    color: var(--text-2);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .w-skills-cmd {
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+    padding: 0.25rem 0.25rem 0.25rem 0.875rem;
+    border-radius: 0.625rem;
+    background: var(--sunken);
+    font-family: var(--mono);
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .w-skills-cmd code::before {
+    content: '$ ';
+    color: var(--accent);
+  }
+
+  .w-flow-n {
+    display: flex;
+    align-items: center;
+    margin: 0 0 1rem;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 0.8125rem;
+  }
+
+  .w-flows p {
+    color: var(--text-2);
+    font-size: 0.9375rem;
+  }
+
+  .w-flows code span {
+    color: var(--accent);
+  }
+
+  .w-videos {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin: 1rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .w-videos a {
+    display: grid;
+    align-content: start;
+    gap: 1rem;
+    height: 100%;
+    padding: 0.625rem 0.625rem 1.25rem;
+    border: 1px solid var(--line);
+    border-radius: 1rem;
+    background: var(--surface);
+    text-decoration: none;
+    transition: border-color 150ms ease-out;
+  }
+
+  .w-videos a:hover {
+    border-color: var(--accent);
+  }
+
+  .w-thumb {
+    position: relative;
+    border-radius: 0.625rem;
+    overflow: hidden;
+  }
+
+  .w-thumb img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    transition: transform 300ms var(--ease, ease-out);
+  }
+
+  .w-videos a:hover .w-thumb img {
+    transform: scale(1.03);
+  }
+
+  .w-thumb::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgb(0 0 0 / 0.12);
+    opacity: 0;
+    transition: opacity 200ms ease-out;
+  }
+
+  .w-videos a:hover .w-thumb::after {
+    opacity: 1;
+  }
+
+  .w-thumb i {
+    position: absolute;
+    left: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 50%;
+    color: #111;
+    background: rgb(255 255 255 / 0.95);
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.3);
+    transition:
+      transform 200ms var(--ease, ease-out),
+      background-color 200ms ease-out,
+      color 200ms ease-out;
+  }
+
+  .w-thumb i svg {
+    display: block;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  .w-videos a:hover .w-thumb i {
+    color: var(--on-accent);
+    background: var(--accent-fill);
+    transform: scale(1.08);
+  }
+
+  .w-videos a:active .w-thumb i {
+    transform: scale(0.96);
+  }
+
+  .w-videos span:not(.w-thumb) {
+    display: grid;
+    padding: 0 0.5rem;
+    font-size: 0.9375rem;
+  }
+
+  .w-videos b {
+    font-weight: 550;
+    line-height: 1.35;
+  }
+
+  .w-videos small {
+    margin-top: 0.25rem;
+    color: var(--text-3);
+  }
+
+  /* hero install picker */
+  .w-install {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.625rem;
+  }
+
+  .w-itabs {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .w-itabs button {
+    padding: 0.125rem 0;
+    border: 0;
+    border-bottom: 1.5px solid transparent;
+    color: var(--text-3);
+    background: none;
+    font: 500 0.8125rem var(--sans);
+    cursor: pointer;
+    transition:
+      color 120ms ease-out,
+      background-color 120ms ease-out;
+  }
+
+  .w-itabs button:hover {
+    color: var(--text-1);
+  }
+
+  .w-itabs button[data-active] {
+    border-color: var(--accent);
+    color: var(--text-1);
+  }
+
+  .w-ilabel {
+    margin-right: 0.25rem;
+    color: var(--text-3);
+    font-size: 0.8125rem;
+  }
+
+  /* featured quote: mark */
+  .w-qmark {
+    padding: 7rem 0 0;
+  }
+
+  .w-qmark-inner {
+    display: grid;
+    grid-template-columns: auto minmax(0, 52rem);
+    gap: 1.25rem;
+    justify-content: center;
+  }
+
+  .w-qmark-glyph {
+    color: var(--accent);
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 5.5rem;
+    line-height: 0.85;
+  }
+
+  .w-qmark figure {
+    margin: 0;
+  }
+
+  .w-qmark blockquote {
+    margin: 0 0 1.5rem;
+    font-size: clamp(1.5rem, 2.8vw, 2.125rem);
+    font-weight: 550;
+    letter-spacing: -0.03em;
+    line-height: 1.25;
+    text-wrap: pretty;
+  }
+  .w-qmark figcaption {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    color: var(--text-3);
+    font-size: 0.9375rem;
+  }
+  .w-qmark figcaption a {
+    color: var(--text-1) !important;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .w-vmarq a {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    color: var(--text-2) !important;
+    font-size: 0.875rem;
+    font-weight: 550;
+    text-decoration: none;
+  }
+
+  /* voices: marquee */
+  .w-vmarq {
+    display: flex;
+    width: 100vw;
+    margin-left: calc(50% - 50vw);
+    overflow: hidden;
+    mask-image: linear-gradient(
+      90deg,
+      transparent,
+      black 10%,
+      black 90%,
+      transparent
+    );
+  }
+
+  .w-vmarq ul {
+    display: flex;
+    flex: none;
+    gap: 1rem;
+    margin: 0;
+    padding: 0 0.5rem;
+    list-style: none;
+    animation: w-marq 60s linear infinite;
+  }
+
+  .w-vmarq:hover ul {
+    animation-play-state: paused;
+  }
+
+  .w-vmarq li {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 1.25rem;
+    width: 21rem;
+    padding: 1.5rem;
+    border: 1px solid var(--line);
+    border-radius: 1rem;
+    background: var(--surface);
+  }
+
+  .w-vmarq p {
+    margin: 0;
+    font-size: 0.9375rem;
+  }
+
+  @keyframes w-marq {
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
+  /* community videos */
+  .w-vhead {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 4rem;
+    align-items: end;
+    margin: 5rem 0 1.5rem;
+  }
+
+  .w-vhead-top {
+    margin-top: 0;
+  }
+
+  .w-vsec {
+    padding-top: 6rem;
+  }
+
+  .w-vhead h3 {
+    margin: 0;
+    font-size: 1.5rem;
+    letter-spacing: -0.025em;
+  }
+
+  .w-vhead p {
+    margin: 0;
+    color: var(--text-2);
+    font-size: 0.9375rem;
+  }
+
+  /* cta + footer */
+  .w-cta {
+    margin-top: 7.5rem;
+    padding: 4.5rem 0;
+    border-block: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .w-cta-inner {
+    display: grid;
+    grid-template-columns: 1fr minmax(0, 30rem);
+    gap: 4rem;
+    align-items: center;
+  }
+
+  .w-cta h2 {
+    margin: 0 0 0.5rem;
+  }
+
+  .w-cta p {
+    margin: 0;
+    color: var(--text-2);
+  }
+
+  .w-cta-side {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .w-cta-side .w-seg {
+    justify-self: start;
+  }
+
+  .w-foot {
+    padding-top: 3.5rem;
+  }
+
+  .w-foot-inner {
+    display: flex;
+    justify-content: space-between;
+    gap: 3rem;
+  }
+
+  .w-foot-brand {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    align-self: start;
+    font-weight: 650;
+  }
+
+  .w-foot-brand small {
+    color: var(--text-3);
+    font-weight: 400;
+  }
+
+  .w-foot nav {
+    display: flex;
+    gap: 4rem;
+    font-size: 0.875rem;
+  }
+
+  .w-foot nav div {
+    display: grid;
+    gap: 0.5rem;
+    align-content: start;
+  }
+
+  .w-foot nav a {
+    color: var(--text-2) !important;
+    text-decoration: none;
+  }
+
+  .w-foot nav a:hover {
+    color: var(--text-1) !important;
+  }
+
+  @media (max-width: 60rem) {
+    .w-links {
+      display: none;
+    }
+
+    .w-hero-grid,
+    .w-tour-panel,
+    .w-duo,
+    .w-split-head,
+    .w-cta-inner {
+      grid-template-columns: 1fr;
+      gap: 2rem;
+    }
+
+    .w-notes {
+      display: none;
+    }
+    .w-flows,
+    .w-videos,
+    .w-vhead,
+    .w-qmark-inner {
+      grid-template-columns: 1fr;
+    }
+    .w-vhead {
+      gap: 1rem;
+    }
+
+    .w-skills ul {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .w-skills li + li {
+      border-top: 1px solid var(--line);
+      border-left: 0;
+    }
+
+    .w-qmark-glyph {
+      font-size: 4.5rem;
+    }
+
+    .w-vmarq li {
+      width: 17rem;
+    }
+
+    .w-foot-inner,
+    .w-foot nav {
+      flex-direction: column;
+      gap: 2rem;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .w-tour-panel {
+      animation: none;
+    }
+
+    .w-vmarq {
+      flex-wrap: wrap;
+    }
+
+    .w-vmarq ul {
+      flex-wrap: wrap;
+      animation: none;
+    }
+
+    .w-vmarq ul + ul {
+      display: none;
+    }
+  }
+</style>

@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/workmux/arm64}"
-rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-bookworm}"
+rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-trixie}"
 
 usage() {
   cat <<'USAGE'

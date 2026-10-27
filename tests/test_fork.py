@@ -1,8 +1,11 @@
 """Tests for `workmux add --fork` conversation forking."""
 
 import json
+import shlex
 import time
 from pathlib import Path
+
+import pytest
 
 
 from .conftest import (
@@ -423,3 +426,104 @@ class TestForkCodex:
             pre_run_env={"CODEX_HOME": str(codex_home)},
         )
         assert "No conversation matching 'deadbeef'" in result.stderr
+
+
+def create_fake_pi_session(session_dir: Path, cwd: Path, session_id: str) -> Path:
+    """Write a Pi session header and a synthetic conversation entry."""
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / f"2026-01-01T00-00-00-000Z_{session_id}.jsonl"
+    header = {
+        "type": "session",
+        "version": 3,
+        "id": session_id,
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "cwd": str(cwd),
+    }
+    path.write_text(json.dumps(header) + '\n{"type":"message"}\n')
+    return path
+
+
+class TestForkPi:
+    """Pi receives a source path and owns creation of the forked session."""
+
+    @pytest.mark.parametrize("fork_flag", ["--fork", "--fork=older"])
+    @pytest.mark.parametrize("custom_store", [False, True])
+    def test_launches_native_fork(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        tmp_path,
+        fork_flag,
+        custom_store,
+    ):
+        env = mux_server
+        agent_dir = tmp_path / "pi agent's data"
+        session_dir = (
+            tmp_path / "custom sessions"
+            if custom_store
+            else agent_dir / "sessions" / "--project--"
+        )
+        older = create_fake_pi_session(session_dir, mux_repo_path, "older-session")
+        time.sleep(0.1)
+        latest = create_fake_pi_session(session_dir, mux_repo_path, "latest-session")
+        # Shared stores must not select a newer conversation from another project.
+        create_fake_pi_session(session_dir, tmp_path / "other", "other-session")
+        selected = older if "=" in fork_flag else latest
+        original = selected.read_bytes()
+        argv_file = tmp_path / "pi-argv.txt"
+        cwd_file = tmp_path / "pi-cwd.txt"
+        shim = tmp_path / "bin" / "pi"
+        shim.parent.mkdir()
+        env.install_script(
+            shim,
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            f'printf "%s\\n" "$@" > {shlex.quote(str(argv_file))}\n'
+            f"pwd -P > {shlex.quote(str(cwd_file))}\n",
+        )
+        write_workmux_config(
+            mux_repo_path, panes=[{"command": "<agent>"}], agent=str(shim)
+        )
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add pi-fork {fork_flag}",
+            pre_run_env={
+                "PI_CODING_AGENT_DIR": str(agent_dir),
+                "PI_CODING_AGENT_SESSION_DIR": str(session_dir) if custom_store else "",
+            },
+        )
+        assert poll_until(lambda: cwd_file.exists(), timeout=10)
+        assert argv_file.read_text().splitlines() == ["--fork", str(selected.resolve())]
+        target = get_worktree_path(mux_repo_path, "pi-fork")
+        assert Path(cwd_file.read_text().strip()) == target.resolve()
+        assert selected.read_bytes() == original
+        assert len(list(agent_dir.rglob("*.jsonl"))) == (0 if custom_store else 3)
+
+    @pytest.mark.parametrize("fork_flag", ["--fork", "--fork=missing"])
+    def test_missing_session_errors(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        tmp_path,
+        fork_flag,
+    ):
+        write_workmux_config(mux_repo_path, agent="pi")
+        result = run_workmux_command(
+            mux_server,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add pi-missing {fork_flag}",
+            expect_fail=True,
+            pre_run_env={
+                "PI_CODING_AGENT_DIR": str(tmp_path / "empty"),
+                "PI_CODING_AGENT_SESSION_DIR": "",
+            },
+        )
+        expected = (
+            "No conversation matching" if "=" in fork_flag else "No conversations found"
+        )
+        assert expected in result.stderr
+        assert not get_worktree_path(mux_repo_path, "pi-missing").exists()

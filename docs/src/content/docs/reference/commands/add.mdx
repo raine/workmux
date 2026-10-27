@@ -43,7 +43,7 @@ workmux add <branch-name> [flags]
 | `--dry-run`                    | Print the resolved worktree path, branch, base, multiplexer target, file operations, and post-create hooks without creating or modifying anything.                                                                                                                      |
 | `--config <path>`              | Use an alternate config file for this invocation. Still merges with global config. Useful for per-command config overrides like `workmux add feat/my-branch --config .workmux.window.yaml`.                                                                             |
 | `-c, --continue`               | Resume the agent's most recent conversation at the destination worktree path. Can be combined with `-p` or `-P`. Cannot be combined with `--fork`.                                                                                                                      |
-| `--fork`                       | Fork the last conversation from the current worktree into the new one. The agent resumes with the forked conversation context. Use `--fork=<session-id>` to fork a specific session (prefix matching supported). Supports Claude Code and Codex.                        |
+| `--fork`                       | Fork the last conversation from the current worktree into the new one. The agent resumes with the forked conversation context. Use `--fork=<session-id>` to fork a specific session (prefix matching supported). Supports Claude Code, Codex, and Pi.                   |
 
 ## Skip options
 
@@ -314,16 +314,16 @@ If you set `auto_name.command`, `llm` is not required. Any tool that accepts a p
 
 When an agent is configured, these commands are used automatically:
 
-| Agent      | Auto-name command                                                        |
-| ---------- | ------------------------------------------------------------------------ |
-| `claude`   | `claude --model haiku -p`                                                |
-| `gemini`   | `gemini -m gemini-2.5-flash-lite -p`                                     |
-| `codex`    | `codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini` |
-| `opencode` | `opencode run`                                                           |
-| `kimi`     | `kimi -p`                                                                |
-| `kiro-cli` | `kiro-cli chat --no-interactive`                                         |
-| `pi`       | `pi -p`                                                                  |
-| `omp`      | `omp -p`                                                                 |
+| Agent      | Auto-name command                                                            |
+| ---------- | ---------------------------------------------------------------------------- |
+| `claude`   | `claude --model haiku --no-session-persistence -p`                           |
+| `gemini`   | `gemini -m gemini-2.5-flash-lite -p`                                         |
+| `codex`    | `codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna` |
+| `opencode` | `opencode run`                                                               |
+| `kimi`     | `kimi -p`                                                                    |
+| `kiro-cli` | `kiro-cli chat --no-interactive`                                             |
+| `pi`       | `pi --no-session -p`                                                         |
+| `omp`      | `omp --no-session -p`                                                        |
 
 To override back to `llm` when an agent is configured, set `auto_name.command: "llm"`.
 

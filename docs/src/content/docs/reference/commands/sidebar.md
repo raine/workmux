@@ -37,6 +37,7 @@ Each agent row displays:
 | `g`/`G` | Jump to first/last        |
 | `v`     | Toggle layout mode        |
 | `f`     | Toggle session filter     |
+| `V`     | Toggle rule-based views   |
 | `z`     | Toggle sleeping on agent  |
 | `t`     | Toggle grouping           |
 | `h`/`l` | Unfold/fold current group |
@@ -140,6 +141,80 @@ configured placement. Width and height also accept percentages, such as
 `workmux sidebar on --width 15%`. Repeating `on` with appearance options applies
 them without creating duplicate panes. The `off` action rejects position and
 dimension flags because they have no effect while stopping the sidebar.
+
+## Named views
+
+Use named views to show agents from selected sessions or project directories.
+Add `sidebar.views` to your global config at `~/.config/workmux/config.yaml`
+(or `$XDG_CONFIG_HOME/workmux/config.yaml`). Views cannot be set per project.
+
+```yaml
+sidebar:
+  views:
+    - name: Named sessions
+      sessions: [foo, bar, xyz]
+    - name: Code
+      project_dirs: [~/code]
+    - name: Work
+      project_dirs: [~/work]
+    - name: Other
+      other: true
+```
+
+Views are enabled by default when configured. Each window uses the first view
+matching its agent's session or project, then Other if nothing matches,
+or All if there is no Other view. Switching to another window shows that
+window's view without changing the one you left.
+
+In a window with several agents, the view follows the active agent and stays
+on that view when you focus the sidebar. A window without a registered agent
+uses its oldest pane's session and working directory.
+
+### Turning views on and off
+
+Press `V` to toggle views for every sidebar in the tmux server:
+
+- **On:** each window shows agents matching its own view.
+- **Off:** every sidebar shows all agents.
+
+```bash
+workmux sidebar view       # Toggle views on/off
+workmux sidebar view on    # Apply each window's matching rules
+workmux sidebar view off   # Show all agents in every sidebar
+```
+
+The view name appears at the bottom of the sidebar, or All when views are off.
+A view with no matching agents shows "No matching agents". Turning the sidebar
+off and on preserves the toggle; restarting tmux enables views again.
+
+The `f` session filter works in both modes. When it is on, each sidebar shows
+only agents in its current session, whether or not views are enabled.
+Views do not change row grouping (`sidebar.group_by`) or which windows have a
+sidebar (`sidebar --session`). `next`, `prev`, and `jump` follow the current
+window's view once the sidebar updates.
+
+A top sidebar needs at least two rows: one for the view name and one for agents.
+With no views configured, `V` does not change which agents appear.
+
+### Matching rules
+
+- `sessions` matches exact, case-sensitive tmux session names. `foo` does not
+  match `foobar` or `Foo`; wildcards are not supported.
+- `project_dirs` matches each directory and its subdirectories. `~/code` does
+  not match `~/code-old`. Use absolute paths or `~` for your home directory;
+  environment variables such as `$HOME` are not expanded. Symlinks are resolved
+  for paths that exist.
+- Linked worktrees belong to the main repository's directory, even if the
+  worktree is stored elsewhere. Bare repositories use the bare directory. If
+  workmux cannot identify a repository, it uses the agent's recorded working
+  directory. After moving a repository, allow about 30 seconds for views to update.
+- An agent matches a view if it matches any of its session names or project
+  directories. The same agent can appear in more than one view.
+- `other: true` shows agents that match none of the other views. Only one view
+  can use it, and that view cannot also have `sessions` or `project_dirs`.
+  Without an Other view, unmatched agents appear only in All.
+- Give each view a unique name other than `All`, without leading or trailing
+  spaces. Each view needs `sessions`, `project_dirs`, or `other: true`.
 
 ## How it works
 

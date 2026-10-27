@@ -1,6 +1,6 @@
 # workmux documentation
 
-The published site lives at [workmux.raine.dev](https://workmux.raine.dev/).
+The published site lives at [workmux.dev](https://workmux.dev/).
 
 ```bash
 bun install

@@ -376,6 +376,7 @@ pub struct SidebarApp {
     suppress_resize_once: bool,
     /// Filter mode: show all agents or only those in the host tmux session.
     pub filter_mode: SidebarFilterMode,
+    pub view_name: Option<String>,
 }
 
 fn detect_terminal_theme_mode() -> ThemeMode {
@@ -454,6 +455,7 @@ impl SidebarApp {
             pending_resize_rows: None,
             resize_deadline: None,
             suppress_resize_once: false,
+            view_name: None,
             filter_mode: SidebarFilterMode::default(),
         }
     }
@@ -545,6 +547,7 @@ impl SidebarApp {
             pending_resize_rows: None,
             resize_deadline: None,
             suppress_resize_once: false,
+            view_name: None,
             filter_mode: SidebarFilterMode::default(),
         })
     }
@@ -570,6 +573,11 @@ impl SidebarApp {
         self.position = snapshot.position;
         self.layout_mode = snapshot.layout_mode;
         self.filter_mode = snapshot.filter_mode;
+        let window_view = self
+            .host_window_id()
+            .and_then(|window| snapshot.window_views.get(window))
+            .cloned();
+        self.view_name = window_view.as_ref().map(|view| view.name.clone());
         self.git_statuses = snapshot.git_statuses;
         self.pr_statuses = snapshot.pr_statuses;
         self.check_statuses = snapshot.check_statuses;
@@ -613,18 +621,22 @@ impl SidebarApp {
         self.stale_pane_ids = snapshot.stale_pane_ids;
         self.agents = snapshot.agents;
 
+        if let Some(view) = window_view {
+            self.agents
+                .retain(|agent| view.pane_ids.contains(&agent.pane_id));
+        }
+
         // Apply session filter: retain only agents in the sidebar's host session.
         if self.filter_mode == SidebarFilterMode::Session
             && let Some(host_session) = self.host_session().map(str::to_owned)
         {
             self.agents.retain(|a| a.session == host_session);
-            // Recompute host_agent_idx after filtering
-            self.host_agent_idx = host_agent_index(
-                &self.agents,
-                self.host_window_id(),
-                &snapshot.active_pane_ids,
-            );
         }
+        self.host_agent_idx = host_agent_index(
+            &self.agents,
+            self.host_window_id(),
+            &snapshot.active_pane_ids,
+        );
 
         // Rows are rebuilt after filtering so header counts reflect what this
         // client actually shows.
@@ -927,8 +939,8 @@ impl SidebarApp {
             start += count;
         }
 
-        // Mark where live work ends. Only the trailing run of dormant groups
-        // counts, so a session filter that strips a group's live agents cannot
+        // Label the trailing run of dormant groups, including an all-stale list,
+        // so a session filter that strips a group's live agents cannot
         // strand the rule in the middle of the list.
         if self.collapse_stale
             && let Some((row, _)) = groups
@@ -936,7 +948,6 @@ impl SidebarApp {
                 .rev()
                 .take_while(|(_, all_stale)| *all_stale)
                 .last()
-            && *row > 0
         {
             rows.insert(
                 *row,
@@ -1599,7 +1610,13 @@ impl SidebarApp {
                 let expected = super::effective_width_for(&config, window_w);
                 let delta = (actual_width as i16 - expected as i16).abs();
                 if delta > 0 {
-                    if super::width_exceeds_defensive_max(actual_width) {
+                    if resize_was_applied_by_reflow(actual_width) {
+                        // A reflow raced with a newer synced width. Catch up
+                        // locally without publishing a size the user never chose.
+                        if let Some(wid) = self.host_window_id() {
+                            let _ = super::reflow(Some(wid));
+                        }
+                    } else if super::width_exceeds_defensive_max(actual_width) {
                         if let Some(wid) = self.host_window_id().map(str::to_string) {
                             super::set_sidebar_width(expected);
                             self.suppress_resize_once = true;
@@ -1607,6 +1624,7 @@ impl SidebarApp {
                         }
                     } else if config.sidebar.width.is_none() {
                         super::set_sidebar_width(actual_width);
+                        record_applied_size(actual_width);
                         if let Some(wid) = self.host_window_id() {
                             super::reflow_all_sidebars_except(wid);
                         }
@@ -1635,8 +1653,13 @@ impl SidebarApp {
                 let expected = super::effective_height_for(&config, window_h);
                 let delta = (actual_height as i16 - expected as i16).abs();
                 if delta > 0 {
-                    if config.sidebar.height.is_none() {
+                    if resize_was_applied_by_reflow(actual_height) {
+                        if let Some(wid) = self.host_window_id() {
+                            let _ = super::reflow(Some(wid));
+                        }
+                    } else if config.sidebar.height.is_none() {
                         super::set_sidebar_height(actual_height);
+                        record_applied_size(actual_height);
                         if let Some(wid) = self.host_window_id() {
                             super::reflow_all_sidebars_except(wid);
                         }
@@ -1862,6 +1885,36 @@ fn query_pane_height_for_pane() -> Option<u16> {
 
 fn query_pane_extent_for_pane(format: &str) -> Option<u16> {
     query_tmux_positive_u16_for_current_pane(format)
+}
+
+/// Whether the sidebar's current extent is the one a layout reflow gave it.
+///
+/// Every sidebar sees the resizes that propagate a new size to it. Treating
+/// those as user resizes would make each sidebar publish its own size and
+/// reflow the others, which keeps sidebars resizing each other indefinitely
+/// when their checks overlap.
+fn resize_was_applied_by_reflow(extent: u16) -> bool {
+    let format = format!("#{{{}}}", super::SIDEBAR_APPLIED_SIZE_OPTION);
+    query_tmux_u16_for_current_pane(&format) == Some(extent)
+}
+
+/// Record a user-chosen extent as applied, so a later resize back to the
+/// previous size still counts as a user resize.
+fn record_applied_size(extent: u16) {
+    let pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
+    if pane_id.is_empty() {
+        return;
+    }
+    let _ = Cmd::new("tmux")
+        .args(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane_id,
+            super::SIDEBAR_APPLIED_SIZE_OPTION,
+            &extent.to_string(),
+        ])
+        .run();
 }
 
 /// Reject agent tokens in a group header template. A header does not
@@ -2287,6 +2340,7 @@ mod tests {
         SidebarSnapshot {
             position: SidebarPosition::Left,
             layout_mode: SidebarLayoutMode::Tiles,
+            window_views: HashMap::new(),
             filter_mode: SidebarFilterMode::None,
             group_by: None,
             expanded_groups: Vec::new(),
@@ -2536,6 +2590,7 @@ mod grouping_tests {
             stale_threshold_secs: super::super::snapshot::STALE_THRESHOLD_SECS,
             position: SidebarPosition::Left,
             layout_mode: SidebarLayoutMode::Tiles,
+            window_views: HashMap::new(),
             filter_mode: SidebarFilterMode::None,
             group_by,
             expanded_groups: Vec::new(),
@@ -2602,6 +2657,36 @@ mod grouping_tests {
                 SidebarRow::Agent(2),
             ]
         );
+    }
+
+    #[test]
+    fn named_view_intersects_session_filter_and_can_be_empty() {
+        let mut app = app();
+        app.host_identity = Some(HostIdentity {
+            session_name: "alpha".into(),
+            session_id: "$1".into(),
+            window_id: "@1".into(),
+            pane_id: "%sidebar".into(),
+        });
+        let mut snap = snapshot(Some(SidebarGroupBy::Project), grouped_agents());
+        snap.window_views.insert(
+            "@1".into(),
+            super::super::view::WindowView {
+                name: "Beta".into(),
+                pane_ids: snap
+                    .agents
+                    .iter()
+                    .filter(|a| a.session == "beta")
+                    .map(|a| a.pane_id.clone())
+                    .collect(),
+            },
+        );
+        snap.filter_mode = SidebarFilterMode::Session;
+        app.apply_snapshot(snap);
+        assert_eq!(app.view_name.as_deref(), Some("Beta"));
+        assert!(app.agents.is_empty());
+        assert!(app.rows.is_empty());
+        assert_eq!(app.selected_agent_idx(), None);
     }
 
     #[test]
@@ -3076,18 +3161,40 @@ mod grouping_tests {
     }
 
     #[test]
-    fn a_list_with_no_live_work_at_all_needs_no_rule() {
+    fn a_list_with_only_stale_groups_starts_with_a_stale_rule() {
         let mut app = app();
         app.apply_snapshot(folding_snapshot(
             Some(SidebarGroupBy::Project),
             grouped_agents(),
         ));
 
-        assert!(
-            !app.rows
-                .iter()
-                .any(|row| matches!(row, SidebarRow::Rule { .. }))
+        assert_eq!(
+            app.rows.first(),
+            Some(&SidebarRow::Rule {
+                label: STALE_RULE_LABEL.to_string(),
+            })
         );
+        assert_eq!(
+            app.rows
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Rule { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            app.rows.get(1),
+            Some(SidebarRow::StaleGroup { .. })
+        ));
+        app.list_state.select(None);
+        app.next();
+        assert_eq!(app.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn an_empty_grouped_list_has_no_stale_rule() {
+        let mut app = app();
+        app.apply_snapshot(folding_snapshot(Some(SidebarGroupBy::Project), vec![]));
+        assert!(app.rows.is_empty());
     }
 
     #[test]

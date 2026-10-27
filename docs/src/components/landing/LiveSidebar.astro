@@ -1,0 +1,921 @@
+---
+// The workmux sidebar rendered live as a character grid beside an agent
+// pane: agents changing status, then the compact layout, grouping by
+// project, and the sidebar as a top bar.
+import './grid.css';
+---
+
+<live-side class="gl">
+  <div
+    class="gl-grid"
+    role="img"
+    aria-label="A tmux window with the workmux sidebar: agents move between working, waiting and done, then the sidebar switches to its compact layout, groups agents by project, and moves to a bar along the top"
+  >
+  </div>
+  <span class="gl-key" aria-hidden="true"></span>
+  <div class="gl-chapters"></div>
+  <span class="gl-time" aria-hidden="true"></span>
+</live-side>
+
+<style is:global>
+  live-side .t {
+    color: #d4d4d4;
+  }
+  live-side .w {
+    color: #f0f0f0;
+  }
+  live-side .d {
+    color: #9b9b9b;
+  }
+  live-side .ok {
+    color: #9fd49a;
+  }
+  live-side .sg {
+    color: #e0896d;
+  }
+  live-side .rule {
+    color: #4a4a4a;
+  }
+  live-side .pm {
+    color: #e2a2b0;
+  }
+  live-side .Bcur {
+    background-color: #c6c6c6;
+  }
+  live-side .Bag {
+    background-color: #161616;
+  }
+
+  /* tmux */
+  live-side .la {
+    color: #b6d698;
+  }
+  live-side .lg {
+    color: #3c3c3c;
+  }
+  live-side .ta {
+    color: #c5e8a6;
+  }
+  live-side .tg {
+    color: #575757;
+  }
+  live-side .stl {
+    color: #b8cc7e;
+  }
+  live-side .stw {
+    color: #e8e8e8;
+  }
+  live-side .wa {
+    color: #151515;
+  }
+  live-side .Bwa {
+    background-color: #aec579;
+  }
+  live-side .clk {
+    color: #c3d48f;
+  }
+
+  /* sidebar */
+  live-side .lsep {
+    color: #363b47;
+  }
+  live-side .sn {
+    color: #e8edf5;
+  }
+  live-side .stm {
+    color: #dfe5ee;
+  }
+  live-side .sp {
+    color: #6c7383;
+  }
+  live-side .sm {
+    color: #727989;
+  }
+  live-side .sa {
+    color: #7d917a;
+  }
+  live-side .sd {
+    color: #917580;
+  }
+  live-side .sa2 {
+    color: #b4dca6;
+  }
+  live-side .sd2 {
+    color: #e2a2b0;
+  }
+  live-side .spn {
+    color: #c4aff2;
+  }
+  live-side .si {
+    color: #4e4d59;
+  }
+  live-side .sk {
+    color: #9addd4;
+  }
+  live-side .gh {
+    color: #c9d3e3;
+  }
+  live-side .sst {
+    color: #646a78;
+  }
+  live-side .Bband {
+    background-color: #1a1e29;
+  }
+  live-side .Bsel {
+    background-color: #262c3c;
+  }
+  live-side .bw {
+    color: #9addd4;
+  }
+  live-side .bq {
+    color: #c4a8f2;
+  }
+  live-side .bdn {
+    color: #b3d89a;
+  }
+  live-side .bi {
+    color: #6d7186;
+  }
+
+  html[data-theme='light'] live-side .t {
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-side .w {
+    color: #111418;
+  }
+  html[data-theme='light'] live-side .d {
+    color: #6b7076;
+  }
+  html[data-theme='light'] live-side .ok {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-side .sg {
+    color: #b4532f;
+  }
+  html[data-theme='light'] live-side .rule {
+    color: #cfcfcf;
+  }
+  html[data-theme='light'] live-side .pm {
+    color: #b4405a;
+  }
+  html[data-theme='light'] live-side .Bcur {
+    background-color: #3a3f45;
+  }
+  html[data-theme='light'] live-side .Bag {
+    background-color: #f3f3f2;
+  }
+  html[data-theme='light'] live-side .la {
+    color: #4f7a21;
+  }
+  html[data-theme='light'] live-side .lg {
+    color: #d6d6d6;
+  }
+  html[data-theme='light'] live-side .ta {
+    color: #3f6f1a;
+  }
+  html[data-theme='light'] live-side .tg {
+    color: #b8b8b8;
+  }
+  html[data-theme='light'] live-side .stl {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] live-side .stw {
+    color: #24292f;
+  }
+  html[data-theme='light'] live-side .clk {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] live-side .lsep {
+    color: #d8dce3;
+  }
+  html[data-theme='light'] live-side .sn {
+    color: #1d2330;
+  }
+  html[data-theme='light'] live-side .stm {
+    color: #2b3240;
+  }
+  html[data-theme='light'] live-side .sp {
+    color: #8a909c;
+  }
+  html[data-theme='light'] live-side .sm {
+    color: #7b8291;
+  }
+  html[data-theme='light'] live-side .sa {
+    color: #4f7a4a;
+  }
+  html[data-theme='light'] live-side .sd {
+    color: #9a5363;
+  }
+  html[data-theme='light'] live-side .sa2 {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-side .sd2 {
+    color: #b4405a;
+  }
+  html[data-theme='light'] live-side .spn {
+    color: #7a4fc2;
+  }
+  html[data-theme='light'] live-side .si {
+    color: #b3b6be;
+  }
+  html[data-theme='light'] live-side .sk {
+    color: #138a7c;
+  }
+  html[data-theme='light'] live-side .gh {
+    color: #2b3445;
+  }
+  html[data-theme='light'] live-side .sst {
+    color: #8a909c;
+  }
+  html[data-theme='light'] live-side .Bband {
+    background-color: #eef1f5;
+  }
+  html[data-theme='light'] live-side .Bsel {
+    background-color: #e3e8f3;
+  }
+  html[data-theme='light'] live-side .bw {
+    color: #13a090;
+  }
+  html[data-theme='light'] live-side .bq {
+    color: #8a5cd0;
+  }
+  html[data-theme='light'] live-side .bdn {
+    color: #4f9a2a;
+  }
+  html[data-theme='light'] live-side .bi {
+    color: #a0a4b0;
+  }
+</style>
+
+<script>
+  import {
+    GridLoop,
+    STEP,
+    clip,
+    fit,
+    html,
+    lineW,
+    sp,
+    spread,
+    wrapPlain,
+  } from './grid';
+  import type { Line, Seg, Step } from './grid';
+
+  const COLS = 100;
+  const ROWS = 26;
+  const SB = 30; // sidebar: cols 0-29, border at 30
+  const RW = COLS - SB - 1; // agent pane beside the sidebar
+  const LIST_H = ROWS - 2; // between the pane titles and the status bar
+  const BAR_H = 3; // rows of the top bar, one per horizontal template line
+  const CHIP_W = 24;
+  const TICK = 100;
+
+  // The sidebar's Nerd Font glyphs: nf-fa-comment, nf-md-check_circle_outline,
+  // nf-md-sleep, nf-md-file_document_edit_outline and nf-md-close_circle.
+  const SVG: Record<string, string> = {
+    nfWait:
+      '<svg viewBox="0 0 1792 1792" style="width:1.05em;height:1.05em"><path fill="currentColor" d="M1792 896q0 174-120 321.5t-326 233-450 85.5q-70 0-145-8-198 175-460 242-49 14-114 22-17 2-30.5-9t-17.5-29v-1q-3-4-.5-12t2-10 4.5-9.5l6-9 7-8.5 8-9q7-8 31-34.5t34.5-38 31-39.5 32.5-51 27-59 26-76q-157-89-247.5-220t-90.5-281q0-130 71-248.5t191-204.5 286-136.5 348-50.5q244 0 450 85.5t326 233 120 321.5z"/></svg>',
+    nfDone:
+      '<svg viewBox="0 0 24 24" style="width:1.15em;height:1.15em;vertical-align:-0.2em"><path fill="currentColor" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2m0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8m4.59-12.42L10 14.17l-2.59-2.58L6 13l4 4 8-8z"/></svg>',
+    nfSleep:
+      '<svg viewBox="0 0 24 24" style="width:1.1em;height:1.1em;vertical-align:-0.18em"><path fill="currentColor" d="M23 12h-6v-2l3.39-4H17V4h6v2l-3.38 4H23zm-8 4H9v-2l3.39-4H9V8h6v2l-3.38 4H15zm-8 4H1v-2l3.39-4H1v-2h6v2l-3.38 4H7z"/></svg>',
+    pencil:
+      '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M11.7 1.3a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.9 13.1l-3.6 1 1-3.6z"/></svg>',
+    fail: '<svg viewBox="0 0 24 24" style="width:1.1em;height:1.1em;vertical-align:-0.2em"><path fill="currentColor" d="M12 2c5.53 0 10 4.47 10 10s-4.47 10-10 10S2 17.53 2 12 6.47 2 12 2m3.59 5L12 10.59 8.41 7 7 8.41 10.59 12 7 15.59 8.41 17 12 13.41 15.59 17 17 15.59 13.41 12 17 8.41z"/></svg>',
+  };
+
+  type State = 'work' | 'wait' | 'done' | 'idle';
+  type Checks = { st: 'ok' | 'fail' | 'run'; pass?: number; total?: number };
+
+  interface Agent {
+    name: string;
+    proj: string;
+    st: State;
+    since: number;
+    add: number;
+    del: number;
+    uadd: number;
+    udel: number;
+    msg: string;
+    pr?: number;
+    checks?: Checks;
+    nextEdit?: number;
+  }
+
+  const BAR: Record<State, string> = {
+    work: 'bw',
+    wait: 'bq',
+    done: 'bdn',
+    idle: 'bi',
+  };
+  const ICON: Record<Exclude<State, 'work'>, Seg> = {
+    wait: { svg: 'nfWait', cls: 'bq', w: 2 },
+    done: { svg: 'nfDone', cls: 'bdn', w: 2 },
+    idle: { svg: 'nfSleep', cls: 'si', w: 2 },
+  };
+  const SPINNER = ['⠋⠙', '⠙⠹', '⠹⠸', '⠸⠼', '⠼⠴', '⠴⠦', '⠦⠧', '⠧⠇', '⠇⠏', '⠏⠋'];
+  const BRAILLE = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+
+  function ago(ms: number) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s >= 86400) return `${Math.floor(s / 86400)}d`;
+    if (s >= 3600) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  // The agent pane of the current window.
+  const tool = (name: string, arg: string): Line => [
+    ['● ', 'ok'],
+    [name, 'b t'],
+    [`(${arg})`, 't'],
+  ];
+  const out = (text: string, cls = 't'): Line => [
+    ['  ⎿  ', 'd'],
+    [text, cls],
+  ];
+  const msg = (text: string, width: number): Line[] =>
+    wrapPlain(text, width - 2).map((l, i) => [
+      [i ? '  ' : '● ', 'w'],
+      [l, 't'],
+    ]);
+
+  class LiveSide extends GridLoop {
+    cols = COLS;
+    rowCount = ROWS;
+    chapters = ['Live status', 'Compact', 'Grouped', 'Top bar'];
+    agents: Agent[] = [];
+    current!: Agent;
+    layout: 'tiles' | 'compact' = 'tiles';
+    grouped = false;
+    top = false;
+    focused: 'agent' | 'sidebar' = 'agent';
+    feed: Line[][] = [];
+    shown: Line[] = [];
+    feedAt = 0;
+    tokens = 0;
+    verbAt = 0;
+
+    reset() {
+      this.begin();
+      const t = this.t;
+      const s = 1000;
+      const m = 60 * s;
+      this.layout = 'tiles';
+      this.grouped = false;
+      this.top = false;
+      this.focused = 'agent';
+      const ag = (
+        a: Omit<Agent, 'add' | 'del' | 'uadd' | 'udel'> & Partial<Agent>,
+      ): Agent => ({ add: 0, del: 0, uadd: 0, udel: 0, ...a });
+      this.agents = [
+        ag({
+          name: 'auth-refresh',
+          proj: 'api',
+          st: 'work',
+          since: t - 134 * s,
+          add: 256,
+          del: 60,
+          uadd: 21,
+          msg: 'Adding refresh token rotation',
+          pr: 412,
+          checks: { st: 'ok' },
+        }),
+        ag({
+          name: 'rate-limit',
+          proj: 'api',
+          st: 'wait',
+          since: t - 42 * s,
+          add: 88,
+          del: 12,
+          msg: 'Ready to apply the migration?',
+        }),
+        ag({
+          name: 'flaky-tests',
+          proj: 'api',
+          st: 'done',
+          since: t - 8 * m,
+          add: 31,
+          del: 9,
+          msg: 'Fixed the retry helper',
+          checks: { st: 'fail', pass: 5, total: 6 },
+        }),
+        ag({
+          name: 'openapi-types',
+          proj: 'api',
+          st: 'idle',
+          since: t - 6 * 60 * m,
+          msg: '',
+        }),
+        ag({
+          name: 'deploy-preview',
+          proj: 'infra',
+          st: 'work',
+          since: t - 6 * m,
+          add: 42,
+          del: 8,
+          msg: 'Pinning the preview image',
+          pr: 421,
+          checks: { st: 'run', pass: 1, total: 4 },
+        }),
+        ag({
+          name: 'metrics-dashboard',
+          proj: 'infra',
+          st: 'wait',
+          since: t - 90 * s,
+          add: 173,
+          del: 24,
+          uadd: 9,
+          msg: 'Which retention window?',
+        }),
+        ag({
+          name: 'dark-mode',
+          proj: 'web',
+          st: 'work',
+          since: t - 19 * m,
+          add: 1278,
+          del: 400,
+          uadd: 46,
+          udel: 12,
+          msg: 'Wiring the theme tokens',
+          pr: 398,
+          checks: { st: 'run', pass: 3, total: 7 },
+        }),
+      ];
+      this.current = this.agents[0];
+      this.shown = [
+        ...msg(
+          'Refresh tokens now rotate on every use. Next, reject a token that has already been used, and revoke its whole family.',
+          RW - 2,
+        ),
+        [],
+        tool('Read', 'src/auth/refresh.ts'),
+        out('Read 186 lines'),
+        [],
+      ];
+      this.feed = [
+        [
+          tool('Update', 'src/auth/refresh.ts'),
+          out('Updated src/auth/refresh.ts with 27 additions and 4 removals'),
+          [],
+        ],
+        [tool('Bash', 'pnpm test auth'), out('✓ 41 tests passed', 'ok'), []],
+        [
+          ...msg(
+            'Reuse detection is in: a replayed token revokes its family.',
+            RW - 2,
+          ),
+          [],
+        ],
+        [
+          tool('Update', 'src/auth/store.ts'),
+          out('Updated src/auth/store.ts with 12 additions'),
+          [],
+        ],
+      ];
+      this.feedAt = t + 1500;
+      this.tokens = 2100;
+      this.verbAt = t - 38 * s;
+      this.play(this.scenario());
+    }
+
+    scenario(): Step[] {
+      const by = (name: string) => this.agents.find((a) => a.name === name)!;
+      const set = (name: string, st: State, text?: string, checks?: Checks) => {
+        const a = by(name);
+        a.st = st;
+        a.since = this.t;
+        if (text) a.msg = text;
+        if (checks) a.checks = checks;
+      };
+      return [
+        // Live status
+        [
+          2800,
+          () =>
+            set('deploy-preview', 'done', 'Preview URLs posted to PR', {
+              st: 'ok',
+            }),
+        ],
+        [3400, () => set('dark-mode', 'wait', 'Keep the system default?')],
+        [
+          3000,
+          () => {
+            this.mark(1);
+            this.focused = 'sidebar';
+            this.layout = 'compact';
+            this.key('v');
+          },
+        ],
+        // Compact
+        [2200, () => set('rate-limit', 'work', 'Applying the migration')],
+        [
+          2600,
+          () => {
+            this.layout = 'tiles';
+            this.key('v');
+          },
+        ],
+        [
+          1000,
+          () => {
+            this.mark(2);
+            this.poster = true;
+            this.grouped = true;
+            this.key('t');
+          },
+        ],
+        // Grouped
+        [
+          2600,
+          () => set('auth-refresh', 'done', 'Rotation done, 41 tests pass'),
+        ],
+        [
+          3000,
+          () => {
+            this.mark(3);
+            this.key('workmux sidebar --position top', 1800);
+          },
+        ],
+        [
+          700,
+          () => {
+            this.top = true;
+            this.focused = 'agent';
+          },
+        ],
+        // Top bar
+        [2600, () => set('metrics-dashboard', 'work', 'Trimming to 30 days')],
+        [3400, () => this.reset()],
+      ];
+    }
+
+    advance() {
+      for (const a of this.agents) {
+        if (a.st !== 'work') continue;
+        if (this.t >= (a.nextEdit ?? 0)) {
+          if (a.nextEdit) {
+            a.uadd += 1 + Math.floor(this.rand() * 9);
+            a.udel += Math.floor(this.rand() * 3);
+          }
+          a.nextEdit = this.t + 2500 + this.rand() * 3500;
+        }
+      }
+      if (this.current.st === 'work') {
+        this.tokens += ((6 + this.rand() * 22) * STEP) / TICK;
+        if (this.feed.length && this.t >= this.feedAt) {
+          this.shown.push(...this.feed.shift()!);
+          this.feedAt = this.t + 2600 + this.rand() * 1200;
+        }
+      }
+    }
+
+    // Most recent status change first, stale agents last; grouped, sections
+    // run alphabetically and keep that order inside.
+    sorted(): Agent[] {
+      return [...this.agents].sort(
+        (a, b) =>
+          (this.grouped ? a.proj.localeCompare(b.proj) : 0) ||
+          Number(a.st === 'idle') - Number(b.st === 'idle') ||
+          b.since - a.since,
+      );
+    }
+
+    // ------------------------------------------------------- fields
+
+    icon(a: Agent, frame: number): Seg {
+      return a.st === 'work'
+        ? [SPINNER[frame % SPINNER.length], 'sk']
+        : ICON[a.st];
+    }
+
+    git(a: Agent): Line {
+      const idle = a.st === 'idle';
+      const diff: Line = [];
+      if (a.add || a.del)
+        diff.push([`+${a.add}`, idle ? 'si' : 'sa'], sp(1), [
+          `-${a.del}`,
+          idle ? 'si' : 'sd',
+        ]);
+      if (a.uadd || a.udel) {
+        if (diff.length) diff.push(sp(1));
+        diff.push({ svg: 'pencil', cls: 'spn', w: 2 }, [`+${a.uadd}`, 'sa2']);
+        if (a.udel) diff.push(sp(1), [`-${a.udel}`, 'sd2']);
+      }
+      return diff;
+    }
+
+    prNumber(a: Agent): Line {
+      return a.pr ? [[`#${a.pr}`, 'sa2']] : [];
+    }
+
+    prChecks(a: Agent, frame: number): Line {
+      const c = a.checks;
+      if (!c) return [];
+      if (c.st === 'ok') return [{ svg: 'nfDone', cls: 'sa2', w: 2 }];
+      if (c.st === 'fail')
+        return [
+          { svg: 'fail', cls: 'sd2', w: 2 },
+          [`${c.pass}/${c.total}`, 'sd2'],
+        ];
+      return [
+        [BRAILLE[frame % BRAILLE.length], 'spn'],
+        [` ${c.pass}/${c.total}`, 'spn'],
+      ];
+    }
+
+    // `{left} {fill} {right}` in `width` cells, the left text cut to fit
+    // with an ellipsis.
+    row(text: string, cls: string, right: Line, width: number): Line {
+      const rw = lineW(right);
+      const lw = Math.max(0, width - rw - (rw ? 1 : 0));
+      return spread(text ? [[clip(text, lw), cls]] : [], right, width);
+    }
+
+    // ------------------------------------------------------- left sidebar
+
+    tile(a: Agent, frame: number): Line[] {
+      const idle = a.st === 'idle';
+      const W = SB - 6;
+      const lead: Line = [sp(1, `bar ${BAR[a.st]}`)];
+      const time: Line = [[ago(this.t - a.since), idle ? 'si' : 'stm']];
+      const join = (...parts: Line[]) =>
+        parts
+          .filter((p) => p.length)
+          .flatMap((p, i) => (i ? [sp(1), ...p] : p));
+      if (this.grouped) {
+        return [
+          [
+            ...lead,
+            sp(1),
+            this.icon(a, frame),
+            sp(1),
+            ...this.row(
+              a.name,
+              idle ? 'si' : 'sn',
+              join(this.prNumber(a), time),
+              W,
+            ),
+          ],
+          [
+            ...lead,
+            sp(4),
+            ...this.row(
+              a.msg,
+              'sm',
+              join(this.prChecks(a, frame), this.git(a)),
+              W,
+            ),
+          ],
+        ];
+      }
+      return [
+        [
+          ...lead,
+          sp(1),
+          this.icon(a, frame),
+          sp(1),
+          ...this.row(a.name, idle ? 'si' : 'sn', time, W),
+        ],
+        [
+          ...lead,
+          sp(4),
+          ...this.row(a.proj, idle ? 'si' : 'sp', this.git(a), W),
+        ],
+        [
+          ...lead,
+          sp(4),
+          ...this.row(
+            a.msg,
+            'sm',
+            join(this.prNumber(a), this.prChecks(a, frame)),
+            W,
+          ),
+        ],
+      ];
+    }
+
+    compact(a: Agent, frame: number): Line {
+      const idle = a.st === 'idle';
+      const W = SB - 2;
+      const time: Line = [[ago(this.t - a.since), idle ? 'si' : 'stm']];
+      return [
+        sp(1),
+        this.icon(a, frame),
+        sp(1),
+        ...this.row(a.name, idle ? 'si' : 'sn', time, W - 3),
+        sp(1),
+      ];
+    }
+
+    header(label: string, count: number): Line {
+      const cnt = String(count);
+      return [
+        sp(2, 'Bband'),
+        [label, 'gh b Bband'],
+        sp(SB - 3 - label.length - cnt.length, 'Bband'),
+        [cnt, 'sp Bband'],
+        sp(1, 'Bband'),
+      ];
+    }
+
+    sidebar(frame: number): { line: Line; bg: string }[] {
+      const list = this.sorted();
+      const div = { line: [sp(SB, 'hl lsep')], bg: '' };
+      const rows: { line: Line; bg: string }[] = [];
+      const bg = (a: Agent) => (a === this.current ? 'Bsel' : '');
+      if (this.layout === 'compact') {
+        for (const a of list)
+          rows.push({ line: this.compact(a, frame), bg: bg(a) });
+        return rows;
+      }
+      if (this.grouped) {
+        const groups = [...new Set(list.map((a) => a.proj))];
+        for (const g of groups) {
+          const members = list.filter((a) => a.proj === g);
+          const live = members.filter((a) => a.st !== 'idle');
+          const stale = members.length - live.length;
+          rows.push({ line: this.header(g, members.length), bg: '' });
+          live.forEach((a, i) => {
+            for (const line of this.tile(a, frame))
+              rows.push({ line, bg: bg(a) });
+            if (i < live.length - 1 || stale) rows.push(div);
+          });
+          if (stale)
+            rows.push({ line: [[`  ▸ ${stale} stale`, 'sst']], bg: '' });
+        }
+        return rows;
+      }
+      // Flat tiles, with a footer counting the agents below the fold.
+      for (let i = 0; i < list.length; i++) {
+        const tile = this.tile(list[i], frame);
+        const left = list.length - i - 1;
+        if (rows.length + tile.length + (left ? 1 : 0) > LIST_H) {
+          rows.length = Math.min(rows.length, LIST_H - 1);
+          rows.push({ line: [[`↓ ${list.length - i} more`, 'sst']], bg: '' });
+          break;
+        }
+        for (const line of tile) rows.push({ line, bg: bg(list[i]) });
+        if (left) rows.push(div);
+      }
+      return rows;
+    }
+
+    // ------------------------------------------------------- top bar
+
+    topBar(frame: number): Line[] {
+      const rows: Line[] = [[sp(1)], [sp(1)], [sp(1)]];
+      const max = COLS - 2;
+      let x = 0;
+      const list = this.sorted();
+      for (let i = 0; i < list.length; i++) {
+        const a = list[i];
+        const w = Math.min(CHIP_W, max - x);
+        if (w < 6) break;
+        const idle = a.st === 'idle';
+        const time: Line = [[ago(this.t - a.since), idle ? 'si' : 'stm']];
+        const join = (...parts: Line[]) =>
+          parts
+            .filter((p) => p.length)
+            .flatMap((p, k) => (k ? [sp(1), ...p] : p));
+        const chip = [
+          [
+            this.icon(a, frame),
+            sp(1),
+            ...this.row(a.name, idle ? 'si' : 'sn', time, w - 3),
+          ],
+          this.row(a.proj, idle ? 'si' : 'sp', this.git(a), w),
+          this.row(
+            a.msg,
+            'sm',
+            join(this.prNumber(a), this.prChecks(a, frame)),
+            w,
+          ),
+        ];
+        const sel = a === this.current;
+        chip.forEach((line, k) => {
+          const cell = fit(line, w);
+          rows[k].push(
+            ...(sel
+              ? cell.map((s): Seg =>
+                  Array.isArray(s)
+                    ? [s[0], `${s[1]} Bsel`]
+                    : { ...s, cls: `${s.cls} Bsel` },
+                )
+              : cell),
+          );
+        });
+        x += w;
+        if (x + 2 < max && i + 1 < list.length) {
+          for (const r of rows) r.push(sp(1), ['│', 'lsep'], sp(1));
+          x += 3;
+        }
+      }
+      return rows;
+    }
+
+    // ------------------------------------------------------- tmux
+
+    pane(width: number, height: number): Line[] {
+      const lines = [...this.shown];
+      const rule: Line = [sp(width - 2, 'hl rule')];
+      if (this.current.st === 'work') {
+        const frame = Math.floor(this.t / TICK);
+        const secs = Math.floor((this.t - this.verbAt) / 1000);
+        lines.push(
+          [
+            [`${SPIN[frame % SPIN.length]} `, 'sg'],
+            ['Rotating… ', 'sg'],
+            [`(${secs}s · ↓ ${(this.tokens / 1000).toFixed(1)}k tokens)`, 'd'],
+          ],
+          [],
+        );
+      } else {
+        lines.push(
+          [
+            ['✻ ', 'd'],
+            ['Worked for 4m 51s', 'd'],
+          ],
+          [],
+        );
+      }
+      lines.push(rule, [['❯ ', 't'], sp(1)], rule, [
+        ['  ⏵⏵ ', 'pm'],
+        ['bypass permissions on', 'pm'],
+        [' (shift+tab to cycle)', 'd'],
+      ]);
+      const body = lines.slice(-height);
+      while (body.length < height) body.unshift([]);
+      return body.map((l) => [sp(1), ...l]);
+    }
+
+    paneTitle(w: number, label: string, active: boolean): Line {
+      const l = active ? 'hl la' : 'hl lg';
+      return [
+        sp(2, l),
+        sp(1),
+        [label, active ? 'ta' : 'tg'],
+        sp(1),
+        sp(w - label.length - 4, l),
+      ];
+    }
+
+    statusBar(): Line {
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, '0');
+      const clock = `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${p(d.getHours())}:${p(d.getMinutes())}`;
+      return spread(
+        [
+          ['api', 'stl'],
+          sp(1),
+          ['1:auth-refresh*', 'wa Bwa'],
+          sp(1),
+          ['2:rate-limit-', 'stw'],
+          sp(1),
+          ['3:flaky-tests', 'stw'],
+        ],
+        [[clock, 'clk']],
+        COLS,
+      );
+    }
+
+    frame(): string[] {
+      const frame = Math.floor(this.t / TICK);
+      const h = (l: Line) => html(l, SVG);
+      const box = (line: Line, w: number, bg = '') =>
+        `<span class="rg ${bg}" style="width:${w}ch">${h(fit(line, w))}</span>`;
+      const rows: string[] = [];
+      const side = this.focused === 'sidebar';
+      if (this.top) {
+        const bar = this.topBar(frame);
+        const pane = this.pane(COLS, ROWS - BAR_H - 3);
+        rows.push(box(this.paneTitle(COLS, '0: workmux', false), COLS));
+        for (const line of bar) rows.push(box([sp(1), ...line], COLS));
+        rows.push(box(this.paneTitle(COLS, '1: claude', true), COLS));
+        for (const line of pane) rows.push(box(line, COLS, 'Bag'));
+      } else {
+        const list = this.sidebar(frame);
+        const pane = this.pane(RW, LIST_H);
+        rows.push(
+          box(this.paneTitle(SB, '0: workmux', side), SB) +
+            box([sp(1, 'td la')], 1) +
+            box(this.paneTitle(RW, '1: claude', !side), RW),
+        );
+        for (let r = 0; r < LIST_H; r++) {
+          const item = list[r] ?? { line: [], bg: '' };
+          rows.push(
+            box(item.line, SB, item.bg) +
+              box([sp(1, 'vl la')], 1) +
+              box(pane[r] ?? [], RW, 'Bag'),
+          );
+        }
+      }
+      rows.push(box(this.statusBar(), COLS));
+      return rows;
+    }
+  }
+
+  if (!customElements.get('live-side')) {
+    customElements.define('live-side', LiveSide);
+  }
+</script>
