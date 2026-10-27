@@ -268,7 +268,7 @@ pub struct DashboardConfig {
 
     /// Columns of the agents table, in display order. Columns left out of the
     /// list are not rendered.
-    /// Default: number, project, worktree, git, pr, status, time, title.
+    /// Default: number, project, worktree, machine, git, pr, status, time, title.
     pub agent_columns: Option<Vec<AgentColumn>>,
 
     /// Columns of the worktree table, in display order. Omit a column to hide it.
@@ -307,6 +307,9 @@ pub enum AgentColumn {
     Project,
     /// Worktree name, with a pane suffix for multi-pane windows.
     Worktree,
+    /// Remote the agent runs on, or `local`. Rendered only while at least one
+    /// agent is remote.
+    Machine,
     /// Git status of the worktree.
     Git,
     /// Pull request and check status. Rendered only while at least one agent
@@ -329,10 +332,11 @@ pub enum AgentColumn {
 }
 
 /// Columns used when the config does not set `dashboard.agent_columns`.
-pub const DEFAULT_AGENT_COLUMNS: [AgentColumn; 8] = [
+pub const DEFAULT_AGENT_COLUMNS: [AgentColumn; 9] = [
     AgentColumn::Number,
     AgentColumn::Project,
     AgentColumn::Worktree,
+    AgentColumn::Machine,
     AgentColumn::Git,
     AgentColumn::Pr,
     AgentColumn::Status,
@@ -4246,6 +4250,7 @@ mod tests {
                 AgentColumn::Number,
                 AgentColumn::Project,
                 AgentColumn::Worktree,
+                AgentColumn::Machine,
                 AgentColumn::Git,
                 AgentColumn::Pr,
                 AgentColumn::Status,
