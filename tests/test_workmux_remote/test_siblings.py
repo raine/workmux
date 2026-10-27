@@ -37,7 +37,7 @@ def spawn(node: Node, ex_id: str, args: str) -> None:
 
 
 def node_pane(node: Node, ex_id: str) -> str:
-    return node.tmux("capture-pane", "-p", "-t", f"{ex_id}-0:").stdout
+    return node.tmux("capture-pane", "-p", "-J", "-t", f"{ex_id}-0:").stdout
 
 
 def by_branch(node: Node, branch: str):
