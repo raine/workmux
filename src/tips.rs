@@ -100,13 +100,9 @@ fn note_remotes(state: &mut TipsState, remotes_configured: bool) {
     }
 }
 
-fn take_remote_tip_view(state: &mut TipsState, remotes_configured: bool) -> bool {
+fn remote_tip_is_due(state: &mut TipsState, remotes_configured: bool) -> bool {
     note_remotes(state, remotes_configured);
-    if state.remote_tip_dismissed || state.remote_tip_views >= REMOTE_TIP_MAX_VIEWS {
-        return false;
-    }
-    state.remote_tip_views += 1;
-    true
+    !state.remote_tip_dismissed && state.remote_tip_views < REMOTE_TIP_MAX_VIEWS
 }
 
 fn take_remote_notice(state: &mut TipsState, remotes_configured: bool) -> bool {
@@ -118,10 +114,16 @@ fn take_remote_notice(state: &mut TipsState, remotes_configured: bool) -> bool {
     true
 }
 
-/// Check whether the dashboard shows the remote servers tip, counting the
-/// view when it does.
-pub fn should_show_remote_tip(remotes_configured: bool) -> bool {
-    update_tips(|state| take_remote_tip_view(state, remotes_configured))
+/// Check whether the dashboard may show the remote servers tip. Only a
+/// dashboard session that draws it uses up a view; see
+/// [`record_remote_tip_view`].
+pub fn remote_tip_due(remotes_configured: bool) -> bool {
+    update_tips(|state| remote_tip_is_due(state, remotes_configured))
+}
+
+/// Count a dashboard session that drew the remote servers tip.
+pub fn record_remote_tip_view() {
+    update_tips(|state| state.remote_tip_views += 1);
 }
 
 /// Check whether to print the one-time remote servers notice, recording it
@@ -172,13 +174,22 @@ mod tests {
     }
 
     #[test]
-    fn remote_tip_retires_after_max_views() {
+    fn remote_tip_retires_after_max_drawn_views() {
         let mut state = TipsState::default();
         for _ in 0..REMOTE_TIP_MAX_VIEWS {
-            assert!(take_remote_tip_view(&mut state, false));
+            assert!(remote_tip_is_due(&mut state, false));
+            state.remote_tip_views += 1;
         }
-        assert!(!take_remote_tip_view(&mut state, false));
-        assert_eq!(state.remote_tip_views, REMOTE_TIP_MAX_VIEWS);
+        assert!(!remote_tip_is_due(&mut state, false));
+    }
+
+    #[test]
+    fn checking_the_tip_does_not_use_a_view() {
+        let mut state = TipsState::default();
+        for _ in 0..REMOTE_TIP_MAX_VIEWS + 3 {
+            assert!(remote_tip_is_due(&mut state, false));
+        }
+        assert_eq!(state.remote_tip_views, 0);
     }
 
     #[test]
@@ -192,7 +203,7 @@ mod tests {
     fn showing_the_notice_leaves_the_dashboard_tip() {
         let mut state = TipsState::default();
         assert!(take_remote_notice(&mut state, false));
-        assert!(take_remote_tip_view(&mut state, false));
+        assert!(remote_tip_is_due(&mut state, false));
     }
 
     #[test]
@@ -201,7 +212,7 @@ mod tests {
             remote_tip_dismissed: true,
             ..TipsState::default()
         };
-        assert!(!take_remote_tip_view(&mut state, false));
+        assert!(!remote_tip_is_due(&mut state, false));
         assert!(!take_remote_notice(&mut state, false));
         assert!(!state.remote_notice_shown);
     }
@@ -209,13 +220,13 @@ mod tests {
     #[test]
     fn configured_remote_silences_both_for_good() {
         let mut state = TipsState::default();
-        assert!(!take_remote_tip_view(&mut state, true));
+        assert!(!remote_tip_is_due(&mut state, true));
         assert!(!take_remote_notice(&mut state, true));
         assert!(state.remote_tip_dismissed);
         assert_eq!(state.remote_tip_views, 0);
 
         // Removing the remote later does not bring the hints back.
-        assert!(!take_remote_tip_view(&mut state, false));
+        assert!(!remote_tip_is_due(&mut state, false));
         assert!(!take_remote_notice(&mut state, false));
     }
 

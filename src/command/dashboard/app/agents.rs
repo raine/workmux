@@ -693,7 +693,7 @@ impl App {
     /// opens, the tip stays and the footer shows the address instead. Does
     /// nothing unless the tip is on screen.
     pub fn open_remote_guide(&mut self) {
-        if super::super::mouse::visible_remote_tip_area(self).is_none() {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
             return;
         }
         let url = crate::tips::REMOTE_GUIDE_URL;
@@ -708,10 +708,19 @@ impl App {
         self.status_message = Some((message, std::time::Instant::now()));
     }
 
+    /// Count this session toward the remote servers tip's view limit the
+    /// first time the footer draws it.
+    pub fn note_remote_tip_drawn(&mut self) {
+        if !self.remote_tip_counted {
+            self.remote_tip_counted = true;
+            crate::tips::record_remote_tip_view();
+        }
+    }
+
     /// Hide the remote servers tip for good. Does nothing unless the tip is
     /// on screen.
     pub fn dismiss_remote_tip(&mut self) {
-        if super::super::mouse::visible_remote_tip_area(self).is_none() {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
             return;
         }
         self.show_remote_tip = false;

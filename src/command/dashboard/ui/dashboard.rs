@@ -15,7 +15,7 @@ use crate::config::AgentColumn;
 
 use super::super::app::{App, DashboardTab};
 use super::super::layout::{
-    FOOTER_HELP_WIDTH, dashboard_content_areas, dashboard_outer_areas, remote_tip_area,
+    FOOTER_HELP_WIDTH, dashboard_content_areas, dashboard_outer_areas, remote_tip_footer,
 };
 use super::format;
 use super::format::{format_git_status, format_pr_status, truncate};
@@ -105,6 +105,7 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
     }
 
     // Footer - show status message if active, otherwise mode-specific help
+    let mut remote_tip_drawn = false;
     if let Some((msg, _)) = &app.status_message {
         let p = &app.palette;
         f.render_widget(
@@ -122,7 +123,7 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
                 } else if app.input_mode {
                     f.render_widget(render_footer_input(app), footer_area);
                 } else {
-                    render_footer_normal(f, app, footer_area);
+                    remote_tip_drawn = render_footer_normal(f, app, footer_area);
                 }
             }
             DashboardTab::Worktrees => {
@@ -133,6 +134,9 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
                 }
             }
         }
+    }
+    if remote_tip_drawn {
+        app.note_remote_tip_drawn();
     }
 }
 
@@ -813,13 +817,10 @@ fn remote_tip_line(p: &ThemePalette) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Render key hints, an optional tip that is dropped when the hints leave
-/// no room for it, and the right-pinned help.
 fn render_pinned_footer(
     f: &mut Frame,
     area: Rect,
     items: &[Vec<Span<'static>>],
-    tip: Option<Line<'static>>,
     dimmed: Style,
     bold_text: Style,
     pipe_style: Style,
@@ -831,27 +832,52 @@ fn render_pinned_footer(
         }
         s.extend(item.iter().cloned());
     }
-    let hints = Line::from(s);
-    let hints_width = hints.width() as u16;
 
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(FOOTER_HELP_WIDTH)])
         .split(area);
-    f.render_widget(Paragraph::new(hints), cols[0]);
-    if let Some(tip) = tip
-        && let Some(tip_area) = remote_tip_area(area, hints_width)
-    {
-        f.render_widget(Paragraph::new(tip), tip_area);
-    }
+    f.render_widget(Paragraph::new(Line::from(s)), cols[0]);
     render_right_help(f, area, dimmed, bold_text);
 }
 
-/// Normal mode footer with right-pinned help
-fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) {
+/// Render the agents footer hints. With `with_tip`, the remote servers tip
+/// takes the place of lower-priority hints when the footer has room for it.
+/// Returns whether the tip was drawn.
+fn render_agent_footer(
+    f: &mut Frame,
+    area: Rect,
+    items: Vec<Vec<Span<'static>>>,
+    with_tip: bool,
+    p: &ThemePalette,
+) -> bool {
+    let dimmed = Style::default().fg(p.dimmed);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let pipe_style = Style::default().fg(p.border);
+
+    let widths: Vec<u16> = items
+        .iter()
+        .map(|item| item.iter().map(Span::width).sum::<usize>() as u16)
+        .collect();
+    let Some(layout) = with_tip.then(|| remote_tip_footer(area, &widths)).flatten() else {
+        render_pinned_footer(f, area, &items, dimmed, bold_text, pipe_style);
+        return false;
+    };
+    let kept: Vec<_> = items
+        .into_iter()
+        .zip(&layout.keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect();
+    render_pinned_footer(f, area, &kept, dimmed, bold_text, pipe_style);
+    f.render_widget(Paragraph::new(remote_tip_line(p)), layout.tip);
+    true
+}
+
+/// Normal mode footer with right-pinned help. Returns whether the remote
+/// servers tip was drawn.
+fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) -> bool {
     let p = &app.palette;
 
     let dimmed = Style::default().fg(p.dimmed);
     let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
-    let pipe_style = Style::default().fg(p.border);
     let active_style = Style::default().fg(p.info);
 
     let sort = app.sort_mode.label();
@@ -891,8 +917,7 @@ fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     items.push(footer_cmd("Tab", "Worktrees", dimmed, bold_text));
     items.push(footer_cmd("q", "Quit", dimmed, bold_text));
 
-    let tip = app.show_remote_tip.then(|| remote_tip_line(p));
-    render_pinned_footer(f, area, &items, tip, dimmed, bold_text, pipe_style);
+    render_agent_footer(f, area, items, app.show_remote_tip, p)
 }
 
 /// Worktree filter mode footer
@@ -932,7 +957,7 @@ fn render_worktree_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     items.push(footer_cmd("Tab", "Agents", dimmed, bold_text));
     items.push(footer_cmd("q", "Quit", dimmed, bold_text));
 
-    render_pinned_footer(f, area, &items, None, dimmed, bold_text, pipe_style);
+    render_pinned_footer(f, area, &items, dimmed, bold_text, pipe_style);
 }
 
 #[cfg(test)]
@@ -1009,9 +1034,9 @@ mod tests {
             .to_string()
     }
 
-    /// Render the agents footer with or without the remote servers tip and
-    /// return its text.
-    fn render_agents_footer(width: u16, tip: bool) -> String {
+    /// Render the agents footer, offering the remote servers tip when `tip`
+    /// is set, and return its text and whether the tip was drawn.
+    fn render_agents_footer(width: u16, tip: bool) -> (String, bool) {
         let p = palette();
         let dimmed = Style::default().fg(p.dimmed);
         let bold = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
@@ -1026,13 +1051,13 @@ mod tests {
             footer_cmd("Tab", "Worktrees", dimmed, bold),
             footer_cmd("q", "Quit", dimmed, bold),
         ];
-        let tip = tip.then(|| remote_tip_line(&p));
+        let mut drawn = false;
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
-            .draw(|f| render_pinned_footer(f, f.area(), &items, tip, dimmed, bold, dimmed))
+            .draw(|f| drawn = render_agent_footer(f, f.area(), items, tip, &p))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
+        ((0..width).map(|x| buffer[(x, 0)].symbol()).collect(), drawn)
     }
 
     #[test]
@@ -1053,23 +1078,53 @@ mod tests {
         assert_eq!(columns(REMOTE_TIP_HIDE_COLUMNS), "x Hide");
     }
 
+    const TIP: &str = "New: remote servers  g Guide  x Hide │ ? Help ";
+
     #[test]
     fn remote_tip_renders_between_hints_and_help() {
-        let line = render_agents_footer(170, true);
-        assert!(line.contains("q Quit"), "{line:?}");
+        let (line, drawn) = render_agents_footer(170, true);
+        assert!(drawn);
         assert!(
-            line.ends_with("New: remote servers  g Guide  x Hide │ ? Help "),
+            line.contains("f Stale (shown) │ Tab Worktrees │ q Quit"),
             "{line:?}"
         );
+        assert!(line.ends_with(TIP), "{line:?}");
     }
 
     #[test]
-    fn remote_tip_is_dropped_when_hints_leave_no_room() {
-        let line = render_agents_footer(140, true);
+    fn remote_tip_replaces_low_priority_hints_at_ordinary_widths() {
+        let (line, drawn) = render_agents_footer(120, true);
+        assert!(drawn);
+        assert!(
+            line.starts_with("  i Input │ d Diff │ o PR │ 1-9 Jump │ Tab Worktrees │ q Quit "),
+            "{line:?}"
+        );
+        assert!(!line.contains("Sort"), "{line:?}");
+        assert!(line.ends_with(TIP), "{line:?}");
+
+        let (line, drawn) = render_agents_footer(80, true);
+        assert!(drawn);
+        assert_eq!(line, format!("  Tab Worktrees │ q Quit{:10}{TIP}", ""));
+    }
+
+    #[test]
+    fn very_narrow_footers_omit_the_tip_and_keep_their_hints() {
+        let (line, drawn) = render_agents_footer(50, true);
+        assert!(!drawn);
         assert!(!line.contains("remote servers"), "{line:?}");
-        assert!(line.contains("q Quit"), "{line:?}");
-        assert!(line.ends_with("? Help "), "{line:?}");
-        assert_eq!(line, render_agents_footer(140, false));
+        assert!(line.starts_with("  i Input │ d Diff"), "{line:?}");
+        assert_eq!(line, render_agents_footer(50, false).0);
+    }
+
+    #[test]
+    fn footer_without_the_tip_is_unchanged() {
+        let (line, drawn) = render_agents_footer(170, false);
+        assert!(!drawn);
+        assert!(!line.contains("remote servers"), "{line:?}");
+        assert!(
+            line.contains("f Stale (shown) │ Tab Worktrees │ q Quit"),
+            "{line:?}"
+        );
     }
 
     fn widths() -> AgentColumnWidths {
