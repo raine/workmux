@@ -567,3 +567,44 @@ def test_setup_token_reaches_claude_panes_on_the_host(
         mux_server, get_window_name("feat"), f"TOKEN-IN-PANE:{token}", timeout=20
     )
     assert list((node.root / "secrets").glob("*.tmux")) == []
+
+
+@pytest.mark.parametrize("inherited", ["", "256color"])
+def test_remote_panes_advertise_truecolor(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    inherited: str,
+):
+    commit_project(
+        mux_repo_path,
+        {
+            "panes": [
+                {"command": "printf 'COLOR=%s\\n' \"$COLORTERM\""},
+                {
+                    "command": "printf 'COLOR=%s\\n' \"$COLORTERM\"",
+                    "split": "horizontal",
+                },
+            ]
+        },
+    )
+    for handle in ["cold", "warm"]:
+        wm(
+            mux_server,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {handle} --remote lo",
+            extra_env={"COLORTERM": inherited},
+        )
+        workspace = next(ws for ws in node.workspaces() if ws["handle"] == handle)
+        ex_id = workspace["execution"]["ex_id"]
+        for index in [0, 1]:
+            assert poll_until(
+                lambda: "COLOR=truecolor"
+                in node.tmux(
+                    "capture-pane", "-p", "-S", "-", "-t", f"{ex_id}-{index}:"
+                ).stdout
+            )
+        # A stale server environment must not control newly created sessions.
+        node.tmux("set-environment", "-g", "COLORTERM", "256color")

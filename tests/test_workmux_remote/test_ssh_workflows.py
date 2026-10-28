@@ -257,7 +257,9 @@ def test_ssh_container_isolation_survives_config_change(ssh_workspace):
         {
             "sandbox": {"enabled": True, "target": "all"},
             "panes": [
-                {"command": "test -f /.dockerenv && echo CONTAINER-READY; exec bash"}
+                {
+                    "command": "test -f /.dockerenv && echo CONTAINER-READY && printf 'COLOR=%s\\n' \"$COLORTERM\"; exec bash"
+                }
             ],
         },
     )
@@ -265,6 +267,7 @@ def test_ssh_container_isolation_survives_config_change(ssh_workspace):
     assert "Runs: in Docker" in added.stdout
     window = get_window_name("boxed")
     wait_for_pane_output(ws.env, window, "CONTAINER-READY", timeout=60)
+    wait_for_pane_output(ws.env, window, "COLOR=truecolor", timeout=30)
     ws.env.tmux(
         [
             "send-keys",
