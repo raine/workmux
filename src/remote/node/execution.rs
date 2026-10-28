@@ -451,6 +451,9 @@ fn new_session(
         .args(["new-session", "-d", "-P", "-F", "#{pane_id}"])
         .args(["-s", name, "-c"])
         .arg(cwd)
+        // The node terminal advertises RGB. Set the application hint per
+        // session, including when the tmux server predates this session.
+        .args(["-e", "COLORTERM=truecolor"])
         .arg("-e")
         .arg(format!(
             "{}={}",
