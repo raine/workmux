@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ..conftest import TmuxEnvironment
+from ..conftest import TmuxEnvironment, poll_until
 from .conftest import Node, commit_project, git, wm
 
 pytestmark = pytest.mark.tmux_only
@@ -208,13 +208,17 @@ def test_local_files_do_not_upload_or_reuse_remote_seeds(
         "panes": [{"command": "echo ready"}],
         "files": {"symlink": ["cache"], "copy": ["CLAUDE.local.md"]},
         "remote_files": {"symlink": ["cache"]},
+        "hook_shell": [shutil.which("bash"), "-c"],
+        "post_create": ['printf %s "$0" > hook-shell'],
     }
     commit_project(repo, project)
-    wm(mux_server, workmux_exe_path, repo, "add seeded --remote lo")
+    seeded_result = wm(mux_server, workmux_exe_path, repo, "add seeded --remote lo")
+    assert "not applied on" not in seeded_result.stderr
     [seeded] = node.workspaces()
     seed = Path(seeded["repo_path"]) / "cache"
     assert (seed / "data").read_text() == "shared"
     assert not (Path(seeded["worktree_path"]) / "CLAUDE.local.md").exists()
+    assert (Path(seeded["worktree_path"]) / "hook-shell").read_text() == "bash"
 
     if selection is None:
         del project["remote_files"]
@@ -228,9 +232,18 @@ def test_local_files_do_not_upload_or_reuse_remote_seeds(
     assert not (tree / "cache").is_symlink()
     assert not (tree / "CLAUDE.local.md").exists()
     assert (seed / "data").read_text() == "shared"
-    assert ("files: local only" in result.stderr) == (
-        selection != {"copy": [], "symlink": []}
+    assert "not applied on" not in result.stderr
+    log = Path(mux_server.env["XDG_STATE_HOME"]) / "workmux" / "workmux.log"
+    assert poll_until(
+        lambda: log.exists()
+        and "remote config: hook_shell: an absolute local path; hooks use bash -c"
+        in log.read_text()
     )
+    note = "remote config: files: local only"
+    if selection == {"copy": [], "symlink": []}:
+        assert not log.exists() or note not in log.read_text()
+    else:
+        assert poll_until(lambda: log.exists() and note in log.read_text())
 
     wm(mux_server, workmux_exe_path, repo, "add local --local")
     local = repo.parent / f"{repo.name}__worktrees" / "local"

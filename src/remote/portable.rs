@@ -25,6 +25,10 @@ pub struct Portable {
     pub location: Option<ConfigLocation>,
     /// One line per dropped or changed setting, naming it but never its value.
     pub dropped: Vec<String>,
+    /// Routine adjustments that apply to most remote workspaces, such as
+    /// local-only `files` or the default hook shell. They belong in the log
+    /// rather than on every `add`.
+    pub notes: Vec<String>,
     /// Environment for the workspace's containers.
     pub secrets: Secrets,
 }
@@ -67,6 +71,7 @@ fn portable_config_with_env(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Portable {
     let mut dropped = Vec::new();
+    let mut notes = Vec::new();
     if config.remote_files.copy.is_none()
         && config.remote_files.symlink.is_none()
         && [config.files.copy.as_ref(), config.files.symlink.as_ref()]
@@ -74,7 +79,7 @@ fn portable_config_with_env(
             .flatten()
             .any(|patterns| !patterns.is_empty())
     {
-        dropped.push("files: local only; configure remote_files to send supplemental files".into());
+        notes.push("files: local only; configure remote_files to send supplemental files".into());
     }
     let mut portable = Config {
         panes: config.panes.clone(),
@@ -93,8 +98,9 @@ fn portable_config_with_env(
     };
 
     match config.hook_shell.as_deref() {
-        Some([program, ..]) if Path::new(program).is_absolute() => dropped
-            .push("hook_shell: an absolute local path; hooks use the default shell".to_string()),
+        Some([program, ..]) if Path::new(program).is_absolute() => {
+            notes.push("hook_shell: an absolute local path; hooks use bash -c".to_string())
+        }
         _ => portable.hook_shell = config.hook_shell.clone(),
     }
     if config
@@ -124,6 +130,7 @@ fn portable_config_with_env(
         config: portable,
         location,
         dropped,
+        notes,
         secrets,
     }
 }
@@ -296,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn local_files_hint_only_when_remote_selection_is_unset() {
+    fn local_files_note_only_when_remote_selection_is_unset() {
         let mut config = Config::default();
         for (local, remote, expected) in [
             (None, None, false),
@@ -310,12 +317,10 @@ mod tests {
             let portable =
                 portable_config(&config, None, RemoteIsolation::None, Path::new("/n/wt"));
             assert_eq!(
-                portable
-                    .dropped
-                    .iter()
-                    .any(|line| line.starts_with("files:")),
+                portable.notes.iter().any(|line| line.starts_with("files:")),
                 expected
             );
+            assert!(portable.dropped.is_empty(), "{:?}", portable.dropped);
             assert!(portable.config.files.symlink.is_none());
             assert!(portable.config.remote_files.copy.is_none());
         }
@@ -353,12 +358,33 @@ mod tests {
             "sandbox.rpc_host",
             "sandbox.extra_mounts",
             "sandbox.container.oci_runtime",
-            "hook_shell",
         ] {
             assert!(report.contains(setting), "{setting} missing from {report}");
         }
+        assert!(!report.contains("hook_shell"), "{report}");
+        assert_eq!(
+            portable.notes,
+            ["hook_shell: an absolute local path; hooks use bash -c"]
+        );
         assert!(!report.contains("GITHUB_TOKEN"), "{report}");
         assert!(!report.contains("/Users/me"), "{report}");
+    }
+
+    #[test]
+    fn absolute_hook_shell_falls_back_to_bash_on_the_node() {
+        let portable = portable_config(&laptop(), None, RemoteIsolation::None, Path::new("/n/wt"));
+        let dir = tempfile::tempdir().unwrap();
+        crate::remote::node::run_hook(
+            &portable.config,
+            r#"printf '%s' "$0" > shell"#,
+            dir.path(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("shell")).unwrap(),
+            "bash"
+        );
     }
 
     #[test]
