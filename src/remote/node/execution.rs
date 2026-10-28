@@ -65,6 +65,15 @@ pub fn tmux_socket(root: &NodeRoot) -> Result<PathBuf> {
     Ok(dir.join(format!("{hash}.sock")))
 }
 
+/// `tmux.conf` under the root, written when it differs from [`TMUX_CONF`].
+pub fn tmux_conf(root: &NodeRoot) -> Result<PathBuf> {
+    let conf = root.path.join("tmux.conf");
+    if fs::read_to_string(&conf).ok().as_deref() != Some(TMUX_CONF) {
+        crate::util::write_atomic(&conf, TMUX_CONF.as_bytes())?;
+    }
+    Ok(conf)
+}
+
 pub fn tmux(socket: &Path) -> Command {
     let mut cmd = Command::new("tmux");
     cmd.arg("-S").arg(socket);
@@ -310,10 +319,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
         .expect("execution recorded")
         .agent_kind = agent_kind.map(str::to_string);
     let plan = pane_plan(&config, workspace.agent.as_deref());
-    let conf = root.path.join("tmux.conf");
-    if fs::read_to_string(&conf).ok().as_deref() != Some(TMUX_CONF) {
-        crate::util::write_atomic(&conf, TMUX_CONF.as_bytes())?;
-    }
+    let conf = tmux_conf(root)?;
 
     super::trust::ensure_for_execution(root, &workspace, &config);
 
@@ -358,7 +364,15 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
             .output();
         let spawn_env = (workspace.isolation == RemoteIsolation::None)
             .then_some((root.path.as_path(), request.ws_id.as_str()));
-        let pane_id = new_session(&socket, &conf, &name, &working_dir, &config_path, spawn_env)?;
+        let pane_id = new_session(
+            &socket,
+            &conf,
+            &name,
+            &working_dir,
+            &config_path,
+            spawn_env,
+            None,
+        )?;
         if !session_secrets.0.is_empty() {
             set_session_env(root, &socket, &name, &session_secrets)?;
         }
@@ -412,7 +426,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
 
 /// Write `run/bin/workmux`, which runs `pin` against the node store, and
 /// return its directory.
-fn write_status_wrapper(root: &NodeRoot, pin: &Path) -> Result<PathBuf> {
+pub(super) fn write_status_wrapper(root: &NodeRoot, pin: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = root.path.join("run").join("bin");
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
@@ -433,14 +447,16 @@ fn write_status_wrapper(root: &NodeRoot, pin: &Path) -> Result<PathBuf> {
 /// Create a detached session and return its pane. The variables that steer
 /// node verbs are kept out of the server's global environment; the session
 /// gets its workspace config explicitly, and with `spawn_env` the node root
-/// and workspace its agent spawns siblings from.
-fn new_session(
+/// and workspace its agent spawns siblings from. The session runs `command`,
+/// or the default shell without one, and ends when it exits.
+pub(super) fn new_session(
     socket: &Path,
     conf: &Path,
     name: &str,
     cwd: &Path,
     config_path: &Path,
     spawn_env: Option<(&Path, &str)>,
+    command: Option<&str>,
 ) -> Result<String> {
     let mut cmd = tmux(socket);
     cmd.arg("-f")
@@ -476,6 +492,9 @@ fn new_session(
             .arg("-e")
             .arg(format!("{}={ws_id}", super::spawn::SESSION_WORKSPACE_ENV));
     }
+    if let Some(command) = command {
+        cmd.arg(command);
+    }
     let output = cmd.output().context("Failed to run tmux")?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -488,7 +507,12 @@ fn new_session(
 
 /// Set `secrets` in a session's environment through a private file, so no
 /// value appears in argv; panes spawned afterwards inherit them.
-fn set_session_env(root: &NodeRoot, socket: &Path, name: &str, secrets: &Secrets) -> Result<()> {
+pub(super) fn set_session_env(
+    root: &NodeRoot,
+    socket: &Path,
+    name: &str,
+    secrets: &Secrets,
+) -> Result<()> {
     let file = secrets::tmux_file(root, name, secrets)?;
     let output = tmux(socket)
         .arg("source-file")
@@ -524,6 +548,7 @@ mod tests {
             "first",
             dir.path(),
             &dir.path().join("config.json"),
+            None,
             None,
         );
         let dimensions = tmux(&socket)

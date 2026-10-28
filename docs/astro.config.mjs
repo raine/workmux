@@ -191,6 +191,7 @@ export default defineConfig({
             { label: "resurrect", slug: "reference/commands/resurrect" },
             { label: "sync-files", slug: "reference/commands/sync-files" },
             { label: "path", slug: "reference/commands/path" },
+            { label: "shell", slug: "reference/commands/shell" },
             { label: "dashboard", slug: "reference/commands/dashboard" },
             { label: "sidebar", slug: "reference/commands/sidebar" },
             { label: "reap-agents", slug: "reference/commands/reap-agents" },

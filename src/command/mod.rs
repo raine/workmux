@@ -30,6 +30,7 @@ pub mod send;
 pub mod set_base;
 pub mod set_window_status;
 pub mod setup;
+pub mod shell;
 pub mod sidebar;
 pub mod status;
 pub mod sync_files;

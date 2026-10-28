@@ -310,14 +310,14 @@ impl Node {
         Ok(command)
     }
 
-    /// Command that attaches the calling terminal to pane `pane` of
-    /// execution `ex_id`; exits with the `node attach` status.
-    pub fn attach_command(&self, ex_id: &str, pane: usize) -> std::process::Command {
-        let pane = pane.to_string();
+    /// Command that attaches the calling terminal to session `slot` (a pane
+    /// index or a shell) of execution `ex_id`; exits with the `node attach`
+    /// status.
+    pub fn attach_command(&self, ex_id: &str, slot: &str) -> std::process::Command {
         let script = self.spec.script(
-            &[("pin", &self.pin.name), ("ex", ex_id), ("pane", &pane)],
+            &[("pin", &self.pin.name), ("ex", ex_id), ("slot", slot)],
             "WORKMUX_NODE_ROOT=$root\nexport WORKMUX_NODE_ROOT\n\
-             exec \"$root/bin/$pin\" node attach \"$ex\" \"$pane\"\n",
+             exec \"$root/bin/$pin\" node attach \"$ex\" \"$slot\"\n",
         );
         self.transport.terminal_command(&script, &[])
     }

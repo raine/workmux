@@ -194,8 +194,16 @@ fn survey(
                 .collect::<Vec<_>>()
         })
         .collect();
+    let executions: HashSet<&str> = workspaces
+        .iter()
+        .filter_map(|ws| Some(ws.execution.as_ref()?.ex_id.as_str()))
+        .collect();
     for session in &sessions {
-        if is_execution_session(session) && !current.contains(session) {
+        let orphan = match super::shell::shell_session_execution(session) {
+            Some(ex_id) => !executions.contains(ex_id),
+            None => is_execution_session(session) && !current.contains(session),
+        };
+        if orphan {
             findings.push(Finding {
                 id: format!("session:{session}"),
                 detail: format!("tmux session {session} of no execution"),
