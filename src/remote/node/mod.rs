@@ -29,6 +29,7 @@ pub mod operation;
 pub mod provision;
 pub mod remove;
 pub mod secrets;
+pub mod shell;
 pub mod spawn;
 pub mod trust;
 

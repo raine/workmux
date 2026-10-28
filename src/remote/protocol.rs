@@ -35,6 +35,7 @@ pub const CAPABILITIES: &[&str] = &[
     REBASE,
     DIFF,
     GC,
+    SHELL,
 ];
 
 pub const PROVISION_WORKSPACE: &str = "provision-workspace";
@@ -56,6 +57,8 @@ pub const REBASE: &str = "rebase";
 pub const DIFF: &str = "diff";
 /// Wire types in `remote::node::gc`.
 pub const GC: &str = "gc";
+/// Wire types in `remote::node::shell`.
+pub const SHELL: &str = "shell";
 
 /// Error codes a node verb reports in its [`ErrorEnvelope`].
 pub mod code {

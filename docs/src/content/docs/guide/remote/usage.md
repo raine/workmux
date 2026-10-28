@@ -13,6 +13,7 @@ Remote workspaces use the usual commands. Run them from the project on the local
 | [`open`](/reference/commands/open/)                                            | Reattaches to the running agent, or starts the panes again if they ended.                                   |
 | [`resurrect`](/reference/commands/resurrect/)                                  | Reopens windows of agents still running after the local machine's tmux restarted, without restarting them.  |
 | `status`, `wait`, `send`, `capture`                                            | Work whether or not the window is open. Agents are labelled `handle@remote`.                                |
+| [`shell`](/reference/commands/shell/)                                          | Opens a shell in the workspace on the server, in the current terminal.                                      |
 | [`list`](/reference/commands/list/)                                            | Shows remote workspaces with their server.                                                                  |
 | [`remove`](/reference/commands/remove/)                                        | Stops the agent and removes the remote worktree, branch and window, with the same checks as a local remove. |
 | [`merge`](/guide/remote/git/#merging), [`rebase`](/guide/remote/git/#rebasing) | See [bringing work home](/guide/remote/git/).                                                               |
@@ -30,6 +31,10 @@ Every pane in the window is a session on the server. Non-agent panes are shells 
 
 - **On the server directly:** `workmux` works in every pane, including the shell left after the agent exits. It is the server's copy, which knows the pane's workspace.
 - **In Docker:** shell panes on the server have no `workmux`. Run workmux commands for the workspace on the local machine. The agent's container has `workmux`, for [`merge` and `rm`](#remove-or-merge-from-a-remote-pane) and [starting agents](#agents-that-start-agents).
+
+### Opening a shell on the server
+
+A tmux split of the window starts a shell on the local machine, not on the server. Run [`workmux shell`](/reference/commands/shell/) in the split to get a shell in the workspace's working directory on the server. In Docker mode the shell runs in a new container of the workspace; `--host` runs it on the server instead. Exiting the shell leaves the agent running.
 
 ## Remove or merge from a remote pane
 

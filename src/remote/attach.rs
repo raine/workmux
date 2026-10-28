@@ -142,9 +142,27 @@ pub fn run(config: &Config, name: &str, ex_id: &str, pane: usize) -> Result<()> 
         bail!("workmux remote attach needs a terminal");
     }
     let _raw = RawMode::enable()?;
-    let mut relay = Relay::new(node, ex_id.to_string(), pane);
+    let mut relay = Relay::new(node, ex_id.to_string(), pane.to_string());
     relay.status = status;
-    relay.run()
+    relay.run().map(|_| ())
+}
+
+/// Relay session `slot` of `ex_id` on `node` into this terminal, which must
+/// be one, until the session ends ([`Left::SessionEnded`]) or the user
+/// leaves the relay.
+pub fn relay_session(node: Node, ex_id: &str, slot: &str) -> Result<Left> {
+    let _raw = RawMode::enable()?;
+    Relay::new(node, ex_id.to_string(), slot.to_string()).run()
+}
+
+/// Why a relay stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// The remote session ended.
+    SessionEnded,
+    /// The user closed the relay, or its terminal went away; the session
+    /// may still run.
+    Relay,
 }
 
 /// What a relay does about the observation of its remote pane.
@@ -346,7 +364,8 @@ struct Connection {
 struct Relay {
     node: Node,
     ex_id: String,
-    pane: usize,
+    /// The session's slot: a pane index or a shell.
+    slot: String,
     events: Sender<Event>,
     receiver: Receiver<Event>,
     /// Where keystrokes go; `Some` only while attached.
@@ -360,12 +379,12 @@ struct Relay {
 }
 
 impl Relay {
-    fn new(node: Node, ex_id: String, pane: usize) -> Self {
+    fn new(node: Node, ex_id: String, slot: String) -> Self {
         let (events, receiver) = mpsc::channel();
         Self {
             node,
             ex_id,
-            pane,
+            slot,
             events,
             receiver,
             input_target: Arc::new(Mutex::new(None)),
@@ -376,7 +395,7 @@ impl Relay {
         }
     }
 
-    fn run(mut self) -> Result<()> {
+    fn run(mut self) -> Result<Left> {
         self.watch_signals()?;
         self.read_input();
         let mut connection = Some(self.connect()?);
@@ -389,7 +408,7 @@ impl Relay {
             let event = match self.receiver.recv_timeout(MIRROR_INTERVAL) {
                 Ok(event) => Some(event),
                 Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(Left::Relay),
             };
             let now = SystemTime::now();
             // A connection that slept with the machine usually died with its
@@ -401,7 +420,7 @@ impl Relay {
                 State::Connecting | State::Attached { .. } => true,
             };
             if woke(last_turn, now) && retrying {
-                tracing::info!(ex_id = %self.ex_id, pane = self.pane, "remote attach woke from sleep; reconnecting");
+                tracing::info!(ex_id = %self.ex_id, slot = %self.slot, "remote attach woke from sleep; reconnecting");
                 *self.input_target.lock().unwrap() = None;
                 if let Some(old) = connection.take() {
                     stop(old);
@@ -419,7 +438,7 @@ impl Relay {
                     if let Some(connection) = connection.take() {
                         stop(connection);
                     }
-                    return Ok(());
+                    return Ok(Left::Relay);
                 }
                 Some(Event::Output(generation)) if generation == self.generation => {
                     if matches!(state, State::Connecting) {
@@ -450,9 +469,9 @@ impl Relay {
                     }
                     let failure = self.node.transport.terminal_failure(status, &stderr);
                     let ending = classify(status, &stderr, failure);
-                    tracing::info!(ex_id = %self.ex_id, pane = self.pane, ?status, ?ending, "remote attach ended");
+                    tracing::info!(ex_id = %self.ex_id, slot = %self.slot, ?status, ?ending, "remote attach ended");
                     if ending == Ending::SessionGone {
-                        return Ok(());
+                        return Ok(Left::SessionEnded);
                     }
                     let retry_at =
                         matches!(ending, Ending::TransportLost(_) | Ending::RemoteError(_)).then(
@@ -469,7 +488,7 @@ impl Relay {
                 Some(Event::Input(bytes)) => {
                     if let State::Waiting { .. } = state {
                         if bytes.contains(&b'q') {
-                            return Ok(());
+                            return Ok(Left::Relay);
                         }
                         if bytes.contains(&b'r') {
                             connection = Some(self.connect()?);
@@ -530,7 +549,7 @@ impl Relay {
     /// Start a connection on a fresh PTY sized like this terminal.
     fn connect(&mut self) -> Result<Connection> {
         self.generation += 1;
-        tracing::info!(ex_id = %self.ex_id, pane = self.pane, attempt = self.attempt, "remote attach connecting");
+        tracing::info!(ex_id = %self.ex_id, slot = %self.slot, attempt = self.attempt, "remote attach connecting");
         let generation = self.generation;
         // The remote tmux client restores this cursor when it leaves and
         // prints its exit message there. Left wherever the last one ended,
@@ -539,7 +558,7 @@ impl Relay {
         write_out("\x1b[r\x1b[H");
         let size = window_size(libc::STDOUT_FILENO);
         let (master, slave) = open_pty(&size)?;
-        let mut cmd = self.node.attach_command(&self.ex_id, self.pane);
+        let mut cmd = self.node.attach_command(&self.ex_id, &self.slot);
         cmd.stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave))
             .stderr(Stdio::piped());

@@ -581,6 +581,22 @@ enum Commands {
         file: Option<String>,
     },
 
+    /// Open a shell in a remote workspace, in this terminal
+    ///
+    /// The shell starts in the workspace's working directory on its server,
+    /// in a new container when the agent runs in one. Exiting the shell
+    /// leaves the agent and its workspace running.
+    Shell {
+        /// Remote workspace handle or branch (supports project:handle);
+        /// defaults to the remote workspace of the current window
+        #[arg(value_parser = AgentTargetParser::new())]
+        name: Option<String>,
+
+        /// Run on the server itself even when the agent runs in a container
+        #[arg(long)]
+        host: bool,
+    },
+
     /// Capture terminal output from a running agent
     Capture {
         /// Worktree name (supports cross-project with project:handle syntax)
@@ -1246,6 +1262,7 @@ pub fn run() -> Result<()> {
         Commands::Send { name, text, file } => {
             command::send::run(&name, text.as_deref(), file.as_deref())
         }
+        Commands::Shell { name, host } => command::shell::run(name.as_deref(), host),
         Commands::Capture { name, lines } => command::capture::run(&name, lines),
         Commands::Status {
             worktrees,

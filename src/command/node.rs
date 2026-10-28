@@ -49,8 +49,8 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
-    /// Attach this terminal to a pane session of an execution
-    Attach { ex_id: String, pane: usize },
+    /// Attach this terminal to a pane or shell session of an execution
+    Attach { ex_id: String, slot: String },
     /// Run an agent's login on this terminal, where executions find it
     Login {
         agent: String,
@@ -137,12 +137,18 @@ pub enum NodeVerb {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Open or close a shell session of a workspace
+    Shell {
+        /// Read JSON from stdin and write JSON to stdout (required)
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 pub fn run(args: NodeArgs) -> Result<()> {
     match &args.verb {
-        NodeVerb::Attach { ex_id, pane } => {
-            let status = node::attach::attach(&NodeRoot::from_env()?, ex_id, *pane)?;
+        NodeVerb::Attach { ex_id, slot } => {
+            let status = node::attach::attach(&NodeRoot::from_env()?, ex_id, slot)?;
             std::process::exit(status);
         }
         NodeVerb::Login {
@@ -226,6 +232,9 @@ pub fn run(args: NodeArgs) -> Result<()> {
                 serve(request, |root, request| node::spawn::spawn(&root, request))
             }
             NodeVerb::Gc { .. } => serve(request, |root, request| node::gc::gc(&root, request)),
+            NodeVerb::Shell { .. } => {
+                serve(request, |root, request| node::shell::shell(&root, request))
+            }
             NodeVerb::Attach { .. } | NodeVerb::Login { .. } => unreachable!("handled above"),
         })
     };
