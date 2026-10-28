@@ -231,6 +231,9 @@ pub fn create(
         for line in &portable.dropped {
             eprintln!("workmux: not applied on '{}': {line}", spec.name);
         }
+        for line in &portable.notes {
+            tracing::info!(server = %spec.name, "remote config: {line}");
+        }
         let files = if request.options.run_file_ops {
             collect_files(
                 &context.config_source_dir,

@@ -103,11 +103,17 @@ Where a workspace lives is decided when it is created. Later commands such as `o
 
 ## What the server uses from your config
 
-A remote workspace runs a copy of the local machine's effective config, taken when the workspace is created. The server's own workmux config and the worktree's `.workmux.yaml` are never read. `add --remote` lists every setting it didn't apply.
+A remote workspace runs a copy of the local machine's effective config, taken when the workspace is created. The server's own workmux config and the worktree's `.workmux.yaml` are never read. `add --remote` warns about settings it couldn't apply.
 
-- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `remote_files`, the status icons and format, and `hook_shell` unless it is an absolute local path.
+- **Applied:** `panes`, `agent`, `agents`, `post_create`, `pre_remove`, `remote_files`, the status icons and format, and `hook_shell` unless it is an absolute local path. An absolute `hook_shell` such as `/opt/homebrew/bin/bash` names a local program, so remote hooks run with `bash -c` instead.
 - **Applied in Docker mode:** `sandbox.image`, `target`, `network`, `toolchain`, `env`, `env_passthrough`, and `container.cpus`, `memory`, `group_add`, `cap_add`, `security_opt` and `excluded_files`. The sandbox is always Docker there.
 - **Not applied**, because they name local resources: Lima, other container runtimes, `rpc_host`, `extra_mounts`, `agent_config_dir`, `host_commands`, `container.devices` and `container.oci_runtime`.
+
+Two routine adjustments are not shown on every `add`: falling back to `bash -c` for an absolute `hook_shell`, and leaving local `files` behind when `remote_files` is not configured. Both are recorded in the workmux log, `$XDG_STATE_HOME/workmux/workmux.log` (`~/.local/state/workmux/workmux.log` by default), as lines starting with `remote config:`:
+
+```bash
+grep 'remote config:' ~/.local/state/workmux/workmux.log
+```
 
 `post_create` and `pre_remove` hooks run on the server, in the remote worktree. If `add --remote` fails partway, run it again with the same arguments: it resumes and doesn't repeat hooks that already finished.
 
@@ -141,7 +147,7 @@ remote_files:
   symlink: []
 ```
 
-An empty object (`remote_files: {}`) still inherits global lists. When local file settings exist but remote lists are unset, workmux prints a hint; explicit empty lists suppress it.
+An empty object (`remote_files: {}`) still inherits global lists. When local file settings exist but remote lists are unset, workmux records a `remote config:` note in the log; explicit empty lists suppress it.
 
 Selection changes apply to new workspaces, not existing ones, and do not delete cached sources. Workspaces spawned by a remote agent reuse their parent's saved copies and symlink selections without contacting the laptop. Resuming creation does not repeat an already completed file stage.
 

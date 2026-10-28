@@ -336,7 +336,7 @@ Run commands at specific points in the worktree lifecycle, such as installing de
 hook_shell: ["/opt/homebrew/bin/bash", "-c"]
 ```
 
-A project can override the complete `hook_shell` argv in `.workmux.yaml`; when omitted, it inherits the global value. The argv must contain a non-empty executable. Workmux reports the configured executable when it cannot be launched. Shell flags such as error handling or login behavior are applied only when included explicitly in `hook_shell` or the hook command.
+A project can override the complete `hook_shell` argv in `.workmux.yaml`; when omitted, it inherits the global value. The argv must contain a non-empty executable. Workmux reports the configured executable when it cannot be launched. Shell flags such as error handling or login behavior are applied only when included explicitly in `hook_shell` or the hook command. Remote workspaces run hooks with `bash -c` when `hook_shell` names an absolute path, since that path refers to a local program; see [What the server uses from your config](/guide/remote/setup/#what-the-server-uses-from-your-config).
 
 | Hook          | When it runs                                      | Additional env vars                  |
 | ------------- | ------------------------------------------------- | ------------------------------------ |
