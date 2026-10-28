@@ -169,9 +169,8 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
             false,
         );
     };
-    progress(&format!(
-        "Started on the local machine; follow with `workmux remote logs {remote} {id}`"
-    ));
+    progress("Started on the local machine");
+    let is_merge = matches!(&claim.operation, Operation::Merge { .. });
     let result = (|| -> Result<()> {
         let receipt_dir = cache::remote_dir(remote)?.join("operations");
         std::fs::create_dir_all(&receipt_dir)?;
@@ -203,10 +202,7 @@ pub fn run(remote: &str, ws_id: &str, id: &str) -> Result<()> {
             eprintln!("Remote operation failed: {err:#}");
             Outcome {
                 success: false,
-                message: format!(
-                    "{}; on the local machine, run `workmux remote logs {remote} {id}`",
-                    refusal(err)
-                ),
+                message: refusal(err, is_merge, remote, id),
             }
         }
     };
@@ -327,25 +323,30 @@ fn resolve_into(record: &WorkspaceRecord, name: &str) -> Result<String> {
 }
 
 /// Never send arbitrary git output, hook output or laptop paths to the node.
-fn refusal(err: &anyhow::Error) -> String {
+fn refusal(err: &anyhow::Error, is_merge: bool, remote: &str, id: &str) -> String {
     let text = format!("{err:#}").to_lowercase();
+    let logs = || format!("on the local machine, run `workmux remote logs {remote} {id}`");
     let message = if text.contains("not merged into") {
         "has commits not merged into its base; run `workmux rm --force`"
     } else if text.contains("uncommitted")
         || text.contains("unstaged")
         || text.contains("untracked")
     {
-        "has uncommitted changes; commit them or explicitly use --force (rm) / --ignore-uncommitted (merge)"
+        if is_merge {
+            "this remote workspace has uncommitted changes; commit them and retry, or use `workmux merge --ignore-uncommitted` to merge only committed changes"
+        } else {
+            "this remote workspace has uncommitted changes; commit them before removing it, or use `workmux rm --force` to discard them"
+        }
     } else if text.contains("interactive") {
         "this merge needs interaction; commit staged changes first or run merge on the local machine"
     } else if text.contains("conflict") {
         "merge conflict; resolve it on the local machine, then run workmux merge there"
     } else if text.contains("hook") || text.contains("post-create") {
-        "a local hook failed; inspect its output on the local machine"
+        return format!("a local hook failed; {}", logs());
     } else if text.contains("existing local branch") {
         "merge target must be an existing local branch"
     } else {
-        "the operation failed on the local machine; inspect it there with workmux"
+        return format!("the operation failed on the local machine; {}", logs());
     };
     message.into()
 }
@@ -408,12 +409,52 @@ mod tests {
     }
 
     #[test]
-    fn refusal_does_not_disclose_paths() {
-        let err = anyhow::anyhow!("hook failed in /private/laptop/secret: token");
-        assert_eq!(
-            refusal(&err),
-            "a local hook failed; inspect its output on the local machine"
+    fn expected_refusals_give_actions_without_log_advice() {
+        for dirty in ["uncommitted changes", "unstaged changes", "untracked files"] {
+            let err = anyhow::anyhow!(dirty);
+            let merge = refusal(&err, true, "vps", "r123456789abc");
+            assert!(merge.contains("workmux merge --ignore-uncommitted"));
+            assert!(merge.contains("only committed changes"));
+            assert!(!merge.contains("remote logs"));
+            assert!(!merge.contains("rm --force"));
+            let remove = refusal(&err, false, "vps", "r123456789abc");
+            assert!(remove.contains("workmux rm --force"));
+            assert!(remove.contains("discard them"));
+            assert!(!remove.contains("remote logs"));
+            assert!(!remove.contains("merge --ignore-uncommitted"));
+        }
+        for text in [
+            "not merged into base",
+            "interactive merge",
+            "merge conflict",
+            "existing local branch",
+        ] {
+            assert!(
+                !refusal(&anyhow::anyhow!(text), true, "vps", "r123456789abc")
+                    .contains("remote logs")
+            );
+        }
+    }
+
+    #[test]
+    fn failures_keep_log_advice_without_disclosing_private_output() {
+        for text in [
+            "hook failed in /private/laptop/secret: token",
+            "unknown failure /private/laptop/secret: token",
+        ] {
+            let message = refusal(&anyhow::anyhow!(text), true, "vps", "r123456789abc");
+            assert!(message.contains("workmux remote logs vps r123456789abc"));
+            assert!(!message.contains("secret"));
+            assert!(!message.contains("token"));
+        }
+        assert!(
+            refusal(
+                &anyhow::anyhow!("hook failed"),
+                true,
+                "vps",
+                "r123456789abc"
+            )
+            .starts_with("a local hook failed")
         );
-        assert!(!refusal(&anyhow::anyhow!("/private/laptop/secret")).contains("secret"));
     }
 }
