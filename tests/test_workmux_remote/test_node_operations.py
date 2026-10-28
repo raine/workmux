@@ -104,19 +104,29 @@ def test_refusals(
     assert get_window_name("feat") in mux_server.list_windows()
 
 
+@pytest.mark.parametrize("command", ["rm", "merge"])
 def test_dirty_refuses(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,
     mux_repo_path: Path,
     node: Node,
+    command: str,
 ):
     configure(mux_repo_path)
     wm(mux_server, workmux_exe_path, mux_repo_path, "add feat --remote lo")
     [record] = local_records(mux_server)
     ex_id = record["execution"]["ex_id"]
     (node_worktree(node, "feat") / "dirty").write_text("uncommitted")
-    request(node, ex_id, "rm")
+    request(node, ex_id, command)
     wait_message(node, ex_id, "has uncommitted changes")
+    pane = node_pane(node, ex_id)
+    expected = (
+        "workmux rm --force"
+        if command == "rm"
+        else "workmux merge --ignore-uncommitted"
+    )
+    assert expected in pane
+    assert "remote logs" not in pane
     assert local_records(mux_server) and node.workspaces()
 
 
