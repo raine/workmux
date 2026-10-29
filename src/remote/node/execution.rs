@@ -301,6 +301,7 @@ pub fn start(root: &NodeRoot, request: StartRequest) -> Result<StartResponse> {
                 .map(|name| name.to_string_lossy().into_owned()),
             continues,
             agent_kind: None,
+            closed_shells: Default::default(),
         });
         root.save(&workspace)?;
     }

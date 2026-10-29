@@ -15,7 +15,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -150,9 +153,16 @@ pub fn run(config: &Config, name: &str, ex_id: &str, pane: usize) -> Result<()> 
 /// Relay session `slot` of `ex_id` on `node` into this terminal, which must
 /// be one, until the session ends ([`Left::SessionEnded`]) or the user
 /// leaves the relay.
-pub fn relay_session(node: Node, ex_id: &str, slot: &str) -> Result<Left> {
+pub fn relay_session(
+    node: Node,
+    ex_id: &str,
+    slot: &str,
+    canceled: Arc<AtomicBool>,
+) -> Result<Left> {
     let _raw = RawMode::enable()?;
-    Relay::new(node, ex_id.to_string(), slot.to_string()).run()
+    let mut relay = Relay::new(node, ex_id.to_string(), slot.to_string());
+    relay.canceled = Some(canceled);
+    relay.run()
 }
 
 /// Why a relay stopped.
@@ -376,6 +386,8 @@ struct Relay {
     /// The row of the last painted status line, cleared when a resize
     /// moves the bottom row away from it.
     painted_row: Option<u16>,
+    /// Termination caught while a shell's open RPC was in flight.
+    canceled: Option<Arc<AtomicBool>>,
 }
 
 impl Relay {
@@ -392,11 +404,19 @@ impl Relay {
             attempt: 0,
             status: None,
             painted_row: None,
+            canceled: None,
         }
     }
 
     fn run(mut self) -> Result<Left> {
         self.watch_signals()?;
+        if self
+            .canceled
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return Ok(Left::Relay);
+        }
         self.read_input();
         let mut connection = Some(self.connect()?);
         let mut state = State::Connecting;

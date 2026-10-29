@@ -118,6 +118,9 @@ fn survey(
                 .panes
                 .iter()
                 .any(|pane| sessions.contains(&session_name(&execution.ex_id, pane.index)))
+                || sessions.iter().any(|session| {
+                    super::shell::shell_session_execution(session) == Some(execution.ex_id.as_str())
+                })
         })
     };
     let known: HashSet<&str> = request.known.iter().map(String::as_str).collect();

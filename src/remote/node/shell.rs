@@ -8,10 +8,10 @@
 //! container of the workspace. A container workspace's shell runs on the host
 //! only when the request asks for that.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::execution::{self, sessions, tmux, tmux_socket};
+use super::execution::{self, tmux, tmux_socket};
 use super::{NodeRoot, refuse, secrets, validate_id};
 use crate::config::RemoteIsolation;
 use crate::multiplexer::{Multiplexer, tmux::TmuxBackend};
@@ -31,13 +31,20 @@ pub enum ShellRequest {
     /// Start a shell in the workspace's working directory.
     Open {
         ws_id: String,
+        ex_id: String,
+        /// Chosen before opening so the caller can close a lost response.
+        slot: String,
         /// Run on the host even when the workspace's agent runs in a
         /// container.
         #[serde(default)]
         host: bool,
     },
     /// End a shell nobody views any more.
-    Close { ex_id: String, slot: String },
+    Close {
+        ws_id: String,
+        ex_id: String,
+        slot: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,13 +79,24 @@ pub fn shell_session_execution(name: &str) -> Option<&str> {
 
 pub fn shell(root: &NodeRoot, request: ShellRequest) -> Result<ShellResponse> {
     match request {
-        ShellRequest::Open { ws_id, host } => open(root, &ws_id, host),
-        ShellRequest::Close { ex_id, slot } => close(root, &ex_id, &slot),
+        ShellRequest::Open {
+            ws_id,
+            ex_id,
+            slot,
+            host,
+        } => open(root, &ws_id, &ex_id, &slot, host),
+        ShellRequest::Close { ws_id, ex_id, slot } => close(root, &ws_id, &ex_id, &slot),
     }
 }
 
-fn open(root: &NodeRoot, ws_id: &str, host: bool) -> Result<ShellResponse> {
-    validate_id(ws_id, 'w', "workspace id")?;
+fn open(
+    root: &NodeRoot,
+    ws_id: &str,
+    ex_id: &str,
+    slot: &str,
+    host: bool,
+) -> Result<ShellResponse> {
+    validate_request(ws_id, ex_id, slot)?;
     let _lock = root.lock_workspace(ws_id)?;
     let workspace = root.load(ws_id)?.ok_or_else(|| {
         refuse(
@@ -99,10 +117,14 @@ fn open(root: &NodeRoot, ws_id: &str, host: bool) -> Result<ShellResponse> {
             format!("'{handle}' has never started on the node"),
         ));
     };
-    let ex_id = execution.ex_id.clone();
+    if execution.ex_id != ex_id {
+        return Err(refuse(code::NOT_FOUND, "the workspace execution changed"));
+    }
+    if execution.closed_shells.contains(slot) {
+        return Err(refuse(code::BAD_REQUEST, "this shell request was canceled"));
+    }
     let socket = tmux_socket(root)?;
     let conf = execution::tmux_conf(root)?;
-    let slot = new_slot(&sessions(&socket), &ex_id);
     let name = format!("{ex_id}-{slot}");
     let config_path = root.config_path(ws_id);
     let working_dir = workspace.working_dir().to_path_buf();
@@ -153,6 +175,16 @@ fn open(root: &NodeRoot, ws_id: &str, host: bool) -> Result<ShellResponse> {
             let session_secrets = secrets::for_execution(root, ws_id, agent_kind)?;
             if !session_secrets.0.is_empty() {
                 execution::set_session_env(root, &socket, &name, &session_secrets)?;
+                // tmux environment updates apply only to newly spawned processes.
+                let output = tmux(&socket)
+                    .args(["respawn-pane", "-k", "-t", &pane_id])
+                    .output()
+                    .context("Failed to restart the shell with its environment")?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to restart the shell: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
         }
         if !container {
@@ -181,21 +213,38 @@ fn open(root: &NodeRoot, ws_id: &str, host: bool) -> Result<ShellResponse> {
         return Err(err);
     }
     Ok(ShellResponse::Opened {
-        ex_id,
-        slot,
+        ex_id: ex_id.to_string(),
+        slot: slot.to_string(),
         container,
         working_dir: working_dir.to_string_lossy().into_owned(),
     })
 }
 
-fn close(root: &NodeRoot, ex_id: &str, slot: &str) -> Result<ShellResponse> {
+fn validate_request(ws_id: &str, ex_id: &str, slot: &str) -> Result<()> {
+    validate_id(ws_id, 'w', "workspace id")?;
     validate_id(ex_id, 'x', "execution id")?;
-    if !slot.starts_with(SHELL_SLOT) || !valid_slot(slot) {
+    if !slot.starts_with(SHELL_SLOT) || !valid_slot(slot) || slot.len() > SHELL_SLOT.len() + 39 {
         return Err(refuse(
             code::BAD_REQUEST,
             format!("'{slot}' is not a shell session"),
         ));
     }
+    Ok(())
+}
+
+fn close(root: &NodeRoot, ws_id: &str, ex_id: &str, slot: &str) -> Result<ShellResponse> {
+    validate_request(ws_id, ex_id, slot)?;
+    let _lock = root.lock_workspace(ws_id)?;
+    let Some(mut workspace) = root.load(ws_id)? else {
+        return Ok(ShellResponse::Closed { closed: false });
+    };
+    let Some(execution) = workspace.execution.as_mut().filter(|ex| ex.ex_id == ex_id) else {
+        return Ok(ShellResponse::Closed { closed: false });
+    };
+    // Closing can reach the node before the corresponding open request.
+    // Persist cancellation under the same lock before removing any session.
+    execution.closed_shells.insert(slot.to_string());
+    root.save(&workspace)?;
     let socket = tmux_socket(root)?;
     let closed = tmux(&socket)
         .args(["kill-session", "-t", &format!("={ex_id}-{slot}")])
@@ -204,18 +253,11 @@ fn close(root: &NodeRoot, ex_id: &str, slot: &str) -> Result<ShellResponse> {
     Ok(ShellResponse::Closed { closed })
 }
 
-/// A shell slot of `ex_id` no session in `sessions` has. Slots are random,
-/// so a relay left reconnecting to a shell that ended never reaches a later
-/// one.
-fn new_slot(sessions: &std::collections::HashSet<String>, ex_id: &str) -> String {
-    loop {
-        let mut bytes = [0u8; 4];
-        getrandom::fill(&mut bytes).expect("failed to get random bytes");
-        let slot = format!("{SHELL_SLOT}{}", u32::from_le_bytes(bytes));
-        if !sessions.contains(&format!("{ex_id}-{slot}")) {
-            return slot;
-        }
-    }
+/// Random identity chosen before the open RPC, never reused for a later shell.
+pub fn new_slot() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).context("Failed to generate a shell identity")?;
+    Ok(format!("{SHELL_SLOT}{}", u128::from_le_bytes(bytes)))
 }
 
 #[cfg(test)]
@@ -244,19 +286,23 @@ mod tests {
     }
 
     #[test]
-    fn new_slots_are_shells_no_session_has() {
-        let taken = ["x1-0".to_string()].into_iter().collect();
-        let slot = new_slot(&taken, "x1");
+    fn new_slots_are_valid_shell_requests() {
+        let slot = new_slot().unwrap();
+        validate_request("w0123456789ab", "x0123456789ab", &slot).unwrap();
         assert!(valid_slot(&slot) && shell_session_execution(&format!("x1-{slot}")) == Some("x1"));
     }
 
     #[test]
     fn requests_are_tagged_by_action() {
-        let request: ShellRequest =
-            serde_json::from_str(r#"{"action":"open","ws_id":"w0123456789ab"}"#).unwrap();
+        let request: ShellRequest = serde_json::from_str(
+            r#"{"action":"open","ws_id":"w0123456789ab","ex_id":"x0123456789ab","slot":"shell1"}"#,
+        )
+        .unwrap();
         assert!(matches!(request, ShellRequest::Open { host: false, .. }));
-        let request: ShellRequest =
-            serde_json::from_str(r#"{"action":"close","ex_id":"x1","slot":"shell2"}"#).unwrap();
+        let request: ShellRequest = serde_json::from_str(
+            r#"{"action":"close","ws_id":"w0123456789ab","ex_id":"x0123456789ab","slot":"shell2"}"#,
+        )
+        .unwrap();
         assert!(matches!(request, ShellRequest::Close { .. }));
     }
 }
