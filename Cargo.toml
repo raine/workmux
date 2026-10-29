@@ -67,6 +67,7 @@ unicode-width = "0.2"
 signal-hook = "0.4"
 notify = "=9.0.0-rc.3"
 ignore = "0.4"
+flate2 = "1.1.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1", features = ["fs"] }
@@ -109,3 +110,8 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-amd64.{ archi
 
 [package.metadata.binstall.overrides.aarch64-apple-darwin]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-arm64.{ archive-format }"
+
+# Dev pins hash the configured binary (a debug build is ~70 MB) on every
+# remote command; unoptimized SHA-256 takes seconds for that.
+[profile.dev.package.sha2]
+opt-level = 3

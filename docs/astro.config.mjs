@@ -12,6 +12,7 @@ export default defineConfig({
   site,
   trailingSlash: "always",
   build: { format: "directory" },
+  redirects: { "/guide/sandbox/remote/": "/guide/remote/" },
   markdown: { remarkPlugins: [changelogReleases] },
   image: {
     layout: "constrained",
@@ -53,7 +54,11 @@ export default defineConfig({
         SocialIcons: "./src/components/HeaderLinks.astro",
         PageTitle: "./src/components/PageTitle.astro",
       },
-      customCss: ["./src/styles/theme.css", "./src/styles/code.css"],
+      customCss: [
+        "./src/styles/theme.css",
+        "./src/styles/layout.css",
+        "./src/styles/code.css",
+      ],
       head: [
         {
           tag: "meta",
@@ -131,6 +136,24 @@ export default defineConfig({
           ],
         },
         {
+          label: "Remote servers",
+          badge: { text: "New", variant: "tip" },
+          items: [
+            { label: "Overview", slug: "guide/remote" },
+            { label: "Setting up a server", slug: "guide/remote/setup" },
+            { label: "Logins and secrets", slug: "guide/remote/logins" },
+            {
+              label: "Working with remote agents",
+              slug: "guide/remote/usage",
+            },
+            { label: "Bringing work home", slug: "guide/remote/git" },
+            {
+              label: "Maintenance and troubleshooting",
+              slug: "guide/remote/troubleshooting",
+            },
+          ],
+        },
+        {
           label: "Alternative backends",
           items: [
             { label: "kitty", slug: "guide/kitty" },
@@ -168,6 +191,7 @@ export default defineConfig({
             { label: "resurrect", slug: "reference/commands/resurrect" },
             { label: "sync-files", slug: "reference/commands/sync-files" },
             { label: "path", slug: "reference/commands/path" },
+            { label: "shell", slug: "reference/commands/shell" },
             { label: "dashboard", slug: "reference/commands/dashboard" },
             { label: "sidebar", slug: "reference/commands/sidebar" },
             { label: "reap-agents", slug: "reference/commands/reap-agents" },
@@ -175,6 +199,7 @@ export default defineConfig({
             { label: "init", slug: "reference/commands/init" },
             { label: "claude prune", slug: "reference/commands/claude" },
             { label: "sandbox", slug: "reference/commands/sandbox" },
+            { label: "remote", slug: "reference/commands/remote" },
             { label: "completions", slug: "reference/commands/completions" },
             { label: "docs", slug: "reference/commands/docs" },
             { label: "update", slug: "reference/commands/update" },

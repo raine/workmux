@@ -42,6 +42,10 @@ workmux list my-feature
 workmux list feature-auth feature-api
 ```
 
+## Remote workspaces
+
+Workspaces on [remote servers](/guide/remote/) are listed alongside local worktrees. Their path names the remote instead of a local directory, with a note while a workspace is still being set up, has a merge or cleanup in progress, or its remote can't be reached. AGENT and UNMERGED come from the remote's last known state, and AGENT says when the agent's session ended, for example `exited (host rebooted)`. In JSON output, they carry a `remote` field with the remote's name, `path` is the worktree's path on the remote, and `agent_statuses` and `has_uncommitted_changes` describe the remote worktree. Local worktrees have no `remote` field.
+
 ## Example output
 
 ```

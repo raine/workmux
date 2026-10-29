@@ -127,6 +127,83 @@ pub struct AgentPane {
     /// Latest user prompt captured from the agent's hooks.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Set when the agent runs in a remote workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteAgent>,
+}
+
+/// The pane of a remote workspace a local attach pane relays.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RemoteRef {
+    /// Remote name from `remotes:`.
+    pub remote: String,
+    pub ws_id: String,
+    pub ex_id: String,
+    /// Index of the configured pane.
+    pub pane: usize,
+}
+
+/// A remote agent as views show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgent {
+    #[serde(flatten)]
+    pub at: RemoteRef,
+    #[serde(default)]
+    pub handle: String,
+    /// Main worktree of the local repository the workspace belongs to.
+    #[serde(default)]
+    pub project_root: PathBuf,
+    /// ssh destination of the remote, for display.
+    #[serde(default)]
+    pub host: String,
+    /// Whether a local pane relays this agent; detached rows have no pane.
+    #[serde(default)]
+    pub attached: bool,
+    /// Whether the remote answered within the heartbeat deadline.
+    #[serde(default)]
+    pub connected: bool,
+    /// When the remote last answered (laptop clock).
+    #[serde(default)]
+    pub last_seen: Option<u64>,
+    /// Git status of the workspace on the node, as last observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::git::GitStatus>,
+    /// Why the execution ended under the agent, as the remote last said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<EndReason>,
+}
+
+/// Why a remote execution ended without anyone stopping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    /// The remote host rebooted.
+    HostReboot,
+}
+
+impl EndReason {
+    /// How `list` and `status` show the agent of an ended execution.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HostReboot => "exited (host rebooted)",
+        }
+    }
+}
+
+impl RemoteAgent {
+    pub fn new(at: RemoteRef) -> Self {
+        Self {
+            at,
+            handle: String::new(),
+            project_root: PathBuf::new(),
+            host: String::new(),
+            attached: true,
+            connected: false,
+            last_seen: None,
+            git: None,
+            ended: None,
+        }
+    }
 }
 
 impl AgentPane {
@@ -197,6 +274,11 @@ pub struct PaneSetupOptions<'a> {
     pub lima_vm_name: Option<&'a str>,
     /// How to resume a conversation (continue last, fork specific session, or none).
     pub resume_mode: ResumeMode,
+    /// Shell-quoted words that replace `workmux sandbox run` in wrapped panes.
+    pub sandbox_supervisor: Option<&'a str>,
+    /// Directory put first on every pane shell's `PATH`, so commands typed
+    /// in the pane find it too.
+    pub path_prefix: Option<&'a std::path::Path>,
 }
 
 /// Backend type for multiplexer selection

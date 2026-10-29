@@ -32,6 +32,14 @@ pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
 pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
 pub const STATUS_TARGET_PANE_ENV: &str = "WORKMUX_STATUS_PANE_ID";
 
+/// A shell statement that puts `dir` first on the pane shell's `PATH`.
+fn export_path_prefix(dir: &Path) -> String {
+    format!(
+        "export PATH={}:\"$PATH\"",
+        agent::shell_quote(&dir.to_string_lossy())
+    )
+}
+
 fn command_with_status_target(
     command: &str,
     backend: &str,
@@ -686,6 +694,7 @@ pub trait Multiplexer: Send + Sync {
                 &shell,
             );
 
+            let has_command = adjusted_command.is_some();
             let pane_id = if let Some(mut resolved) = adjusted_command {
                 let is_agent_pane = resolved.selected_agent.is_some();
 
@@ -745,6 +754,10 @@ pub trait Multiplexer: Send + Sync {
                     }
                 }
 
+                if let Some(selected_agent) = resolved.selected_agent.as_mut() {
+                    selected_agent.add_launch_flags();
+                }
+
                 // Apply sandbox wrapping if enabled for this pane type
                 let final_command = if config.sandbox.is_enabled() {
                     let should_wrap = match config.sandbox.target() {
@@ -759,12 +772,11 @@ pub trait Multiplexer: Send + Sync {
 
                         // Inject skip-permissions flag for agent panes only
                         // (sandbox provides the security boundary, so permission
-                        // prompts are unnecessary and break autonomous workflow)
+                        // prompts are unnecessary and break autonomous workflow),
+                        // plus any other flags sandboxed launches need.
                         let command_to_wrap =
                             if let Some(selected_agent) = resolved.selected_agent.as_mut() {
-                                if let Some(flag) = selected_agent.profile.skip_permissions_flag() {
-                                    selected_agent.command.prepend_args_fragment(flag);
-                                }
+                                selected_agent.add_sandbox_flags();
                                 resolved.render_command()
                             } else {
                                 resolved.command.clone()
@@ -775,7 +787,7 @@ pub trait Multiplexer: Send + Sync {
                             crate::config::SandboxBackend::Container => {
                                 crate::sandbox::wrap_for_container(
                                     &command_to_wrap,
-                                    &config.sandbox,
+                                    options.sandbox_supervisor,
                                     wt_root,
                                     working_dir,
                                 )
@@ -812,6 +824,22 @@ pub trait Multiplexer: Send + Sync {
                     }
                 } else {
                     resolved.render_command()
+                };
+
+                let final_command = match options.path_prefix {
+                    Some(dir) => format!("{}; {final_command}", export_path_prefix(dir)),
+                    None => final_command,
+                };
+
+                // Only a node passes a supervisor. Its command lines name
+                // pinned binaries and supervisor arguments; clear the screen
+                // and scrollback they were typed into so the pane starts
+                // clean. The leading space keeps the line out of shell
+                // history where the shell honors that.
+                let final_command = if options.sandbox_supervisor.is_some() {
+                    format!(" printf '\\033[H\\033[2J\\033[3J'; {final_command}")
+                } else {
+                    final_command
                 };
 
                 let final_command = if is_agent_pane && self.name() == "zellij" {
@@ -862,6 +890,19 @@ pub trait Multiplexer: Send + Sync {
                     None,
                 )?
             };
+
+            if let Some(dir) = options.path_prefix
+                && !has_command
+            {
+                // The keys reach the shell once it starts reading input.
+                self.send_keys(
+                    &pane_id,
+                    &format!(
+                        " {}; printf '\\033[H\\033[2J\\033[3J'",
+                        export_path_prefix(dir)
+                    ),
+                )?;
+            }
 
             if is_first {
                 pane_ids[0] = pane_id.clone();

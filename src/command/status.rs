@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,9 @@ use tabled::{
 
 use crate::git;
 use crate::multiplexer::{AgentPane, AgentStatus, create_backend, detect_backend_strict};
+use crate::remote::{self, cache::WorkspaceRecord};
 use crate::state::StateStore;
+use crate::state::store::ReconciledAgentReport;
 use crate::util;
 use crate::workflow;
 
@@ -32,6 +35,26 @@ struct StatusEntry {
     updated_ts: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteStatus>,
+}
+
+/// Where a remote agent runs and whether the laptop can see it.
+#[derive(Serialize)]
+struct RemoteStatus {
+    name: String,
+    host: String,
+    ws_id: String,
+    pane: usize,
+    /// Whether a local pane relays the agent.
+    attached: bool,
+    connected: bool,
+    /// When the remote last answered.
+    last_seen: Option<u64>,
+    /// Why the execution ended under the agent (`host_reboot`); `workmux
+    /// open` starts it again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended: Option<crate::multiplexer::EndReason>,
 }
 
 #[derive(Serialize)]
@@ -171,14 +194,15 @@ fn normalized_branch(branch: String) -> String {
     }
 }
 
+/// `project` is the name and main worktree of the agent's repository.
 fn status_entry(
     agent: &AgentPane,
     worktree: String,
     branch: String,
+    (project, project_path): (Option<String>, Option<PathBuf>),
     now: u64,
     git: Option<GitInfo>,
 ) -> StatusEntry {
-    let (project, project_path) = git::project_identity(&agent.path);
     StatusEntry {
         worktree,
         branch,
@@ -194,7 +218,61 @@ fn status_entry(
         window_name: optional_name(&agent.window_name),
         updated_ts: agent.updated_ts,
         git,
+        remote: None,
     }
+}
+
+fn remote_entry(agent: &AgentPane, record: &WorkspaceRecord, now: u64) -> StatusEntry {
+    let project = record
+        .project_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    StatusEntry {
+        remote: agent.remote.as_ref().map(|remote| RemoteStatus {
+            name: remote.at.remote.clone(),
+            host: remote.host.clone(),
+            ws_id: remote.at.ws_id.clone(),
+            pane: remote.at.pane,
+            attached: remote.attached,
+            connected: remote.connected,
+            last_seen: remote.last_seen,
+            ended: remote.ended,
+        }),
+        ..status_entry(
+            agent,
+            record.handle.clone(),
+            record.branch.clone(),
+            (project, Some(record.project_root.clone())),
+            now,
+            None,
+        )
+    }
+}
+
+/// Status entries of the agents of remote workspaces `records`.
+fn remote_entries(
+    config: &crate::config::Config,
+    records: &[WorkspaceRecord],
+    observations: &HashMap<String, remote::observe::Observation>,
+    attached: &[AgentPane],
+    now: u64,
+) -> Vec<StatusEntry> {
+    let hosts = remote::agents::hosts(config);
+    records
+        .iter()
+        .flat_map(|record| {
+            remote::agents::rows(
+                std::slice::from_ref(record),
+                attached,
+                observations,
+                &hosts,
+                now,
+            )
+            .into_iter()
+            .map(|agent| remote_entry(&agent, record, now))
+            .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Compute git info for a worktree path.
@@ -218,8 +296,26 @@ fn compute_git_info(wt_path: &std::path::Path, branch: &str) -> Result<GitInfo> 
 pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Result<()> {
     let mux = create_backend(detect_backend_strict()?);
     let store = StateStore::open_read_only()?;
-    let mut report = store.load_reconciled_agent_report(mux.as_ref())?;
+    let mut report = match store.load_reconciled_agent_report(mux.as_ref()) {
+        Ok(report) => report,
+        // Nodes answer for remote agents, which need no local multiplexer
+        // unless a local pane relays them.
+        Err(error)
+            if !worktrees.is_empty()
+                && worktrees
+                    .iter()
+                    .all(|name| remote::agents::find_target(name).is_some()) =>
+        {
+            tracing::debug!(%error, "status: no local agents");
+            ReconciledAgentReport {
+                backend: mux.name().to_string(),
+                ..Default::default()
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let agent_panes = std::mem::take(&mut report.agents);
+    let attached = std::mem::take(&mut report.remote_agents);
     let invalid_state_failures =
         report.state_files_invalid_matching_context + report.state_files_invalid_unattributed;
     if invalid_state_failures > 0 {
@@ -236,15 +332,30 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // Nodes are asked before records are read: they report the workspaces
+    // their agents spawned, which become records.
+    let config = crate::config::Config::load(None).unwrap_or_default();
+    let in_repo = git::get_repo_root_if_present()?.is_some();
+    let remote_scope = if worktrees.is_empty() && !all && in_repo {
+        remote::cache::for_project(&git::get_main_worktree_root()?)
+    } else {
+        remote::cache::all()
+    };
+    let observations = remote::agents::observations(&config, &remote_scope, true);
+
     let reconciled_agent_count = agent_panes.len();
     let mut entries: Vec<StatusEntry> = Vec::new();
     let mut target_errors = Vec::new();
+    let mut remote_records = Vec::new();
     let repository;
 
     if worktrees.is_empty() {
         if !all && git::get_repo_root_if_present()?.is_some() {
             let all_worktrees = git::list_worktrees()?;
-            repository = Some(git::get_main_worktree_root()?);
+            let main_root = git::get_main_worktree_root()?;
+            remote_records = remote::cache::for_project(&main_root);
+            remote_records.retain(|record| !record.cleanup_pending());
+            repository = Some(main_root);
             let has_scoped_agents = all_worktrees.iter().any(|(wt_path, _)| {
                 !workflow::match_agents_to_worktree(&agent_panes, wt_path).is_empty()
             });
@@ -281,6 +392,7 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                         agent,
                         worktree_name.clone(),
                         branch.clone(),
+                        git::project_identity(&agent.path),
                         now,
                         git_info.clone(),
                     )
@@ -288,6 +400,8 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
             }
         } else {
             repository = None;
+            remote_records = remote::cache::all();
+            remote_records.retain(|record| !record.cleanup_pending());
             for agent in &agent_panes {
                 let worktree_path =
                     workflow::find_worktree_root(&agent.path).unwrap_or_else(|| agent.path.clone());
@@ -306,7 +420,14 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                 } else {
                     None
                 };
-                entries.push(status_entry(agent, worktree_name, branch, now, git_info));
+                entries.push(status_entry(
+                    agent,
+                    worktree_name,
+                    branch,
+                    git::project_identity(&agent.path),
+                    now,
+                    git_info,
+                ));
             }
         }
     } else {
@@ -316,6 +437,10 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
             None
         };
         for name in worktrees {
+            if let Some(record) = remote::agents::find_target(name) {
+                remote_records.push(record);
+                continue;
+            }
             let (wt_path, matching) =
                 match workflow::resolve_worktree_agents_from_snapshot(name, &agent_panes) {
                     Ok(resolved) => resolved,
@@ -352,12 +477,21 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
                     agent,
                     worktree_name.clone(),
                     branch.clone(),
+                    git::project_identity(&agent.path),
                     now,
                     git_info.clone(),
                 )
             }));
         }
     }
+
+    entries.extend(remote_entries(
+        &config,
+        &remote_records,
+        &observations,
+        &attached,
+        now,
+    ));
 
     let target_failure_count = target_errors.len();
     if json {
@@ -402,16 +536,30 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
             let rows: Vec<StatusRow> = entries
                 .iter()
                 .map(|e| {
+                    let name = match &e.remote {
+                        Some(remote) => remote::agents::label(&e.worktree, &remote.name),
+                        None => e.worktree.clone(),
+                    };
                     let worktree = if e.branch != e.worktree {
-                        format!("{} ({})", e.worktree, e.branch)
+                        format!("{name} ({})", e.branch)
                     } else {
-                        e.worktree.clone()
+                        name
+                    };
+                    let status = match &e.remote {
+                        Some(remote) if !remote.connected => {
+                            format!("{} (disconnected)", e.status)
+                        }
+                        Some(RemoteStatus {
+                            ended: Some(reason),
+                            ..
+                        }) => reason.label().to_string(),
+                        _ => e.status.clone(),
                     };
                     StatusRow {
                         project: e.project.clone().unwrap_or("-".to_string()),
                         session: e.session.clone().unwrap_or("-".to_string()),
                         worktree,
-                        status: e.status.clone(),
+                        status,
                         elapsed: e
                             .elapsed_secs
                             .map(util::format_elapsed_secs)
@@ -480,6 +628,7 @@ mod tests {
             window_name: None,
             updated_ts: None,
             git: None,
+            remote: None,
         }
     }
 

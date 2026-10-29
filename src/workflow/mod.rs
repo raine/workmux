@@ -1,6 +1,6 @@
 // Module declarations
 mod agent_resolve;
-mod cleanup;
+pub mod cleanup;
 mod cleanup_diagnostics;
 mod cleanup_retry;
 mod cleanup_tree;
@@ -24,13 +24,18 @@ pub use agent_resolve::{
     resolve_worktree_agents, resolve_worktree_agents_from_snapshot,
 };
 pub use cleanup::run_deferred_cleanup_worker;
-pub use create::{create, create_headless, create_with_changes};
+pub use create::{
+    create, create_headless, create_with_changes, project_suffixed_handle, suffix_taken_handle,
+};
 pub use list::{list, list_in};
-pub use merge::merge;
+pub use merge::{MergeConflict, merge};
 pub use open::open;
 pub use remove::{fallback_worktree_path, remove, remove_quiet};
 pub use rename::rename;
-pub use setup::write_prompt_file;
+pub use setup::{
+    prompt_file_name, provision_environment, resolve_pane_configuration,
+    validate_prompt_consumption, write_prompt_file,
+};
 
 // Re-export commonly used types for convenience
 pub use context::{WorkflowContext, resolve_configured_base_branch};

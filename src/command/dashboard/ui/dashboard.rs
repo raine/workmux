@@ -14,7 +14,9 @@ use crate::agent_display::strip_oc_title_prefix;
 use crate::config::AgentColumn;
 
 use super::super::app::{App, DashboardTab};
-use super::super::layout::{dashboard_content_areas, dashboard_outer_areas};
+use super::super::layout::{
+    FOOTER_HELP_WIDTH, dashboard_content_areas, dashboard_outer_areas, remote_tip_footer,
+};
 use super::format;
 use super::format::{format_git_status, format_pr_status, truncate};
 use super::theme::ThemePalette;
@@ -103,6 +105,7 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
     }
 
     // Footer - show status message if active, otherwise mode-specific help
+    let mut remote_tip_drawn = false;
     if let Some((msg, _)) = &app.status_message {
         let p = &app.palette;
         f.render_widget(
@@ -120,7 +123,7 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
                 } else if app.input_mode {
                     f.render_widget(render_footer_input(app), footer_area);
                 } else {
-                    render_footer_normal(f, app, footer_area);
+                    remote_tip_drawn = render_footer_normal(f, app, footer_area);
                 }
             }
             DashboardTab::Worktrees => {
@@ -131,6 +134,9 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
                 }
             }
         }
+    }
+    if remote_tip_drawn {
+        app.note_remote_tip_drawn();
     }
 }
 
@@ -144,6 +150,7 @@ struct AgentRowData {
     worktree_suffix: String,
     is_main: bool,
     is_current: bool,
+    machine: String,
     git_spans: Vec<(String, Style)>,
     pr_spans: Option<Vec<(String, Style)>>,
     pr_title: String,
@@ -159,6 +166,7 @@ struct AgentRowData {
 struct AgentColumnWidths {
     project: u16,
     worktree: u16,
+    machine: u16,
     git: u16,
     pr: u16,
     pr_title: u16,
@@ -168,13 +176,22 @@ struct AgentColumnWidths {
 }
 
 /// Columns to render, given the configured order. The PR column carries content
-/// only once an agent has GitHub status, so it drops out until then, unless it
-/// is the only thing left to show and dropping it would blank the table.
-fn visible_columns(configured: &[AgentColumn], show_pr_column: bool) -> Vec<AgentColumn> {
+/// only once an agent has GitHub status, and the Machine column only while an
+/// agent is remote, so each drops out until then, unless dropping them would
+/// blank the table.
+fn visible_columns(
+    configured: &[AgentColumn],
+    show_pr_column: bool,
+    show_machine_column: bool,
+) -> Vec<AgentColumn> {
     let visible: Vec<AgentColumn> = configured
         .iter()
         .copied()
-        .filter(|column| *column != AgentColumn::Pr || show_pr_column)
+        .filter(|column| match column {
+            AgentColumn::Pr => show_pr_column,
+            AgentColumn::Machine => show_machine_column,
+            _ => true,
+        })
         .collect();
 
     if visible.is_empty() {
@@ -207,6 +224,7 @@ fn agent_cell(column: AgentColumn, row: &AgentRowData, palette: &ThemePalette) -
             };
             Cell::from(worktree_line)
         }
+        AgentColumn::Machine => Cell::from(row.machine.clone()),
         AgentColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
         AgentColumn::Pr => Cell::from(format::spans_to_line(
             row.pr_spans.clone().unwrap_or_default(),
@@ -265,6 +283,7 @@ fn agent_column_constraints(
             AgentColumn::Number => Constraint::Length(2), // jump key
             AgentColumn::Project => Constraint::Length(widths.project), // auto-sized
             AgentColumn::Worktree => Constraint::Length(widths.worktree), // auto-sized
+            AgentColumn::Machine => Constraint::Length(widths.machine), // auto-sized
             AgentColumn::Git => Constraint::Length(widths.git), // auto-sized
             AgentColumn::Pr => Constraint::Length(widths.pr), // auto-sized
             AgentColumn::PrTitle if index == last_column => Constraint::Fill(1),
@@ -303,6 +322,7 @@ fn build_agent_table(
             AgentColumn::Number => format::ResourceHeaderCell::Plain("#"),
             AgentColumn::Project => format::ResourceHeaderCell::Plain("Project"),
             AgentColumn::Worktree => format::ResourceHeaderCell::Plain("Worktree"),
+            AgentColumn::Machine => format::ResourceHeaderCell::Plain("Machine"),
             AgentColumn::Git => format::ResourceHeaderCell::Git,
             AgentColumn::Pr => format::ResourceHeaderCell::Pr,
             AgentColumn::PrTitle => format::ResourceHeaderCell::Plain("PR Title"),
@@ -352,7 +372,13 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Show the GitHub column when at least one agent has a PR or checks.
     let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
-    let columns = visible_columns(&app.config.dashboard.agent_columns(), show_pr_column);
+    // Show the machine column when at least one listed agent is remote.
+    let show_machine_column = app.agents.iter().any(|agent| agent.remote.is_some());
+    let columns = visible_columns(
+        &app.config.dashboard.agent_columns(),
+        show_pr_column,
+        show_machine_column,
+    );
 
     // Group agents by (session, window_name) to detect multi-pane windows
     let mut window_groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
@@ -370,6 +396,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Track position within each window group for pane numbering
     let mut window_positions: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     // Pre-compute row data to calculate max widths
     let mut row_data: Vec<_> = app
@@ -423,6 +453,11 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                     t.strip_prefix("... ").unwrap_or(t).to_string()
                 })
                 .unwrap_or_default();
+            let title = agent
+                .remote
+                .as_ref()
+                .and_then(|remote| crate::remote::agents::row_title(remote, now, Some(&title)))
+                .unwrap_or(title);
             let status_spans = app.get_status_display(agent);
             let elapsed = app.get_elapsed(agent);
             let duration = elapsed
@@ -430,9 +465,18 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 .unwrap_or_else(|| "-".to_string());
             let duration_line = format::elapsed_time_line(duration, elapsed, &app.palette);
 
-            // Get git status for this worktree (may be None if not yet fetched)
-            let git_status = app.git_statuses.get(&agent.path);
-            let git_spans = format_git_status(git_status, app.spinner_frame, &app.palette);
+            // Get git status for this worktree (may be None if not yet fetched).
+            // A remote worktree's comes from the node with its agents.
+            let git_spans = match &agent.remote {
+                Some(remote) if remote.git.is_none() => Vec::new(),
+                Some(remote) => {
+                    format_git_status(remote.git.as_ref(), app.spinner_frame, &app.palette)
+                }
+                None => {
+                    let git_status = app.git_statuses.get(&agent.path);
+                    format_git_status(git_status, app.spinner_frame, &app.palette)
+                }
+            };
 
             let pr = app.get_pr_for_agent(agent);
             let pr_title = pr.map(|pr| pr.title.clone()).unwrap_or_default();
@@ -460,6 +504,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 worktree_suffix,
                 is_main,
                 is_current,
+                machine: agent.remote.as_ref().map_or_else(
+                    || "local".to_string(),
+                    |remote| truncate(&remote.at.remote, 20),
+                ),
                 git_spans,
                 pr_spans,
                 pr_title,
@@ -487,6 +535,9 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|r| r.worktree_display.clone())
         .collect();
     let max_worktree_width = format::calc_column_width(&worktree_names, 8, 25, 1);
+
+    let machines: Vec<String> = row_data.iter().map(|r| r.machine.clone()).collect();
+    let max_machine_width = format::calc_column_width(&machines, 7, 20, 1);
 
     // Calculate max git status width (sum of all span character counts)
     // Use chars().count() instead of len() because Nerd Font icons are multi-byte
@@ -533,6 +584,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     let widths = AgentColumnWidths {
         project: max_project_width,
         worktree: max_worktree_width,
+        machine: max_machine_width,
         git: max_git_width as u16,
         pr: max_pr_width as u16,
         pr_title: max_pr_title_width,
@@ -578,7 +630,19 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.palette.success),
         )
     } else if let Some(agent) = selected_agent {
-        let worktree_name = app.extract_worktree_name(agent).0;
+        let mut worktree_name = app.extract_worktree_name(agent).0;
+        if let Some(remote) = &agent.remote {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if !remote.host.is_empty() {
+                worktree_name = format!("{worktree_name} · {}", remote.host);
+            }
+            if let Some(connectivity) = crate::remote::agents::connectivity(remote, now) {
+                worktree_name = format!("{worktree_name} · {connectivity}");
+            }
+        }
         (
             format!(" Preview: {} ", worktree_name),
             Style::default().fg(app.palette.header),
@@ -732,8 +796,25 @@ fn render_right_help(f: &mut Frame, area: Rect, dimmed: Style, bold_text: Style)
         Span::styled("?", dimmed),
         Span::styled(" Help ", bold_text),
     ]);
-    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(7)]).split(area);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(FOOTER_HELP_WIDTH)])
+        .split(area);
     f.render_widget(Paragraph::new(right), cols[1]);
+}
+
+/// The remote servers tip shown left of `? Help`.
+fn remote_tip_line(p: &ThemePalette) -> Line<'static> {
+    let dimmed = Style::default().fg(p.dimmed);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled("New: ", Style::default().fg(p.header)),
+        Span::styled("remote servers", Style::default().fg(p.accent)),
+        Span::raw("  "),
+    ];
+    spans.extend(footer_cmd("g", "Guide", dimmed, bold_text));
+    spans.push(Span::raw("  "));
+    spans.extend(footer_cmd("x", "Hide", dimmed, bold_text));
+    spans.push(footer_pipe(Style::default().fg(p.border)));
+    Line::from(spans)
 }
 
 fn render_pinned_footer(
@@ -752,18 +833,51 @@ fn render_pinned_footer(
         s.extend(item.iter().cloned());
     }
 
-    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(7)]).split(area);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(FOOTER_HELP_WIDTH)])
+        .split(area);
     f.render_widget(Paragraph::new(Line::from(s)), cols[0]);
     render_right_help(f, area, dimmed, bold_text);
 }
 
-/// Normal mode footer with right-pinned help
-fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) {
+/// Render the agents footer hints. With `with_tip`, the remote servers tip
+/// takes the place of lower-priority hints when the footer has room for it.
+/// Returns whether the tip was drawn.
+fn render_agent_footer(
+    f: &mut Frame,
+    area: Rect,
+    items: Vec<Vec<Span<'static>>>,
+    with_tip: bool,
+    p: &ThemePalette,
+) -> bool {
+    let dimmed = Style::default().fg(p.dimmed);
+    let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+    let pipe_style = Style::default().fg(p.border);
+
+    let widths: Vec<u16> = items
+        .iter()
+        .map(|item| item.iter().map(Span::width).sum::<usize>() as u16)
+        .collect();
+    let Some(layout) = with_tip.then(|| remote_tip_footer(area, &widths)).flatten() else {
+        render_pinned_footer(f, area, &items, dimmed, bold_text, pipe_style);
+        return false;
+    };
+    let kept: Vec<_> = items
+        .into_iter()
+        .zip(&layout.keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect();
+    render_pinned_footer(f, area, &kept, dimmed, bold_text, pipe_style);
+    f.render_widget(Paragraph::new(remote_tip_line(p)), layout.tip);
+    true
+}
+
+/// Normal mode footer with right-pinned help. Returns whether the remote
+/// servers tip was drawn.
+fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) -> bool {
     let p = &app.palette;
 
     let dimmed = Style::default().fg(p.dimmed);
     let bold_text = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
-    let pipe_style = Style::default().fg(p.border);
     let active_style = Style::default().fg(p.info);
 
     let sort = app.sort_mode.label();
@@ -803,7 +917,7 @@ fn render_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     items.push(footer_cmd("Tab", "Worktrees", dimmed, bold_text));
     items.push(footer_cmd("q", "Quit", dimmed, bold_text));
 
-    render_pinned_footer(f, area, &items, dimmed, bold_text, pipe_style);
+    render_agent_footer(f, area, items, app.show_remote_tip, p)
 }
 
 /// Worktree filter mode footer
@@ -868,6 +982,7 @@ mod tests {
             worktree_suffix: String::new(),
             is_main: false,
             is_current: false,
+            machine: "devbox".to_string(),
             git_spans: vec![("+1".to_string(), Style::default())],
             pr_spans: Some(vec![("#7".to_string(), Style::default())]),
             pr_title: "fix the dashboard".to_string(),
@@ -889,6 +1004,7 @@ mod tests {
             AgentColumnWidths {
                 project: 8,
                 worktree: 9,
+                machine: 8,
                 git: 6,
                 pr: 5,
                 pr_title: 20,
@@ -918,10 +1034,104 @@ mod tests {
             .to_string()
     }
 
+    /// Render the agents footer, offering the remote servers tip when `tip`
+    /// is set, and return its text and whether the tip was drawn.
+    fn render_agents_footer(width: u16, tip: bool) -> (String, bool) {
+        let p = palette();
+        let dimmed = Style::default().fg(p.dimmed);
+        let bold = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+        let items = vec![
+            footer_cmd("i", "Input", dimmed, bold),
+            footer_cmd("d", "Diff", dimmed, bold),
+            footer_cmd("o", "PR", dimmed, bold),
+            footer_cmd("1-9", "Jump", dimmed, bold),
+            footer_toggle("s", "Sort", "priority", true, dimmed, bold, dimmed),
+            footer_toggle("F", "Scope", "all", false, dimmed, bold, dimmed),
+            footer_toggle("f", "Stale", "shown", false, dimmed, bold, dimmed),
+            footer_cmd("Tab", "Worktrees", dimmed, bold),
+            footer_cmd("q", "Quit", dimmed, bold),
+        ];
+        let mut drawn = false;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|f| drawn = render_agent_footer(f, f.area(), items, tip, &p))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        ((0..width).map(|x| buffer[(x, 0)].symbol()).collect(), drawn)
+    }
+
+    #[test]
+    fn remote_tip_columns_match_its_text() {
+        use super::super::super::layout::{
+            REMOTE_TIP_GUIDE_COLUMNS, REMOTE_TIP_HIDE_COLUMNS, REMOTE_TIP_WIDTH,
+        };
+        let line = remote_tip_line(&palette());
+        assert_eq!(line.width() as u16, REMOTE_TIP_WIDTH);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let columns = |range: std::ops::Range<u16>| {
+            text.chars()
+                .skip(range.start as usize)
+                .take(range.len())
+                .collect::<String>()
+        };
+        assert_eq!(columns(REMOTE_TIP_GUIDE_COLUMNS), "remote servers  g Guide");
+        assert_eq!(columns(REMOTE_TIP_HIDE_COLUMNS), "x Hide");
+    }
+
+    const TIP: &str = "New: remote servers  g Guide  x Hide │ ? Help ";
+
+    #[test]
+    fn remote_tip_renders_between_hints_and_help() {
+        let (line, drawn) = render_agents_footer(170, true);
+        assert!(drawn);
+        assert!(
+            line.contains("f Stale (shown) │ Tab Worktrees │ q Quit"),
+            "{line:?}"
+        );
+        assert!(line.ends_with(TIP), "{line:?}");
+    }
+
+    #[test]
+    fn remote_tip_replaces_low_priority_hints_at_ordinary_widths() {
+        let (line, drawn) = render_agents_footer(120, true);
+        assert!(drawn);
+        assert!(
+            line.starts_with("  i Input │ d Diff │ o PR │ 1-9 Jump │ Tab Worktrees │ q Quit "),
+            "{line:?}"
+        );
+        assert!(!line.contains("Sort"), "{line:?}");
+        assert!(line.ends_with(TIP), "{line:?}");
+
+        let (line, drawn) = render_agents_footer(80, true);
+        assert!(drawn);
+        assert_eq!(line, format!("  Tab Worktrees │ q Quit{:10}{TIP}", ""));
+    }
+
+    #[test]
+    fn very_narrow_footers_omit_the_tip_and_keep_their_hints() {
+        let (line, drawn) = render_agents_footer(50, true);
+        assert!(!drawn);
+        assert!(!line.contains("remote servers"), "{line:?}");
+        assert!(line.starts_with("  i Input │ d Diff"), "{line:?}");
+        assert_eq!(line, render_agents_footer(50, false).0);
+    }
+
+    #[test]
+    fn footer_without_the_tip_is_unchanged() {
+        let (line, drawn) = render_agents_footer(170, false);
+        assert!(!drawn);
+        assert!(!line.contains("remote servers"), "{line:?}");
+        assert!(
+            line.contains("f Stale (shown) │ Tab Worktrees │ q Quit"),
+            "{line:?}"
+        );
+    }
+
     fn widths() -> AgentColumnWidths {
         AgentColumnWidths {
             project: 8,
             worktree: 9,
+            machine: 8,
             git: 6,
             pr: 5,
             pr_title: 20,
@@ -995,10 +1205,15 @@ mod tests {
         AgentColumn::Project,
     ];
 
+    /// Default columns while every agent is local and has GitHub status.
+    fn local_default_columns() -> Vec<AgentColumn> {
+        visible_columns(&crate::config::DEFAULT_AGENT_COLUMNS, true, false)
+    }
+
     #[test]
     fn agents_table_header_follows_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 0),
+            render_line(&local_default_columns(), 0),
             "#  Project  Worktree  Git    PR    Status   Time       Title"
         );
         assert_eq!(
@@ -1010,7 +1225,7 @@ mod tests {
     #[test]
     fn agents_table_rows_follow_column_order() {
         assert_eq!(
-            render_line(&crate::config::DEFAULT_AGENT_COLUMNS, 1),
+            render_line(&local_default_columns(), 1),
             "1  proj     wt        +1     #7    work     00:42      the title"
         );
         assert_eq!(render_line(&REORDERED, 1), "the title    work     1  proj");
@@ -1066,22 +1281,57 @@ mod tests {
     }
 
     #[test]
+    fn agents_table_shows_machine_beside_worktree_by_default() {
+        let columns = visible_columns(&crate::config::DEFAULT_AGENT_COLUMNS, true, true);
+        assert_eq!(
+            render_line(&columns, 0),
+            "#  Project  Worktree  Machine  Git    PR    Status   Time       Title"
+        );
+        assert_eq!(
+            render_line(&columns, 1),
+            "1  proj     wt        devbox   +1     #7    work     00:42      the title"
+        );
+    }
+
+    #[test]
     fn pr_column_hidden_until_an_agent_has_github_status() {
         assert_eq!(
-            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], false),
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], false, true),
             vec![AgentColumn::Worktree]
         );
         assert_eq!(
-            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], true),
+            visible_columns(&[AgentColumn::Worktree, AgentColumn::Pr], true, true),
             vec![AgentColumn::Worktree, AgentColumn::Pr]
         );
     }
 
     #[test]
-    fn hiding_the_pr_column_never_empties_the_table() {
+    fn machine_column_hidden_until_an_agent_is_remote() {
+        let configured = [AgentColumn::Worktree, AgentColumn::Machine];
         assert_eq!(
-            visible_columns(&[AgentColumn::Pr], false),
+            visible_columns(&configured, true, false),
+            vec![AgentColumn::Worktree]
+        );
+        assert_eq!(
+            visible_columns(&configured, true, true),
+            vec![AgentColumn::Worktree, AgentColumn::Machine]
+        );
+        // Leaving machine out of the configured list keeps it hidden.
+        assert_eq!(
+            visible_columns(&[AgentColumn::Worktree], true, true),
+            vec![AgentColumn::Worktree]
+        );
+    }
+
+    #[test]
+    fn hiding_conditional_columns_never_empties_the_table() {
+        assert_eq!(
+            visible_columns(&[AgentColumn::Pr], false, false),
             vec![AgentColumn::Pr]
+        );
+        assert_eq!(
+            visible_columns(&[AgentColumn::Machine], false, false),
+            vec![AgentColumn::Machine]
         );
     }
 }

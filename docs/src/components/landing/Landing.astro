@@ -18,6 +18,7 @@ import LiveTmux from './LiveTmux.astro';
 import LiveDashboard from './LiveDashboard.astro';
 import LiveSidebar from './LiveSidebar.astro';
 import LiveSandbox from './LiveSandbox.astro';
+import LiveRemote from './LiveRemote.astro';
 
 const videoThumbs = [v1, v2, v3];
 const methods = ['brew', 'curl', 'cargo'].map((id) =>
@@ -380,8 +381,9 @@ const wall = testimonials.slice(1);
         <p class="w-eyebrow">Setup</p>
         <h3>Ready the moment it opens.</h3>
         <p>
-          New worktrees are clean checkouts. Copy in what git leaves out, like
-          <code>.env</code>, and let each pane install and start what it runs.
+          New worktrees are clean checkouts. Copy in what git leaves out, like <code
+            >.env</code
+          >, and let each pane install and start what it runs.
         </p>
         <div class="w-yaml">
           <p class="w-file">.workmux.yaml</p>
@@ -412,6 +414,38 @@ const wall = testimonials.slice(1);
           <LiveSandbox />
         </div>
       </article>
+    </div>
+  </section>
+
+  <section class="w-section">
+    <div class="w-wrap">
+      <div class="w-split-head">
+        <div>
+          <p class="w-eyebrow">Remote servers</p>
+          <h2>Agents that keep working when you close the lid.</h2>
+        </div>
+        <p>
+          Run any agent on a Linux server you reach over SSH. Its window stays
+          in your tmux session, it survives sleep and lost Wi-Fi, and{' '}
+          <code>workmux merge</code> brings the work home.
+        </p>
+      </div>
+      <figure class="w-remote">
+        <div class="w-frame">
+          <div class="w-titlebar" aria-hidden="true">
+            <span class="w-lights"><i></i><i></i><i></i></span>
+            <span class="w-title">~/code/api</span>
+          </div>
+          <LiveRemote />
+        </div>
+        <figcaption class="w-cap">
+          Works with any server you can <code>ssh</code> into: a home box, a Proxmox
+          VM or a cloud instance. Agents run directly on it or in Docker. <a
+            class="w-arrow"
+            href="/guide/remote/">Remote servers guide →</a
+          >
+        </figcaption>
+      </figure>
     </div>
   </section>
 
@@ -1041,6 +1075,14 @@ const wall = testimonials.slice(1);
   .w-frame img,
   .w-frame video {
     width: 100%;
+  }
+
+  .w-remote {
+    margin: 0;
+  }
+
+  .w-remote .w-arrow {
+    white-space: nowrap;
   }
 
   .w-cap {

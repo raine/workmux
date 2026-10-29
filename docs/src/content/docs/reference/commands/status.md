@@ -89,6 +89,18 @@ Each agent contains `worktree`, `branch`, `project`, `project_path`, `status`,
 agent's Git repository cannot be resolved. With `--git`, the entry also contains
 a `git` object.
 
+Agents on [remote servers](/guide/remote/) are reported with the local ones, labelled with the remote's name. When the remote can't be reached, they keep their last known status, marked as disconnected. In JSON output, a remote agent has a `remote` object:
+
+- `name`, `host`: the remote and its SSH host
+- `ws_id`: the workspace's id on the remote
+- `pane`: the agent's pane index in the remote session
+- `attached`: whether a local window relays the agent
+- `connected`: whether the remote answered recently
+- `last_seen`: Unix time of the remote's last answer, or `null`
+- `ended`: present when the agent's session ended under it, for example `host_reboot` after the remote host restarted. `workmux open` starts it again.
+
+Local agents have no `remote` field.
+
 ## Safe automation
 
 Check the exit status before interpreting the JSON. Most failures produce no

@@ -154,6 +154,7 @@ pub(crate) struct CompactionStats {
 }
 
 /// Agent observation and the state inventory used to produce it.
+#[derive(Default)]
 pub struct ReconciledAgentReport {
     pub backend: String,
     pub instance: String,
@@ -163,6 +164,8 @@ pub struct ReconciledAgentReport {
     pub state_files_invalid_matching_context: usize,
     pub state_files_matching_context: usize,
     pub agents: Vec<crate::multiplexer::AgentPane>,
+    /// Local panes relaying remote agents, kept apart from `agents`.
+    pub remote_agents: Vec<crate::multiplexer::AgentPane>,
 }
 
 struct AgentInventory {
@@ -633,6 +636,65 @@ impl StateStore {
             .unwrap_or(0);
         self.upsert_agent_locked(&state)?;
         Ok(true)
+    }
+
+    /// Delete the state of every pane relaying workspace `ws_id` of
+    /// `remote`, on any server, including what earlier servers left for
+    /// resurrection.
+    pub fn delete_remote_attachments(&self, remote: &str, ws_id: &str) -> Result<()> {
+        let relays = |state: &AgentState| {
+            state
+                .remote
+                .as_ref()
+                .is_some_and(|at| at.remote == remote && at.ws_id == ws_id)
+        };
+        self.with_agent_lock("delete_remote_attachments", |store| {
+            for state in store.list_all_agents()? {
+                if relays(&state) {
+                    store.delete_agent_locked(&state.pane_key)?;
+                }
+            }
+            for path in store.recovery_manifest_paths()? {
+                let mut manifest = match store.load_recovery_manifest_path_locked(&path) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        warn!(?path, %error, "invalid recovery state file");
+                        continue;
+                    }
+                };
+                let before = manifest.entries.len();
+                manifest.entries.retain(|entry| !relays(&entry.state));
+                if manifest.entries.len() != before {
+                    store.save_recovery_manifest_locked(&manifest)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Every recovery manifest file, of any backend and instance.
+    fn recovery_manifest_paths(&self) -> Result<Vec<PathBuf>> {
+        let recovery_dir = self.recovery_dir();
+        let mut paths = Vec::new();
+        if !recovery_dir.exists() {
+            return Ok(paths);
+        }
+        for backend_dir in fs::read_dir(&recovery_dir)? {
+            let backend_dir = backend_dir?.path();
+            if !backend_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(backend_dir)? {
+                let path = entry?.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+        Ok(paths)
     }
 
     /// Delete agent state.
@@ -1171,57 +1233,42 @@ impl StateStore {
             }
         }
 
-        let recovery_dir = self.recovery_dir();
-        if recovery_dir.exists() {
-            for backend_dir in fs::read_dir(&recovery_dir)? {
-                let backend_dir = backend_dir?.path();
-                if !backend_dir.is_dir() {
+        for path in self.recovery_manifest_paths()? {
+            let mut manifest = match self.load_recovery_manifest_path_locked(&path) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    warn!(?path, %error, "invalid recovery state file");
                     continue;
                 }
-                for entry in fs::read_dir(backend_dir)? {
-                    let path = entry?.path();
-                    if path.extension().is_none_or(|extension| extension != "json") {
-                        continue;
-                    }
-                    let mut manifest = match self.load_recovery_manifest_path_locked(&path) {
-                        Ok(manifest) => manifest,
-                        Err(error) => {
-                            warn!(?path, %error, "invalid recovery state file");
-                            continue;
-                        }
-                    };
-                    let mut changed = false;
-                    for entry in &mut manifest.entries {
-                        let stored_canon = canon_or_self(&entry.state.workdir);
-                        let Ok(relpath) = stored_canon.strip_prefix(old_root_canonical) else {
-                            continue;
-                        };
-                        remap_agent_state(
-                            &mut entry.state,
-                            new_root.join(relpath),
-                            old_full_base,
-                            new_full_base,
-                        );
-                        for source in entry
-                            .pending_sources
-                            .iter_mut()
-                            .chain(&mut entry.recent_sources)
-                        {
-                            let source_canon = canon_or_self(&source.workdir);
-                            if let Ok(source_relpath) =
-                                source_canon.strip_prefix(old_root_canonical)
-                            {
-                                source.workdir = new_root.join(source_relpath);
-                            }
-                        }
-                        entry.revision = entry.revision.saturating_add(1);
-                        migrated += 1;
-                        changed = true;
-                    }
-                    if changed {
-                        self.save_recovery_manifest_locked(&manifest)?;
+            };
+            let mut changed = false;
+            for entry in &mut manifest.entries {
+                let stored_canon = canon_or_self(&entry.state.workdir);
+                let Ok(relpath) = stored_canon.strip_prefix(old_root_canonical) else {
+                    continue;
+                };
+                remap_agent_state(
+                    &mut entry.state,
+                    new_root.join(relpath),
+                    old_full_base,
+                    new_full_base,
+                );
+                for source in entry
+                    .pending_sources
+                    .iter_mut()
+                    .chain(&mut entry.recent_sources)
+                {
+                    let source_canon = canon_or_self(&source.workdir);
+                    if let Ok(source_relpath) = source_canon.strip_prefix(old_root_canonical) {
+                        source.workdir = new_root.join(source_relpath);
                     }
                 }
+                entry.revision = entry.revision.saturating_add(1);
+                migrated += 1;
+                changed = true;
+            }
+            if changed {
+                self.save_recovery_manifest_locked(&manifest)?;
             }
         }
         Ok(migrated)
@@ -1279,8 +1326,19 @@ impl StateStore {
     ///
     /// Uses batched pane queries for performance, with backend-specific fallback validation.
     ///
-    /// Returns only valid agents; removes stale state files.
+    /// Returns only valid local agents; removes stale state files. Panes
+    /// relaying remote agents are reconciled the same way but left out,
+    /// because their workdir is not a local worktree.
     pub fn load_reconciled_agents(
+        &self,
+        mux: &dyn crate::multiplexer::Multiplexer,
+    ) -> Result<Vec<crate::multiplexer::AgentPane>> {
+        Ok(split_remote(self.load_all_reconciled_agents(mux)?).0)
+    }
+
+    /// Like [`StateStore::load_reconciled_agents`], including panes that
+    /// relay remote agents.
+    pub fn load_all_reconciled_agents(
         &self,
         mux: &dyn crate::multiplexer::Multiplexer,
     ) -> Result<Vec<crate::multiplexer::AgentPane>> {
@@ -1313,8 +1371,13 @@ impl StateStore {
             .filter_map(Option::as_ref)
             .filter(|key| key.backend == backend && key.instance == instance)
             .count();
-        let agents =
-            self.reconcile_agents_for_context(inventory.states, mux, &instance, true, false)?;
+        let (agents, remote_agents) = split_remote(self.reconcile_agents_for_context(
+            inventory.states,
+            mux,
+            &instance,
+            true,
+            false,
+        )?);
 
         Ok(ReconciledAgentReport {
             backend: backend.to_string(),
@@ -1325,6 +1388,7 @@ impl StateStore {
             state_files_invalid_matching_context,
             state_files_matching_context,
             agents,
+            remote_agents,
         })
     }
 
@@ -1356,6 +1420,7 @@ impl StateStore {
         )
     }
 
+    /// Includes panes that relay remote agents.
     pub(crate) fn load_reconciled_agents_from_snapshot_cached(
         &self,
         cache: &mut AgentStateCache,
@@ -1524,6 +1589,16 @@ impl StateStore {
     }
 }
 
+/// Split reconciled agents into local agents and panes relaying remote ones.
+pub(crate) fn split_remote(
+    agents: Vec<crate::multiplexer::AgentPane>,
+) -> (
+    Vec<crate::multiplexer::AgentPane>,
+    Vec<crate::multiplexer::AgentPane>,
+) {
+    agents.into_iter().partition(|agent| agent.remote.is_none())
+}
+
 /// Legacy tmux IDs identify a possible matching server by start time alone.
 /// Callers merging pane state must also verify the pane PID.
 pub(super) fn same_server_boot(backend: &str, stored: &str, current: &str) -> bool {
@@ -1640,6 +1715,7 @@ mod tests {
             agent_kind: None,
             agent_session_id: None,
             prompt: None,
+            remote: None,
         }
     }
 
@@ -2261,6 +2337,40 @@ mod tests {
         let repaired = cache.load_context(&store, "tmux", "default").unwrap();
         assert_eq!(repaired.stats.parses, 1);
         assert_eq!(repaired.agents.len(), 1);
+    }
+
+    #[test]
+    fn deleting_remote_attachments_reaches_earlier_servers() {
+        let (store, _dir) = test_store();
+        let relay = |pane: usize, boot: &str, ws_id: &str| {
+            let mut state = context_state("tmux", "default", pane, Some(boot), pane);
+            state.remote = Some(crate::multiplexer::RemoteRef {
+                remote: "box".into(),
+                ws_id: ws_id.into(),
+                ex_id: "x1".into(),
+                pane: 0,
+            });
+            state
+        };
+        write_raw_agent(&store, &relay(1, "old", "w1"));
+        write_raw_agent(&store, &relay(2, "old", "w2"));
+        write_raw_agent(&store, &context_state("tmux", "default", 3, Some("old"), 3));
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        write_raw_agent(&store, &relay(4, "current", "w1"));
+
+        store.delete_remote_attachments("box", "w1").unwrap();
+
+        let remaining: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.state.remote.map(|at| at.ws_id))
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&Some("w2".into())));
+        assert!(remaining.contains(&None));
     }
 
     #[test]

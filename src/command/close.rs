@@ -4,9 +4,21 @@ use crate::{config, git, sandbox};
 use anyhow::{Context, Result, anyhow};
 
 pub fn run(name: Option<&str>) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        anyhow::bail!("the window is on the local machine: run `workmux close <handle>` there");
+    }
     if crate::sandbox::guest::is_sandbox_guest() {
         let name_to_close = super::resolve_name(name)?;
         return run_via_rpc(&name_to_close);
+    }
+
+    let remote = match name {
+        Some(name) => crate::remote::cache::find_here(name),
+        None => current_remote_window(),
+    };
+    if let Some(record) = remote {
+        let mux = create_backend(detect_backend());
+        return crate::remote::lifecycle::close(mux.as_ref(), &record);
     }
 
     let config = config::Config::load(None)?;
@@ -242,6 +254,31 @@ fn run_via_rpc_impl(name: &str, client: &mut crate::sandbox::rpc::RpcClient) -> 
             other => anyhow::bail!("Unexpected RPC response: {:?}", other),
         }
     }
+}
+
+/// The remote workspace whose window the command runs in. Its panes run
+/// in the laptop's checkout, so the directory does not name it, and a
+/// local worktree of another project can have the same window name. Each
+/// relay pane is registered with the workspace it relays.
+fn current_remote_window() -> Option<crate::remote::cache::WorkspaceRecord> {
+    let records = crate::remote::cache::all();
+    if records.is_empty() {
+        return None;
+    }
+    let mux = create_backend(detect_backend());
+    let key = crate::state::PaneKey {
+        backend: mux.name().to_string(),
+        instance: mux.instance_id(),
+        pane_id: mux.current_pane_id().or_else(|| mux.active_pane_id())?,
+    };
+    let at = crate::state::StateStore::new()
+        .ok()?
+        .get_agent(&key)
+        .ok()??
+        .remote?;
+    records
+        .into_iter()
+        .find(|record| record.remote == at.remote && record.ws_id == at.ws_id)
 }
 
 #[cfg(test)]

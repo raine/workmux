@@ -13,11 +13,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* && \
     mkdir -p /home/user/.codex && chmod -R 777 /home/user
 
-# Install Codex CLI from GitHub releases (musl for glibc-independent static binary)
+# Install the Codex package from GitHub releases (musl, glibc-independent).
+# The package keeps the layout Codex expects next to its binary:
+# codex-package.json, bin/codex-code-mode-host (runs commands), codex-path/rg
+# and codex-resources/bwrap. Codex resolves the symlink in /usr/local/bin to
+# find that layout. The tarball and its checksum list come from the same
+# release tag.
 RUN ARCH=$(uname -m) && \
-    mkdir /tmp/codex-install && \
-    curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-${ARCH}-unknown-linux-musl.tar.gz" | \
-    tar xz -C /tmp/codex-install && \
-    install -m 0755 /tmp/codex-install/codex* /usr/local/bin/codex && \
-    rm -rf /tmp/codex-install && \
+    TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/openai/codex/releases/latest) && \
+    TAG=${TAG##*/} && \
+    BASE="https://github.com/openai/codex/releases/download/${TAG}" && \
+    ASSET="codex-package-${ARCH}-unknown-linux-musl.tar.gz" && \
+    mkdir /tmp/codex-install && cd /tmp/codex-install && \
+    curl -fsSLo "$ASSET" "$BASE/$ASSET" && \
+    curl -fsSLo SHA256SUMS "$BASE/codex-package_SHA256SUMS" && \
+    grep -E "^[0-9a-f]{64}  ${ASSET}\$" SHA256SUMS > expected && \
+    sha256sum -c expected && \
+    mkdir -p /opt/codex && \
+    tar xzf "$ASSET" --no-same-owner -C /opt/codex && \
+    cd / && rm -rf /tmp/codex-install && \
+    test -f /opt/codex/codex-package.json && \
+    test -x /opt/codex/bin/codex-code-mode-host && \
+    test -x /opt/codex/codex-path/rg && \
+    test -x /opt/codex/codex-resources/bwrap && \
+    ln -s /opt/codex/bin/codex /usr/local/bin/codex && \
     codex --version

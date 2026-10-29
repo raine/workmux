@@ -1,6 +1,7 @@
 use crate::command::args::PromptArgs;
 use crate::config::MuxMode;
 use crate::multiplexer::{create_backend, detect_backend};
+use crate::remote::cache::WorkspaceRecord;
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 use crate::workflow::{SetupOptions, WorkflowContext};
 use crate::{config, workflow};
@@ -60,11 +61,63 @@ pub fn run(
         .map(crate::naming::validate_parent_session)
         .transpose()?;
 
+    let mut remote_records: Vec<Option<WorkspaceRecord>> = resolved_names
+        .iter()
+        .map(|name| crate::remote::cache::find_here(name))
+        .collect();
+    // A name that is neither a local worktree nor a known remote workspace
+    // may belong to a workspace a remote agent spawned; ask the remotes.
+    let unknown: Vec<usize> = (0..resolved_names.len())
+        .filter(|&i| {
+            remote_records[i].is_none()
+                && crate::git::find_worktree_in(&resolved_names[i], None).is_err()
+        })
+        .collect();
+    if !unknown.is_empty()
+        && let Ok(config) = config::Config::load(None)
+        && !config.remotes.is_empty()
+    {
+        for name in config.remotes.keys() {
+            crate::remote::observe::current(&config, name);
+        }
+        for i in unknown {
+            remote_records[i] = crate::remote::cache::find_here(&resolved_names[i]);
+        }
+    }
+    if let Some(record) = remote_records.iter().flatten().next() {
+        let unsupported = [
+            (prompt_args.has_any(), "Prompt arguments (-p, -P, -e)"),
+            (continue_session, "--continue"),
+            (new_window, "--new"),
+            (run_hooks, "--run-hooks"),
+            (force_files, "--force-files"),
+            (target_name.is_some(), "--target-name"),
+            (parent_session.is_some(), "--parent-session"),
+        ];
+        if let Some((_, option)) = unsupported.iter().find(|(set, _)| *set) {
+            bail!(
+                "{option} cannot be used with remote workspace '{}' on '{}'",
+                record.handle,
+                record.remote
+            );
+        }
+    }
+
     let (config, config_location) = config::Config::load_with_location(None, config_override)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, config_location)?;
 
     let preliminary_mode = context.config.mode();
+    if let Some(record) = remote_records.iter().flatten().next()
+        && mode_override.unwrap_or(preliminary_mode) == MuxMode::Session
+    {
+        bail!(
+            "Session mode cannot be used with remote workspace '{}' on '{}'; remote agents \
+             open in a window: pass --mode window",
+            record.handle,
+            record.remote
+        );
+    }
 
     if new_window && mode_override == Some(MuxMode::Session) {
         bail!("--new is not supported in session mode. Each worktree can only have one session.");
@@ -82,7 +135,15 @@ pub fn run(
 
     let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
 
-    for resolved_name in &resolved_names {
+    for (resolved_name, remote_record) in resolved_names.iter().zip(remote_records) {
+        if let Some(record) = remote_record {
+            if let Err(e) = crate::remote::lifecycle::open(&context, record, true) {
+                eprintln!("✗ {:#}", e);
+                errors.push((resolved_name.clone(), e));
+            }
+            continue;
+        }
+
         // Write prompt to temp file if provided (unique per worktree).
         // In file-only mode, skip writing here; the prompt is passed to
         // workflow::open which writes to the worktree before pane setup.

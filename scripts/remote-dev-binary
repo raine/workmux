@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Build this workmux tree on a Linux remote and fetch the binary, for use as
+# `remotes.<name>.binary` when no release matches the local build.
+#
+# Usage: scripts/remote-dev-binary HOST [HANDLE]
+#   HOST    ssh destination (alias from ~/.ssh/config or user@host)
+#   HANDLE  source directory name on the remote: ~/src/HANDLE (default: dev)
+#
+# The remote needs rsync and a Rust toolchain in ~/.cargo/bin.
+
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 HOST [HANDLE]" >&2
+  exit 2
+}
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+host=$1
+handle=${2:-dev}
+
+if [[ -z $host || $host == -* || $host =~ [[:space:]] ]]; then
+  echo "error: invalid ssh destination: '$host'" >&2
+  exit 2
+fi
+if [[ ! $handle =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "error: HANDLE must match [A-Za-z0-9][A-Za-z0-9._-]*: '$handle'" >&2
+  exit 2
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+remote_dir="src/$handle"
+# Local directory name derived from the host, safe for any ssh destination.
+host_dir=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '_')
+out_dir="$repo_root/target/remote-dev/$host_dir"
+
+echo "Syncing $repo_root to $host:~/$remote_dir..."
+ssh -- "$host" "mkdir -p $remote_dir"
+# --delete keeps the remote tree identical to the local one; excluded paths
+# (including the remote target/ build cache) are left alone.
+rsync -az --delete \
+  --exclude /target \
+  --exclude /docs/node_modules \
+  --exclude /tests/venv \
+  --exclude /.git \
+  --exclude /history \
+  -e ssh \
+  "$repo_root/" "$host:$remote_dir/"
+
+echo "Building on $host..."
+ssh -- "$host" "cd $remote_dir && ~/.cargo/bin/cargo build --release --locked"
+
+mkdir -p "$out_dir"
+scp -q -- "$host:$remote_dir/target/release/workmux" "$out_dir/workmux.tmp"
+chmod 755 "$out_dir/workmux.tmp"
+mv -f "$out_dir/workmux.tmp" "$out_dir/workmux"
+
+echo "Built $out_dir/workmux"
+echo "Set it on the remote in your global config:"
+echo "    binary: $out_dir/workmux"

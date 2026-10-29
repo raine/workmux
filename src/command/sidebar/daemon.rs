@@ -2329,6 +2329,14 @@ pub fn run() -> Result<()> {
                         tmux_state.server_boot_id.as_deref(),
                     ) {
                         Ok((agents, stats)) => {
+                            let agents = {
+                                let cfg = config.lock().unwrap();
+                                let now_ts = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                crate::remote::agents::for_views(&cfg, agents, now_ts)
+                            };
                             tracing::trace!(
                                 listed = stats.listed,
                                 metadata = stats.metadata,
@@ -2363,7 +2371,11 @@ pub fn run() -> Result<()> {
 
         if publish_pending && let Some((agents, tmux_state)) = &cached_inputs {
             publish_pending = false;
-            let live_paths = agents.iter().map(|agent| agent.path.clone()).collect();
+            let live_paths = agents
+                .iter()
+                .filter(|agent| agent.remote.is_none())
+                .map(|agent| agent.path.clone())
+                .collect();
             let version = config_version.load(Ordering::Relaxed);
             let invalidated = version != seen_config_version;
             seen_config_version = version;
@@ -2487,6 +2499,7 @@ pub fn run() -> Result<()> {
                     .snapshot
                     .agents
                     .iter()
+                    .filter(|agent| agent.remote.is_none())
                     .map(|agent| GitWorkerPath {
                         path: agent.path.clone(),
                         is_stale: agent
@@ -2680,8 +2693,14 @@ fn compute_tick(
     } = input;
 
     // Phase 1: Inactivity detection
-    let interrupted =
-        tracker.check_with(&agents, now, |pane_id| captured_panes.get(pane_id).cloned());
+    let observable: Vec<_> = agents
+        .iter()
+        .filter(|agent| shows_live_output(agent))
+        .cloned()
+        .collect();
+    let interrupted = tracker.check_with(&observable, now, |pane_id| {
+        captured_panes.get(pane_id).cloned()
+    });
 
     // Phase 2: Mutate agents in memory for resumed agents
     let mut agent_writes = Vec::new();
@@ -2770,6 +2789,15 @@ fn apply_tick_effects(
     }
 }
 
+/// Whether the agent's local pane shows its output as it happens. A remote
+/// agent's does only while a connected relay draws it.
+fn shows_live_output(agent: &crate::multiplexer::AgentPane) -> bool {
+    agent
+        .remote
+        .as_ref()
+        .is_none_or(|remote| remote.attached && remote.connected)
+}
+
 /// Capture working panes, including interrupted ones, to detect resumed output.
 fn gather_captures(
     agents: &[crate::multiplexer::AgentPane],
@@ -2778,6 +2806,7 @@ fn gather_captures(
     agents
         .iter()
         .filter(|a| a.status == Some(crate::multiplexer::AgentStatus::Working))
+        .filter(|a| shows_live_output(a))
         .filter_map(|a| {
             mux.capture_pane(&a.pane_id, 5)
                 .map(|content| (a.pane_id.clone(), content))
@@ -3236,6 +3265,7 @@ mod tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 
@@ -4867,6 +4897,7 @@ mod tests {
                 agent_kind: None,
                 agent_session_id: None,
                 prompt: None,
+                remote: None,
             };
             store.upsert_agent(&state).unwrap();
         }

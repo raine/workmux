@@ -12,7 +12,7 @@ When running agents in multiple worktrees across many projects, it's helpful to 
 The dashboard is entirely optional. It becomes especially useful when running multiple agents across several projects, but workmux's core workflow works great on its own.
 :::
 
-<div style="display: flex; justify-content: center; margin: 1.5rem 0;">
+<div style="display: flex; justify-content: center; max-width: 45rem; margin: 1.5rem 0;">
 
 <Screenshot src={screenshot} alt="workmux dashboard" framed={false} />
 
@@ -119,6 +119,7 @@ released when the dashboard exits.
 - **#** (`number`): Quick jump key (1-9)
 - **Project** (`project`): Project name (from `__worktrees` path or directory name)
 - **Worktree** (`worktree`): Worktree/window name
+- **Machine** (`machine`): Remote server name, or `local`, shown once a remote agent is listed
 - **Git** (`git`): Diff stats showing branch changes (dim) and uncommitted changes (bright)
 - **PR** (`pr`): Pull request number and check status, shown once an agent has one
 - **PR Title** (`pr_title`): Pull request title (opt-in)

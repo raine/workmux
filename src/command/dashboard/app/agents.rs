@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::style::Style;
 
 use crate::github::{CheckSummary, PrSummary};
-use crate::multiplexer::{AgentPane, AgentStatus};
+use crate::multiplexer::{AgentPane, AgentStatus, RemoteAgent};
 
 use super::DashboardTab;
 
@@ -48,6 +48,10 @@ impl App {
                     window_prefix,
                     &a.path,
                 );
+                let worktree = match &a.remote {
+                    Some(remote) => crate::remote::agents::label(&worktree, &remote.at.remote),
+                    None => worktree,
+                };
                 let worktree_lower = worktree.to_lowercase();
                 project.contains(&filter_lower) || worktree_lower.contains(&filter_lower)
             });
@@ -302,9 +306,52 @@ impl App {
     }
 
     pub fn jump_to_selected(&mut self) {
+        if let Some(remote) = self.selected_detached() {
+            if self.open_detached(&remote) && self.should_close_after_jump() {
+                self.should_jump = true;
+            }
+            return;
+        }
         if let Some(target) = self.selected_agent_target() {
             self.switch_to_pane_and_track(&target.pane_id);
         }
+    }
+
+    /// The selected remote agent, when no local pane relays it.
+    pub(crate) fn selected_detached(&self) -> Option<RemoteAgent> {
+        let agent = self.agents.get(self.table_state.selected()?)?;
+        if !crate::remote::agents::is_detached(agent) {
+            return None;
+        }
+        agent.remote.clone()
+    }
+
+    /// Open a window relaying a detached remote agent, reporting failure.
+    fn open_detached(&mut self, remote: &RemoteAgent) -> bool {
+        match crate::remote::agents::open_window(remote) {
+            Ok(()) => {
+                self.refresh();
+                true
+            }
+            Err(err) => {
+                self.status_message = Some((
+                    format!("open {}: {err:#}", remote.handle),
+                    std::time::Instant::now(),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Tell the user a pane action does not reach a detached remote agent.
+    pub(crate) fn report_detached(&mut self, remote: &RemoteAgent) {
+        self.status_message = Some((
+            format!(
+                "{} is not attached here; Enter opens it",
+                crate::remote::agents::label(&remote.handle, &remote.at.remote)
+            ),
+            std::time::Instant::now(),
+        ));
     }
 
     pub(crate) fn selected_agent_target(&self) -> Option<PaneTarget> {
@@ -362,6 +409,10 @@ impl App {
     }
 
     pub fn peek_selected(&mut self) {
+        if let Some(remote) = self.selected_detached() {
+            self.open_detached(&remote);
+            return;
+        }
         // Switch to pane but keep popup open
         if let Some(selected) = self.table_state.selected()
             && let Some(agent) = self.agents.get(selected)
@@ -486,8 +537,18 @@ impl App {
 
         let base_style = Style::default().fg(base_color);
         let mut spans = ansi::parse_tmux_styles(icon, base_style);
+        let disconnected = agent
+            .remote
+            .as_ref()
+            .is_some_and(|remote| !remote.connected);
 
-        if is_stale {
+        if disconnected {
+            // The last status the remote reported, which may have moved on.
+            let dimmed = Style::default().fg(self.palette.dimmed);
+            for span in &mut spans {
+                span.1 = dimmed;
+            }
+        } else if is_stale {
             // Override all styling for stale agents
             let dimmed = Style::default().fg(self.palette.dimmed);
             for span in &mut spans {
@@ -506,12 +567,19 @@ impl App {
     /// Extract the worktree name from an agent.
     /// Returns (worktree_name, is_main) where is_main indicates if this is the main worktree.
     pub fn extract_worktree_name(&self, agent_pane: &AgentPane) -> (String, bool) {
-        agent::extract_worktree_name(
+        let (name, is_main) = agent::extract_worktree_name(
             &agent_pane.session,
             &agent_pane.window_name,
             self.config.window_prefix(),
             &agent_pane.path,
-        )
+        );
+        match &agent_pane.remote {
+            Some(remote) => (
+                crate::remote::agents::label(&name, &remote.at.remote),
+                is_main,
+            ),
+            None => (name, is_main),
+        }
     }
 
     pub fn extract_project_name(agent_pane: &AgentPane) -> String {
@@ -599,13 +667,7 @@ impl App {
         match pr {
             Some(ref pr) if pr.url.is_some() => {
                 let url = make_url(pr.url.as_ref().unwrap());
-
-                #[cfg(target_os = "macos")]
-                let cmd = "open";
-                #[cfg(not(target_os = "macos"))]
-                let cmd = "xdg-open";
-
-                if let Err(e) = std::process::Command::new(cmd).arg(&url).spawn() {
+                if let Err(e) = open_url(&url) {
                     self.status_message = Some((
                         format!("Failed to open browser: {e}"),
                         std::time::Instant::now(),
@@ -626,6 +688,61 @@ impl App {
             }
         }
     }
+
+    /// Open the remote servers guide and retire the tip. When no browser
+    /// opens, the tip stays and the footer shows the address instead. Does
+    /// nothing unless the tip is on screen.
+    pub fn open_remote_guide(&mut self) {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
+            return;
+        }
+        let url = crate::tips::REMOTE_GUIDE_URL;
+        let message = match open_url(url) {
+            Ok(()) => {
+                self.show_remote_tip = false;
+                crate::tips::dismiss_remote_tip();
+                format!("Opened {url}")
+            }
+            Err(e) => format!("Failed to open browser: {e}. Guide: {url}"),
+        };
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
+    /// Count this session toward the remote servers tip's view limit the
+    /// first time the footer draws it.
+    pub fn note_remote_tip_drawn(&mut self) {
+        if !self.remote_tip_counted {
+            self.remote_tip_counted = true;
+            crate::tips::record_remote_tip_view();
+        }
+    }
+
+    /// Hide the remote servers tip for good. Does nothing unless the tip is
+    /// on screen.
+    pub fn dismiss_remote_tip(&mut self) {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
+            return;
+        }
+        self.show_remote_tip = false;
+        crate::tips::dismiss_remote_tip();
+        self.status_message = Some((
+            format!(
+                "Remote servers tip hidden. Guide: {}",
+                crate::tips::REMOTE_GUIDE_URL
+            ),
+            std::time::Instant::now(),
+        ));
+    }
+}
+
+/// Open `url` in the default browser.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let cmd = "xdg-open";
+
+    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
 }
 
 #[cfg(test)]

@@ -1474,7 +1474,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
-        Ok(Box::new(TmuxHandshake::new()?))
+        Ok(Box::new(TmuxHandshake::new(self.socket_path.as_deref())?))
     }
 
     // === Status ===
@@ -1676,11 +1676,14 @@ mod tests {
         let socket = temp.path().join("tmux socket ' quoted");
         let marker = temp.path().join("format-job-marker");
         let output = temp.path().join("format-output");
+        let pending = temp.path().join("format-output.pending");
         let socket_text = socket.to_string_lossy();
         Cmd::new("tmux")
             .args(&[
                 "-S",
                 &socket_text,
+                "-f",
+                "/dev/null",
                 "new-session",
                 "-d",
                 "-s",
@@ -1690,9 +1693,12 @@ mod tests {
             .unwrap();
         let backend = TmuxBackend::for_socket(&socket_text);
         let literal = format!("#{{session_name}} #(touch {})", marker.display());
+        // Publish only after printf finishes; redirection creates the file before writing.
         let script = format!(
-            "printf %s {} > {}",
+            "printf %s {} > {} && mv {} {}",
             crate::shell::shell_quote(&literal),
+            crate::shell::shell_quote(&pending.to_string_lossy()),
+            crate::shell::shell_quote(&pending.to_string_lossy()),
             crate::shell::shell_quote(&output.to_string_lossy())
         );
 

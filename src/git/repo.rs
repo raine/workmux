@@ -19,6 +19,59 @@ pub fn is_path_ignored(repo_path: &Path, file_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Classify paths with the same index-aware rules and false-on-error behavior
+/// as `is_path_ignored`, without starting Git separately for every path.
+pub fn ignored_paths(repo_path: &Path, paths: &[String]) -> std::collections::HashSet<String> {
+    let individually = || {
+        paths
+            .iter()
+            .filter(|path| is_path_ignored(repo_path, path))
+            .cloned()
+            .collect()
+    };
+    // These inputs are errors/options in the single-path invocation, not
+    // literal stdin records. Preserve its classification for them.
+    if paths.len() <= 1
+        || paths
+            .iter()
+            .any(|path| path.starts_with('-') || path.contains('\0'))
+    {
+        return individually();
+    }
+    let batch = || -> Result<std::collections::HashSet<String>> {
+        use std::io::{Seek, Write};
+        // File-backed stdin avoids pipe backpressure for large selections.
+        let mut input = tempfile::tempfile()?;
+        {
+            let mut writer = std::io::BufWriter::new(&mut input);
+            for path in paths {
+                writer.write_all(path.as_bytes())?;
+                writer.write_all(&[0])?;
+            }
+            writer.flush()?;
+        }
+        input.rewind()?;
+        let output = super::unattended_git(Some(repo_path))?
+            .args(["check-ignore", "-z", "--stdin"])
+            .stdin(input)
+            .stderr(std::process::Stdio::null())
+            .output()?;
+        anyhow::ensure!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "git check-ignore failed"
+        );
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect())
+    };
+    // One invalid path (e.g. beyond a symlink) must not discard valid results
+    // for the other paths when Git aborts the batch.
+    batch().unwrap_or_else(|_| individually())
+}
+
 /// Check if we're in a git repository
 pub fn is_git_repo() -> Result<bool> {
     is_git_repo_in(None)
@@ -188,6 +241,94 @@ pub fn get_repository_key_in(workdir: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_ignore_matches_individual_rules_and_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        crate::test_support::init_repo(repo);
+        std::fs::write(repo.join(".gitignore"), "*.secret\n!keep.secret\nodd*\n").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "local-*\n").unwrap();
+        let global = repo.join("global-ignore");
+        std::fs::write(&global, "global-*\n").unwrap();
+        crate::test_support::run_git(
+            repo,
+            &["config", "core.excludesFile", global.to_str().unwrap()],
+        );
+        let paths: Vec<String> = [
+            "ignored.secret",
+            "keep.secret",
+            "tracked.secret",
+            "local-only",
+            "global-only",
+            "odd space",
+            "odd\nline",
+            "odd\ttab",
+            "odd\"quote",
+            "plain",
+            "missing.secret",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        for prefix in ["", "app"] {
+            let source = repo.join(prefix);
+            std::fs::create_dir_all(&source).unwrap();
+            for name in &paths {
+                if name != "missing.secret" {
+                    std::fs::write(source.join(name), "data").unwrap();
+                }
+            }
+            crate::test_support::run_git(
+                repo,
+                &[
+                    "add",
+                    "-f",
+                    format!("{prefix}/tracked.secret").trim_start_matches('/'),
+                ],
+            );
+            let expected: std::collections::HashSet<_> = paths
+                .iter()
+                .filter(|path| is_path_ignored(&source, path))
+                .cloned()
+                .collect();
+            assert_eq!(ignored_paths(&source, &paths), expected);
+            assert_eq!(expected.len(), 8);
+            for not_ignored in ["keep.secret", "tracked.secret", "plain"] {
+                assert!(!expected.contains(not_ignored));
+            }
+        }
+        assert!(ignored_paths(repo, &[]).is_empty());
+        assert!(ignored_paths(repo, &["plain".into()]).is_empty());
+    }
+
+    #[test]
+    fn batch_ignore_preserves_results_when_a_path_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        crate::test_support::init_repo(repo);
+        std::fs::write(repo.join(".gitignore"), "*.secret\n").unwrap();
+        std::os::unix::fs::symlink("missing", repo.join("link")).unwrap();
+        for invalid in [
+            "link/child.secret",
+            "../outside.secret",
+            "-option.secret",
+            "bad\0path",
+        ] {
+            let paths: Vec<String> =
+                vec!["first.secret".into(), invalid.into(), "last.secret".into()];
+            let expected: std::collections::HashSet<_> = paths
+                .iter()
+                .filter(|path| is_path_ignored(repo, path))
+                .cloned()
+                .collect();
+            assert_eq!(ignored_paths(repo, &paths), expected, "{invalid:?}");
+            assert!(expected.contains("first.secret"));
+            assert!(expected.contains("last.secret"));
+        }
+        std::fs::write(repo.join(".git/config"), "[invalid").unwrap();
+        assert!(ignored_paths(repo, &["first.secret".into(), "last.secret".into()]).is_empty());
+    }
 
     #[test]
     fn repository_key_is_shared_by_primary_linked_and_nested_paths() {

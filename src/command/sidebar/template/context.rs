@@ -82,6 +82,13 @@ impl<'a> RowContext<'a> {
         );
         let (template_worktree, _) =
             extract_worktree_name(&agent.session, &agent.window_name, "", &agent.path);
+        let (label_worktree, template_worktree) = match &agent.remote {
+            Some(remote) => (
+                crate::remote::agents::label(&label_worktree, &remote.at.remote),
+                crate::remote::agents::label(&template_worktree, &remote.at.remote),
+            ),
+            None => (label_worktree, template_worktree),
+        };
         let session = if agent.session.starts_with(app.window_prefix()) {
             ""
         } else {
@@ -103,22 +110,39 @@ impl<'a> RowContext<'a> {
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
         let is_interrupted = app.interrupted_pane_ids.contains(&agent.pane_id);
-        let is_stale = should_dim_agent(
-            app.dim_stale,
-            agent_is_stale(
-                agent,
-                now_secs,
-                app.stale_threshold_secs,
-                is_sleeping,
-                is_interrupted,
-            ),
-        );
+        let title = build_pane_title(agent, &primary, &secondary, &label_worktree, &project);
+        let connectivity = agent.remote.as_ref().and_then(|remote| {
+            crate::remote::agents::row_title(remote, now_secs, title.as_deref())
+        });
+        // A remote that does not answer shows its last status dimmed.
+        let is_stale = connectivity.is_some()
+            || should_dim_agent(
+                app.dim_stale,
+                agent_is_stale(
+                    agent,
+                    now_secs,
+                    app.stale_threshold_secs,
+                    is_sleeping,
+                    is_interrupted,
+                ),
+            );
         let is_active = app.host_agent_idx == Some(idx);
         let jump_idx = app.jump_numbers.get(idx).copied().flatten();
         let is_selected = selected_idx == Some(idx);
 
-        let (status_icon_spans, status_icon_style) =
-            super::super::ui::status_icon_and_style(app, agent.status, is_stale);
+        // A remote's last status stays recognizable, only dimmed.
+        let (mut status_icon_spans, mut status_icon_style) =
+            super::super::ui::status_icon_and_style(
+                app,
+                agent.status,
+                is_stale && connectivity.is_none(),
+            );
+        if connectivity.is_some() {
+            status_icon_style = status_icon_style.fg(app.palette.dimmed);
+            for (_, style) in &mut status_icon_spans {
+                *style = style.fg(app.palette.dimmed);
+            }
+        }
         let status_color = status_icon_style.fg.unwrap_or(Color::Reset);
 
         let elapsed = agent
@@ -126,8 +150,11 @@ impl<'a> RowContext<'a> {
             .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
             .unwrap_or_default();
 
-        let pane_title = build_pane_title(agent, &primary, &secondary, &label_worktree, &project);
-        let git_status = app.git_statuses.get(&agent.path);
+        let pane_title = connectivity.clone().or(title);
+        let git_status = match &agent.remote {
+            Some(remote) => remote.git.as_ref(),
+            None => app.git_statuses.get(&agent.path),
+        };
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
         let kind =
@@ -663,6 +690,7 @@ mod tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 

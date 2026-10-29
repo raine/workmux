@@ -49,7 +49,7 @@ pub struct SandboxPaths {
     pub config_dir: PathBuf,
 }
 
-const CLAUDE_ONBOARDING_JSON: &str =
+pub const CLAUDE_ONBOARDING_JSON: &str =
     r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#;
 
 impl SandboxPaths {
@@ -720,6 +720,138 @@ fn validate_oci_runtime_support(runtime: SandboxRuntime, podman_remote: bool) ->
     Ok(())
 }
 
+/// Per-worktree, arch-keyed directory for pi's managed fd/rg binaries, so the
+/// guest's Linux downloads never clobber the host's Mach-O binaries through
+/// the agent directory mount. The cache key includes a hash of the canonical
+/// worktree path so two projects with the same basename don't share a cache.
+fn pi_bin_overlay(worktree_root: &Path, state_root: Option<&Path>) -> Result<PathBuf> {
+    let canonical = worktree_root
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_root.to_path_buf());
+    let basename = worktree_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let cache_key = format!(
+        "{}-{}",
+        slug::slugify(basename),
+        crate::sandbox::pi::path_hash(&canonical)
+    );
+    let state_dir = match state_root {
+        Some(root) => root.join("container").join(&cache_key),
+        None => crate::xdg::state_dir()?.join("container").join(cache_key),
+    };
+    std::fs::create_dir_all(&state_dir)?;
+    crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)
+}
+
+/// Push the env and mounts that give `agent` its home inside the container:
+/// `HOME=/tmp`, the agent's credential and config directories, and its
+/// container-specific config. Returns whether the command must first link
+/// Claude's config file (runtimes without file mounts).
+pub(crate) fn push_agent_home(
+    args: &mut Vec<String>,
+    config: &SandboxConfig,
+    agent: &str,
+    runtime: SandboxRuntime,
+    pi_bin_overlay: Option<&Path>,
+) -> bool {
+    args.push("--env".to_string());
+    args.push("HOME=/tmp".to_string());
+
+    // Codex refuses to create helper binaries when CODEX_HOME is under a
+    // temporary directory (i.e. /tmp). Setting CODEX_HOME to a non-temp path
+    // avoids this while keeping HOME=/tmp like the other agents.
+    if agent == "codex" {
+        args.push("--env".to_string());
+        args.push("CODEX_HOME=/home/user/.codex".to_string());
+    }
+
+    // Agent-specific credential mounts
+    // Claude uses ~/.claude-sandbox-config/claude.json for container-specific config.
+    // Apple Container only supports directory mounts, so we mount the directory
+    // and the caller symlinks the file inside the container.
+    // Docker/Podman can mount the file directly.
+    let needs_claude_config_symlink = if agent == "claude"
+        && let Some(paths) = SandboxPaths::new()
+    {
+        if runtime.supports_file_mounts() && paths.config_file.exists() {
+            args.push("--mount".to_string());
+            args.push(format!(
+                "type=bind,source={},target=/tmp/.claude.json",
+                paths.config_file.display()
+            ));
+            false
+        } else if !runtime.supports_file_mounts() && paths.config_dir.exists() {
+            args.push("--mount".to_string());
+            args.push(format!(
+                "type=bind,source={},target=/tmp/.claude-sandbox-config",
+                paths.config_dir.display()
+            ));
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Mount agent config directory
+    if let Some(config_dir) = config.resolved_agent_config_dir(agent) {
+        let target = match agent {
+            "claude" => "/tmp/.claude",
+            "gemini" => "/tmp/.gemini",
+            "codex" => "/home/user/.codex",
+            "opencode" => "/tmp/.local/share/opencode",
+            "pi" => "/tmp/.pi/agent",
+            "omp" => "/tmp/.omp/agent",
+            _ => unreachable!(), // resolved_agent_config_dir returns None for unknown agents
+        };
+        let _ = std::fs::create_dir_all(&config_dir);
+        args.push("--mount".to_string());
+        args.push(format!(
+            "type=bind,source={},target={}",
+            config_dir.display(),
+            target
+        ));
+
+        // The runtime creates /tmp/.local for the opencode mount as root, and
+        // opencode creates ~/.local/state/opencode at startup.
+        if agent == "opencode" && runtime != SandboxRuntime::AppleContainer {
+            args.push("--mount".to_string());
+            args.push("type=tmpfs,destination=/tmp/.local/state".to_string());
+        }
+
+        // Pi stores managed fd/rg binaries under bin/; keep the guest's
+        // downloads out of the host's directory.
+        if let Some(overlay) = pi_bin_overlay {
+            args.push("--mount".to_string());
+            args.push(format!(
+                "type=bind,source={},target=/tmp/.pi/agent/bin",
+                overlay.display()
+            ));
+        }
+    }
+
+    // Mount opencode global config directory (~/.config/opencode/) read-only.
+    // This is separate from the data directory (~/.local/share/opencode/) and
+    // contains opencode.json, plugins, and global MCP definitions.
+    if agent == "opencode"
+        && let Some(cfg_dir) = crate::agent_setup::opencode::opencode_config_dir()
+        && cfg_dir.is_dir()
+    {
+        let target = "/tmp/.config/opencode";
+        args.push("--mount".to_string());
+        args.push(format!(
+            "type=bind,source={},target={},readonly",
+            cfg_dir.display(),
+            target
+        ));
+    }
+
+    needs_claude_config_symlink
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_docker_run_args_inner(
     command: &str,
@@ -1055,112 +1187,13 @@ fn build_docker_run_args_inner(
     args.push("--workdir".to_string());
     args.push(pane_cwd_str.to_string());
 
-    args.push("--env".to_string());
-    args.push("HOME=/tmp".to_string());
-
-    // Codex refuses to create helper binaries when CODEX_HOME is under a
-    // temporary directory (i.e. /tmp). Setting CODEX_HOME to a non-temp path
-    // avoids this while keeping HOME=/tmp like the other agents.
-    if agent == "codex" {
-        args.push("--env".to_string());
-        args.push("CODEX_HOME=/home/user/.codex".to_string());
-    }
-
-    // Agent-specific credential mounts
-    // Claude uses ~/.claude-sandbox-config/claude.json for container-specific config.
-    // Apple Container only supports directory mounts, so we mount the directory
-    // and symlink the file inside the container (see command wrapping below).
-    // Docker/Podman can mount the file directly.
-    let needs_claude_config_symlink = if agent == "claude"
-        && let Some(paths) = SandboxPaths::new()
-    {
-        if runtime.supports_file_mounts() && paths.config_file.exists() {
-            args.push("--mount".to_string());
-            args.push(format!(
-                "type=bind,source={},target=/tmp/.claude.json",
-                paths.config_file.display()
-            ));
-            false
-        } else if !runtime.supports_file_mounts() && paths.config_dir.exists() {
-            args.push("--mount".to_string());
-            args.push(format!(
-                "type=bind,source={},target=/tmp/.claude-sandbox-config",
-                paths.config_dir.display()
-            ));
-            true
-        } else {
-            false
-        }
+    let pi_bin_overlay = if agent == "pi" && config.resolved_agent_config_dir(agent).is_some() {
+        Some(pi_bin_overlay(worktree_root, state_root)?)
     } else {
-        false
+        None
     };
-
-    // Mount agent config directory
-    if let Some(config_dir) = config.resolved_agent_config_dir(agent) {
-        let target = match agent {
-            "claude" => "/tmp/.claude",
-            "gemini" => "/tmp/.gemini",
-            "codex" => "/home/user/.codex",
-            "opencode" => "/tmp/.local/share/opencode",
-            "pi" => "/tmp/.pi/agent",
-            "omp" => "/tmp/.omp/agent",
-            _ => unreachable!(), // resolved_agent_config_dir returns None for unknown agents
-        };
-        let _ = std::fs::create_dir_all(&config_dir);
-        args.push("--mount".to_string());
-        args.push(format!(
-            "type=bind,source={},target={}",
-            config_dir.display(),
-            target
-        ));
-
-        // Pi stores managed fd/rg binaries under bin/. Overlay a per-worktree,
-        // arch-keyed directory there so the guest's Linux downloads never
-        // clobber the host's Mach-O binaries via the parent bind mount. The
-        // cache key includes a hash of the canonical worktree path so two
-        // different projects with the same basename don't share a cache.
-        if agent == "pi" {
-            let canonical = worktree_root
-                .canonicalize()
-                .unwrap_or_else(|_| worktree_root.to_path_buf());
-            let basename = worktree_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-            let cache_key = format!(
-                "{}-{}",
-                slug::slugify(basename),
-                crate::sandbox::pi::path_hash(&canonical)
-            );
-            let state_dir = match state_root {
-                Some(root) => root.join("container").join(&cache_key),
-                None => crate::xdg::state_dir()?.join("container").join(cache_key),
-            };
-            std::fs::create_dir_all(&state_dir)?;
-            let overlay = crate::sandbox::pi::pi_bin_overlay_dir(&state_dir)?;
-            args.push("--mount".to_string());
-            args.push(format!(
-                "type=bind,source={},target=/tmp/.pi/agent/bin",
-                overlay.display()
-            ));
-        }
-    }
-
-    // Mount opencode global config directory (~/.config/opencode/) read-only.
-    // This is separate from the data directory (~/.local/share/opencode/) and
-    // contains opencode.json, plugins, and global MCP definitions.
-    if agent == "opencode"
-        && let Some(cfg_dir) = crate::agent_setup::opencode::opencode_config_dir()
-        && cfg_dir.is_dir()
-    {
-        let target = "/tmp/.config/opencode";
-        args.push("--mount".to_string());
-        args.push(format!(
-            "type=bind,source={},target={},readonly",
-            cfg_dir.display(),
-            target
-        ));
-    }
+    let needs_claude_config_symlink =
+        push_agent_home(&mut args, config, agent, runtime, pi_bin_overlay.as_deref());
 
     // Terminal vars
     for term_var in ["TERM", "COLORTERM"] {
@@ -1252,13 +1285,18 @@ pub fn deny_mode_run_flags() -> Vec<String> {
 
 use crate::shell::shell_escape;
 
+/// Shell words that start the sandbox supervisor, resolved through `PATH`.
+const DEFAULT_SUPERVISOR: &str = "workmux sandbox run";
+
 /// Wrap a command to run inside a Docker/Podman container via the sandbox supervisor.
 ///
 /// Generates a `workmux sandbox run` command that starts an RPC server, then
 /// runs the command inside a container with RPC connection details as env vars.
+/// `supervisor` replaces the default `workmux sandbox run` words, already
+/// shell-quoted, for callers that must pin a specific binary.
 pub fn wrap_for_container(
     command: &str,
-    _config: &SandboxConfig,
+    supervisor: Option<&str>,
     worktree_root: &Path,
     pane_cwd: &Path,
 ) -> Result<String> {
@@ -1267,7 +1305,8 @@ pub fn wrap_for_container(
     let command = command.strip_prefix(' ').unwrap_or(command);
 
     let mut parts = format!(
-        "workmux sandbox run '{}'",
+        "{} '{}'",
+        supervisor.unwrap_or(DEFAULT_SUPERVISOR),
         shell_escape(&pane_cwd.to_string_lossy()),
     );
 
@@ -2107,10 +2146,9 @@ mod tests {
 
     #[test]
     fn test_wrap_generates_supervisor_command() {
-        let config = make_config();
         let result = wrap_for_container(
             "claude",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2125,10 +2163,9 @@ mod tests {
 
     #[test]
     fn test_wrap_escapes_quotes_in_command() {
-        let config = make_config();
         let result = wrap_for_container(
             "echo 'hello'",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2139,10 +2176,9 @@ mod tests {
 
     #[test]
     fn test_wrap_strips_leading_space() {
-        let config = make_config();
         let result = wrap_for_container(
             " claude -- \"$(cat PROMPT.md)\"",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project"),
         )
@@ -2153,10 +2189,9 @@ mod tests {
 
     #[test]
     fn test_wrap_with_different_worktree_root() {
-        let config = make_config();
         let result = wrap_for_container(
             "claude",
-            &config,
+            None,
             Path::new("/tmp/project"),
             Path::new("/tmp/project/backend"),
         )
@@ -2164,6 +2199,22 @@ mod tests {
 
         assert!(result.contains("--worktree-root '/tmp/project'"));
         assert!(result.contains("'/tmp/project/backend'"));
+    }
+
+    #[test]
+    fn test_wrap_with_pinned_supervisor() {
+        let result = wrap_for_container(
+            "claude",
+            Some("'/n/bin/workmux-x' sandbox run --node-root '/n'"),
+            Path::new("/tmp/project"),
+            Path::new("/tmp/project"),
+        )
+        .unwrap();
+
+        assert!(
+            result.starts_with(" '/n/bin/workmux-x' sandbox run --node-root '/n' '/tmp/project'"),
+            "{result}"
+        );
     }
 
     #[test]
@@ -2325,6 +2376,10 @@ mod tests {
             &args,
             Some("/tmp/.local/share/opencode"),
             &["target=/tmp/.claude.json", "target=/tmp/.gemini"],
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "type=tmpfs,destination=/tmp/.local/state")
         );
     }
 
