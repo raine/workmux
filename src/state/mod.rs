@@ -7,6 +7,7 @@ pub mod run;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod timing;
 mod types;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -165,10 +166,16 @@ fn persist_agent_snapshot(
     preserve_existing: bool,
     remote: Option<RemoteUpdate>,
 ) {
+    let operation = if preserve_existing {
+        "update"
+    } else {
+        "registration"
+    };
+    let _total = timing::Timer::start("persistence", operation, Some(mux.name()));
     let Ok(store) = StateStore::new() else {
         return;
     };
-    if let Err(error) = store.with_agent_lock(|store| {
+    if let Err(error) = store.with_agent_lock(operation, |store| {
         persist_agent_snapshot_locked(
             store,
             mux,
@@ -198,13 +205,21 @@ fn persist_agent_snapshot_locked(
     preserve_existing: bool,
     remote: Option<RemoteUpdate>,
 ) {
+    let instance_id = || {
+        let _timer = timing::Timer::start("backend_query", "instance_id", Some(mux.name()));
+        mux.instance_id()
+    };
     let pane_key = PaneKey {
         backend: mux.name().to_string(),
-        instance: mux.instance_id(),
+        instance: instance_id(),
         pane_id: pane_id.to_string(),
     };
 
-    let live_info = match mux.get_live_pane_info(pane_id) {
+    let live_query = {
+        let _timer = timing::Timer::start("backend_query", "get_live_pane_info", Some(mux.name()));
+        mux.get_live_pane_info(pane_id)
+    };
+    let live_info = match live_query {
         Ok(Some(info)) => info,
         Ok(None) => {
             warn!(%pane_id, "pane not found, skipping state persist");
@@ -221,12 +236,16 @@ fn persist_agent_snapshot_locked(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let server_boot_id = || {
+        let _timer = timing::Timer::start("backend_query", "server_boot_id", Some(mux.name()));
+        mux.server_boot_id()
+    };
     let (live_pid, boot_id) = if mux.name() == "tmux" {
         let Some(live_pid) = live_info.pid else {
             warn!(%pane_id, "tmux pane PID unavailable, skipping state persist");
             return;
         };
-        let boot_id = match mux.server_boot_id() {
+        let boot_id = match server_boot_id() {
             Ok(Some(boot_id)) => Some(boot_id),
             Ok(None) => {
                 warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
@@ -239,14 +258,11 @@ fn persist_agent_snapshot_locked(
         };
         (live_pid, boot_id)
     } else {
-        (
-            live_info.pid.unwrap_or(0),
-            mux.server_boot_id().unwrap_or(None),
-        )
+        (live_info.pid.unwrap_or(0), server_boot_id().unwrap_or(None))
     };
 
     if let Some(boot_id) = boot_id.as_deref()
-        && let Err(error) = store.compact_context_locked(mux.name(), &mux.instance_id(), boot_id)
+        && let Err(error) = store.compact_context_locked(mux.name(), &instance_id(), boot_id)
     {
         warn!(%error, "failed to compact historical agent state");
         return;

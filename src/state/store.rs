@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
@@ -433,10 +433,25 @@ impl StateStore {
 
     pub(crate) fn with_agent_lock<T>(
         &self,
+        operation_name: &'static str,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        let _lock = AgentStateLock::acquire(&self.base_path)?;
-        operation(self)
+        let wait_start = Instant::now();
+        let lock = AgentStateLock::acquire(&self.base_path);
+        let wait = wait_start.elapsed();
+        let result = match lock {
+            Ok(lock) => {
+                let hold_start = Instant::now();
+                let result = operation(self);
+                drop(lock);
+                let hold = hold_start.elapsed();
+                super::timing::record("lock_hold", operation_name, None, hold);
+                result
+            }
+            Err(error) => Err(error),
+        };
+        super::timing::record("lock_wait", operation_name, None, wait);
+        result
     }
 
     /// Path to a specific agent's state file.
@@ -449,7 +464,7 @@ impl StateStore {
     /// Uses atomic write (temp file + rename) for crash safety.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn upsert_agent(&self, state: &AgentState) -> Result<()> {
-        self.with_agent_lock(|store| store.upsert_agent_locked(state))
+        self.with_agent_lock("upsert_agent", |store| store.upsert_agent_locked(state))
     }
 
     pub(crate) fn upsert_agent_locked(&self, state: &AgentState) -> Result<()> {
@@ -500,7 +515,7 @@ impl StateStore {
         state: &AgentState,
         expected: &FileRevision,
     ) -> Result<bool> {
-        self.with_agent_lock(|store| {
+        self.with_agent_lock("upsert_agent_if_revision", |store| {
             let path = store.agent_path(&state.pane_key);
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
@@ -601,7 +616,9 @@ impl StateStore {
     /// Resets only the status fields so the pane identity and metadata survive
     /// an explicit clear. Returns whether a record existed for the key.
     pub fn clear_agent_status(&self, key: &PaneKey, clear_prompt: bool) -> Result<bool> {
-        self.with_agent_lock(|store| store.clear_agent_status_locked(key, clear_prompt))
+        self.with_agent_lock("clear_agent_status", |store| {
+            store.clear_agent_status_locked(key, clear_prompt)
+        })
     }
 
     fn clear_agent_status_locked(&self, key: &PaneKey, clear_prompt: bool) -> Result<bool> {
@@ -684,7 +701,7 @@ impl StateStore {
     ///
     /// No-op if the file doesn't exist.
     pub fn delete_agent(&self, key: &PaneKey) -> Result<()> {
-        self.with_agent_lock(|store| store.delete_agent_locked(key))
+        self.with_agent_lock("delete_agent", |store| store.delete_agent_locked(key))
     }
 
     fn delete_agent_locked(&self, key: &PaneKey) -> Result<()> {
@@ -825,7 +842,7 @@ impl StateStore {
         let Some(current_boot_id) = current_boot_id else {
             return Ok(CompactionStats::default());
         };
-        self.with_agent_lock(|store| {
+        self.with_agent_lock("compact_context", |store| {
             store.compact_context_locked(backend, instance, current_boot_id)
         })
     }
@@ -912,7 +929,7 @@ impl StateStore {
         backend: &str,
         instance: &str,
     ) -> Result<Vec<ResurrectionAgentState>> {
-        self.with_agent_lock(|store| {
+        self.with_agent_lock("resurrection_snapshot", |store| {
             let mut result = Vec::new();
             let agents_dir = store.agents_dir();
             if agents_dir.exists() {
@@ -960,7 +977,7 @@ impl StateStore {
     }
 
     pub(crate) fn consume_agent_sources(&self, sources: &[AgentStateSource]) -> Result<()> {
-        self.with_agent_lock(|store| {
+        self.with_agent_lock("consume_agent_sources", |store| {
             let mut manifests: HashMap<(String, String), RecoveryManifest> = HashMap::new();
             for source in sources {
                 match source {
@@ -1173,7 +1190,7 @@ impl StateStore {
         old_full_base: &str,
         new_full_base: &str,
     ) -> Result<usize> {
-        self.with_agent_lock(|store| {
+        self.with_agent_lock("migrate_worktree_paths", |store| {
             store.migrate_worktree_paths_locked(
                 old_root_canonical,
                 new_root,
@@ -2538,7 +2555,7 @@ mod tests {
         let mut state = context_state("tmux", "default", 1, Some("old"), 1);
         state.prompt = Some("fix the bug".to_string());
         let manifest = store
-            .with_agent_lock(|store| {
+            .with_agent_lock("test_recovery", |store| {
                 store.merge_recovery_locked("tmux", "default", std::slice::from_ref(&state))?;
                 store.load_recovery_manifest_locked("tmux", "default")
             })
@@ -2552,7 +2569,7 @@ mod tests {
         let (store, _dir) = test_store();
         let state = context_state("tmux", "default", 1, Some("old"), 1);
         store
-            .with_agent_lock(|store| {
+            .with_agent_lock("test_recovery", |store| {
                 store.merge_recovery_locked("tmux", "default", std::slice::from_ref(&state))?;
                 store.merge_recovery_locked("tmux", "default", std::slice::from_ref(&state))?;
                 Ok(())
