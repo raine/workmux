@@ -758,6 +758,7 @@ mod tests {
             pin: None,
             continues: false,
             agent_kind: None,
+            closed_shells: Default::default(),
         });
         ws
     }

@@ -317,6 +317,10 @@ pub struct Execution {
     /// so an `agents:` alias names its type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<String>,
+    /// Closed shell requests cannot start later if their open RPC was delayed.
+    /// The tombstones live only as long as this execution.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub closed_shells: std::collections::BTreeSet<String>,
 }
 
 impl Execution {
