@@ -24,6 +24,33 @@ All workmux files live under a `workmux/` subdirectory within these base directo
 
 The host-side log lives at `$XDG_STATE_HOME/workmux/workmux.log` and includes sandbox network-proxy rejections - see [Debugging blocked requests](/guide/sandbox/features/#debugging-blocked-requests).
 
+## Diagnosing agent-state delays
+
+State operations taking **250 ms or longer** emit `WARN` timing events in the host-side log. To include faster operations, set `RUST_LOG=info,workmux::state=debug` in the environment inherited by workmux hooks and the sidebar. For a single registration:
+
+```sh
+RUST_LOG=info,workmux::state=debug workmux register-agent
+```
+
+Filter the log with:
+
+```sh
+grep 'agent state timing' "${XDG_STATE_HOME:-$HOME/.local/state}/workmux/workmux.log"
+```
+
+Each event has `phase`, `operation`, `duration_ms`, and `process_id` fields. Backend-query and persistence events also identify the `backend`. Timing events do not include prompts, pane IDs, paths, or agent session IDs.
+
+| Phase           | Measures                                                                            |
+| --------------- | ----------------------------------------------------------------------------------- |
+| `lock_wait`     | Opening and acquiring the shared agent-state lock                                   |
+| `lock_hold`     | Running the locked operation through lock release                                   |
+| `backend_query` | Instance resolution, live-pane lookup, or server-identity lookup during persistence |
+| `persistence`   | A registration or update persistence attempt, including queries and locking         |
+
+High query times alongside high lock-hold times suggest backend delays. High lock-wait times indicate contention; high hold times without slow queries suggest work inside the store. Compare events by process ID and timestamp. Phases overlap, so their durations should not be added together.
+
+Lock timings are logged after releasing the lock; query and persistence timings are logged when those attempts finish, including early returns and errors. They do not indicate that a write succeeded. A query or lock acquisition that never finishes produces no completed timing for that phase. Total persistence time excludes hook parsing, backend status-icon updates, and sidebar refresh requests.
+
 ## Global configuration example
 
 `~/.config/workmux/config.yaml`:
