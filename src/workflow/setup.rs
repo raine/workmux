@@ -195,23 +195,12 @@ pub fn setup_environment(
             let initial_pane_id = if let Some(parent_session) =
                 options.window_session_name.as_deref()
             {
-                let parent_session_full_name = parent_session.to_string();
-                if mux.session_exists(&parent_session_full_name)? {
-                    mux.create_window_in_session(CreateWindowInSessionParams {
-                        session_name: &parent_session_full_name,
-                        name: Some(&mux_target_full_name),
-                        cwd: effective_working_dir,
-                    })
-                    .context("Failed to create window in session")?
-                } else {
-                    mux.create_session(CreateSessionParams {
-                        prefix: "",
-                        name: &parent_session_full_name,
-                        cwd: effective_working_dir,
-                        initial_window_name: Some(&mux_target_full_name),
-                    })
-                    .context("Failed to create session")?
-                }
+                crate::multiplexer::util::create_window_in_parent_session(
+                    mux,
+                    parent_session,
+                    &mux_target_full_name,
+                    effective_working_dir,
+                )?
             } else {
                 let placement_window_id = if after_window.is_some() {
                     None

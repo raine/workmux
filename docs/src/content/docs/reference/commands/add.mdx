@@ -80,7 +80,9 @@ With `--remote`, or when `placement` names a remote, the worktree, its panes and
 
 File operations and `post_create` hooks run on the remote, and agent isolation follows `sandbox.enabled` unless the remote explicitly overrides it. See [server or Docker](/guide/remote/setup/#server-or-docker). If an add fails part way, run the same command again to resume it.
 
-These options aren't available for remote workspaces: `--headless`, `--sandbox`, `--pr`, `--with-changes`, `--fork`, `--continue`, `--open-if-exists`, `--target-name`, `--parent-session`, `--dry-run`, session mode, and the `windows:` config. Remote workspaces need the tmux backend.
+`--parent-session <name>` places the local relay window in that exact tmux session, creating it if needed. `--background` leaves focus unchanged. The parent is remembered for `open`, `close`, and `list`, including when run from another session.
+
+These options aren't available for remote workspaces: `--headless`, `--sandbox`, `--pr`, `--with-changes`, `--fork`, `--continue`, `--open-if-exists`, `--target-name`, `--dry-run`, session mode, and the `windows:` config. Remote workspaces need the tmux backend.
 
 ## Resume a session at a recreated worktree path
 

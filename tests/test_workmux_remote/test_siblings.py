@@ -344,12 +344,14 @@ def session_windows(
     return [(line.split()[0], line.split()[1] == "1") for line in out.splitlines()]
 
 
+@pytest.mark.parametrize("explicit_parent", [False, True])
 def test_sibling_opens_next_to_its_parent_in_another_session(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,
     mux_repo_path: Path,
     node: Node,
     tmp_path: Path,
+    explicit_parent: bool,
 ):
     repo = mux_repo_path
     setup_agent_project(repo, tmp_path / "fake-agent")
@@ -358,24 +360,37 @@ def test_sibling_opens_next_to_its_parent_in_another_session(
     wait_for_pane_output(
         mux_server, get_window_name("obs"), "FAKE-AGENT-READY", timeout=20
     )
-    wm(mux_server, workmux_exe_path, repo, "add feat --remote lo")
+    parent_option = " --parent-session other" if explicit_parent else ""
+    wm(mux_server, workmux_exe_path, repo, f"add feat --remote lo{parent_option}")
+    parent_session = "other" if explicit_parent else "test"
     wait_for_pane_output(
-        mux_server, get_window_name("feat"), "FAKE-AGENT-READY", timeout=20
+        mux_server,
+        f"={parent_session}:={get_window_name('feat')}",
+        "FAKE-AGENT-READY",
+        timeout=20,
     )
     parent = by_branch(node, "feat")
     assert parent is not None
 
-    mux_server.tmux(["new-session", "-d", "-s", "other"])
+    if not explicit_parent:
+        mux_server.tmux(["new-session", "-d", "-s", "other"])
     feat_id = mux_server.tmux(
         [
             "display-message",
             "-p",
             "-t",
-            f"test:{get_window_name('feat')}",
+            f"={parent_session}:={get_window_name('feat')}",
             "#{window_id}",
         ]
     ).stdout.strip()
-    mux_server.tmux(["move-window", "-s", feat_id, "-t", "other:"])
+    if explicit_parent:
+        mux_server.tmux(["link-window", "-s", feat_id, "-t", "=test:"])
+        mux_server.tmux(["select-window", "-t", f"=test:{feat_id}"])
+        mux_server.tmux(
+            ["new-window", "-d", "-t", "=test:", "-n", get_window_name("feat")]
+        )
+    else:
+        mux_server.tmux(["move-window", "-s", feat_id, "-t", "other:"])
     # Ids, not names: tmux renames the runner window after its command.
     before = session_windows(mux_server, "test", "window_id")
 
@@ -390,3 +405,78 @@ def test_sibling_opens_next_to_its_parent_in_another_session(
     # Opened where its parent is, without taking focus from another session.
     assert session_windows(mux_server, "test", "window_id") == before
     assert (window, False) in session_windows(mux_server, "other")
+    assert window not in [name for name, _ in session_windows(mux_server, "test")]
+
+    wm(mux_server, workmux_exe_path, repo, "close sib")
+    assert window not in [name for name, _ in session_windows(mux_server, "other")]
+    wm(mux_server, workmux_exe_path, repo, "open sib")
+    assert window in [name for name, _ in session_windows(mux_server, "other")]
+
+
+def test_sibling_adoption_without_a_local_tmux_server(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+):
+    import subprocess
+
+    from .conftest import LOOPBACK, agent_dirs_env
+
+    env, exe, repo = mux_server, workmux_exe_path, mux_repo_path
+    setup_project(repo)
+    wm(env, exe, repo, "add feat --remote lo -b --parent-session Review")
+    [parent] = local_records(env)
+    ex_id = parent["execution"]["ex_id"]
+    wait_for_pane_output(
+        env, "=Review:" + get_window_name("feat"), "AGENT-READY", timeout=20
+    )
+    wm(env, exe, repo, "close feat")
+    env.stop_server()
+    spawn(node, ex_id, "later -b -p 'while away'")
+    assert poll_until(lambda: running(node, "later"), timeout=20)
+    result = subprocess.run(
+        [str(exe), "list", "--json"],
+        cwd=repo,
+        env={
+            **env.env,
+            **LOOPBACK,
+            **agent_dirs_env(env.home_path),
+            "TMUX": f"{env.socket_path},0,0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    [sibling] = [r for r in local_records(env) if r["handle"] == "later"]
+    assert sibling["window_pending"]
+    assert sibling["window_session"] == "Review"
+    env.start_server()
+    wm(env, exe, repo, "list")
+    assert get_window_name("later") in [
+        name for name, _ in session_windows(env, "Review")
+    ]
+
+
+@pytest.mark.parametrize("explicit_parent", [False, True])
+def test_foreground_sibling_focuses_with_a_live_parent(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    tmp_path: Path,
+    explicit_parent: bool,
+):
+    env, exe, repo = mux_server, workmux_exe_path, mux_repo_path
+    setup_agent_project(repo, tmp_path / "fake-agent")
+    option = " --parent-session test" if explicit_parent else ""
+    wm(env, exe, repo, f"add feat --remote lo{option}")
+    wait_for_pane_output(env, get_window_name("feat"), "FAKE-AGENT-READY", timeout=20)
+    parent = by_branch(node, "feat")
+    assert parent is not None
+    env.tmux(["select-window", "-t", f"=test:={get_window_name('feat')}"])
+    tell(Path(parent["worktree_path"]), "spawn foreground -p focus-me")
+    assert poll_until(
+        lambda: active_window(env) == get_window_name("foreground"), timeout=20
+    )

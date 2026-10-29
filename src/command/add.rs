@@ -431,7 +431,6 @@ pub fn run(
                 (setup.open_if_exists, "--open-if-exists"),
                 (setup.sandbox, "--sandbox"),
                 (target_name.is_some(), "--target-name"),
-                (parent_session.is_some(), "--parent-session"),
                 (mode_override == Some(MuxMode::Session), "Session mode"),
                 (dry_run, "--dry-run"),
             ],
@@ -1044,6 +1043,7 @@ impl<'a> CreationPlan<'a> {
 
         // Track targets for --wait (all created windows/sessions)
         let mut created_targets = Vec::new();
+        let mut remote_wait_targets = Vec::new();
         // Track currently active targets for --max-concurrent
         let mut active_targets: Vec<String> = Vec::new();
         let mode = self.options.mode;
@@ -1202,8 +1202,11 @@ impl<'a> CreationPlan<'a> {
                         final_branch_name, remote.name
                     )
                 })?;
-                if self.wait {
-                    created_targets.push(record.window_name.clone());
+                if self.wait
+                    && let Some(target) =
+                        crate::remote::lifecycle::window_target(mux.as_ref(), &record)?
+                {
+                    remote_wait_targets.push(target);
                 }
                 if self.max_concurrent.is_some() {
                     active_targets.push(record.window_name.clone());
@@ -1289,6 +1292,13 @@ impl<'a> CreationPlan<'a> {
                 println!("  Base: {}", base);
             }
             println!("  Worktree: {}", result.worktree_path.display());
+        }
+
+        for target in remote_wait_targets {
+            println!("Waiting for window '{}' to close...", target.full_name);
+            while mux.is_running()? && mux.window_target_exists(&target)? {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
         }
 
         if self.wait && !created_targets.is_empty() {

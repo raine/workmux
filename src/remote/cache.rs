@@ -93,6 +93,9 @@ pub struct WorkspaceRecord {
     pub base_label: Option<String>,
     /// Full local window name.
     pub window_name: String,
+    /// Explicit local parent session, retained when reopening the relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_session: Option<String>,
     /// Worktree path on the node, once known.
     pub remote_worktree: Option<String>,
     pub state: WorkspaceState,
@@ -141,6 +144,7 @@ impl WorkspaceRecord {
             base_sha,
             base_label,
             window_name,
+            window_session: None,
             remote_worktree: None,
             state: WorkspaceState::Provisioning,
             layout: Vec::new(),
@@ -570,6 +574,28 @@ mod tests {
             format!("wm-{handle}"),
             PathBuf::from("/repo__worktrees").join(handle),
         )
+    }
+
+    #[test]
+    fn parent_session_is_optional_and_roundtrips() {
+        let mut record = record("w1", "feat", "feat");
+        let old = serde_json::to_value(&record).unwrap();
+        assert!(old.get("window_session").is_none());
+        assert!(
+            serde_json::from_value::<WorkspaceRecord>(old)
+                .unwrap()
+                .window_session
+                .is_none()
+        );
+        record.window_session = Some("Review".into());
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkspaceRecord>(json)
+                .unwrap()
+                .window_session
+                .as_deref(),
+            Some("Review")
+        );
     }
 
     #[test]

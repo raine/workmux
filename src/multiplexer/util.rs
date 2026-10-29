@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::agent::SelectedAgent;
 use crate::config::Config;
@@ -20,6 +20,31 @@ use super::types::LivePaneInfo;
 /// Used by all backends to construct full window names from prefix and base name.
 pub fn prefixed(prefix: &str, window_name: &str) -> String {
     format!("{}{}", prefix, window_name)
+}
+
+/// Create a named window in an existing parent session, or as its first window.
+pub fn create_window_in_parent_session(
+    mux: &dyn super::Multiplexer,
+    session: &str,
+    name: &str,
+    cwd: &Path,
+) -> Result<String> {
+    if mux.session_exists(session)? {
+        mux.create_window_in_session(super::CreateWindowInSessionParams {
+            session_name: session,
+            name: Some(name),
+            cwd,
+        })
+        .context("Failed to create window in session")
+    } else {
+        mux.create_session(super::CreateSessionParams {
+            prefix: "",
+            name: session,
+            cwd,
+            initial_window_name: Some(name),
+        })
+        .context("Failed to create session")
+    }
 }
 
 /// Check if a shell is POSIX-compatible (supports `$(...)` syntax).

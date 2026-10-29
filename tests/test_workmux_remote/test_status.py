@@ -528,20 +528,28 @@ def test_dashboard_machine_column_follows_remote_agents(
     ), dashboard()
 
 
+@pytest.mark.parametrize("parent_session", [None, "Review"])
 def test_resurrect_reattaches_without_restarting_the_agent(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,
     mux_repo_path: Path,
     node: Node,
     tmp_path: Path,
+    parent_session,
 ):
     env = mux_server
     repo = mux_repo_path
     exe = workmux_exe_path
     agent = FakeAgent(tmp_path)
     setup_agent_project(repo, agent)
-    window = get_window_name("rs")
-    wm(env, exe, repo, "add rs --remote lo")
+    name = get_window_name("rs")
+    window = f"={parent_session}:={name}" if parent_session else name
+    option = f" --parent-session {parent_session}" if parent_session else ""
+    wm(env, exe, repo, f"add rs --remote lo{option}")
+
+    def is_open():
+        return env.tmux(["list-panes", "-t", window], check=False).returncode == 0
+
     wait_for_pane_output(env, window, "FAKE-AGENT-READY", timeout=20)
     agent.do("working")
     wait_for_pane_output(env, window, "applied-working", timeout=10)
@@ -576,9 +584,11 @@ def test_resurrect_reattaches_without_restarting_the_agent(
     assert row["status"] == "working"
     assert row["remote"]["attached"] is False
     env.start_server()
+    if parent_session:
+        env.tmux(["new-window", "-d", "-t", "=test:", "-n", name])
     result = wm(env, exe, repo, "resurrect")
     assert "rs@lo" in result.stdout and "restoring" in result.stdout, result.stdout
-    assert window in env.list_windows()
+    assert is_open()
     wait_for_pane_output(env, window, "applied-working", timeout=20)
     assert node.sessions() == sessions
     assert agent_pid() == pid
@@ -594,7 +604,7 @@ def test_resurrect_reattaches_without_restarting_the_agent(
     env.start_server()
     result = wm(env, exe, repo, "resurrect")
     assert "rs@lo" not in result.stdout, result.stdout
-    assert window not in env.list_windows()
+    assert not is_open()
     assert agent_pid() == pid
 
     # Also when it was reopened by hand after a restart, which files the

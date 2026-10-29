@@ -286,8 +286,8 @@ pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()
     }
 
     let remote_open = |record: &WorkspaceRecord| {
-        mux.window_exists_by_full_name(&record.window_name)
-            .unwrap_or(false)
+        crate::remote::lifecycle::window_target(mux.as_ref(), record)
+            .is_ok_and(|target| target.is_some())
     };
 
     if worktrees.is_empty() && remotes.is_empty() {
