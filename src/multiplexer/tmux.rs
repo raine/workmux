@@ -654,7 +654,7 @@ impl TmuxBackend {
         }
 
         match target.parent_session() {
-            Some(session) => format!("{}:={}", session, target.full_name),
+            Some(session) => format!("={}:={}", session, target.full_name),
             None => format!("={}", target.full_name),
         }
     }
@@ -925,7 +925,7 @@ impl Multiplexer for TmuxBackend {
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
         // Target the specific session with trailing colon (creates window at next index)
-        let target = format!("{}:", params.session_name);
+        let target = format!("={}:", params.session_name);
 
         let mut cmd =
             self.tmux_command()
@@ -1032,7 +1032,7 @@ impl Multiplexer for TmuxBackend {
     fn session_exists(&self, full_name: &str) -> Result<bool> {
         // has-session returns 0 if session exists, 1 if not
         self.tmux_command()
-            .args(&["has-session", "-t", full_name])
+            .args(&["has-session", "-t", &format!("={full_name}")])
             .run_as_check()
     }
 
@@ -1337,7 +1337,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn get_window_names_in_session(&self, session_name: &str) -> Result<HashSet<String>> {
-        let target = format!("{}:", session_name);
+        let target = format!("={}:", session_name);
         let windows = self
             .tmux_query(&["list-windows", "-t", &target, "-F", "#{window_name}"])
             .unwrap_or_default();
@@ -1970,7 +1970,7 @@ mod tests {
     fn window_target_falls_back_to_parent_qualified_exact_name() {
         let target = WindowTarget::new("work".to_string(), Some("parent".to_string()));
 
-        assert_eq!(TmuxBackend::window_target_arg(&target), "parent:=work");
+        assert_eq!(TmuxBackend::window_target_arg(&target), "=parent:=work");
     }
 
     #[test]

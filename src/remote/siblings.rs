@@ -18,7 +18,7 @@ use super::cache::{self, ExecutionRecord, WorkspaceRecord, WorkspaceState};
 use super::node::observe::{ObservedWorkspace, Sibling};
 use super::observe::Observation;
 use crate::config::Config;
-use crate::multiplexer::{Multiplexer, create_backend, detect_backend};
+use crate::multiplexer::{create_backend, detect_backend};
 use crate::workflow::WorkflowContext;
 
 /// Seconds after its spawn within which a sibling's window takes focus, so
@@ -124,11 +124,21 @@ fn adopt_one(
     }
     let context = context(&project_root)?;
     let window_name = crate::multiplexer::util::prefixed(&context.prefix, &identity.handle);
+    let parent = records
+        .iter()
+        .find(|parent| parent.remote == remote && parent.ws_id == sibling.origin.parent);
+    let window_session = match parent {
+        Some(parent) => super::lifecycle::window_target(context.mux.as_ref(), parent)?
+            .and_then(|target| target.parent_session)
+            .or_else(|| parent.window_session.clone()),
+        None => None,
+    };
     if let Some(conflict) = super::lifecycle::local_conflict(
         &context,
         &identity.branch,
         &identity.handle,
         &window_name,
+        window_session.as_deref(),
         true,
         "",
     )? {
@@ -146,6 +156,7 @@ fn adopt_one(
         window_name,
         context.worktree_base_dir()?.join(&identity.handle),
     );
+    record.window_session = window_session;
     record.remote_worktree = Some(sibling.worktree.clone());
     record.state = WorkspaceState::Ready;
     record.layout = sibling.origin.layout.clone();
@@ -182,58 +193,37 @@ fn open(
     if !mux.is_running().unwrap_or(false) {
         return Ok(());
     }
-    if !mux.window_exists_by_full_name(&record.window_name)? {
+    if super::lifecycle::window_target(mux, &record)?.is_none() {
         let spawned = observation.local_ts(sibling.origin.spawned_at);
         let focus =
             !sibling.origin.background && cache::now().saturating_sub(spawned) <= FOCUS_WITHIN;
         let parent = records
             .iter()
             .find(|parent| parent.remote == record.remote && parent.ws_id == sibling.origin.parent)
-            .filter(|_| mux.name() == "tmux")
-            .and_then(|parent| window_of(mux, &parent.window_name));
+            .map(|parent| super::lifecycle::window_target(mux, parent))
+            .transpose()?
+            .flatten();
         match parent {
             // Next to the window of the agent that spawned it, in whichever
             // session has it; focus only moves within this process's session.
-            Some(parent) => super::lifecycle::open_window_after(
-                context,
-                &record,
-                focus && parent.here,
-                Some(&parent.id),
-            ),
+            Some(parent) => {
+                let after = format!(
+                    "={}:{}",
+                    parent.parent_session.as_deref().expect("resolved session"),
+                    parent.window_id.as_deref().expect("resolved window ID")
+                );
+                super::lifecycle::open_window_after(
+                    context,
+                    &record,
+                    focus && parent.parent_session == mux.current_session(),
+                    Some(&after),
+                )
+            }
             None => super::lifecycle::open_window(context, &record, focus),
         }?;
     }
     record.window_pending = false;
     record.save()
-}
-
-struct ParentWindow {
-    id: String,
-    /// In the session of this process.
-    here: bool,
-}
-
-/// The window named `name`, preferring one in this process's session.
-fn window_of(mux: &dyn Multiplexer, name: &str) -> Option<ParentWindow> {
-    let current = mux
-        .current_pane_id()
-        .and_then(|pane| mux.get_live_pane_info(&pane).ok().flatten())
-        .and_then(|pane| pane.session);
-    let mut windows: Vec<(bool, String)> = mux
-        .get_all_live_pane_info()
-        .ok()?
-        .into_values()
-        .filter(|pane| pane.window.as_deref() == Some(name))
-        .filter_map(|pane| {
-            Some((
-                current.is_some() && pane.session == current,
-                pane.window_id?,
-            ))
-        })
-        .collect();
-    windows.sort();
-    let (here, id) = windows.pop()?;
-    Some(ParentWindow { id, here })
 }
 
 /// The repository of `project_id` on this machine: from the records, else

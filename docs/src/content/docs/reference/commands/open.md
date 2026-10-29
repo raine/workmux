@@ -51,6 +51,8 @@ Git repository and only provides conservative evidence for tmux placement.
 
 For a workspace on a [remote server](/guide/remote/), `open` reopens the local window and reattaches it to the remote session. The agent was never stopped by `close`, so nothing restarts. If the remote session has ended, `open` starts the workspace's panes again. After a remote host reboot, agents resume their most recent conversation, and `open` says whether the agent continued its conversation or started a new one.
 
+A remote workspace created with `add --parent-session` reopens in its recorded parent session, creating the session again if needed.
+
 Prompts, `--continue`, `--new`, `--run-hooks`, `--force-files`, `--target-name`, `--parent-session` and session mode aren't available for remote workspaces. With `mode: session` in the config, pass `--mode window` to open a remote workspace.
 
 ## Examples

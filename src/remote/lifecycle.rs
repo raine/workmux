@@ -21,8 +21,8 @@ use super::protocol::{
     RemoveRequest, RemoveResponse, StartRequest, StartResponse, WorkspaceIdentity, code,
 };
 use crate::cmd::Cmd;
-use crate::config::{Config, ConfigLocation, MuxMode};
-use crate::multiplexer::{CreateWindowParams, Multiplexer};
+use crate::config::{Config, ConfigLocation};
+use crate::multiplexer::{CreateWindowParams, Multiplexer, WindowOwnershipRecord, WindowTarget};
 use crate::prompt::Prompt;
 use crate::shell::shell_quote;
 use crate::workflow::{SetupOptions, WorkflowContext};
@@ -86,11 +86,20 @@ pub fn create(
             // Local add's rule for a window name another repository holds:
             // an implicit name gets this project's suffix.
             if !request.explicit_name
-                && context.mux.window_exists(&context.prefix, &handle)?
+                && window_name_taken(
+                    context.mux.as_ref(),
+                    &crate::multiplexer::util::prefixed(&context.prefix, &handle),
+                    request.options.window_session_name.as_deref(),
+                )?
                 && !crate::git::worktree_exists_in(request.branch, Some(&context.execution_dir))?
             {
-                (handle, _) =
-                    crate::workflow::suffix_taken_handle(context, MuxMode::Window, &handle)?;
+                let suffixed = crate::workflow::project_suffixed_handle(context, &handle);
+                eprintln!(
+                    "workmux: window '{}' exists in another repository, using '{}'",
+                    crate::multiplexer::util::prefixed(&context.prefix, &handle),
+                    crate::multiplexer::util::prefixed(&context.prefix, &suffixed)
+                );
+                handle = suffixed;
                 if let Some(record) = cache::claimed(&project_root, &handle, request.branch) {
                     bail!(
                         "'{}' already exists as a remote workspace on '{}'. Use `workmux open \
@@ -104,6 +113,20 @@ pub fn create(
             None
         }
     };
+    let window_session = match &resume {
+        Some(record) => {
+            if let Some(requested) = &request.options.window_session_name
+                && record.window_session.as_ref() != Some(requested)
+            {
+                bail!(
+                    "Cannot change --parent-session while resuming remote workspace '{}'",
+                    record.handle
+                );
+            }
+            record.window_session.clone()
+        }
+        None => request.options.window_session_name.clone(),
+    };
     let window_name = match &resume {
         Some(record) => record.window_name.clone(),
         None => crate::multiplexer::util::prefixed(&context.prefix, &handle),
@@ -113,6 +136,7 @@ pub fn create(
         request.branch,
         &handle,
         &window_name,
+        window_session.as_deref(),
         resume.is_none(),
         "\nHint: use --name to pick another name.",
     )? {
@@ -178,6 +202,7 @@ pub fn create(
         }
     };
 
+    record.window_session = window_session;
     let node = Node::connect(spec)?;
     super::homecoming::finish_pending(&node, &record.ws_id);
     super::observe::current_on(&node);
@@ -329,6 +354,7 @@ pub(super) fn local_conflict(
     branch: &str,
     handle: &str,
     window_name: &str,
+    window_session: Option<&str>,
     worktrees: bool,
     hint: &str,
 ) -> Result<Option<String>> {
@@ -343,12 +369,71 @@ pub(super) fn local_conflict(
             "A local worktree named '{handle}' already exists.{hint}"
         )));
     }
-    if context.mux.window_exists_by_full_name(window_name)? {
+    if window_name_taken(context.mux.as_ref(), window_name, window_session)? {
         return Ok(Some(format!(
             "A tmux window named '{window_name}' already exists.{hint}"
         )));
     }
     Ok(None)
+}
+
+/// Exact name matches in the destination scope, retaining linked session membership.
+fn matching_windows(
+    mux: &dyn Multiplexer,
+    name: &str,
+    session: Option<&str>,
+) -> Result<Vec<WindowOwnershipRecord>> {
+    if !mux.is_running()? {
+        return Ok(Vec::new());
+    }
+    Ok(mux
+        .window_ownership_records()?
+        .into_iter()
+        .filter(|window| {
+            window.window_name == name
+                && session.is_none_or(|session| window.session_name == session)
+        })
+        .collect())
+}
+
+/// Whether the name is occupied in the destination or would make an existing
+/// implicit remote workspace's server-wide lookup ambiguous.
+fn window_name_taken(mux: &dyn Multiplexer, name: &str, session: Option<&str>) -> Result<bool> {
+    let windows = matching_windows(mux, name, None)?;
+    Ok(windows
+        .iter()
+        .any(|window| session.is_none_or(|session| window.session_name == session))
+        || (!windows.is_empty()
+            && cache::all()
+                .iter()
+                .any(|record| record.window_session.is_none() && record.window_name == name)))
+}
+
+/// Resolve an exact remote relay name to a live window ID. Never choose between
+/// different windows with the same name; linked windows count only once.
+pub(crate) fn window_target(
+    mux: &dyn Multiplexer,
+    record: &WorkspaceRecord,
+) -> Result<Option<WindowTarget>> {
+    let mut target: Option<WindowTarget> = None;
+    for window in matching_windows(mux, &record.window_name, record.window_session.as_deref())? {
+        if let Some(found) = &target {
+            if found.window_id.as_ref() != Some(&window.window_id) {
+                bail!(
+                    "Ambiguous tmux window '{}' for remote workspace '{}'; more than one exact match",
+                    record.window_name,
+                    record.handle
+                );
+            }
+        } else {
+            target = Some(WindowTarget::with_id(
+                window.window_name,
+                Some(window.session_name),
+                window.window_id,
+            ));
+        }
+    }
+    Ok(target)
 }
 
 /// Start the workspace's execution, or rejoin the running one, and record
@@ -630,9 +715,13 @@ fn attach_command_line(remote: &str, ex_id: &str, index: usize) -> Result<String
 /// Create the window for `record`'s execution: one pane per remote session,
 /// split, sized, named and focused as configured.
 pub fn open_window(context: &WorkflowContext, record: &WorkspaceRecord, focus: bool) -> Result<()> {
-    let placement = context
-        .mux
-        .resolve_window_placement_target(context.config.window_placement())?;
+    let placement = if record.window_session.is_some() {
+        None
+    } else {
+        context
+            .mux
+            .resolve_window_placement_target(context.config.window_placement())?
+    };
     open_window_after(context, record, focus, placement.as_deref())
 }
 
@@ -659,14 +748,23 @@ pub(super) fn open_window_after(
         .collect();
 
     let cwd = &context.main_worktree_root;
-    let first = mux
-        .create_window(CreateWindowParams {
-            prefix: &context.prefix,
-            name: &record.handle,
+    let first = if let Some(session) = record.window_session.as_deref().filter(|_| after.is_none())
+    {
+        crate::multiplexer::util::create_window_in_parent_session(
+            mux,
+            session,
+            &record.window_name,
+            cwd,
+        )?
+    } else {
+        mux.create_window(CreateWindowParams {
+            prefix: "",
+            name: &record.window_name,
             cwd,
             after_window: after,
         })
-        .context("Failed to create window")?;
+        .context("Failed to create window")?
+    };
 
     let mut pane_ids: Vec<String> = Vec::new();
     let mut focus_pane = None;
@@ -708,7 +806,9 @@ pub(super) fn open_window_after(
 
     if focus {
         mux.select_pane(focus_pane.as_deref().unwrap_or(&pane_ids[0]))?;
-        mux.select_window(&context.prefix, &record.handle)?;
+        if record.window_session.is_none() || after.is_some() {
+            mux.select_window("", &record.window_name)?;
+        }
     }
     if let Some(zoom) = zoom_pane {
         mux.zoom_pane(&zoom)?;
@@ -730,13 +830,14 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
     }
     let mux = context.mux.as_ref();
     let switch = |record: &WorkspaceRecord| -> Result<()> {
-        if focus {
-            mux.select_window(&context.prefix, &record.handle)?;
+        if focus && let Some(target) = window_target(mux, record)? {
+            mux.select_window_target(&target)?;
         }
         println!("✓ Switched to remote workspace '{}'", record.handle);
         Ok(())
     };
-    let window = mux.window_exists_by_full_name(&record.window_name)?;
+    let target = window_target(mux, &record)?;
+    let window = target.is_some();
     let stale = super::observe::load_connected(&record.remote)
         .and_then(|observation| Some(observation.of(&record)?.ended.is_some()))
         .unwrap_or(window);
@@ -771,7 +872,7 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
     super::homecoming::finish_pending(&node, &record.ws_id);
     // Observing adopts siblings, which may open this window meanwhile.
     super::observe::current_on(&node);
-    if !window && mux.window_exists_by_full_name(&record.window_name)? {
+    if !window && window_target(mux, &record)?.is_some() {
         return switch(&record);
     }
     let previous = record
@@ -779,12 +880,12 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         .as_ref()
         .map(|execution| execution.ex_id.clone());
     let started = start_execution(&node, &mut record, false, true)?;
-    if window {
+    if let Some(target) = &target {
         let current = record.execution.as_ref().map(|execution| &execution.ex_id);
         if started.reused && current == previous.as_ref() {
             return switch(&record);
         }
-        mux.kill_window(&record.window_name)
+        mux.kill_window_target(target)
             .context("Failed to close the window of the ended execution")?;
         forget_attachments(&record);
     }
@@ -822,14 +923,14 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
 /// `workmux close` of a remote workspace: the window goes, the remote
 /// sessions keep running.
 pub fn close(mux: &dyn Multiplexer, record: &WorkspaceRecord) -> Result<()> {
-    if !mux.window_exists_by_full_name(&record.window_name)? {
+    let Some(target) = window_target(mux, record)? else {
         bail!(
             "No open window for remote workspace '{}' on '{}'",
             record.handle,
             record.remote
         );
-    }
-    mux.kill_window(&record.window_name)
+    };
+    mux.kill_window_target(&target)
         .context("Failed to close window")?;
     forget_attachments(record);
     println!(
@@ -1178,11 +1279,14 @@ pub(crate) fn close_relay(mux: &dyn Multiplexer, record: &WorkspaceRecord) {
     forget_attachments(record);
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    if mux
-        .window_exists_by_full_name(&record.window_name)
-        .unwrap_or(false)
-    {
-        let _ = mux.kill_window(&record.window_name);
+    match window_target(mux, record) {
+        Ok(Some(target)) => {
+            let _ = mux.kill_window_target(&target);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(handle = %record.handle, "could not resolve relay window: {err:#}")
+        }
     }
 }
 

@@ -227,7 +227,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
     // Sort by handle for deterministic output
     candidates.sort_by(|a, b| a.handle.cmp(&b.handle));
 
-    let (remote, forgotten_remote_sources) = plan_remote(by_workspace, &canon_main, &mux_windows);
+    let (remote, forgotten_remote_sources) = plan_remote(by_workspace, &canon_main, mux)?;
 
     Ok(ResurrectPlan {
         candidates,
@@ -242,10 +242,10 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
 fn plan_remote(
     by_workspace: HashMap<(String, String), Vec<AgentStateSource>>,
     canon_main: &std::path::Path,
-    mux_windows: &std::collections::HashSet<String>,
-) -> (Vec<RemoteResurrectCandidate>, Vec<AgentStateSource>) {
+    mux: &dyn Multiplexer,
+) -> Result<(Vec<RemoteResurrectCandidate>, Vec<AgentStateSource>)> {
     if by_workspace.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let records = crate::remote::cache::all();
     let mut candidates = Vec::new();
@@ -265,7 +265,7 @@ fn plan_remote(
             forgotten.extend(sources);
             continue;
         }
-        let action = if mux_windows.contains(&record.window_name) {
+        let action = if crate::remote::lifecycle::window_target(mux, record)?.is_some() {
             ResurrectAction::SkipAlreadyOpen
         } else {
             ResurrectAction::Restore
@@ -277,7 +277,7 @@ fn plan_remote(
         });
     }
     candidates.sort_by(|a, b| a.record.handle.cmp(&b.record.handle));
-    (candidates, forgotten)
+    Ok((candidates, forgotten))
 }
 
 #[cfg(test)]
