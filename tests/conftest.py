@@ -749,11 +749,25 @@ class RexEnvironment(MuxEnvironment):
         result = self.mux_command(["api", "call", method, json.dumps(args)])
         return json.loads(result.stdout) if result.stdout.strip() else {}
 
+    def _block_args(self, block_id: str) -> list[str]:
+        """The `-s SESSION -b BLOCK` pair that addresses a block."""
+        return ["-s", str(self.session_id), "-b", block_id]
+
+    def _window_ref(self, window: dict) -> dict:
+        return {"session_id": self.session_id, "window_id": window["window_id"]}
+
     def _view(self) -> dict:
         return self._api("session.view", {"session_id": self.session_id})
 
     def _windows(self) -> list[dict]:
         return self._view().get("windows") or []
+
+    def _active_window(self) -> Optional[dict]:
+        view = self._view()
+        for window in view.get("windows") or []:
+            if window.get("window_id") == view.get("active_window_id"):
+                return window
+        return None
 
     def _find_window(self, window_name: str) -> Optional[dict]:
         for window in self._windows():
@@ -761,11 +775,15 @@ class RexEnvironment(MuxEnvironment):
                 return window
         return None
 
-    def _window_block(self, window_name: str) -> Optional[str]:
-        """The focused block of a window, falling back to its first tiled block."""
+    def _require_window(self, window_name: str) -> dict:
         window = self._find_window(window_name)
         if not window:
-            return None
+            raise RuntimeError(f"Window '{window_name}' not found in session")
+        return window
+
+    @staticmethod
+    def _focused_block(window: dict) -> Optional[str]:
+        """A window's focused block, falling back to its first tiled block."""
         if window.get("focused_block_id"):
             return window["focused_block_id"]
         for layer in window.get("layers") or []:
@@ -773,23 +791,22 @@ class RexEnvironment(MuxEnvironment):
                 return layer["blocks"][0]["block_id"]
         return None
 
-    def _active_block(self) -> str:
-        """The focused block of the active window, like tmux's 'test:' target."""
-        view = self._view()
-        for window in view.get("windows") or []:
-            if window.get("window_id") == view.get("active_window_id") and window.get(
-                "focused_block_id"
-            ):
-                return window["focused_block_id"]
-        assert self.runner_block_id is not None, "Rex session has not been started"
-        return self.runner_block_id
+    def _window_block(self, window_name: str) -> Optional[str]:
+        window = self._find_window(window_name)
+        return self._focused_block(window) if window else None
 
     def _target_block(self, target: str) -> str:
+        """Resolve a send target. 'test:' means the active block, like tmux."""
         if target == "test:":
-            return self._active_block()
-        block_id = self._window_block(target)
+            window = self._active_window()
+            block_id = self._focused_block(window) if window else None
+            if block_id:
+                return block_id
+            assert self.runner_block_id is not None, "Rex session has not been started"
+            return self.runner_block_id
+        block_id = self._focused_block(self._require_window(target))
         if not block_id:
-            raise RuntimeError(f"Window '{target}' not found in session")
+            raise RuntimeError(f"Window '{target}' has no blocks")
         return block_id
 
     def list_windows(self) -> list[str]:
@@ -805,19 +822,16 @@ class RexEnvironment(MuxEnvironment):
         block_id = self._window_block(window_name)
         if not block_id:
             return None
-        result = self.mux_command(
-            ["capture", "-s", str(self.session_id), "-b", block_id], check=False
-        )
+        result = self.mux_command(["capture", *self._block_args(block_id)], check=False)
         if result.returncode == 0:
             return result.stdout
         return None
 
     def _send(self, block_id: str, text: str, enter: bool) -> None:
-        self.mux_command(["send", "-s", str(self.session_id), "-b", block_id, text])
+        # `--` so text starting with "-" isn't read as a flag
+        self.mux_command(["send", *self._block_args(block_id), "--", text])
         if enter:
-            self.mux_command(
-                ["send-key", "-s", str(self.session_id), "-b", block_id, "enter"]
-            )
+            self.mux_command(["send-key", *self._block_args(block_id), "enter"])
 
     def send_keys(self, target: str, text: str, enter: bool = True) -> None:
         """Send text to the active block ('test:') or a window's focused block."""
@@ -830,36 +844,23 @@ class RexEnvironment(MuxEnvironment):
         self._send(self.runner_block_id, f"nohup {command} >/dev/null 2>&1 &", True)
 
     def set_session_env(self, key: str, value: str) -> None:
-        """Set an environment variable via shell export in the runner block."""
+        """Set an environment variable via shell export in the active block."""
         self.send_keys("test:", f"export {key}={shlex.quote(value)}", enter=True)
 
     def kill_window(self, window_name: str) -> None:
         """Close a window by label. Raises if it doesn't exist."""
-        window = self._find_window(window_name)
-        if not window:
-            raise RuntimeError(f"Window '{window_name}' not found in session")
-        self._api(
-            "session.close_window",
-            {"session_id": self.session_id, "window_id": window["window_id"]},
-        )
+        window = self._require_window(window_name)
+        self._api("session.close_window", self._window_ref(window))
 
     def get_current_window(self) -> Optional[str]:
         """Get the label of the session's active window."""
-        view = self._view()
-        for window in view.get("windows") or []:
-            if window.get("window_id") == view.get("active_window_id"):
-                return window.get("label")
-        return None
+        window = self._active_window()
+        return window.get("label") if window else None
 
     def select_window(self, window_name: str) -> None:
         """Make a window active by label. Raises if it doesn't exist."""
-        window = self._find_window(window_name)
-        if not window:
-            raise RuntimeError(f"Window '{window_name}' not found in session")
-        self._api(
-            "session.focus_window",
-            {"session_id": self.session_id, "window_id": window["window_id"]},
-        )
+        window = self._require_window(window_name)
+        self._api("session.focus_window", self._window_ref(window))
 
     def new_window(self, name: Optional[str] = None) -> None:
         """Create a new window in the test session."""
@@ -917,11 +918,16 @@ def skip_if_backend_unavailable(backend: str):
 # Type alias for tests that accept any backend
 MuxEnv = Union[TmuxEnvironment, WezTermEnvironment, RexEnvironment]
 
+# Test environment class for each --backend value
+MUX_ENVIRONMENTS: dict[str, type[MuxEnvironment]] = {
+    "tmux": TmuxEnvironment,
+    "wezterm": WezTermEnvironment,
+    "rex": RexEnvironment,
+}
+
 # Default window prefix - must match src/config.rs window_prefix() default
 DEFAULT_WINDOW_PREFIX = "wm-"
 
-# Type alias for backward compatibility - tests can use any backend
-MuxEnv = Union[TmuxEnvironment, WezTermEnvironment, RexEnvironment]
 
 # =============================================================================
 # Shared Assertion Helpers
@@ -1350,12 +1356,7 @@ def mux_server(request, tmp_path: Path) -> Generator[MuxEnvironment, None, None]
     backend = request.param
     skip_if_backend_unavailable(backend)
 
-    if backend == "tmux":
-        test_env = TmuxEnvironment(tmp_path)
-    elif backend == "rex":
-        test_env = RexEnvironment(tmp_path)
-    else:
-        test_env = WezTermEnvironment(tmp_path)
+    test_env = MUX_ENVIRONMENTS.get(backend, WezTermEnvironment)(tmp_path)
 
     test_env.start_server()
     yield test_env

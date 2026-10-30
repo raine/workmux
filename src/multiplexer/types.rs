@@ -227,18 +227,35 @@ impl std::fmt::Display for BackendType {
     }
 }
 
+impl BackendType {
+    /// Every backend, in the order they are listed to users.
+    pub const ALL: [BackendType; 5] = [
+        BackendType::Tmux,
+        BackendType::WezTerm,
+        BackendType::Kitty,
+        BackendType::Zellij,
+        BackendType::Rex,
+    ];
+
+    /// The accepted `WORKMUX_BACKEND` values, as "tmux|wezterm|...".
+    pub fn expected_names() -> String {
+        Self::ALL
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
 impl std::str::FromStr for BackendType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "tmux" => Ok(BackendType::Tmux),
-            "wezterm" => Ok(BackendType::WezTerm),
-            "kitty" => Ok(BackendType::Kitty),
-            "zellij" => Ok(BackendType::Zellij),
-            "rex" => Ok(BackendType::Rex),
-            other => Err(format!("unknown backend: {}", other)),
-        }
+        let wanted = s.to_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|backend| backend.to_string() == wanted)
+            .ok_or_else(|| format!("unknown backend: {}", wanted))
     }
 }
 
