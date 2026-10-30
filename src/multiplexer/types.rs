@@ -211,6 +211,8 @@ pub enum BackendType {
     Kitty,
     /// Zellij backend
     Zellij,
+    /// Rex backend
+    Rex,
 }
 
 impl std::fmt::Display for BackendType {
@@ -220,6 +222,7 @@ impl std::fmt::Display for BackendType {
             BackendType::WezTerm => write!(f, "wezterm"),
             BackendType::Kitty => write!(f, "kitty"),
             BackendType::Zellij => write!(f, "zellij"),
+            BackendType::Rex => write!(f, "rex"),
         }
     }
 }
@@ -233,6 +236,7 @@ impl std::str::FromStr for BackendType {
             "wezterm" => Ok(BackendType::WezTerm),
             "kitty" => Ok(BackendType::Kitty),
             "zellij" => Ok(BackendType::Zellij),
+            "rex" => Ok(BackendType::Rex),
             other => Err(format!("unknown backend: {}", other)),
         }
     }

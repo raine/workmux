@@ -249,6 +249,7 @@ struct StatusBackendSignals {
     wezterm: bool,
     zellij: bool,
     kitty: bool,
+    rex: bool,
 }
 
 impl StatusBackendSignals {
@@ -261,11 +262,12 @@ impl StatusBackendSignals {
                 || std::env::var_os("ZELLIJ_PANE_ID").is_some()
                 || std::env::var_os("ZELLIJ_SESSION_NAME").is_some(),
             kitty: std::env::var_os("KITTY_WINDOW_ID").is_some(),
+            rex: std::env::var_os("REX_BLOCK").is_some(),
         }
     }
 
     fn has_any_signal(&self) -> bool {
-        self.workmux_backend || self.tmux || self.wezterm || self.zellij || self.kitty
+        self.workmux_backend || self.tmux || self.wezterm || self.zellij || self.kitty || self.rex
     }
 }
 
