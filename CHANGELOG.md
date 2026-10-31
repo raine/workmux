@@ -22,7 +22,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.278 (2026-10-31)
 
 <!-- highlight: Remote servers -->
 
