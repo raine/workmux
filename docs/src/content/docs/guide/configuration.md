@@ -47,6 +47,8 @@ Each event has `phase`, `operation`, `duration_ms`, and `process_id` fields. Bac
 | `backend_query` | Instance resolution, live-pane lookup, or server-identity lookup during persistence |
 | `persistence`   | A registration or update persistence attempt, including queries and locking         |
 
+For tmux, `operation="get_live_pane_snapshot"` measures a single query returning both pane information and server identity. `operation="instance_id"` measures instance resolution.
+
 High query times alongside high lock-hold times suggest backend delays. High lock-wait times indicate contention; high hold times without slow queries suggest work inside the store. Compare events by process ID and timestamp. Phases overlap, so their durations should not be added together.
 
 Lock timings are logged after releasing the lock; query and persistence timings are logged when those attempts finish, including early returns and errors. They do not indicate that a write succeeded. A query or lock acquisition that never finishes produces no completed timing for that phase. Total persistence time excludes hook parsing, backend status-icon updates, and sidebar refresh requests.

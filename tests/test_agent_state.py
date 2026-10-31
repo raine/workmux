@@ -17,6 +17,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -779,10 +780,68 @@ def test_same_status_update_discards_state_from_prior_tmux_server(
 
 
 @pytest.mark.tmux_only
-def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
-    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+@pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
+def test_persistence_combines_tmux_pane_and_boot_queries(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    command: str,
 ):
-    """A failed server identity query leaves valid pane state intact."""
+    """Persistence obtains live pane and server identity in one tmux query."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-combined-snapshot",
+        status="working",
+    )
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None
+    wrapper_dir = env.tmp_path / "snapshot-query-bin"
+    wrapper_dir.mkdir()
+    calls = env.tmp_path / "snapshot-query-calls"
+    env.install_script(
+        wrapper_dir / "tmux",
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "if 'display-message' in args:\n"
+        "    for arg in args:\n"
+        "        if '#{start_time}:#{pid}' in arg:\n"
+        "            kind = 'combined' if '#{pane_pid}' in arg else 'boot_only'\n"
+        f"            with open({str(calls)!r}, 'a') as log:\n"
+        "                log.write(kind + '\\n')\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
+    )
+    marker = env.tmp_path / "snapshot-query-finished"
+    script = make_env_script(
+        env,
+        f"{shlex.quote(str(workmux_exe_path))} {command} && touch {shlex.quote(str(marker))}",
+        {
+            "PATH": f"{wrapper_dir}:{env.env['PATH']}",
+            "XDG_STATE_HOME": env.env["XDG_STATE_HOME"],
+        },
+    )
+    env.send_keys(agent.window, script)
+    assert poll_until(marker.exists, timeout=5.0)
+    assert calls.read_text().splitlines() == ["combined"]
+    state = read_agent_state(list_agent_state_files(env)[0])
+    boot = env.tmux(["display-message", "-p", "#{start_time}:#{pid}"])
+    assert state["boot_id"] == boot.stdout.strip()
+    assert state["pane_pid"] > 0
+    assert state["status"] == (None if command == "register-agent" else "working")
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("boot_response", ["error", "", "unknown", "1700000000:"])
+def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    boot_response: str,
+):
+    """A failed or incomplete snapshot leaves valid pane state intact."""
     env = mux_server
     agent = start_active_agent(
         env,
@@ -805,12 +864,15 @@ def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
     tmux_wrapper = wrapper_dir / "tmux"
     env.install_script(
         tmux_wrapper,
-        "#!/bin/sh\n"
-        'if [ "$1" = display-message ] && [ "$2" = -p ] '
-        "&& [ \"$3\" = '#{start_time}:#{pid}' ]; then\n"
-        "  exit 1\n"
-        "fi\n"
-        f'exec {shlex.quote(real_tmux)} "$@"\n',
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        f"response = {boot_response!r}\n"
+        "if any('#{start_time}:#{pid}' in arg for arg in args):\n"
+        "    if response == 'error':\n"
+        "        sys.exit(1)\n"
+        "    args = [arg.replace('#{start_time}:#{pid}', response) for arg in args]\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
     )
 
     marker = env.tmp_path / "boot-id-failure-status-finished"

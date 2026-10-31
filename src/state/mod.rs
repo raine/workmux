@@ -216,17 +216,18 @@ fn persist_agent_snapshot_locked(
     };
 
     let live_query = {
-        let _timer = timing::Timer::start("backend_query", "get_live_pane_info", Some(mux.name()));
-        mux.get_live_pane_info(pane_id)
+        let _timer =
+            timing::Timer::start("backend_query", "get_live_pane_snapshot", Some(mux.name()));
+        mux.get_live_pane_snapshot(pane_id)
     };
-    let live_info = match live_query {
+    let snapshot = match live_query {
         Ok(Some(info)) => info,
         Ok(None) => {
             warn!(%pane_id, "pane not found, skipping state persist");
             return;
         }
         Err(e) => {
-            warn!(error = %e, "failed to get live pane info, skipping state persist");
+            warn!(error = %e, "failed to get live pane snapshot, skipping state persist");
             return;
         }
     };
@@ -236,29 +237,20 @@ fn persist_agent_snapshot_locked(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let server_boot_id = || {
-        let _timer = timing::Timer::start("backend_query", "server_boot_id", Some(mux.name()));
-        mux.server_boot_id()
-    };
-    let (live_pid, boot_id) = if mux.name() == "tmux" {
+    let live_info = snapshot.pane;
+    let boot_id = snapshot.boot_id;
+    let live_pid = if mux.name() == "tmux" {
         let Some(live_pid) = live_info.pid else {
             warn!(%pane_id, "tmux pane PID unavailable, skipping state persist");
             return;
         };
-        let boot_id = match server_boot_id() {
-            Ok(Some(boot_id)) => Some(boot_id),
-            Ok(None) => {
-                warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
-                return;
-            }
-            Err(error) => {
-                warn!(%pane_id, %error, "failed to get tmux server identity, skipping state persist");
-                return;
-            }
-        };
-        (live_pid, boot_id)
+        if boot_id.is_none() {
+            warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
+            return;
+        }
+        live_pid
     } else {
-        (live_info.pid.unwrap_or(0), server_boot_id().unwrap_or(None))
+        live_info.pid.unwrap_or(0)
     };
 
     if let Some(boot_id) = boot_id.as_deref()

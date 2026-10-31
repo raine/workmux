@@ -983,6 +983,21 @@ pub trait Multiplexer: Send + Sync {
     /// exist. Query failures and unparseable responses return an error.
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>>;
 
+    /// Observe a pane and its server lifecycle for state persistence.
+    ///
+    /// Backends without reliable lifecycle identity use best-effort boot data.
+    /// Backends that require it can override this to collect both in one query
+    /// and reject incomplete observations.
+    fn get_live_pane_snapshot(&self, pane_id: &str) -> Result<Option<LivePaneSnapshot>> {
+        let Some(pane) = self.get_live_pane_info(pane_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(LivePaneSnapshot {
+            pane,
+            boot_id: self.server_boot_id().unwrap_or(None),
+        }))
+    }
+
     /// Get live pane info for all panes at once (batched query).
     ///
     /// Returns a HashMap from pane_id to LivePaneInfo. This is more efficient
