@@ -24,6 +24,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- **New!** Run agents on remote Linux servers over SSH while keeping them in your local tmux windows, dashboard and sidebar. Agents keep working while your machine sleeps or disconnects; bring their work home with `workmux merge`. Experimental: see the [remote servers guide](https://workmux.dev/guide/remote/) for setup.
 - Fix sidebar Git diff stats disappearing or stopping updates on macOS.
 
 ## v0.1.277 (2026-10-23)
