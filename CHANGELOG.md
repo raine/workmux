@@ -26,6 +26,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - **New!** Run agents on remote Linux servers over SSH while keeping them in your local tmux windows, dashboard and sidebar. Agents keep working while your machine sleeps or disconnects; bring their work home with `workmux merge`. Experimental: see the [remote servers guide](https://workmux.dev/guide/remote/) for setup.
 - Fix sidebar Git diff stats disappearing or stopping updates on macOS.
+- Fix Codex status hooks reporting to the wrong pane by disabling its shared background server. Codex launches now require version 0.156 or newer. ([#330](https://github.com/raine/workmux/issues/330))
+- Fix recent Codex versions failing to start or run commands in Docker images and Lima VMs, and skip hook-review prompts inside sandboxes. Recreate existing Lima VMs with `workmux sandbox prune` to update their Codex installation.
+- Fix OpenCode failing to start with a state-directory permission error in Docker and Podman sandboxes.
+- Perf: Reduce tmux queries when registering agents and updating their status. ([#342](https://github.com/raine/workmux/issues/342))
 
 ## v0.1.277 (2026-10-23)
 
