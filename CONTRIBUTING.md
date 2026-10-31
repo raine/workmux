@@ -18,6 +18,7 @@ To avoid wasted effort, open an issue first to discuss your proposed change.
 - tmux (required for tests)
 - WezTerm (optional, for testing WezTerm backend)
 - Zellij (optional, for testing Zellij backend)
+- Rex (optional, for testing the Rex backend)
 
 ## Development setup
 
@@ -62,6 +63,9 @@ By default, tests run against **tmux only**.
 ```bash
 # Test with WezTerm (requires WezTerm to be running)
 WORKMUX_TEST_BACKEND=wezterm just itest
+
+# Test with Rex (requires Rex to be running; each test uses its own session)
+just itest --backend=rex
 
 # Test both backends
 just itest --backend=tmux,wezterm
