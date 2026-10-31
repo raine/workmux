@@ -19,6 +19,19 @@
         "bash": "workmux set-window-status working"
       }
     ],
+    "postToolUseFailure": [
+      {
+        "type": "command",
+        "bash": "workmux set-window-status working"
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": "ask_user",
+        "bash": "workmux set-window-status waiting"
+      }
+    ],
     "agentStop": [
       {
         "type": "command",

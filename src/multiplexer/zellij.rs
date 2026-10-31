@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -25,10 +26,14 @@ const STATUS_MARKER_CLOSE: char = '\u{2064}';
 /// Zellij multiplexer backend.
 pub struct ZellijBackend {
     session_name: Option<String>,
+    // Status hooks are short-lived requests: validation, UI updates and persistence
+    // can share one snapshot. Other commands (especially pane creation and long-
+    // running UIs) must continue querying fresh pane data.
+    status_panes: Option<Mutex<Option<Vec<PaneInfo>>>>,
 }
 
 /// Info about a pane from `zellij action list-panes --json --tab --command`
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct PaneInfo {
     id: u32,
     is_plugin: bool,
@@ -65,6 +70,12 @@ impl TabInfo {
     fn tab_id(&self) -> u32 {
         self.tab_id
     }
+}
+
+// Restrict snapshot lifetime to the standalone hook commands. In particular,
+// never enable this for dashboard/sidebar processes or pane-creation polling.
+fn is_status_hook_command(command: Option<&std::ffi::OsStr>) -> bool {
+    command.is_some_and(|command| command == "set-window-status" || command == "register-agent")
 }
 
 /// Parse a numeric pane ID from a "terminal_X" string.
@@ -241,14 +252,18 @@ impl Default for ZellijBackend {
 
 impl ZellijBackend {
     pub fn new() -> Self {
-        Self {
-            session_name: std::env::var("ZELLIJ_SESSION_NAME").ok(),
-        }
+        Self::with_session(std::env::var("ZELLIJ_SESSION_NAME").ok())
     }
 
     pub fn for_session(session_name: impl Into<String>) -> Self {
+        Self::with_session(Some(session_name.into()))
+    }
+
+    fn with_session(session_name: Option<String>) -> Self {
+        let command = std::env::args_os().nth(1);
         Self {
-            session_name: Some(session_name.into()),
+            session_name,
+            status_panes: is_status_hook_command(command.as_deref()).then(|| Mutex::new(None)),
         }
     }
 
@@ -305,16 +320,37 @@ impl ZellijBackend {
     /// The `--tab` flag includes `tab_id`, `tab_name`, `tab_position`.
     /// The `--command` flag includes `pane_command`, `pane_cwd`.
     fn list_panes(&self) -> Result<Vec<PaneInfo>> {
-        query_json_with_retry(
-            || {
-                self.command()
-                    .args(&["action", "list-panes", "--json", "--tab", "--command"])
-                    .run_and_capture_stdout()
-                    .context("Failed to list panes")
-            },
-            "Failed to parse list-panes JSON output",
-            Duration::from_millis(50),
-        )
+        self.list_panes_with(|| {
+            query_json_with_retry(
+                || {
+                    self.command()
+                        .args(&["action", "list-panes", "--json", "--tab", "--command"])
+                        .run_and_capture_stdout()
+                        .context("Failed to list panes")
+                },
+                "Failed to parse list-panes JSON output",
+                Duration::from_millis(50),
+            )
+        })
+    }
+
+    fn list_panes_with(
+        &self,
+        query: impl FnOnce() -> Result<Vec<PaneInfo>>,
+    ) -> Result<Vec<PaneInfo>> {
+        let Some(cache) = &self.status_panes else {
+            return query();
+        };
+        let mut snapshot = cache
+            .lock()
+            .map_err(|_| anyhow!("Zellij status snapshot lock poisoned"))?;
+        if let Some(panes) = snapshot.as_ref() {
+            return Ok(panes.clone());
+        }
+        // Do not cache failures: a subsequent lookup may succeed.
+        let panes = query()?;
+        *snapshot = Some(panes.clone());
+        Ok(panes)
     }
 
     /// Query all tabs using `zellij action list-tabs --json`
@@ -405,10 +441,34 @@ impl ZellijBackend {
     }
 
     fn rename_tab_by_id(&self, tab_id: u32, name: &str) -> Result<()> {
-        self.command()
-            .args(&["action", "rename-tab-by-id", &tab_id.to_string(), name])
-            .run()
-            .with_context(|| format!("Failed to rename zellij tab {}", tab_id))?;
+        self.rename_tab_by_id_with(tab_id, name, || {
+            self.command()
+                .args(&["action", "rename-tab-by-id", &tab_id.to_string(), name])
+                .run()
+                .with_context(|| format!("Failed to rename zellij tab {}", tab_id))?;
+            Ok(())
+        })
+    }
+
+    fn rename_tab_by_id_with(
+        &self,
+        tab_id: u32,
+        name: &str,
+        rename: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        rename()?;
+        // Persistence must see the new name, including for other panes in this
+        // tab. Leave the snapshot untouched when the rename fails.
+        if let Some(cache) = &self.status_panes {
+            let mut snapshot = cache
+                .lock()
+                .map_err(|_| anyhow!("Zellij status snapshot lock poisoned"))?;
+            if let Some(panes) = snapshot.as_mut() {
+                for pane in panes.iter_mut().filter(|pane| pane.tab_id == Some(tab_id)) {
+                    name.clone_into(&mut pane.tab_name);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -998,7 +1058,9 @@ impl Multiplexer for ZellijBackend {
             return Ok(());
         };
         let status_name = tab_name_with_status(&current_name, icon);
-        self.rename_tab_by_id(tab_id, &status_name)?;
+        if status_name != current_name {
+            self.rename_tab_by_id(tab_id, &status_name)?;
+        }
         Ok(())
     }
 
@@ -1193,6 +1255,152 @@ mod tests {
             tab_name: String::new(),
             title: String::new(),
         }
+    }
+
+    fn status_backend() -> ZellijBackend {
+        ZellijBackend {
+            session_name: Some("__workmux_status_snapshot_unit_test__".to_string()),
+            status_panes: Some(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn snapshots_are_only_enabled_for_standalone_status_hooks() {
+        use std::ffi::OsStr;
+
+        for command in ["set-window-status", "register-agent"] {
+            assert!(is_status_hook_command(Some(OsStr::new(command))));
+        }
+        for command in ["add", "dashboard", "_sidebar-daemon", "list", "send"] {
+            assert!(!is_status_hook_command(Some(OsStr::new(command))));
+        }
+        assert!(!is_status_hook_command(None));
+    }
+
+    #[test]
+    fn status_validation_rendering_and_persistence_share_one_query() {
+        let backend = status_backend();
+        let mut pane = test_pane(1, false, Some(7));
+        pane.tab_name = tab_name_with_status("feature", "working");
+        pane.pane_command = Some("/usr/bin/copilot".to_string());
+        pane.pane_cwd = Some("/repo".to_string());
+        backend.list_panes_with(|| Ok(vec![pane])).unwrap();
+
+        // These calls must use the injected snapshot, not invoke Zellij. The
+        // identical status must also avoid issuing a rename command.
+        assert!(backend.get_live_pane_info("terminal_1").unwrap().is_some());
+        backend.set_status("terminal_1", "working", false).unwrap();
+        let live = backend.get_live_pane_info("terminal_1").unwrap().unwrap();
+        assert_eq!(live.window.as_deref(), Some("feature"));
+        assert_eq!(live.current_command.as_deref(), Some("copilot"));
+        assert_eq!(live.working_dir, PathBuf::from("/repo"));
+        backend
+            .list_panes_with(|| panic!("a status request must only query once"))
+            .unwrap();
+    }
+
+    #[test]
+    fn ordinary_backend_queries_always_remain_fresh() {
+        let backend = ZellijBackend {
+            session_name: None,
+            status_panes: None,
+        };
+        let first = backend
+            .list_panes_with(|| Ok(vec![test_pane(1, false, Some(7))]))
+            .unwrap();
+        let second = backend
+            .list_panes_with(|| Ok(vec![test_pane(2, false, Some(7))]))
+            .unwrap();
+        assert_eq!(first[0].id, 1);
+        assert_eq!(second[0].id, 2);
+    }
+
+    #[test]
+    fn failed_status_query_is_not_cached() {
+        let backend = status_backend();
+        assert!(
+            backend
+                .list_panes_with(|| Err(anyhow!("query failed")))
+                .is_err()
+        );
+        let panes = backend
+            .list_panes_with(|| Ok(vec![test_pane(1, false, Some(7))]))
+            .unwrap();
+        assert_eq!(panes[0].id, 1);
+    }
+
+    #[test]
+    fn successful_rename_updates_all_cached_panes_in_its_tab() {
+        let backend = status_backend();
+        backend
+            .list_panes_with(|| {
+                Ok(vec![
+                    test_pane(1, false, Some(7)),
+                    test_pane(2, false, Some(7)),
+                    test_pane(3, false, Some(8)),
+                ])
+            })
+            .unwrap();
+        let name = tab_name_with_status("feature", "done");
+        backend.rename_tab_by_id_with(7, &name, || Ok(())).unwrap();
+        let panes = backend
+            .list_panes_with(|| panic!("unexpected query"))
+            .unwrap();
+        assert_eq!(panes[0].tab_name, name);
+        assert_eq!(panes[1].tab_name, name);
+        assert_eq!(panes[2].tab_name, "");
+        assert_eq!(
+            backend
+                .get_live_pane_info("terminal_2")
+                .unwrap()
+                .unwrap()
+                .window
+                .as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn failed_rename_preserves_cached_tab_name() {
+        let backend = status_backend();
+        let mut pane = test_pane(1, false, Some(7));
+        pane.tab_name = "original".to_string();
+        backend.list_panes_with(|| Ok(vec![pane])).unwrap();
+        assert!(
+            backend
+                .rename_tab_by_id_with(7, "changed", || Err(anyhow!("rename failed")))
+                .is_err()
+        );
+        let panes = backend
+            .list_panes_with(|| panic!("unexpected query"))
+            .unwrap();
+        assert_eq!(panes[0].tab_name, "original");
+    }
+
+    #[test]
+    fn registration_clear_and_persistence_share_snapshot() {
+        let backend = status_backend();
+        let mut pane = test_pane(1, false, Some(7));
+        pane.tab_name = "feature".to_string();
+        backend.list_panes_with(|| Ok(vec![pane])).unwrap();
+        // An unmarked name needs no rename and registration's subsequent
+        // persistence lookup should not query again.
+        backend.clear_status("terminal_1").unwrap();
+        assert!(backend.get_live_pane_info("terminal_1").unwrap().is_some());
+        assert!(backend.get_live_pane_info("terminal_99").unwrap().is_none());
+    }
+
+    #[test]
+    fn status_snapshots_do_not_cross_backend_instances() {
+        let first = status_backend();
+        first
+            .list_panes_with(|| Ok(vec![test_pane(1, false, Some(7))]))
+            .unwrap();
+        let second = status_backend();
+        let panes = second
+            .list_panes_with(|| Ok(vec![test_pane(2, false, Some(8))]))
+            .unwrap();
+        assert_eq!(panes[0].id, 2);
     }
 
     // === parse_pane_id ===
