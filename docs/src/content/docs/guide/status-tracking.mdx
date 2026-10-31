@@ -32,6 +32,7 @@ doing.
 | Oh My Pi                | ✅ Supported                                                                |
 | Gemini CLI              | ✅ Supported                                                                |
 | Grok                    | ✅ Supported                                                                |
+| Kimi Code               | ✅ Supported                                                                |
 | Antigravity CLI (`agy`) | ✅ Supported\*                                                              |
 | Kiro                    | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe            | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
@@ -58,7 +59,7 @@ Run `workmux setup` to automatically detect your agent CLIs and install status t
 workmux setup
 ```
 
-This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
+This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Kimi Code, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
 
 Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
 
@@ -189,6 +190,49 @@ curl -o "$grok_home/hooks/workmux-status.json" \
 ```
 
 `UserPromptSubmit` and `PostToolUse` mark the pane working, `Notification` marks it waiting, and `Stop` or `SessionEnd` marks it done. Grok permission prompts do not all emit `Notification`, so some prompts may remain marked as working while waiting for input.
+
+## Kimi Code setup
+
+`workmux setup` installs Kimi Code lifecycle hooks into `$KIMI_CODE_HOME/config.toml`, or `~/.kimi-code/config.toml` when `KIMI_CODE_HOME` is unset. Start a new Kimi Code session after setup so it discovers the hook.
+
+`workmux` supports Kimi Code, not the legacy python Kimi CLI.
+
+For manual setup, merge these hook tables into your `~/.kimi-code/config.toml`:
+
+```toml
+[[hooks]]
+event = "SessionStart"
+matcher = "startup|resume"
+command = "workmux register-agent"
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "PermissionRequest"
+command = "workmux set-window-status waiting"
+
+[[hooks]]
+event = "PermissionResult"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "PostToolUse"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "SubagentStart"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "SubagentStop"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "Stop"
+command = "workmux set-window-status done"
+```
 
 ## Antigravity CLI (`agy`) setup
 

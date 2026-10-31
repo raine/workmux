@@ -71,6 +71,17 @@ fn skills_dir_with_env(
                 .unwrap_or_else(|| home.join(".grok"));
             Some(base.join("skills"))
         }
+        Agent::Kimi => {
+            // Kimi also supports:
+            // - `~/.agents/skills`
+            // or inside a given $project_dir:
+            // - `$project_dir/.kimi-code/skills`
+            // - `$project_dir/.agents/skills`
+            let base = get_env("KIMI_CODE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".kimi-code"));
+            Some(base.join("skills"))
+        }
         Agent::Pi => {
             let pi_dir = get_env("PI_CODING_AGENT_DIR")
                 .map(PathBuf::from)
@@ -364,6 +375,23 @@ mod tests {
         let dir = skills_dir_with_env(Agent::Pi, Path::new("/home/test"), |_| None).unwrap();
 
         assert_eq!(dir, PathBuf::from("/home/test/.pi/agent/skills"));
+    }
+
+    #[test]
+    fn test_skills_dir_kimi() {
+        let dir = skills_dir_with_env(Agent::Kimi, Path::new("/home/test"), |_| None).unwrap();
+
+        assert_eq!(dir, PathBuf::from("/home/test/.kimi-code/skills"));
+    }
+
+    #[test]
+    fn test_skills_dir_kimi_respects_env() {
+        let dir = skills_dir_with_env(Agent::Kimi, Path::new("/home/test"), |key| {
+            (key == "KIMI_CODE_HOME").then(|| OsString::from("/tmp/.kimi-code"))
+        })
+        .unwrap();
+
+        assert_eq!(dir, PathBuf::from("/tmp/.kimi-code/skills"));
     }
 
     #[test]
