@@ -304,6 +304,29 @@ fn parse_live_pane_snapshot(output: &str) -> Result<HashMap<String, LivePaneInfo
     Ok(panes)
 }
 
+fn parse_live_pane_with_boot(line: &str) -> Option<(String, LivePaneSnapshot)> {
+    let (pane_id, pane) = parse_live_pane_line(line)?;
+    let parts = live_pane_fields(line);
+    if parts.len() != 11 {
+        return None;
+    }
+    let boot_id = parts[10];
+    let (start, pid) = boot_id.split_once(':')?;
+    if [start, pid]
+        .iter()
+        .any(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((
+        pane_id,
+        LivePaneSnapshot {
+            pane,
+            boot_id: Some(boot_id.to_string()),
+        },
+    ))
+}
+
 fn classify_live_pane_query<F>(
     pane_id: &str,
     query_result: Result<String>,
@@ -312,10 +335,19 @@ fn classify_live_pane_query<F>(
 where
     F: FnOnce() -> Result<String>,
 {
+    classify_pane_query(pane_id, query_result, list_pane_ids, parse_live_pane_line)
+}
+
+fn classify_pane_query<T>(
+    pane_id: &str,
+    query_result: Result<String>,
+    list_pane_ids: impl FnOnce() -> Result<String>,
+    parse: impl FnOnce(&str) -> Option<(String, T)>,
+) -> Result<Option<T>> {
     let query_error = match query_result {
         Ok(output) => {
             if let Some((_, info)) =
-                parse_live_pane_line(output.trim()).filter(|(queried_id, _)| queried_id == pane_id)
+                parse(output.trim()).filter(|(queried_id, _)| queried_id == pane_id)
             {
                 return Ok(Some(info));
             }
@@ -1603,6 +1635,17 @@ impl Multiplexer for TmuxBackend {
         })
     }
 
+    fn get_live_pane_snapshot(&self, pane_id: &str) -> Result<Option<LivePaneSnapshot>> {
+        let format = format!("{LIVE_PANE_FORMAT}\x1f{}", server_boot_format!());
+        let query_result = self.tmux_query(&["display-message", "-t", pane_id, "-p", &format]);
+        classify_pane_query(
+            pane_id,
+            query_result,
+            || self.tmux_query(&["list-panes", "-a", "-F", "#{pane_id}"]),
+            parse_live_pane_with_boot,
+        )
+    }
+
     fn server_boot_id(&self) -> Result<Option<String>> {
         // Server start time plus PID distinguishes rapid restarts while remaining
         // stable for the server lifetime. Legacy start-time-only IDs require
@@ -1971,6 +2014,98 @@ mod tests {
         let target = WindowTarget::new("work".to_string(), Some("parent".to_string()));
 
         assert_eq!(TmuxBackend::window_target_arg(&target), "=parent:=work");
+    }
+
+    #[test]
+    fn pane_snapshot_parses_boot_and_preserves_live_fields() {
+        for separator in ["\x1f", "\\037", "\t"] {
+            let line = [
+                "%7",
+                "12345",
+                "node",
+                "/repo",
+                "Working",
+                "main",
+                "work",
+                "$1",
+                "@2",
+                "4",
+                "1700000000:42",
+            ]
+            .join(separator);
+            let snapshot = classify_pane_query(
+                "%7",
+                Ok(line),
+                || panic!("successful query must not list panes"),
+                parse_live_pane_with_boot,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(snapshot.boot_id.as_deref(), Some("1700000000:42"));
+            assert_eq!(snapshot.pane.pid, Some(12345));
+            assert_eq!(snapshot.pane.current_command.as_deref(), Some("node"));
+            assert_eq!(snapshot.pane.working_dir, PathBuf::from("/repo"));
+            assert_eq!(snapshot.pane.title.as_deref(), Some("Working"));
+            assert_eq!(snapshot.pane.session.as_deref(), Some("main"));
+            assert_eq!(snapshot.pane.window.as_deref(), Some("work"));
+            assert_eq!(snapshot.pane.session_id.as_deref(), Some("$1"));
+            assert_eq!(snapshot.pane.window_id.as_deref(), Some("@2"));
+            assert_eq!(snapshot.pane.window_index, Some(4));
+        }
+    }
+
+    #[test]
+    fn pane_snapshot_preserves_multiline_title() {
+        let line = "\x1e%7\x1f12345\x1fnode\x1f/repo\x1fhello\nworld\t!\x1fmain\x1fwork\x1f$1\x1f@2\x1f4\x1f1700000000:42";
+        let (_, snapshot) = parse_live_pane_with_boot(line).unwrap();
+        assert_eq!(snapshot.pane.title.as_deref(), Some("hello\nworld\t!"));
+        assert_eq!(snapshot.boot_id.as_deref(), Some("1700000000:42"));
+    }
+
+    #[test]
+    fn pane_snapshot_rejects_incomplete_or_invalid_boot_identity() {
+        let pane = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2\t4";
+        assert!(parse_live_pane_with_boot(pane).is_none());
+        for boot in [
+            "",
+            ":",
+            "1700000000:",
+            ":42",
+            "unknown",
+            "1700000000:unknown",
+            "1700000000:42:3",
+        ] {
+            let error = classify_pane_query(
+                "%7",
+                Ok(format!("{pane}\t{boot}")),
+                || Ok("%7".to_string()),
+                parse_live_pane_with_boot,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("exists"));
+        }
+    }
+
+    #[test]
+    fn pane_snapshot_confirms_missing_pane_and_rejects_wrong_target() {
+        let absent = classify_pane_query(
+            "%7",
+            Err(anyhow!("query failed")),
+            || Ok("%1".to_string()),
+            parse_live_pane_with_boot,
+        )
+        .unwrap();
+        assert!(absent.is_none());
+        let wrong_target = "%1\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2\t4\t1700000000:42";
+        assert!(
+            classify_pane_query(
+                "%7",
+                Ok(wrong_target.to_string()),
+                || Ok("%7".to_string()),
+                parse_live_pane_with_boot,
+            )
+            .is_err()
+        );
     }
 
     #[test]

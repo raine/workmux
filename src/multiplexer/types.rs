@@ -320,6 +320,13 @@ impl std::str::FromStr for BackendType {
     }
 }
 
+/// Pane information and the server lifecycle observed for state persistence.
+#[derive(Debug)]
+pub struct LivePaneSnapshot {
+    pub pane: LivePaneInfo,
+    pub boot_id: Option<String>,
+}
+
 /// Live pane information from the multiplexer (used for reconciliation).
 ///
 /// Contains current state of a pane as queried from the multiplexer,
