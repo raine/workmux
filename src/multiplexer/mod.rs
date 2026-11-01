@@ -330,6 +330,12 @@ pub trait Multiplexer: Send + Sync {
         self.schedule_window_close(&target.full_name, delay)
     }
 
+    /// Whether the backend supports session mode (`--mode session`), where
+    /// each worktree gets its own session.
+    fn supports_session_mode(&self) -> bool {
+        false
+    }
+
     /// Whether the backend handles client navigation as part of session closure.
     fn session_close_handles_navigation(&self) -> bool {
         false

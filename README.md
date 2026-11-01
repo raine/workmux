@@ -2427,7 +2427,7 @@ which window is selected when the session opens.
 
 ### Limitations
 
-- **tmux only**: Session mode is currently only supported for the tmux backend.
+- **tmux and Rex only**: Session mode is currently only supported for the tmux and Rex backends.
 - **No duplicates**: Unlike window mode which supports opening multiple windows
   for the same worktree (`-2`, `-3` suffixes), session mode creates one session
   per worktree.

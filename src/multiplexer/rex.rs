@@ -329,15 +329,27 @@ impl RexBackend {
         RexSnapshot::parse(&output)
     }
 
-    /// A one-block layout running a shell in `cwd`, or `command` through
-    /// `sh -c` so quoting behaves like the other backends.
+    /// A one-block layout in `cwd` running `command` through `sh -c`, so
+    /// quoting behaves like the other backends, or a login shell.
+    ///
+    /// The shell is started as `$SHELL -l`, like tmux does. A Rex terminal with
+    /// no command, or with the `shell: "none"` option, goes through login(1),
+    /// which resets HOME and PATH to the account's. Panes then wouldn't
+    /// inherit the environment workmux runs in.
     fn shell_layout(cwd: &Path, command: Option<&str>) -> Value {
-        let mut options = json!({ "cwd": cwd.to_string_lossy() });
-        if let Some(command) = command {
-            options["command"] = json!(["sh", "-c", command]);
-            options["shell"] = json!("none");
-        }
-        json!({ "block": { "flavor": SHELL_FLAVOR, "options": options } })
+        let argv = match command {
+            Some(command) => json!(["sh", "-c", command]),
+            None => {
+                let shell = util::default_shell("/bin/sh").unwrap_or_else(|_| "/bin/sh".into());
+                json!([shell, "-l"])
+            }
+        };
+        json!({
+            "block": {
+                "flavor": SHELL_FLAVOR,
+                "options": { "cwd": cwd.to_string_lossy(), "command": argv },
+            }
+        })
     }
 
     fn first_block_id(result: &Value) -> Result<String> {
@@ -487,6 +499,10 @@ impl RexBackend {
     }
 
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        // Rex rejects empty text, and there is nothing to send anyway
+        if text.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_pane(pane_id)?;
         // `--` so text starting with "-" isn't read as a flag
@@ -517,6 +533,10 @@ impl RexBackend {
 impl Multiplexer for RexBackend {
     fn name(&self) -> &'static str {
         "rex"
+    }
+
+    fn supports_session_mode(&self) -> bool {
+        true
     }
 
     // === Server/Session ===
@@ -1054,13 +1074,22 @@ mod tests {
     }
 
     #[test]
+    fn shell_layout_starts_a_login_shell_directly() {
+        let layout = RexBackend::shell_layout(Path::new("/tmp"), None);
+        let options = &layout["block"]["options"];
+        assert_eq!(options["command"][1], "-l");
+        // `shell: "none"` would route the terminal through login(1)
+        assert!(options.get("shell").is_none());
+    }
+
+    #[test]
     fn shell_layout_runs_commands_through_sh() {
         let layout = RexBackend::shell_layout(Path::new("/tmp"), Some("echo 'hi'"));
         let options = &layout["block"]["options"];
         assert_eq!(layout["block"]["flavor"], SHELL_FLAVOR);
         assert_eq!(options["cwd"], "/tmp");
         assert_eq!(options["command"], json!(["sh", "-c", "echo 'hi'"]));
-        assert_eq!(options["shell"], "none");
+        assert!(options.get("shell").is_none());
     }
 
     #[test]
