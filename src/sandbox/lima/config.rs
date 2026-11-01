@@ -21,13 +21,25 @@ ln -sfn "$HOME/.workmux-state/.claude.json" "$HOME/.claude.json"
 "#
         .to_string(),
 
-        "codex" => r#"# Install Codex CLI from GitHub releases (use musl for glibc compatibility)
-mkdir -p "$HOME/.local/bin"
+        "codex" => r#"# Install the Codex package from GitHub releases (use musl for glibc
+# compatibility). Codex needs the whole package next to its binary (helper
+# binaries, codex-package.json). It goes outside ~/.codex, which is mounted
+# from the host.
 ARCH=$(uname -m)
 if [ "$ARCH" != "aarch64" ]; then ARCH="x86_64"; fi
-curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-${ARCH}-unknown-linux-musl.tar.gz" | \
-  tar xz -C "$HOME/.local/bin/"
-mv "$HOME/.local/bin/codex-${ARCH}-unknown-linux-musl" "$HOME/.local/bin/codex"
+TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/openai/codex/releases/latest)
+BASE="https://github.com/openai/codex/releases/download/${TAG##*/}"
+ASSET="codex-package-${ARCH}-unknown-linux-musl.tar.gz"
+CODEX_TMP=$(mktemp -d)
+curl -fsSLo "$CODEX_TMP/$ASSET" "$BASE/$ASSET"
+curl -fsSLo "$CODEX_TMP/SHA256SUMS" "$BASE/codex-package_SHA256SUMS"
+grep -E "^[0-9a-f]{64}  ${ASSET}\$" "$CODEX_TMP/SHA256SUMS" > "$CODEX_TMP/expected"
+(cd "$CODEX_TMP" && sha256sum -c expected)
+mkdir -p "$HOME/.local/share/codex" "$HOME/.local/bin"
+tar xzf "$CODEX_TMP/$ASSET" -C "$HOME/.local/share/codex"
+rm -rf "$CODEX_TMP"
+ln -sfn "$HOME/.local/share/codex/bin/codex" "$HOME/.local/bin/codex"
+"$HOME/.local/bin/codex" --version
 "#
         .to_string(),
 
@@ -635,6 +647,8 @@ mod tests {
     fn test_lima_install_script_for_agent_codex() {
         let script = lima_install_script_for_agent("codex");
         assert!(script.contains("openai/codex/releases"));
+        assert!(script.contains("codex-package-${ARCH}-unknown-linux-musl.tar.gz"));
+        assert!(script.contains("sha256sum -c"));
         assert!(script.contains("tar xz"));
     }
 

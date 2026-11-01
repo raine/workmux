@@ -56,16 +56,14 @@ const image = `${site}/social-preview.png`;
       crossorigin
     />
     <script is:inline>
-      // The theme the docs pages store, or the system's, set before first
-      // paint.
+      // Respect saved preferences and default to dark before first paint.
       (() => {
         const stored = localStorage.getItem('starlight-theme');
         document.documentElement.dataset.theme =
-          stored === 'light' || stored === 'dark'
-            ? stored
-            : matchMedia('(prefers-color-scheme: light)').matches
-              ? 'light'
-              : 'dark';
+          stored === 'light' ||
+          (stored === '' && matchMedia('(prefers-color-scheme: light)').matches)
+            ? 'light'
+            : 'dark';
       })();
     </script>
   </head>
@@ -75,16 +73,9 @@ const image = `${site}/social-preview.png`;
 </html>
 
 <script>
-  // Theme toggle, copy buttons and tab groups, delegated from the document.
+  // Copy buttons and tab groups, delegated from the document.
   document.addEventListener('click', async (e) => {
     const target = e.target as Element;
-    if (target.closest('[data-theme-toggle]')) {
-      const next =
-        document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-      document.documentElement.dataset.theme = next;
-      localStorage.setItem('starlight-theme', next);
-      return;
-    }
     const copy = target.closest<HTMLElement>('[data-copy]');
     if (copy) {
       const panel = copy

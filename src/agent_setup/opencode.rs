@@ -78,7 +78,11 @@ fn version_from_command(command: &Path) -> Result<OpenCodeVersion> {
     if !output.status.success() {
         anyhow::bail!("opencode --version failed; status tracking was not changed");
     }
-    parse_version(&version).ok_or_else(|| {
+    supported_version(&version)
+}
+
+fn supported_version(version: &str) -> Result<OpenCodeVersion> {
+    parse_version(version).ok_or_else(|| {
         anyhow::anyhow!(
             "Unsupported OpenCode version {:?}; status tracking was not changed",
             version.trim()
@@ -291,6 +295,12 @@ pub fn check_for_setup() -> Result<StatusCheck> {
     check_at(&config_dir, installed_version()?)
 }
 
+/// [`check_for_setup`] in `config_dir` for the OpenCode whose `--version`
+/// printed `version`.
+pub(crate) fn check_dir_for(config_dir: &Path, version: &str) -> Result<StatusCheck> {
+    check_at(config_dir, supported_version(version)?)
+}
+
 pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
     let Some(config_dir) = opencode_config_dir() else {
         return Ok(None);
@@ -439,12 +449,21 @@ fn install_at(config_dir: &Path, version: OpenCodeVersion) -> Result<()> {
 pub fn install() -> Result<String> {
     let config_dir = opencode_config_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine OpenCode config directory"))?;
-    let version = installed_version()?;
-    install_at(&config_dir, version)?;
+    install_version(&config_dir, installed_version()?)
+}
+
+/// [`install`] into `config_dir` for the OpenCode whose `--version` printed
+/// `version`.
+pub(crate) fn install_dir_for(config_dir: &Path, version: &str) -> Result<String> {
+    install_version(config_dir, supported_version(version)?)
+}
+
+fn install_version(config_dir: &Path, version: OpenCodeVersion) -> Result<String> {
+    install_at(config_dir, version)?;
 
     let path = match version {
         OpenCodeVersion::V1 => config_dir.join("plugins/workmux-status.ts"),
-        OpenCodeVersion::V2 => v2_dir(&config_dir),
+        OpenCodeVersion::V2 => v2_dir(config_dir),
     };
     Ok(format!(
         "Installed OpenCode plugin to {}. Restart OpenCode for it to take effect.",

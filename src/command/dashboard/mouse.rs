@@ -9,7 +9,10 @@ use super::app::{
     App, DashboardTab, MouseRowClick, MouseRowId, PaletteCommand, RowContextKind, RowContextMenu,
     ViewMode,
 };
-use super::layout::{dashboard_content_areas, dashboard_outer_areas};
+use super::layout::{
+    FOOTER_HELP_WIDTH, REMOTE_TIP_GUIDE_COLUMNS, REMOTE_TIP_HIDE_COLUMNS, RemoteTipFooter,
+    dashboard_content_areas, dashboard_outer_areas, remote_tip_footer,
+};
 use crate::config::DashboardLayout;
 
 const TABLE_HEADER_HEIGHT: u16 = 1;
@@ -465,7 +468,7 @@ fn dashboard_surface_target(
 }
 
 fn dashboard_footer_target(app: &App, column: u16) -> MouseTarget {
-    if column >= app.terminal_area.right().saturating_sub(7) {
+    if column >= app.terminal_area.right().saturating_sub(FOOTER_HELP_WIDTH) {
         return MouseTarget::Action(Action::ShowHelp);
     }
     if app.status_message.is_some() {
@@ -497,11 +500,71 @@ fn dashboard_footer_target(app: &App, column: u16) -> MouseTarget {
         _ => {}
     }
 
-    let items = match app.active_tab {
-        DashboardTab::Agents => agent_footer_items(app),
-        DashboardTab::Worktrees => worktree_footer_items(app),
+    let footer = dashboard_outer_areas(app.terminal_area)[2];
+    match app.active_tab {
+        DashboardTab::Agents if remote_tip_may_show(app) => {
+            agent_footer_target_with_tip(footer, agent_footer_items(app), column)
+        }
+        DashboardTab::Agents => footer_target_at(footer.x + 2, column, &agent_footer_items(app)),
+        DashboardTab::Worktrees => {
+            footer_target_at(footer.x + 2, column, &worktree_footer_items(app))
+        }
+    }
+}
+
+/// Whether the agents footer is in the state that draws the remote servers
+/// tip, if it has room for it.
+fn remote_tip_may_show(app: &App) -> bool {
+    app.show_remote_tip
+        && app.active_tab == DashboardTab::Agents
+        && !app.filter_active
+        && !app.input_mode
+        && app.status_message.is_none()
+}
+
+/// The agents footer layout with the remote servers tip, while it is on
+/// screen.
+pub(super) fn visible_remote_tip_footer(app: &App) -> Option<RemoteTipFooter> {
+    if !remote_tip_may_show(app) {
+        return None;
+    }
+    let footer = dashboard_outer_areas(app.terminal_area)[2];
+    remote_tip_footer(footer, &item_widths(&agent_footer_items(app)))
+}
+
+/// Hit-test an agents footer that shows the remote servers tip when it fits,
+/// in place of the hints it displaces.
+fn agent_footer_target_with_tip(footer: Rect, items: Vec<FooterItem>, column: u16) -> MouseTarget {
+    let Some(layout) = remote_tip_footer(footer, &item_widths(&items)) else {
+        return footer_target_at(footer.x + 2, column, &items);
     };
-    footer_target_at(app.terminal_area.x + 2, column, &items)
+    if let Some(target) = remote_tip_target(layout.tip, column) {
+        return target;
+    }
+    let kept: Vec<FooterItem> = items
+        .into_iter()
+        .zip(&layout.keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect();
+    footer_target_at(footer.x + 2, column, &kept)
+}
+
+fn remote_tip_target(tip: Rect, column: u16) -> Option<MouseTarget> {
+    if !(tip.x..tip.right()).contains(&column) {
+        return None;
+    }
+    let offset = column - tip.x;
+    Some(if REMOTE_TIP_GUIDE_COLUMNS.contains(&offset) {
+        MouseTarget::Action(Action::OpenRemoteGuide)
+    } else if REMOTE_TIP_HIDE_COLUMNS.contains(&offset) {
+        MouseTarget::Action(Action::DismissRemoteTip)
+    } else {
+        MouseTarget::None
+    })
+}
+
+fn item_widths(items: &[FooterItem]) -> Vec<u16> {
+    items.iter().map(|item| item.text.width() as u16).collect()
 }
 
 fn filter_footer_target(start: u16, column: u16, filter_width: usize) -> MouseTarget {
@@ -700,6 +763,7 @@ mod tests {
             staged_hunks: Vec::new(),
             comment_input: None,
             file_list: Vec::new(),
+            remote: None,
         }
     }
 
@@ -858,6 +922,86 @@ mod tests {
             footer_target_at(2, 22, &items),
             MouseTarget::Action(Action::Quit)
         );
+    }
+
+    use crate::command::dashboard::layout::REMOTE_TIP_WIDTH;
+
+    /// The agents footer hints as the dashboard lists them with no filter.
+    fn agent_items() -> Vec<FooterItem> {
+        vec![
+            FooterItem::action("i Input", Action::EnterInputMode),
+            FooterItem::action("d Diff", Action::LoadWipDiff),
+            FooterItem::action("o PR", Action::OpenPr),
+            FooterItem::label("1-9 Jump"),
+            FooterItem::action("s Sort (priority)", Action::CycleSortMode),
+            FooterItem::action("F Scope (all)", Action::ToggleScopeFilter),
+            FooterItem::action("f Stale (shown)", Action::ToggleStaleFilter),
+            FooterItem::action("Tab Worktrees", Action::SwitchTab),
+            FooterItem::action("q Quit", Action::Quit),
+        ]
+    }
+
+    fn tip_target(width: u16, column: u16) -> MouseTarget {
+        agent_footer_target_with_tip(Rect::new(0, 23, width, 1), agent_items(), column)
+    }
+
+    #[test]
+    fn remote_tip_keys_are_hit_tested_at_every_width_that_shows_it() {
+        for width in [170, 120, 80] {
+            let tip_x = width - FOOTER_HELP_WIDTH - REMOTE_TIP_WIDTH;
+            assert_eq!(tip_target(width, tip_x), MouseTarget::None, "{width}");
+            for offset in [
+                REMOTE_TIP_GUIDE_COLUMNS.start,
+                REMOTE_TIP_GUIDE_COLUMNS.end - 1,
+            ] {
+                assert_eq!(
+                    tip_target(width, tip_x + offset),
+                    MouseTarget::Action(Action::OpenRemoteGuide),
+                    "{width}"
+                );
+            }
+            assert_eq!(
+                tip_target(width, tip_x + REMOTE_TIP_HIDE_COLUMNS.start),
+                MouseTarget::Action(Action::DismissRemoteTip),
+                "{width}"
+            );
+        }
+    }
+
+    #[test]
+    fn hints_beside_the_tip_follow_the_compact_footer() {
+        // At 80 columns only `Tab Worktrees │ q Quit` stay beside the tip,
+        // so they move left into the space of the dropped hints.
+        assert_eq!(tip_target(80, 2), MouseTarget::Action(Action::SwitchTab));
+        assert_eq!(
+            tip_target(80, 2 + 13 + 3),
+            MouseTarget::Action(Action::Quit)
+        );
+        // At 120 columns Sort, Scope and Stale give way; Tab follows Jump.
+        let tab = 2 + 7 + 3 + 6 + 3 + 4 + 3 + 8 + 3;
+        assert_eq!(tip_target(120, tab), MouseTarget::Action(Action::SwitchTab));
+    }
+
+    #[test]
+    fn very_narrow_footers_keep_their_hints_without_the_tip() {
+        let footer = Rect::new(0, 23, 50, 1);
+        assert_eq!(
+            remote_tip_footer(footer, &item_widths(&agent_items())),
+            None
+        );
+        assert_eq!(
+            tip_target(50, 2),
+            MouseTarget::Action(Action::EnterInputMode)
+        );
+        for column in 0..50 {
+            assert!(
+                !matches!(
+                    tip_target(50, column),
+                    MouseTarget::Action(Action::OpenRemoteGuide | Action::DismissRemoteTip)
+                ),
+                "{column}"
+            );
+        }
     }
 
     #[test]

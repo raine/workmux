@@ -64,6 +64,12 @@ Use `workmux merge --cleanup` to clean up for a single merge when this default i
 7. Removes the worktree unless keep behavior is enabled via `--keep` or `merge_keep: true`
 8. Deletes the local branch unless keep behavior is enabled via `--keep` or `merge_keep: true`
 
+## Remote workspaces
+
+For a workspace on a [remote server](/guide/remote/), run `workmux merge <handle>` from the project on your machine. workmux fetches the branch and the uncommitted work into a local copy, then merges it as usual; all options apply. The remote agent keeps running until the merge succeeds, and its worktree, container and window are then removed. If the remote workspace changed after the fetch, it is kept and the merge still lands.
+
+See [merging remote workspaces](/guide/remote/git/#merging) for preparing the merge worktree, uncommitted work, conflicts and `--keep`. In a remote workspace's pane, or from its agent, `workmux merge` asks the local machine to merge it; see [remove or merge from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane).
+
 ## Typical workflow
 
 When you're done working in a worktree, simply run `workmux merge` from within that worktree's tmux window. The command will automatically detect which branch you're on, merge it into main, and close the current window as part of cleanup.

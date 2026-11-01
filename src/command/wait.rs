@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
+use crate::config::Config;
 use crate::git;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
+use crate::remote::{self, cache::WorkspaceRecord, node::observe::ObservedAgent};
 use crate::state::StateStore;
 use crate::util;
 use crate::workflow;
@@ -55,14 +57,28 @@ pub fn run(
     let mux = create_backend(detect_backend());
     let start = Instant::now();
 
-    // Resolve worktree paths upfront (local git first, then global agents)
-    let worktree_paths: Vec<_> = worktree_names
+    // Remote workspaces are watched through their node; the rest resolve
+    // to paths upfront (local git first, then global agents).
+    let mut remote_targets: Vec<(String, WorkspaceRecord)> = Vec::new();
+    let mut worktree_paths = Vec::new();
+    for name in worktree_names {
+        match remote::agents::find_target(name) {
+            Some(record) => remote_targets.push((name.clone(), record)),
+            None => worktree_paths.push((name.clone(), resolve_worktree_path(name, mux.as_ref())?)),
+        }
+    }
+    let config = if remote_targets.is_empty() {
+        Config::default()
+    } else {
+        Config::load(None).unwrap_or_default()
+    };
+    let mut remotes: Vec<String> = remote_targets
         .iter()
-        .map(|name| {
-            let path = resolve_worktree_path(name, mux.as_ref())?;
-            Ok((name.clone(), path))
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .map(|(_, record)| record.remote.clone())
+        .collect();
+    remotes.sort();
+    remotes.dedup();
+    remote::observe::spawn(&config, &remotes);
 
     let mut reached: HashSet<String> = HashSet::new();
     let mut seen_agent: HashSet<String> = HashSet::new();
@@ -85,6 +101,47 @@ pub fn run(
                     .join(", ")
             );
             std::process::exit(1);
+        }
+
+        for (name, record) in &remote_targets {
+            if reached.contains(name) {
+                continue;
+            }
+            match remote_progress(record, target) {
+                RemoteProgress::Unknown => {}
+                RemoteProgress::Running => {
+                    seen_agent.insert(name.clone());
+                }
+                RemoteProgress::Reached => {
+                    seen_agent.insert(name.clone());
+                    let elapsed = util::format_elapsed_duration(start.elapsed());
+                    eprintln!("{}: {} ({})", name, target_status, elapsed);
+                    reached.insert(name.clone());
+                    if any {
+                        return Ok(());
+                    }
+                }
+                RemoteProgress::Removed => {
+                    let elapsed = util::format_elapsed_duration(start.elapsed());
+                    eprintln!("{}: removed ({})", name, elapsed);
+                    reached.insert(name.clone());
+                    if any {
+                        return Ok(());
+                    }
+                }
+                RemoteProgress::Gone if seen_agent.contains(name) => {
+                    eprintln!("{}: agent exited unexpectedly", name);
+                    std::process::exit(3);
+                }
+                RemoteProgress::Gone => {}
+            }
+        }
+        if reached.len() == worktree_names.len() {
+            return Ok(());
+        }
+        if worktree_paths.is_empty() {
+            thread::sleep(Duration::from_secs(2));
+            continue;
         }
 
         // Load current agent state
@@ -135,10 +192,63 @@ pub fn run(
         }
 
         // Check if all have reached target
-        if reached.len() == worktree_paths.len() {
+        if reached.len() == worktree_names.len() {
             return Ok(());
         }
 
         thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// Where a remote workspace's agents stand, from the latest observation.
+enum RemoteProgress {
+    /// The remote is not observed right now; keep waiting.
+    Unknown,
+    Running,
+    Reached,
+    /// No agent runs in the workspace.
+    Gone,
+    /// The workspace was removed.
+    Removed,
+}
+
+fn remote_progress(record: &WorkspaceRecord, target: AgentStatus) -> RemoteProgress {
+    let current = remote::cache::all()
+        .into_iter()
+        .find(|r| r.remote == record.remote && r.ws_id == record.ws_id && !r.cleanup_pending());
+    let Some(current) = current else {
+        return RemoteProgress::Removed;
+    };
+    let Some(execution) = &current.execution else {
+        return RemoteProgress::Gone;
+    };
+    let Some(observation) = remote::observe::load_connected(&current.remote) else {
+        return RemoteProgress::Unknown;
+    };
+    let Some(workspace) = observation.execution(&current.ws_id, &execution.ex_id) else {
+        return RemoteProgress::Unknown;
+    };
+    // After a send, only the agent sent to counts, and until the fence
+    // lapses only the turn the send started.
+    let sent = remote::cache::sent_turn(&current.remote, &current.ws_id)
+        .filter(|turn| turn.ex_id == execution.ex_id);
+    let fence = sent
+        .as_ref()
+        .filter(|turn| !turn.lapsed(remote::cache::now()));
+    let agents: Vec<_> = workspace
+        .panes
+        .iter()
+        .filter(|pane| sent.as_ref().is_none_or(|turn| turn.pane == pane.index))
+        .filter_map(|pane| pane.agent.as_ref())
+        .collect();
+    let reached = |agent: &ObservedAgent| {
+        agent.status == Some(target) && fence.is_none_or(|turn| turn.admits(agent))
+    };
+    if agents.iter().any(|agent| reached(agent)) {
+        RemoteProgress::Reached
+    } else if agents.is_empty() {
+        RemoteProgress::Gone
+    } else {
+        RemoteProgress::Running
     }
 }

@@ -96,7 +96,11 @@ fn default_stale_threshold_secs() -> u64 {
 pub fn group_label(agent: &AgentPane, group_by: SidebarGroupBy) -> String {
     let raw = match group_by {
         SidebarGroupBy::Project => extract_project_name(&agent.path),
-        SidebarGroupBy::Session => agent.session.clone(),
+        // A remote agent no local pane relays is in no session.
+        SidebarGroupBy::Session => match &agent.remote {
+            Some(remote) if agent.session.is_empty() => format!("@{}", remote.at.remote),
+            _ => agent.session.clone(),
+        },
         SidebarGroupBy::None => String::new(),
     };
     if raw.trim().is_empty() {
@@ -275,7 +279,9 @@ fn order_agents(
 /// the same question, or a hotkey lands somewhere other than the row wearing
 /// its number.
 pub fn is_jump_target(snapshot: &SidebarSnapshot, agent: &AgentPane) -> bool {
-    snapshot.group_by.is_none() || !snapshot.stale_pane_ids.contains(&agent.pane_id)
+    // A remote agent no local pane relays has no pane to switch to.
+    !crate::remote::agents::is_detached(agent)
+        && (snapshot.group_by.is_none() || !snapshot.stale_pane_ids.contains(&agent.pane_id))
 }
 
 /// Inputs for one snapshot build.
@@ -467,6 +473,7 @@ mod tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 

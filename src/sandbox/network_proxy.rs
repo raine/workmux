@@ -107,8 +107,21 @@ impl Drop for ConnectionPermit {
 impl NetworkProxy {
     /// Bind to a random port on all interfaces (same as RPC server).
     pub fn bind(allowed_domains: &[AllowedDomainRule], max_connections: usize) -> Result<Self> {
-        let listener =
-            TcpListener::bind("0.0.0.0:0").context("Failed to bind network proxy listener")?;
+        Self::bind_to(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            allowed_domains,
+            max_connections,
+        )
+    }
+
+    /// Listen on an ephemeral port of `ip` only.
+    pub fn bind_to(
+        ip: std::net::IpAddr,
+        allowed_domains: &[AllowedDomainRule],
+        max_connections: usize,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind((ip, 0))
+            .with_context(|| format!("Failed to bind network proxy listener on {ip}"))?;
         let port = listener.local_addr()?.port();
         let token = generate_token();
         debug!(port, "network proxy bound");

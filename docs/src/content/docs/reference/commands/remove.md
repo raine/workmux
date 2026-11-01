@@ -56,6 +56,14 @@ workmux rm --gone -f
 workmux rm --all
 ```
 
+## Remote workspaces
+
+Pass the handle of a workspace on a [remote server](/guide/remote/) to remove its worktree, agent, container and window from the remote. Uncommitted changes on the remote refuse the removal without `--force`, and commits its base doesn't have ask for confirmation, as with a local worktree. `--keep-branch` fetches the branch to your machine before the remote copy goes. `pre_remove` hooks run on the remote.
+
+If the remote is unreachable or no longer configured, `--force` forgets the workspace on this machine only, leaving whatever exists on the remote for [`workmux remote gc`](/reference/commands/remote/#remote-gc). `--all` and `--gone` only consider local worktrees.
+
+In a remote workspace's pane, or from its agent, `workmux rm` asks the local machine to remove that workspace. See [remove or merge from a remote pane](/guide/remote/usage/#remove-or-merge-from-a-remote-pane).
+
 ## Deferred filesystem cleanup
 
 When removing a worktree from its own terminal target, filesystem cleanup runs

@@ -21,6 +21,18 @@ struct FrozenConfigFile {
     location: Option<ConfigLocation>,
 }
 
+impl FrozenConfigFile {
+    fn new(config: &Config, location: Option<&ConfigLocation>) -> Self {
+        Self {
+            version: SNAPSHOT_VERSION,
+            config: config.clone(),
+            selected_agent: config.selected_agent.clone(),
+            agent_type: config.agent_type.clone(),
+            location: location.cloned(),
+        }
+    }
+}
+
 /// Owns a secrets-bearing snapshot in the host's temporary directory.
 pub struct FrozenConfigGuard {
     file: NamedTempFile,
@@ -41,13 +53,7 @@ impl FrozenConfigGuard {
         location: Option<&ConfigLocation>,
         directory: &Path,
     ) -> Result<Self> {
-        let snapshot = FrozenConfigFile {
-            version: SNAPSHOT_VERSION,
-            config: config.clone(),
-            selected_agent: config.selected_agent.clone(),
-            agent_type: config.agent_type.clone(),
-            location: location.cloned(),
-        };
+        let snapshot = FrozenConfigFile::new(config, location);
         let mut file = tempfile::Builder::new()
             .prefix("workmux-frozen-config-")
             .suffix(".json")
@@ -91,6 +97,32 @@ fn ensure_outside_worktree(directory: &Path, worktree: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Snapshot document for `config`, in the format [`load`] reads.
+pub fn snapshot_document(
+    config: &Config,
+    location: Option<&ConfigLocation>,
+) -> Result<serde_json::Value> {
+    serde_json::to_value(FrozenConfigFile::new(config, location))
+        .context("Failed to serialize frozen configuration snapshot")
+}
+
+/// Validate a snapshot document and store it at `path`, readable only by
+/// the user.
+pub fn write_document(path: &Path, document: &serde_json::Value) -> Result<()> {
+    let snapshot: FrozenConfigFile = serde_json::from_value(document.clone())
+        .context("Invalid frozen configuration snapshot")?;
+    if snapshot.version != SNAPSHOT_VERSION {
+        bail!(
+            "Unsupported frozen configuration snapshot version {}",
+            snapshot.version
+        );
+    }
+    let bytes = serde_json::to_vec(document)
+        .context("Failed to serialize frozen configuration snapshot")?;
+    crate::util::write_atomic(path, &bytes)
+        .with_context(|| format!("Failed to store {}", path.display()))
 }
 
 pub fn load(path: &Path) -> Result<(Config, Option<ConfigLocation>)> {
@@ -167,6 +199,7 @@ fn open_snapshot(path: &Path) -> Result<File> {
 mod tests {
     use super::*;
     use crate::config::{Config, ConfigLocation, StatusIcons};
+    use std::fs;
 
     fn sample_config() -> Config {
         Config {
@@ -286,6 +319,23 @@ sandbox:
     fn accepts_snapshot_directory_outside_worktree() {
         ensure_outside_worktree(Path::new("/tmp/workmux-state"), Path::new("/tmp/project"))
             .unwrap();
+    }
+
+    #[test]
+    fn written_document_loads_and_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws.config.json");
+        let document = snapshot_document(&sample_config(), None).unwrap();
+        write_document(&path, &document).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (config, location) = load(&path).unwrap();
+        assert_eq!(config.agent, sample_config().agent);
+        assert!(location.is_none());
+        assert!(write_document(&path, &serde_json::json!({"version": 9})).is_err());
     }
 
     #[test]

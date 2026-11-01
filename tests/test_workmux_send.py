@@ -20,6 +20,7 @@ from .conftest import (
     write_workmux_config,
 )
 from .support.agent_state import start_active_agent
+from .support.codex import CODEX_SIMULATOR
 
 
 def test_send_error_worktree_not_found(
@@ -138,64 +139,7 @@ def test_send_codex_prompt_uses_bracketed_paste(
     submitted_file = tmp_path / "codex-simulator-submitted"
     input_file = tmp_path / "codex-simulator-input"
     simulator = tmp_path / "codex_simulator.py"
-    simulator.write_text(
-        """
-import os
-from pathlib import Path
-import subprocess
-import sys
-import termios
-import time
-import tty
-
-workmux, ready_path, submitted_path, input_path = sys.argv[1:]
-subprocess.run([workmux, "set-window-status", "waiting"], check=True)
-fd = sys.stdin.fileno()
-old_settings = termios.tcgetattr(fd)
-tty.setraw(fd)
-os.write(sys.stdout.fileno(), b"\\x1b[?2004h")
-time.sleep(0.1)
-Path(ready_path).touch()
-
-begin = b"\\x1b[200~"
-end = b"\\x1b[201~"
-buffer = bytearray()
-prompt = bytearray()
-in_paste = False
-paste_completed = False
-try:
-    while True:
-        received = os.read(fd, 4096)
-        with Path(input_path).open("ab") as input_log:
-            input_log.write(received)
-        buffer.extend(received)
-        while buffer:
-            if (len(buffer) < len(begin) and begin.startswith(buffer)) or (
-                len(buffer) < len(end) and end.startswith(buffer)
-            ):
-                break
-            if buffer.startswith(begin):
-                del buffer[:len(begin)]
-                in_paste = True
-                continue
-            if buffer.startswith(end):
-                del buffer[:len(end)]
-                in_paste = False
-                paste_completed = True
-                continue
-            byte = buffer.pop(0)
-            if byte == 13:
-                if paste_completed and not in_paste:
-                    Path(submitted_path).write_bytes(prompt)
-                    raise SystemExit(0)
-                prompt.append(10)
-            else:
-                prompt.append(byte)
-finally:
-    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-""".strip()
-        + "\n"
-    )
+    simulator.write_text(CODEX_SIMULATOR)
 
     env.send_keys(
         agent.window,

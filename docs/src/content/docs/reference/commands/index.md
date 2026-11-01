@@ -19,12 +19,14 @@ description: Complete reference for all workmux commands
 | [`resurrect`](/reference/commands/resurrect/)     | Restore worktree windows after a crash              |
 | [`sync-files`](/reference/commands/sync-files/)   | Re-apply file operations to existing worktrees      |
 | [`path`](/reference/commands/path/)               | Get the filesystem path of a worktree               |
+| [`shell`](/reference/commands/shell/)             | Open a shell in a remote workspace                  |
 | [`dashboard`](/reference/commands/dashboard/)     | TUI dashboard for monitoring agents                 |
 | [`sidebar`](/reference/commands/sidebar/)         | Live agent status sidebar in tmux                   |
 | [`reap-agents`](/reference/commands/reap-agents/) | Exit tracked agent processes older than a threshold |
 | [`config edit`](/reference/commands/config/)      | Edit the global configuration file                  |
 | [`init`](/reference/commands/init/)               | Generate configuration file                         |
 | [`claude prune`](/reference/commands/claude/)     | Clean up stale Claude Code entries                  |
+| [`remote`](/reference/commands/remote/)           | Set up and manage remote hosts that run agents      |
 | [`completions`](/reference/commands/completions/) | Generate shell completions                          |
 | [`docs`](/reference/commands/docs/)               | Show detailed documentation                         |
 | [`update`](/reference/commands/update/)           | Update workmux to the latest version                |

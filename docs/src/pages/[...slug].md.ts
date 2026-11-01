@@ -13,6 +13,10 @@ function readableBody(entry: CollectionEntry<"docs">): string {
     .replace(/\s*<TabItem label="([^"]+)">\s*/g, "\n\n### $1\n\n")
     .replace(/\s*<\/TabItem>\s*/g, "\n")
     .replace(/<Screenshot[\s\S]*?alt="([^"]+)"[\s\S]*?\/>/g, "_Screenshot: $1_")
+    .replace(
+      /<RemoteDemo[\s\S]*?caption="([^"]+)"[\s\S]*?\/>/g,
+      "_Animation: $1_",
+    )
     .trim();
 }
 

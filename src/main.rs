@@ -19,6 +19,7 @@ mod multiplexer;
 mod naming;
 mod nerdfont;
 mod prompt;
+mod remote;
 mod sandbox;
 mod shell;
 mod skills;

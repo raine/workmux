@@ -8,10 +8,27 @@ use crate::workflow;
 
 pub fn run(name: &str, text: Option<&str>, file: Option<&str>) -> Result<()> {
     let cfg = config::Config::load(None).unwrap_or_default();
+    if let Some(record) = crate::remote::agents::find_target(name) {
+        let content = read_content(text, file)?;
+        return crate::remote::agents::send(&cfg, &record, &content);
+    }
     let mux = create_backend(detect_backend());
     let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref())?;
+    let content = read_content(text, file)?;
 
-    // Determine content: positional arg > --file > stdin
+    let agent_identity = agent
+        .agent_kind
+        .as_deref()
+        .or(cfg.agent.as_deref())
+        .or(agent.agent_command.as_deref());
+    mux.send_prompt_to_agent(&agent.pane_id, &content, agent_identity)?;
+
+    Ok(())
+}
+
+/// The text to send: positional arg > --file > stdin, without its trailing
+/// newlines.
+fn read_content(text: Option<&str>, file: Option<&str>) -> Result<String> {
     let content = if let Some(t) = text {
         t.to_string()
     } else if let Some(f) = file {
@@ -28,19 +45,9 @@ pub fn run(name: &str, text: Option<&str>, file: Option<&str>) -> Result<()> {
         buf
     };
 
-    // Strip trailing newline
     let content = content.trim_end_matches('\n');
-
     if content.is_empty() {
         return Err(anyhow!("No content to send"));
     }
-
-    let agent_identity = agent
-        .agent_kind
-        .as_deref()
-        .or(cfg.agent.as_deref())
-        .or(agent.agent_command.as_deref());
-    mux.send_prompt_to_agent(&agent.pane_id, content, agent_identity)?;
-
-    Ok(())
+    Ok(content.to_string())
 }

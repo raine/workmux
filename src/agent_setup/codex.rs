@@ -70,6 +70,11 @@ pub fn check() -> Result<StatusCheck> {
     check_at(&hooks_path, &config_path)
 }
 
+/// [`check`] for the Codex home `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    check_at(&dir.join("hooks.json"), &dir.join("config.toml"))
+}
+
 fn check_at(hooks_path: &Path, config_path: &Path) -> Result<StatusCheck> {
     if !hooks_path.exists() {
         return Ok(StatusCheck::NotInstalled);
@@ -253,12 +258,6 @@ fn enable_hooks_feature(content: &str) -> Result<String> {
 
 /// Ensure `hooks = true` is set under `[features]` in config.toml.
 /// Returns true if the file was modified.
-fn ensure_hooks_feature_flag() -> Result<bool> {
-    let path =
-        config_toml_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    ensure_hooks_feature_flag_at(&path)
-}
-
 fn ensure_hooks_feature_flag_at(path: &Path) -> Result<bool> {
     let content = if path.exists() {
         fs::read_to_string(path).context("Failed to read ~/.codex/config.toml")?
@@ -335,14 +334,18 @@ fn install_hooks_at(path: &Path) -> Result<()> {
 /// Merges hook groups into existing hooks without clobbering or creating
 /// duplicates. Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path = hooks_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir = codex_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
+/// [`install`] into the Codex home `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = dir.join("hooks.json");
     install_hooks_at(&path)?;
 
     let mut message = format!("Installed hooks to {}", path.display());
-    if ensure_hooks_feature_flag()?
-        && let Some(config_path) = config_toml_path()
-    {
+    let config_path = dir.join("config.toml");
+    if ensure_hooks_feature_flag_at(&config_path)? {
         message.push_str(&format!(", enabled hooks in {}", config_path.display()));
     }
 

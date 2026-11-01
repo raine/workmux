@@ -171,6 +171,8 @@ pub fn setup_environment(
         worktree_root: Some(worktree_path),
         lima_vm_name: lima_vm_name.as_deref(),
         resume_mode: options.resume_mode.clone(),
+        sandbox_supervisor: None,
+        path_prefix: None,
     };
 
     let target_window_name = options.target_window_name.as_deref().unwrap_or(handle);
@@ -193,23 +195,12 @@ pub fn setup_environment(
             let initial_pane_id = if let Some(parent_session) =
                 options.window_session_name.as_deref()
             {
-                let parent_session_full_name = parent_session.to_string();
-                if mux.session_exists(&parent_session_full_name)? {
-                    mux.create_window_in_session(CreateWindowInSessionParams {
-                        session_name: &parent_session_full_name,
-                        name: Some(&mux_target_full_name),
-                        cwd: effective_working_dir,
-                    })
-                    .context("Failed to create window in session")?
-                } else {
-                    mux.create_session(CreateSessionParams {
-                        prefix: "",
-                        name: &parent_session_full_name,
-                        cwd: effective_working_dir,
-                        initial_window_name: Some(&mux_target_full_name),
-                    })
-                    .context("Failed to create session")?
-                }
+                crate::multiplexer::util::create_window_in_parent_session(
+                    mux,
+                    parent_session,
+                    &mux_target_full_name,
+                    effective_working_dir,
+                )?
             } else {
                 let placement_window_id = if after_window.is_some() {
                     None
@@ -501,6 +492,12 @@ pub fn resolve_pane_configuration(
     panes
 }
 
+/// Name of the file `write_prompt_file` writes under a worktree's
+/// `.workmux/` for `branch_name`.
+pub fn prompt_file_name(branch_name: &str) -> String {
+    format!("PROMPT-{}.md", branch_name.replace(['/', '\\', ':'], "-"))
+}
+
 /// Write a prompt file for agent consumption.
 ///
 /// When `working_dir` is provided, writes to `<working_dir>/.workmux/PROMPT-<branch>.md`
@@ -543,8 +540,7 @@ pub fn write_prompt_file(
             let _ = writeln!(file, "\n# workmux prompt files\n.workmux/");
         }
 
-        let prompt_filename = format!("PROMPT-{}.md", safe_branch_name);
-        workmux_dir.join(prompt_filename)
+        workmux_dir.join(prompt_file_name(branch_name))
     } else {
         // Legacy: write to temp directory for open command
         let prompt_filename = format!("workmux-prompt-{}.md", safe_branch_name);
@@ -582,7 +578,7 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
 ///
 /// This prevents the case where a user provides `-p "some prompt"` but no pane
 /// is configured to run an agent that would receive it.
-fn validate_prompt_consumption(
+pub fn validate_prompt_consumption(
     panes: &[config::PaneConfig],
     cli_agent: Option<&str>,
     config: &config::Config,

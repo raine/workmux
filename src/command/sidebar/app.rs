@@ -1348,13 +1348,35 @@ impl SidebarApp {
     }
 
     pub fn focus_selected(&mut self) {
-        let pane_id = self
+        let Some(agent) = self
             .selected_agent_idx()
             .and_then(|idx| self.agents.get(idx))
-            .map(|agent| agent.pane_id.clone());
-        if let Some(pane_id) = pane_id {
-            self.focus_pane(&pane_id);
+        else {
+            return;
+        };
+        if let Some(remote) = agent.remote.as_ref().filter(|remote| !remote.attached) {
+            self.open_detached(remote.clone());
+            return;
         }
+        let pane_id = agent.pane_id.clone();
+        self.focus_pane(&pane_id);
+    }
+
+    /// Open a window relaying a remote agent that no local pane relays.
+    fn open_detached(&self, remote: crate::multiplexer::RemoteAgent) {
+        // `workmux open` contacts the node; the sidebar keeps drawing.
+        std::thread::spawn(move || {
+            if let Err(err) = crate::remote::agents::open_window(&remote) {
+                tracing::warn!(handle = remote.handle, "sidebar open: {err:#}");
+                let _ = Cmd::new("tmux")
+                    .args(&[
+                        "display-message",
+                        &format!("workmux: open {}: {err:#}", remote.handle),
+                    ])
+                    .run();
+            }
+            super::daemon_ctrl::signal_daemon();
+        });
     }
 
     fn focus_pane(&self, pane_id: &str) {
@@ -1364,6 +1386,14 @@ impl SidebarApp {
     }
 
     fn select_selected_window(&mut self) {
+        if self
+            .selected_agent_idx()
+            .and_then(|idx| self.agents.get(idx))
+            .is_some_and(crate::remote::agents::is_detached)
+        {
+            self.focus_selected();
+            return;
+        }
         let Some((agent_pane_id, window_id)) = self
             .selected_agent_idx()
             .and_then(|idx| self.agents.get(idx))
@@ -2333,6 +2363,7 @@ mod tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 
@@ -2554,6 +2585,7 @@ mod grouping_tests {
             agent_command: None,
             agent_kind: None,
             prompt: None,
+            remote: None,
         }
     }
 
@@ -3317,6 +3349,7 @@ mod filter_tests {
                 agent_command: None,
                 agent_kind: None,
                 prompt: None,
+                remote: None,
             },
             AgentPane {
                 session: "s".to_string(),
@@ -3334,6 +3367,7 @@ mod filter_tests {
                 agent_command: None,
                 agent_kind: None,
                 prompt: None,
+                remote: None,
             },
         ];
         let active_panes = std::collections::HashSet::from(["%2".to_string()]);

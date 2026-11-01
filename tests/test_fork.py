@@ -288,6 +288,7 @@ class TestForkCodex:
         # `-C` keeps the fork in the new worktree. Without it Codex asks which
         # directory to use and defaults to the one the parent session recorded.
         assert read_codex_argv(argv_file) == [
+            "--no-daemon",
             "fork",
             "-C",
             str(worktree_path),
@@ -331,6 +332,7 @@ class TestForkCodex:
 
         worktree_path = get_worktree_path(mux_repo_path, "codex-fork-specific")
         assert read_codex_argv(argv_file) == [
+            "--no-daemon",
             "fork",
             "-C",
             str(worktree_path),

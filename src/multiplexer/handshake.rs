@@ -53,6 +53,9 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 /// 4. Clean up the channel
 pub struct TmuxHandshake {
     channel: String,
+    /// Server socket (`-S`); `None` means the server tmux finds by default.
+    /// The pane side always signals the server it runs in, through `$TMUX`.
+    socket: Option<String>,
 }
 
 impl TmuxHandshake {
@@ -60,21 +63,37 @@ impl TmuxHandshake {
     ///
     /// The channel must be locked before spawning the pane to ensure we don't
     /// miss the signal even if the shell starts instantly.
-    pub fn new() -> Result<Self> {
+    pub fn new(socket: Option<&str>) -> Result<Self> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let pid = std::process::id();
         let channel = format!("wm_ready_{}_{}", pid, nanos);
+        let handshake = Self {
+            channel,
+            socket: socket.map(str::to_string),
+        };
 
         // Lock the channel (ensures we don't miss the signal)
-        Cmd::new("tmux")
-            .args(&["wait-for", "-L", &channel])
+        handshake
+            .tmux()
+            .args(&["wait-for", "-L", &handshake.channel])
             .run()
             .context("Failed to initialize wait channel")?;
 
-        Ok(Self { channel })
+        Ok(handshake)
+    }
+
+    fn socket_args(&self) -> Vec<&str> {
+        match self.socket.as_deref() {
+            Some(socket) => vec!["-S", socket],
+            None => Vec::new(),
+        }
+    }
+
+    fn tmux(&self) -> Cmd<'_> {
+        Cmd::new("tmux").args(&self.socket_args())
     }
 }
 
@@ -112,6 +131,7 @@ impl PaneHandshake for TmuxHandshake {
         debug!(channel = %self.channel, "tmux:handshake start");
 
         let mut child = std::process::Command::new("tmux")
+            .args(self.socket_args())
             .args(["wait-for", "-L", &self.channel])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -126,7 +146,7 @@ impl PaneHandshake for TmuxHandshake {
                 Ok(Some(status)) => {
                     if status.success() {
                         // Cleanup: unlock the channel we just re-locked
-                        Cmd::new("tmux")
+                        self.tmux()
                             .args(&["wait-for", "-U", &self.channel])
                             .run()
                             .context("Failed to cleanup wait channel")?;
@@ -134,9 +154,7 @@ impl PaneHandshake for TmuxHandshake {
                         return Ok(());
                     } else {
                         // Attempt cleanup even on failure
-                        let _ = Cmd::new("tmux")
-                            .args(&["wait-for", "-U", &self.channel])
-                            .run();
+                        let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
                         warn!(channel = %self.channel, status = ?status.code(), "tmux:handshake failed (wait-for error)");
                         return Err(anyhow!(
                             "Pane handshake failed - tmux wait-for returned error"
@@ -149,9 +167,7 @@ impl PaneHandshake for TmuxHandshake {
                         let _ = child.wait(); // Ensure process is reaped
 
                         // Attempt cleanup
-                        let _ = Cmd::new("tmux")
-                            .args(&["wait-for", "-U", &self.channel])
-                            .run();
+                        let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
 
                         warn!(
                             channel = %self.channel,
@@ -173,9 +189,7 @@ impl PaneHandshake for TmuxHandshake {
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = Cmd::new("tmux")
-                        .args(&["wait-for", "-U", &self.channel])
-                        .run();
+                    let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
                     warn!(channel = %self.channel, error = %e, "tmux:handshake error");
                     return Err(anyhow!("Error waiting for pane handshake: {}", e));
                 }

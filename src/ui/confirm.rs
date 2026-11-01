@@ -4,7 +4,6 @@ use std::io::{self, Write};
 
 pub enum ConfirmDefault {
     Yes,
-    #[allow(dead_code)]
     No,
 }
 

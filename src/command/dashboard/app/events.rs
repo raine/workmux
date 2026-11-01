@@ -19,6 +19,20 @@ impl App {
     pub fn apply_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Terminal(_) => {} // handled separately in main loop
+            AppEvent::RemotePreview(pane_id, capture) => {
+                if let Some((_, running)) = &mut self.remote_preview_fetch {
+                    *running = false;
+                }
+                let text =
+                    capture.unwrap_or_else(|err| format!("(remote preview unavailable: {err})"));
+                if self.preview_pane_id.as_ref() == Some(&pane_id) {
+                    self.preview = Some(text.clone());
+                }
+                self.remote_previews.insert(pane_id, text);
+            }
+            AppEvent::RemoteDiff(ws_id, branch_diff, result) => {
+                super::super::diff_ops::apply_remote_diff(self, &ws_id, branch_diff, result);
+            }
             AppEvent::GitStatus(path, status) => {
                 self.git_statuses.insert(path, status);
             }

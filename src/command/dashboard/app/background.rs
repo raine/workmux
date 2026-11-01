@@ -44,7 +44,12 @@ impl App {
         let is_fetching = self.is_git_fetching.clone();
         let main_branch = self.config.main_branch.clone();
         // Include both agent paths and worktree paths so the worktree view gets git status too
-        let mut paths: Vec<PathBuf> = self.all_agents.iter().map(|a| a.path.clone()).collect();
+        let mut paths: Vec<PathBuf> = self
+            .all_agents
+            .iter()
+            .filter(|a| a.remote.is_none())
+            .map(|a| a.path.clone())
+            .collect();
         for wt in &self.worktrees {
             if !paths.contains(&wt.path) {
                 paths.push(wt.path.clone());

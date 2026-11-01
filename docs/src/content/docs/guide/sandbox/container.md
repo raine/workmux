@@ -396,6 +396,8 @@ sandbox:
   image: my-sandbox
 ```
 
+A custom image for Codex needs Codex 0.156 or newer, installed from its full release package (`codex-package-<arch>-unknown-linux-musl.tar.gz`) rather than the bare `codex` binary, which lacks helpers such as `codex-code-mode-host`. Workmux starts sandboxed Codex with `--no-daemon`, which older versions reject (see [Agent flags](/guide/sandbox/features/#agent-flags)).
+
 ## Security: hooks in sandbox
 
 Pre-merge and pre-remove hooks are always skipped for RPC-triggered merges (`--no-verify --no-hooks` is forced by the host). This prevents a compromised guest from injecting malicious hooks via `.workmux.yaml` and triggering them on the host. Similarly, `SpawnAgent` RPC forces `--no-hooks` to skip post-create hooks.

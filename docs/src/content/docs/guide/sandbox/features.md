@@ -96,6 +96,16 @@ This means git commits inside the sandbox use your identity without exposing the
 
 No configuration is needed. If the host has no `user.name` or `user.email` configured, the injection is silently skipped.
 
+## Agent flags
+
+Inside a sandbox the sandbox is the security boundary, so workmux starts agents without their own permission prompts: Claude with `--dangerously-skip-permissions`, Codex and Gemini with `--yolo`, and other agents with their equivalent. Flags your agent command already sets are not added a second time.
+
+Codex also gets `--no-daemon`. The sandbox mounts the host's `~/.codex`, where Codex installs and tracks its shared background server, but a sandboxed Codex can't reach a server running outside the sandbox. Without the flag, it fails to start once Codex on the host has installed the server ("daemon executable not found"), or installs a server of its own into the host's `~/.codex`.
+
+Codex also gets `--dangerously-bypass-hook-trust`. Codex otherwise asks you to review every new or changed hook before it runs, including the hooks workmux installs for [status tracking](/guide/status-tracking/), and the sandbox path of `~/.codex/hooks.json` differs from the host's, so approvals given on the host don't apply. Hooks run inside the sandbox, the same as any command the agent runs with `--yolo`, so the review adds no protection there. Hooks you disabled in Codex stay disabled. The flag applies to that launch only and records no approval.
+
+`--no-daemon` needs Codex 0.156 or newer. The workmux image installs the latest release. A custom image (`sandbox.image`) or a Lima VM with an older Codex fails to start Codex with "unexpected argument '--no-daemon'": update Codex in the image, or recreate the VM with `workmux sandbox prune`.
+
 ## Credentials
 
 Both sandbox backends mount agent-specific credential directories from the host. The mounted directory depends on the configured `agent`:
@@ -157,7 +167,8 @@ The supervisor and guest communicate via JSON-lines over TCP. Each request is a 
 - `Heartbeat` - health check, returns Ok
 - `SpawnAgent` - runs `workmux add` on the host to create a new worktree and pane
 - `Exec` - runs a command on the host and streams stdout/stderr back (used by host-exec shims, including built-in `afplay`)
-- `Merge` - runs `workmux merge` on the host with all flags forwarded
+- `Merge` - runs `workmux merge` on the host with hooks disabled
+- `Remove` - asks the local machine to remove a workspace on a [remote server](/guide/remote/), without hooks; refused locally, where `pre_remove` hooks would run on the host
 - `ClipboardRead` - reads the host clipboard and writes image data to the shared worktree filesystem (used by `wl-paste`/`xclip` shims)
 
 Requests are authenticated with a per-session token passed via the `WM_RPC_TOKEN` environment variable.

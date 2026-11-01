@@ -11,9 +11,160 @@ use std::io::Write;
 use super::ansi::parse_ansi_to_lines;
 use super::app::{App, ViewMode};
 use super::diff::{
-    DiffView, extract_file_list, get_diff_content, get_file_list_numstat, map_file_offsets,
-    parse_hunk_header,
+    DiffView, RemoteDiff, extract_file_list, get_diff_content, get_file_list_numstat,
+    map_file_offsets, parse_hunk_header, render_diff,
 };
+use crate::remote::agents::CachedDiff;
+use crate::remote::protocol::DiffMode;
+
+fn diff_mode(branch_diff: bool) -> DiffMode {
+    if branch_diff {
+        DiffMode::Branch
+    } else {
+        DiffMode::Wip
+    }
+}
+
+/// Show a remote workspace's diff: the copy last fetched from its node at
+/// once, then the node's current one when it arrives.
+fn load_remote_diff(
+    app: &mut App,
+    remote: RemoteDiff,
+    branch_diff: bool,
+    path: std::path::PathBuf,
+    pane_id: String,
+) {
+    let mode = diff_mode(branch_diff);
+    let cached = crate::remote::agents::cached_diff(&remote.at.remote, &remote.at.ws_id, mode);
+    let view = match &cached {
+        Some(diff) => {
+            let age = crate::util::format_compact_age(
+                crate::remote::cache::now().saturating_sub(diff.fetched_at),
+            );
+            let note = format!("cached {age} ago, refreshing");
+            remote_diff_view(&remote, branch_diff, path, pane_id, Ok(diff), Some(&note))
+        }
+        None => {
+            let fetching = format!("Fetching the diff from '{}'...", remote.at.remote);
+            remote_diff_view(&remote, branch_diff, path, pane_id, Err(&fetching), None)
+        }
+    };
+    app.view_mode = ViewMode::Diff(Box::new(view));
+
+    let tx = app.event_tx.clone();
+    let config = app.config.clone();
+    let at = remote.at;
+    std::thread::spawn(move || {
+        let result = crate::remote::agents::fetch_diff(&config, &at.remote, &at.ws_id, mode)
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(super::app::AppEvent::RemoteDiff(
+            at.ws_id,
+            branch_diff,
+            result,
+        ));
+    });
+}
+
+/// Apply a diff fetched from a node to the open diff view it was fetched
+/// for. A failed fetch leaves the cached copy, if any, with a note.
+pub(super) fn apply_remote_diff(
+    app: &mut App,
+    ws_id: &str,
+    branch_diff: bool,
+    result: Result<CachedDiff, String>,
+) {
+    let ViewMode::Diff(ref view) = app.view_mode else {
+        return;
+    };
+    let Some(remote) = view
+        .remote
+        .clone()
+        .filter(|remote| remote.at.ws_id == ws_id && view.is_branch_diff == branch_diff)
+    else {
+        return;
+    };
+    let (path, pane_id, scroll) = (
+        view.worktree_path.clone(),
+        view.pane_id.clone(),
+        view.scroll,
+    );
+    let mut next = match result {
+        Ok(diff) => remote_diff_view(&remote, branch_diff, path, pane_id, Ok(&diff), None),
+        Err(err) => {
+            let mode = diff_mode(branch_diff);
+            match crate::remote::agents::cached_diff(&remote.at.remote, ws_id, mode) {
+                Some(diff) => {
+                    let age = crate::util::format_compact_age(
+                        crate::remote::cache::now().saturating_sub(diff.fetched_at),
+                    );
+                    let note = format!("cached {age} ago; {} is unreachable", remote.at.remote);
+                    remote_diff_view(&remote, branch_diff, path, pane_id, Ok(&diff), Some(&note))
+                }
+                None => {
+                    let message = format!("Could not fetch the diff: {err}");
+                    remote_diff_view(&remote, branch_diff, path, pane_id, Err(&message), None)
+                }
+            }
+        }
+    };
+    next.scroll = scroll.min(next.line_count.saturating_sub(1));
+    app.view_mode = ViewMode::Diff(Box::new(next));
+}
+
+/// A read-only diff view of a remote workspace's diff, or of `message`
+/// when there is none to show.
+fn remote_diff_view(
+    remote: &RemoteDiff,
+    branch_diff: bool,
+    path: std::path::PathBuf,
+    pane_id: String,
+    diff: Result<&CachedDiff, &str>,
+    note: Option<&str>,
+) -> DiffView {
+    let empty = if branch_diff {
+        "No commits on this branch yet"
+    } else {
+        "No uncommitted changes"
+    };
+    let (mut content, lines_added, lines_removed, hunks) = match diff {
+        Ok(diff) if diff.text.trim().is_empty() => (empty.to_string(), 0, 0, Vec::new()),
+        Ok(diff) => render_diff(diff.text.clone().into_bytes(), true)
+            .unwrap_or_else(|err| (err, 0, 0, Vec::new())),
+        Err(message) => (message.to_string(), 0, 0, Vec::new()),
+    };
+    if diff.is_ok_and(|diff| diff.truncated) {
+        content.push_str("\n(the node cut this diff short)\n");
+    }
+    let parsed_lines = parse_ansi_to_lines(&content);
+    let mut file_list = extract_file_list(&hunks);
+    map_file_offsets(&mut file_list, &parsed_lines);
+    let title = match note {
+        Some(note) => format!("{} ({note})", remote.title),
+        None => remote.title.clone(),
+    };
+    DiffView {
+        line_count: parsed_lines.len().max(1),
+        content,
+        parsed_lines,
+        scroll: 0,
+        viewport_height: 0,
+        title,
+        worktree_path: path,
+        pane_id,
+        is_branch_diff: branch_diff,
+        lines_added,
+        lines_removed,
+        patch_mode: false,
+        hunks: Vec::new(),
+        current_hunk: 0,
+        hunks_total: 0,
+        hunks_processed: 0,
+        staged_hunks: Vec::new(),
+        comment_input: None,
+        file_list,
+        remote: Some(remote.clone()),
+    }
+}
 
 /// Extension trait for diff and patch mode operations on App.
 pub trait DiffOps {
@@ -85,6 +236,7 @@ fn reload_unstaged_diff(app: &mut App) {
                 staged_hunks: Vec::new(),
                 comment_input: None,
                 file_list,
+                remote: None,
             }));
         }
         Err(e) => {
@@ -109,6 +261,7 @@ fn reload_unstaged_diff(app: &mut App) {
                 staged_hunks: Vec::new(),
                 comment_input: None,
                 file_list: Vec::new(),
+                remote: None,
             }));
         }
     }
@@ -203,6 +356,15 @@ impl DiffOps for App {
 
     /// Enter patch mode for the current diff view
     fn enter_patch_mode(&mut self) {
+        if let ViewMode::Diff(ref diff) = self.view_mode
+            && diff.remote.is_some()
+        {
+            self.status_message = Some((
+                "Patch mode needs a local worktree".to_string(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
         // Check if we are in WIP diff view (patch mode not supported for branch diffs)
         let is_wip_diff = if let ViewMode::Diff(ref diff) = self.view_mode {
             !diff.is_branch_diff
@@ -423,6 +585,27 @@ impl DiffOps for App {
         let pane_id = agent.pane_id.clone();
         let worktree_name = self.extract_worktree_name(agent).0;
 
+        if let Some(remote) = agent.remote.clone() {
+            let title = if branch_diff {
+                let base = remote
+                    .git
+                    .as_ref()
+                    .map(|status| status.base_branch.clone())
+                    .filter(|base| !base.is_empty())
+                    .unwrap_or_else(|| "base".to_string());
+                format!("Review: {worktree_name} \u{2192} {base}")
+            } else {
+                format!("WIP: {worktree_name}")
+            };
+            let remote = RemoteDiff {
+                at: remote.at,
+                title,
+            };
+            let path = path.clone();
+            load_remote_diff(self, remote, branch_diff, path, pane_id);
+            return;
+        }
+
         let (diff_arg, title) = if branch_diff {
             // Get the base branch from git status if available, then config, then "main"
             let base = self
@@ -488,6 +671,7 @@ impl DiffOps for App {
                     staged_hunks: Vec::new(),
                     comment_input: None,
                     file_list,
+                    remote: None,
                 }));
             }
             Err(e) => {
@@ -513,6 +697,7 @@ impl DiffOps for App {
                     staged_hunks: Vec::new(),
                     comment_input: None,
                     file_list: Vec::new(),
+                    remote: None,
                 }));
             }
         }

@@ -66,6 +66,12 @@ pub enum SandboxCommand {
         /// Root of the worktree for mounting (defaults to worktree path)
         #[arg(long)]
         worktree_root: Option<PathBuf>,
+        /// Run for a remote node rooted here (set by `workmux node`)
+        #[arg(long, hide = true, requires = "node_workspace")]
+        node_root: Option<PathBuf>,
+        /// Workspace id on that node
+        #[arg(long, hide = true, requires = "node_root")]
+        node_workspace: Option<String>,
         /// Command and arguments to run inside the sandbox
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -143,7 +149,7 @@ fn run_agent(command: Vec<String>) -> Result<()> {
         command
     };
 
-    let exit_code = super::sandbox_run::run(cwd, Some(worktree_root), agent_command)?;
+    let exit_code = super::sandbox_run::run(cwd, Some(worktree_root), agent_command, None)?;
     std::process::exit(exit_code);
 }
 
@@ -155,10 +161,13 @@ pub fn run(args: SandboxArgs) -> Result<()> {
         SandboxCommand::Run {
             worktree,
             worktree_root,
+            node_root,
+            node_workspace,
             command,
         } => {
             debug!(worktree = %worktree.display(), ?worktree_root, ?command, "sandbox run");
-            let exit_code = super::sandbox_run::run(worktree, worktree_root, command)?;
+            let node = node_root.zip(node_workspace);
+            let exit_code = super::sandbox_run::run(worktree, worktree_root, command, node)?;
             std::process::exit(exit_code);
         }
         SandboxCommand::InstallDev {
