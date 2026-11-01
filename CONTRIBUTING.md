@@ -64,7 +64,7 @@ By default, tests run against **tmux only**.
 # Test with WezTerm (requires WezTerm to be running)
 WORKMUX_TEST_BACKEND=wezterm just itest
 
-# Test with Rex (requires Rex to be running; each test uses its own session)
+# Test with Rex (each test starts a private Rex server)
 just itest --backend=rex
 
 # Test both backends

@@ -834,6 +834,10 @@ impl Multiplexer for TmuxBackend {
         "tmux"
     }
 
+    fn supports_session_mode(&self) -> bool {
+        true
+    }
+
     // === Server/Session ===
 
     fn is_running(&self) -> Result<bool> {

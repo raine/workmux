@@ -311,8 +311,11 @@ class MuxEnvironment(ABC):
         pass
 
     @abstractmethod
-    def new_window(self, name: Optional[str] = None) -> None:
-        """Create a new window/tab with optional name."""
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
+        """Create a new window/tab with optional name.
+
+        With `detached`, the current window stays active.
+        """
         pass
 
     @abstractmethod
@@ -323,6 +326,27 @@ class MuxEnvironment(ABC):
         For WezTerm: sets SHELL env var (workmux already starts with -l).
         """
         pass
+
+    # Whether switching to a new session fails in the test environment. tmux
+    # has no attached client to switch, so `open` exits non-zero after the
+    # session is created. Rex treats the switch as best effort.
+    session_switch_fails = True
+
+    def list_sessions(self) -> list[str]:
+        """Return the names of all sessions, for backends with session mode."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """Return the window names of one session."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def new_session(self, session_name: str) -> None:
+        """Create a detached session, outside workmux."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the working directory of a session's active pane."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
 
 
 class TmuxEnvironment(MuxEnvironment):
@@ -436,9 +460,11 @@ class TmuxEnvironment(MuxEnvironment):
         if result.returncode != 0:
             raise RuntimeError(f"Window '{window_name}' not found: {result.stderr}")
 
-    def new_window(self, name: Optional[str] = None) -> None:
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
         """Create a new tmux window with optional name."""
         args = ["new-window"]
+        if detached:
+            args.append("-d")
         if name:
             args.extend(["-n", name])
         self.mux_command(args)
@@ -446,6 +472,32 @@ class TmuxEnvironment(MuxEnvironment):
     def configure_default_shell(self, shell: str) -> None:
         """Configure tmux to use the specified shell for new panes."""
         self.mux_command(["set-option", "-g", "default-shell", shell])
+
+    def list_sessions(self) -> list[str]:
+        """List tmux session names. No server means no sessions."""
+        result = self.mux_command(
+            ["list-sessions", "-F", "#{session_name}"], check=False
+        )
+        if result.returncode != 0:
+            return []
+        return [s for s in result.stdout.strip().split("\n") if s]
+
+    def new_session(self, session_name: str) -> None:
+        """Create a detached tmux session."""
+        self.mux_command(["new-session", "-d", "-s", session_name])
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """List the window names of one tmux session."""
+        result = self.mux_command(
+            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
+        )
+        return [w for w in result.stdout.strip().split("\n") if w]
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the current path of a tmux session's active pane."""
+        return self.mux_command(
+            ["display-message", "-t", f"={session_name}:", "-p", "#{pane_current_path}"]
+        ).stdout.strip()
 
 
 class WezTermEnvironment(MuxEnvironment):
@@ -636,7 +688,7 @@ class WezTermEnvironment(MuxEnvironment):
         pane_id = str(pane["pane_id"])
         self.mux_command(["activate-pane", "--pane-id", pane_id])
 
-    def new_window(self, name: Optional[str] = None) -> None:
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
         """Create a new WezTerm tab in the test workspace."""
         # Find window_id from existing pane in our workspace
         panes = self._list_panes()
@@ -676,46 +728,70 @@ class RexEnvironment(MuxEnvironment):
     """
     Rex-specific test environment.
 
-    Rex runs one server per user, so each test gets its own session on the
-    running server and removes it afterwards, like WezTerm's workspaces.
+    Each test starts its own Rex server on a private socket, like the tmux
+    tests. The server is started with the isolated environment, so every
+    terminal it opens (including the ones workmux creates) inherits HOME,
+    PATH and the XDG directories. It never touches the user's Rex server.
     """
-
-    # Variables the test terminal needs from the isolated environment. Rex
-    # starts terminals from its server's environment, not the caller's.
-    _PANE_ENV_KEYS = (
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_HOME",
-        "GIT_EDITOR",
-    )
 
     def __init__(self, tmp_path: Path):
         super().__init__(tmp_path)
 
-        import uuid
-
-        self.session_label = f"workmux_test_{uuid.uuid4().hex[:8]}"
+        # Short socket path, to stay under the macOS limit for Unix sockets
+        self.server_dir = Path(tempfile.mkdtemp(prefix="rex_"))
+        self.server_endpoint = f"unix://{self.server_dir / 's.sock'}"
+        self.server_process: Optional[subprocess.Popen] = None
         self.session_id: Optional[str] = None
         self.runner_block_id: Optional[str] = None
 
         # Keep the tests off any multiplexer the test run itself is inside
         for key in ("TMUX", "TMUX_PANE", "WEZTERM_PANE", "REX_SESSION", "REX_BLOCK"):
             self.env.pop(key, None)
+        self.env["REX_SERVER"] = self.server_endpoint
 
     @property
     def backend_name(self) -> str:
         return "rex"
 
+    session_switch_fails = False
+
+    def _server_ready(self) -> bool:
+        status = ["api", "call", "server.status", "{}"]
+        return self.mux_command(status, check=False).returncode == 0
+
     def start_server(self) -> None:
-        """Create the test session, with one window named 'test'."""
+        """Start a private Rex server and a 'test' session with one window."""
+        # The server keeps its own copy of the log file's descriptor
+        with open(self.server_dir / "server.log", "w") as log:
+            self.server_process = subprocess.Popen(
+                [
+                    "rex",
+                    "server",
+                    "run",
+                    "--listen",
+                    self.server_endpoint,
+                    "--state-dir",
+                    str(self.server_dir / "state"),
+                    "--restore=false",
+                    "--config",
+                    "/dev/null",
+                ],
+                cwd=self.tmp_path,
+                env=self.env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        if not poll_until(self._server_ready, timeout=10.0):
+            raise RuntimeError(
+                "Rex test server did not start:\n"
+                + (self.server_dir / "server.log").read_text()
+            )
+
         shell = self.env.get("SHELL", "/bin/sh")
-        pane_env = [f"{k}={self.env[k]}" for k in self._PANE_ENV_KEYS if k in self.env]
         result = self.mux_command(
             [
                 "new",
-                self.session_label,
+                "test",
                 "-c",
                 str(self.tmp_path),
                 "--window",
@@ -723,8 +799,6 @@ class RexEnvironment(MuxEnvironment):
                 "--shell=none",
                 "--json",
                 "--",
-                "env",
-                *pane_env,
                 shell,
                 "-l",
             ]
@@ -734,16 +808,25 @@ class RexEnvironment(MuxEnvironment):
         self.runner_block_id = created["initial_windows"][0]["block_ids"][0]
 
     def stop_server(self) -> None:
-        """Remove the test session and everything workmux created in it."""
-        if self.session_id:
-            self.mux_command(["kill", self.session_id], check=False)
-            self.session_id = None
+        """Stop the private server, which ends every terminal it started."""
+        if self.server_process is not None:
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+            self.server_process = None
+        self.session_id = None
+        shutil.rmtree(self.server_dir, ignore_errors=True)
 
     def mux_command(
         self, args: list[str], check: bool = True
     ) -> subprocess.CompletedProcess[str]:
-        """Run a rex CLI command. Never start a server as a side effect."""
-        return self.run_command(["rex", "--autostart=false"] + args, check=check)
+        """Run a rex CLI command against the private server."""
+        return self.run_command(
+            ["rex", "--autostart=false", "-S", self.server_endpoint] + args,
+            check=check,
+        )
 
     def _api(self, method: str, args: dict) -> dict:
         result = self.mux_command(["api", "call", method, json.dumps(args)])
@@ -828,8 +911,10 @@ class RexEnvironment(MuxEnvironment):
         return None
 
     def _send(self, block_id: str, text: str, enter: bool) -> None:
-        # `--` so text starting with "-" isn't read as a flag
-        self.mux_command(["send", *self._block_args(block_id), "--", text])
+        # `--` so text starting with "-" isn't read as a flag. Rex rejects
+        # empty text, and there is nothing to send anyway.
+        if text:
+            self.mux_command(["send", *self._block_args(block_id), "--", text])
         if enter:
             self.mux_command(["send-key", *self._block_args(block_id), "enter"])
 
@@ -862,9 +947,11 @@ class RexEnvironment(MuxEnvironment):
         window = self._require_window(window_name)
         self._api("session.focus_window", self._window_ref(window))
 
-    def new_window(self, name: Optional[str] = None) -> None:
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
         """Create a new window in the test session."""
         args = ["window", "new", "-s", str(self.session_id)]
+        if detached:
+            args.append("--focus=false")
         if name:
             args.append(name)
         self.mux_command(args + ["-c", str(self.tmp_path)])
@@ -872,6 +959,45 @@ class RexEnvironment(MuxEnvironment):
     def configure_default_shell(self, shell: str) -> None:
         """Rex has no default-shell option; set SHELL for workmux to read."""
         self.env["SHELL"] = shell
+
+    def _sessions(self) -> list[dict]:
+        return self._api("session.list", {}).get("sessions") or []
+
+    def list_sessions(self) -> list[str]:
+        """List session labels on the private server."""
+        return [s["label"] for s in self._sessions() if s.get("label")]
+
+    def _session_view(self, session_name: str) -> tuple[str, dict]:
+        for session in self._sessions():
+            if session.get("label") == session_name:
+                view = self._api("session.view", {"session_id": session["session_id"]})
+                return session["session_id"], view
+        raise RuntimeError(f"Session '{session_name}' not found")
+
+    def new_session(self, session_name: str) -> None:
+        """Create a session on the private server, without switching to it."""
+        self.mux_command(["new", session_name, "-c", str(self.tmp_path)])
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """List the window labels of one session."""
+        _, view = self._session_view(session_name)
+        return [w["label"] for w in view.get("windows") or [] if w.get("label")]
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the cwd of the focused block in a session's active window."""
+        session_id, view = self._session_view(session_name)
+        for window in view.get("windows") or []:
+            if window.get("window_id") != view.get("active_window_id"):
+                continue
+            block_id = self._focused_block(window)
+            if not block_id:
+                break
+            result = self.mux_command(
+                ["block", "call", "-s", session_id, "-b", block_id, "process", "{}"]
+            )
+            process = json.loads(result.stdout)
+            return (process.get("foreground") or {}).get("cwd") or ""
+        raise RuntimeError(f"Session '{session_name}' has no active pane")
 
 
 def skip_if_backend_unavailable(backend: str):
@@ -881,8 +1007,7 @@ def skip_if_backend_unavailable(backend: str):
     For tmux: Checks binary exists and `tmux -V` succeeds.
     For WezTerm: Checks binary exists and `wezterm cli list` succeeds
                 (requires WezTerm to be running).
-    For Rex: Checks binary exists and the server answers (requires Rex to be
-             running; never starts one).
+    For Rex: Checks the binary exists. Each test starts its own server.
 
     This ensures CI environments without WezTerm can still run tmux tests.
     """
@@ -905,14 +1030,6 @@ def skip_if_backend_unavailable(backend: str):
     elif backend == "rex":
         if not shutil.which("rex"):
             pytest.skip("rex not installed")
-        result = subprocess.run(
-            ["rex", "--autostart=false", "api", "call", "server.status", "{}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            pytest.skip("rex server not running or not available")
 
 
 # Type alias for tests that accept any backend
@@ -942,34 +1059,25 @@ def assert_window_exists(env: MuxEnvironment, window_name: str) -> None:
     )
 
 
-def assert_session_exists(env: "TmuxEnvironment", session_name: str) -> None:
-    """Ensure a tmux session with the provided name exists."""
-    result = env.tmux(["list-sessions", "-F", "#{session_name}"])
-    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+def assert_session_exists(env: MuxEnvironment, session_name: str) -> None:
+    """Ensure a session with the provided name exists."""
+    existing_sessions = env.list_sessions()
     assert session_name in existing_sessions, (
         f"Session {session_name!r} not found. Existing: {existing_sessions!r}"
     )
 
 
-def assert_session_not_exists(env: "TmuxEnvironment", session_name: str) -> None:
-    """Ensure a tmux session with the provided name does NOT exist."""
-    result = env.tmux(["list-sessions", "-F", "#{session_name}"], check=False)
-    if result.returncode != 0:
-        # No sessions exist at all
-        return
-    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+def assert_session_not_exists(env: MuxEnvironment, session_name: str) -> None:
+    """Ensure a session with the provided name does NOT exist."""
+    existing_sessions = env.list_sessions()
     assert session_name not in existing_sessions, (
         f"Session {session_name!r} should not exist but was found. Existing: {existing_sessions!r}"
     )
 
 
-def assert_window_not_exists(env: "TmuxEnvironment", window_name: str) -> None:
-    """Ensure a tmux window with the provided name does NOT exist."""
-    result = env.tmux(["list-windows", "-F", "#{window_name}"], check=False)
-    if result.returncode != 0:
-        # No windows exist at all
-        return
-    existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+def assert_window_not_exists(env: MuxEnvironment, window_name: str) -> None:
+    """Ensure a window with the provided name does NOT exist."""
+    existing_windows = env.list_windows()
     assert window_name not in existing_windows, (
         f"Window {window_name!r} should not exist but was found. Existing: {existing_windows!r}"
     )
@@ -1297,8 +1405,6 @@ def pytest_xdist_auto_num_workers(config) -> int | None:
     backends = get_test_backends(config)
     if "wezterm" in backends:
         return 8  # Single worker to avoid WezTerm crashes
-    if "rex" in backends:
-        return 4  # Every worker shares the user's one Rex server
     return None  # Let xdist use its default (usually CPU count)
 
 

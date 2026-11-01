@@ -1,5 +1,7 @@
 """Tests for `workmux add --session` command - session mode worktree creation."""
 
+from pathlib import Path
+
 from ..conftest import (
     assert_session_exists,
     assert_session_not_exists,
@@ -236,10 +238,8 @@ class TestSessionBackground:
         assert worktree_path.is_dir()
 
         # Verify the session's pane is in the worktree directory
-        pane_path_result = env.tmux(
-            ["display-message", "-t", f"={session_name}:", "-p", "#{pane_current_path}"]
-        )
-        assert str(worktree_path) in pane_path_result.stdout
+        pane_path = env.session_pane_path(session_name)
+        assert Path(pane_path).resolve() == Path(worktree_path).resolve()
 
 
 class TestSessionRemove:
@@ -351,15 +351,12 @@ class TestSessionOpen:
             workmux_exe_path,
             repo_path,
             f"open {branch_name}",
-            expect_fail=True,  # May fail due to switch-client, but session should exist
+            expect_fail=env.session_switch_fails,  # session should exist either way
         )
 
         # Even if switch-client fails, the session should be recreated
         # Check if session exists OR if it was a switch-client error
-        sessions_result = env.tmux(
-            ["list-sessions", "-F", "#{session_name}"], check=False
-        )
-        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+        existing_sessions = env.list_sessions()
 
         # The session should exist (even if switching to it failed)
         assert session_name in existing_sessions, (
@@ -396,14 +393,11 @@ class TestOpenSessionFlag:
             workmux_exe_path,
             repo_path,
             f"open {branch_name} --session",
-            expect_fail=True,  # May fail due to switch-client in test env
+            expect_fail=env.session_switch_fails,
         )
 
         # The session should be created
-        sessions_result = env.tmux(
-            ["list-sessions", "-F", "#{session_name}"], check=False
-        )
-        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+        existing_sessions = env.list_sessions()
 
         assert session_name in existing_sessions, (
             f"Session {session_name!r} should exist after open --session. "
@@ -435,7 +429,7 @@ class TestOpenSessionFlag:
             workmux_exe_path,
             repo_path,
             f"open {branch_name} --session",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         # Close again
@@ -453,13 +447,10 @@ class TestOpenSessionFlag:
             workmux_exe_path,
             repo_path,
             f"open {branch_name}",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
-        sessions_result = env.tmux(
-            ["list-sessions", "-F", "#{session_name}"], check=False
-        )
-        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+        existing_sessions = env.list_sessions()
 
         assert session_name in existing_sessions, (
             f"Session {session_name!r} should exist after subsequent open (mode persisted). "
@@ -483,8 +474,7 @@ class TestOpenSessionFlag:
         )
 
         # Verify window exists
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         assert window_name in existing_windows
 
         # Open with --session (should close old window and create session)
@@ -493,21 +483,17 @@ class TestOpenSessionFlag:
             workmux_exe_path,
             repo_path,
             f"open {branch_name} --session",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         # Old window should be gone
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         assert window_name not in existing_windows, (
             f"Window {window_name!r} should have been closed during mode conversion"
         )
 
         # New session should exist
-        sessions_result = env.tmux(
-            ["list-sessions", "-F", "#{session_name}"], check=False
-        )
-        existing_sessions = [s for s in sessions_result.stdout.strip().split("\n") if s]
+        existing_sessions = env.list_sessions()
         assert session_name in existing_sessions, (
             f"Session {session_name!r} should exist after conversion. "
             f"Existing sessions: {existing_sessions!r}"
@@ -542,8 +528,7 @@ class TestMixedMode:
         )
 
         # Verify window exists for window-mode (specify test session explicitly)
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         window_name = get_window_name(window_branch)
         assert window_name in existing_windows, (
             f"Window {window_name!r} not found in test session. Existing: {existing_windows!r}"
@@ -575,8 +560,7 @@ class TestMixedMode:
         )
 
         # Verify both exist (specify test session for window check)
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         window_name = get_window_name(window_branch)
         assert window_name in existing_windows, (
             f"Window {window_name!r} not found in test session. Existing: {existing_windows!r}"
@@ -590,8 +574,7 @@ class TestMixedMode:
 
         # Verify session is gone but window still exists
         assert_session_not_exists(env, get_session_name(session_branch))
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         assert window_name in existing_windows, (
             f"Window {window_name!r} should still exist after session removal"
         )
@@ -602,8 +585,7 @@ class TestMixedMode:
         )
 
         # Verify window is gone
-        result = env.tmux(["list-windows", "-t", "test:", "-F", "#{window_name}"])
-        existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+        existing_windows = env.list_windows_in_session("test")
         assert window_name not in existing_windows, (
             f"Window {window_name!r} should be removed"
         )

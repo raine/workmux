@@ -180,7 +180,7 @@ class TestTargetNameOptions:
         window_name = f"{DEFAULT_WINDOW_PREFIX}{slugify(target_name)}"
 
         write_workmux_config(mux_repo_path)
-        env.tmux(["new-session", "-d", "-s", session_name])
+        env.new_session(session_name)
         run_workmux_command(
             env,
             workmux_exe_path,
@@ -190,10 +190,7 @@ class TestTargetNameOptions:
 
         assert_session_exists(env, session_name)
         assert_session_not_exists(env, session_name.lower())
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-        )
-        assert window_name in [w for w in result.stdout.strip().split("\n") if w]
+        assert window_name in env.list_windows_in_session(session_name)
 
         metadata = env.run_command(
             [
@@ -261,10 +258,7 @@ class TestTargetNameOptions:
 
         assert_session_exists(env, session_name)
         assert_session_not_exists(env, session_name.lower())
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-        )
-        windows = [w for w in result.stdout.strip().split("\n") if w]
+        windows = env.list_windows_in_session(session_name)
         assert f"{DEFAULT_WINDOW_PREFIX}feature-parent-session-a" in windows
         assert f"{DEFAULT_WINDOW_PREFIX}feature-parent-session-b" in windows
 
@@ -287,10 +281,7 @@ class TestTargetNameOptions:
             f"add {branch_name} --parent-session {session_name} --background",
         )
 
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-        )
-        assert window_name in [w for w in result.stdout.strip().split("\n") if w]
+        assert window_name in env.list_windows_in_session(session_name)
 
         list_result = run_workmux_command(env, workmux_exe_path, mux_repo_path, "list")
         row = next(
