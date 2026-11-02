@@ -13,6 +13,7 @@ const HOOK_NAMES: &[&str] = &[
     "after-select-window[98]",
     "client-session-changed[98]",
     "after-kill-pane[98]",
+    "pane-exited[98]",
 ];
 
 /// Install tmux hooks so new windows automatically get a sidebar.
@@ -41,6 +42,9 @@ pub(super) fn install_hooks() -> Result<()> {
         ("after-select-window[98]", dirty_cmd),
         ("client-session-changed[98]", dirty_cmd),
         ("after-kill-pane[98]", &after_kill_pane_cmd),
+        // Shell exits do not fire after-kill-pane. Wake the daemon so a lone
+        // sidebar can exit without waiting for the periodic tmux observation.
+        ("pane-exited[98]", dirty_cmd),
     ];
 
     let args = hook_install_args(hooks);
