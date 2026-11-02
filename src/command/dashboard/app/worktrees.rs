@@ -184,14 +184,21 @@ fn run_add_worktree_job(
     }
 }
 
+fn worktree_context(
+    path: &Path,
+    mux: Arc<dyn Multiplexer>,
+) -> anyhow::Result<workflow::WorkflowContext> {
+    let (config, config_location) = crate::config::Config::load_with_location_from(path, None)?;
+    workflow::WorkflowContext::new_in(path, config, mux, config_location)
+}
+
 fn remove_worktree(
     handle: &str,
     path: &Path,
     keep_branch: bool,
     mux: Arc<dyn Multiplexer>,
 ) -> anyhow::Result<workflow::types::RemoveResult> {
-    let (config, config_location) = crate::config::Config::load_with_location_from(path, None)?;
-    let ctx = workflow::WorkflowContext::new_in(path, config, mux, config_location)?;
+    let ctx = worktree_context(path, mux)?;
     workflow::remove_quiet(handle, true, keep_branch, &ctx)
 }
 
@@ -948,19 +955,26 @@ impl App {
             return;
         }
 
-        let handle = worktree.handle.clone();
+        let result = (|| -> anyhow::Result<_> {
+            let ctx = worktree_context(&worktree.path, self.mux.clone())?;
+            let mut options = workflow::types::SetupOptions::new(false, false, true);
+            options.mode = ctx.config.mode();
+            workflow::open(&worktree.handle, &ctx, options, false, None, None, None)
+        })();
 
-        let Ok(ctx) = workflow::WorkflowContext::new(self.config.clone(), self.mux.clone(), None)
-        else {
-            return;
-        };
-
-        let mut options = workflow::types::SetupOptions::new(false, false, true);
-        options.mode = self.config.mode();
-        if workflow::open(&handle, &ctx, options, false, None, None, None).is_ok()
-            && self.should_close_after_jump()
-        {
-            self.should_jump = true;
+        match result {
+            Ok(_) => {
+                self.trigger_worktree_refetch();
+                if self.should_close_after_jump() {
+                    self.should_jump = true;
+                }
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Failed to open worktree: {e:#}"),
+                    std::time::Instant::now(),
+                ));
+            }
         }
     }
 
@@ -1408,6 +1422,28 @@ mod tests {
             created_at: None,
             base_branch: None,
         }
+    }
+
+    #[test]
+    fn worktree_context_uses_selected_repository_and_config() {
+        let repo = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .arg(repo.path())
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        std::fs::write(
+            repo.path().join(".workmux.yaml"),
+            "main_branch: main\nwindow_prefix: selected-\n",
+        )
+        .unwrap();
+        let mux = crate::multiplexer::create_backend(crate::multiplexer::BackendType::Tmux);
+        let ctx = worktree_context(repo.path(), mux).unwrap();
+        assert_eq!(ctx.execution_dir, repo.path().canonicalize().unwrap());
+        assert_eq!(ctx.main_worktree_root, ctx.execution_dir);
+        assert_eq!(ctx.prefix, "selected-");
+        assert_eq!(ctx.config_source_dir, ctx.execution_dir);
     }
 
     fn pr(number: u32) -> PrSummary {
