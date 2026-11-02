@@ -190,7 +190,7 @@ impl RexSnapshot {
     /// The session with this label. Rex labels need not be unique, so the
     /// current session wins, then the first one in server order.
     fn session_id(&self, label: &str) -> Option<String> {
-        self.session_id_from(label, RexBackend::current_session_id().as_deref())
+        self.session_id_from(label, RexBackend::env_session_id().as_deref())
     }
 
     fn session_id_from(&self, label: &str, current: Option<&str>) -> Option<String> {
@@ -222,7 +222,7 @@ impl RexSnapshot {
             .iter()
             .filter(|p| !p.floating && p.window == full_name)
             .collect();
-        match RexBackend::current_session_id() {
+        match RexBackend::env_session_id() {
             Some(current) if named.iter().any(|p| p.session_id == current) => named
                 .into_iter()
                 .filter(|p| p.session_id == current)
@@ -282,14 +282,14 @@ impl RexBackend {
         Cmd::new("rex")
     }
 
-    fn current_session_id() -> Option<String> {
+    fn env_session_id() -> Option<String> {
         std::env::var("REX_SESSION")
             .ok()
             .filter(|id| !id.trim().is_empty())
     }
 
     fn is_current_session(session_id: &str) -> bool {
-        Self::current_session_id().as_deref() == Some(session_id)
+        Self::env_session_id().as_deref() == Some(session_id)
     }
 
     /// Call a server API method and return its JSON result.
@@ -321,9 +321,14 @@ impl RexBackend {
     }
 
     fn snapshot(&self) -> Result<RexSnapshot> {
+        // The script lists every session itself. Drop the session and block
+        // from the environment: once workmux closes the session it runs in,
+        // `rex do` can't resolve them and fails.
         let output = self
             .rex_cmd()
             .args(&["do", "-e", SNAPSHOT_SCRIPT])
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .run_and_capture_stdout()
             .context("Failed to list Rex panes")?;
         RexSnapshot::parse(&output)
@@ -371,7 +376,7 @@ impl RexBackend {
         let list: RexClientList =
             serde_json::from_str(&output).context("Failed to parse the Rex client list")?;
         let apps: Vec<&RexClient> = list.clients.iter().filter(|c| c.is_app()).collect();
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         apps.iter()
             .find(|c| current.as_deref().is_some_and(|s| c.has_session(s)))
             .or(apps.first())
@@ -547,6 +552,19 @@ impl Multiplexer for RexBackend {
             .run_as_check()
     }
 
+    fn current_session_id(&self) -> Result<Option<String>> {
+        Ok(Self::env_session_id())
+    }
+
+    /// Navigation runs before this command, so `preferred_session` is unused.
+    fn shell_close_session_by_id_guard_cmd(
+        &self,
+        id: &str,
+        _preferred_session: Option<&str>,
+    ) -> Result<String> {
+        Ok(format!("rex kill '{id}' >/dev/null 2>&1 || true"))
+    }
+
     fn current_pane_id(&self) -> Option<String> {
         std::env::var("REX_BLOCK")
             .ok()
@@ -555,7 +573,7 @@ impl Multiplexer for RexBackend {
 
     fn active_pane_id(&self) -> Option<String> {
         let snapshot = self.snapshot().ok()?;
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         snapshot
             .panes
             .iter()
@@ -582,7 +600,7 @@ impl Multiplexer for RexBackend {
 
     fn create_window(&self, params: CreateWindowParams) -> Result<String> {
         let full_name = util::prefixed(params.prefix, params.name);
-        let session_id = Self::current_session_id()
+        let session_id = Self::env_session_id()
             .ok_or_else(|| anyhow!("REX_SESSION not set; run workmux inside a Rex terminal"))?;
         // Rex appends new windows at the end; params.after_window is ignored
         let result = self
@@ -637,8 +655,10 @@ impl Multiplexer for RexBackend {
         Ok(())
     }
 
+    /// Accepts a session label or a stable session ID.
     fn session_exists(&self, full_name: &str) -> Result<bool> {
-        Ok(self.snapshot()?.session_id(full_name).is_some())
+        let snapshot = self.snapshot()?;
+        Ok(snapshot.session_label(full_name).is_some() || snapshot.session_id(full_name).is_some())
     }
 
     fn kill_session(&self, full_name: &str) -> Result<()> {
@@ -756,7 +776,7 @@ impl Multiplexer for RexBackend {
     }
 
     fn get_all_window_names(&self) -> Result<HashSet<String>> {
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         Ok(self
             .snapshot()?
             .panes
@@ -919,7 +939,7 @@ impl Multiplexer for RexBackend {
     // === Multi-Session Support ===
 
     fn current_session(&self) -> Option<String> {
-        let current = Self::current_session_id()?;
+        let current = Self::env_session_id()?;
         self.snapshot()
             .ok()?
             .session_label(&current)
