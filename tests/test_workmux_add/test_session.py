@@ -1,5 +1,6 @@
 """Tests for `workmux add --session` command - session mode worktree creation."""
 
+import shlex
 from pathlib import Path
 
 from ..conftest import (
@@ -8,6 +9,7 @@ from ..conftest import (
     assert_window_not_exists,
     get_session_name,
     get_window_name,
+    poll_until,
     run_workmux_command,
     write_global_workmux_config,
     write_workmux_config,
@@ -276,6 +278,50 @@ class TestSessionRemove:
 
         # Verify worktree directory is gone
         assert not worktree_path.exists()
+
+    def test_remove_from_inside_session(self, mux_server, workmux_exe_path, repo_path):
+        """Verifies `workmux remove` run inside its own session finishes the cleanup.
+
+        The session closes first, so a deferred worker removes the worktree
+        and branch once it is gone. A second session stays open, as on a real
+        server, so the worker can't fall back to the only one left.
+        """
+        env = mux_server
+        branch_name = "session-remove-inside"
+        session_name = get_session_name(branch_name)
+
+        write_workmux_config(repo_path)
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            branch_name,
+            extra_args="--session --background",
+        )
+        assert_session_exists(env, session_name)
+        env.new_session("bystander")
+
+        env.send_keys_to_session(
+            session_name,
+            f"cd {shlex.quote(str(worktree_path))} && "
+            f"{shlex.quote(str(workmux_exe_path))} remove -f",
+        )
+
+        assert poll_until(
+            lambda: session_name not in env.list_sessions(), timeout=15.0
+        ), "workmux remove did not close the session"
+        assert poll_until(lambda: not worktree_path.exists(), timeout=15.0), (
+            "workmux remove did not remove the worktree"
+        )
+        assert poll_until(
+            lambda: (
+                branch_name
+                not in env.run_command(
+                    ["git", "branch", "--list", branch_name], cwd=repo_path
+                ).stdout
+            ),
+            timeout=15.0,
+        ), "workmux remove did not delete the branch"
 
 
 class TestSessionClose:

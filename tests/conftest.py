@@ -348,6 +348,10 @@ class MuxEnvironment(ABC):
         """Return the working directory of a session's active pane."""
         raise NotImplementedError(f"{self.backend_name} has no session mode")
 
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into a session's active pane and press Enter."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
 
 class TmuxEnvironment(MuxEnvironment):
     """
@@ -498,6 +502,10 @@ class TmuxEnvironment(MuxEnvironment):
         return self.mux_command(
             ["display-message", "-t", f"={session_name}:", "-p", "#{pane_current_path}"]
         ).stdout.strip()
+
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into a tmux session's active pane."""
+        self.mux_command(["send-keys", "-t", f"={session_name}:", text, "C-m"])
 
 
 class WezTermEnvironment(MuxEnvironment):
@@ -997,6 +1005,21 @@ class RexEnvironment(MuxEnvironment):
             )
             process = json.loads(result.stdout)
             return (process.get("foreground") or {}).get("cwd") or ""
+        raise RuntimeError(f"Session '{session_name}' has no active pane")
+
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into the focused block of a session's active window."""
+        session_id, view = self._session_view(session_name)
+        for window in view.get("windows") or []:
+            if window.get("window_id") != view.get("active_window_id"):
+                continue
+            block_id = self._focused_block(window)
+            if not block_id:
+                break
+            block_args = ["-s", session_id, "-b", block_id]
+            self.mux_command(["send", *block_args, "--", text])
+            self.mux_command(["send-key", *block_args, "enter"])
+            return
         raise RuntimeError(f"Session '{session_name}' has no active pane")
 
 
