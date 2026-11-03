@@ -117,6 +117,29 @@ def test_first_bash_pane_keeps_startup_output(
     )
 
 
+@pytest.mark.parametrize("closed", [False, True])
+def test_remote_open_background_preserves_focus(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    closed: bool,
+):
+    repo = mux_repo_path
+    setup_project(repo)
+    wm(mux_server, workmux_exe_path, repo, "add feat --remote lo --background")
+    if closed:
+        wm(mux_server, workmux_exe_path, repo, "close feat")
+    original = mux_server.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
+    result = wm(mux_server, workmux_exe_path, repo, "open feat --background")
+    assert (
+        mux_server.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
+        == original
+    )
+    assert_window_exists(mux_server, get_window_name("feat"))
+    assert "Switched" not in result.stdout
+
+
 def test_remote_lifecycle(
     mux_server: TmuxEnvironment,
     workmux_exe_path: Path,

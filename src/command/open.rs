@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     names: &[String],
+    background: bool,
     run_hooks: bool,
     force_files: bool,
     new_window: bool,
@@ -137,7 +138,7 @@ pub fn run(
 
     for (resolved_name, remote_record) in resolved_names.iter().zip(remote_records) {
         if let Some(record) = remote_record {
-            if let Err(e) = crate::remote::lifecycle::open(&context, record, true) {
+            if let Err(e) = crate::remote::lifecycle::open(&context, record, !background) {
                 eprintln!("✗ {:#}", e);
                 errors.push((resolved_name.clone(), e));
             }
@@ -168,6 +169,7 @@ pub fn run(
         // Construct setup options (pane commands always run on open)
         let mut options = SetupOptions::new(run_hooks, force_files, true);
         options.mode = preliminary_mode;
+        options.focus_window = !background;
         options.prompt_file_path = prompt_file_path;
         if continue_session {
             options.resume_mode = crate::multiplexer::types::ResumeMode::Continue;
@@ -209,8 +211,14 @@ pub fn run(
                 };
 
                 if result.did_switch {
+                    let action = if background {
+                        "Kept existing"
+                    } else {
+                        "Switched to existing"
+                    };
                     println!(
-                        "✓ Switched to existing tmux {} for '{}'\n  Worktree: {}",
+                        "✓ {} tmux {} for '{}'\n  Worktree: {}",
+                        action,
                         target_type,
                         resolved_name,
                         result.worktree_path.display()

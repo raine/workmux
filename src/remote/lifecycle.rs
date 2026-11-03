@@ -833,7 +833,14 @@ pub fn open(context: &WorkflowContext, mut record: WorkspaceRecord, focus: bool)
         if focus && let Some(target) = window_target(mux, record)? {
             mux.select_window_target(&target)?;
         }
-        println!("✓ Switched to remote workspace '{}'", record.handle);
+        if focus {
+            println!("✓ Switched to remote workspace '{}'", record.handle);
+        } else {
+            println!(
+                "✓ Kept existing window for remote workspace '{}'",
+                record.handle
+            );
+        }
         Ok(())
     };
     let target = window_target(mux, &record)?;
