@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, trace, warn};
 
+use super::sent::TurnFence;
 use super::types::{AgentState, GlobalSettings, PaneKey};
 use crate::agent_identity::AgentKind;
 use crate::config::SandboxRuntime;
@@ -22,9 +23,11 @@ use crate::util::{write_atomic, write_atomic_durable};
 /// ```text
 /// $XDG_STATE_HOME/workmux/           # ~/.local/state/workmux/
 /// ├── settings.json                   # Global dashboard settings
-/// └── agents/
-///     ├── tmux__default__%1.json     # {backend}__{instance}__{pane_id}.json
-///     └── wezterm__main__3.json
+/// ├── agents/
+/// │   ├── tmux__default__%1.json     # {backend}__{instance}__{pane_id}.json
+/// │   └── wezterm__main__3.json
+/// └── sent/
+///     └── tmux__default__%1.json     # The last turn `send` started there
 /// ```
 pub struct StateStore {
     base_path: PathBuf,
@@ -444,6 +447,25 @@ impl StateStore {
         self.agents_dir().join(key.to_filename())
     }
 
+    /// Path to the file of the last turn `send` started in a pane.
+    fn sent_path(&self, key: &PaneKey) -> PathBuf {
+        self.base_path.join("sent").join(key.to_filename())
+    }
+
+    /// The last turn `send` started in the pane of `key`.
+    pub fn sent_turn(&self, key: &PaneKey) -> Option<TurnFence> {
+        let bytes = fs::read(self.sent_path(key)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Record `fence` as the last turn `send` started in the pane of `key`.
+    pub fn set_sent_turn(&self, key: &PaneKey, fence: &TurnFence) -> Result<()> {
+        let path = self.sent_path(key);
+        let dir = path.parent().expect("sent path has a parent");
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        write_atomic(&path, &serde_json::to_vec(fence)?)
+    }
+
     /// Create or update agent state.
     ///
     /// Uses atomic write (temp file + rename) for crash safety.
@@ -688,6 +710,7 @@ impl StateStore {
     }
 
     fn delete_agent_locked(&self, key: &PaneKey) -> Result<()> {
+        let _ = fs::remove_file(self.sent_path(key));
         let path = self.agent_path(key);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),

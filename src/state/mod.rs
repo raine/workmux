@@ -4,6 +4,7 @@
 //! terminal multiplexer backends (tmux, WezTerm, Zellij).
 
 pub mod run;
+pub mod sent;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;

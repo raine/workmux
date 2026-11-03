@@ -2,7 +2,7 @@
 bracketed paste followed by Enter, the way Codex's composer needs it.
 
 Run as `python3 SIMULATOR WORKMUX READY SUBMITTED INPUT`: it reports
-`waiting` through WORKMUX, touches READY once it reads input, logs raw
+`done` through WORKMUX, touches READY once it reads input, logs raw
 input to INPUT, and writes the submitted prompt to SUBMITTED."""
 
 CODEX_SIMULATOR = (
@@ -16,7 +16,7 @@ import time
 import tty
 
 workmux, ready_path, submitted_path, input_path = sys.argv[1:]
-subprocess.run([workmux, "set-window-status", "waiting"], check=True)
+subprocess.run([workmux, "set-window-status", "done"], check=True)
 fd = sys.stdin.fileno()
 old_settings = termios.tcgetattr(fd)
 tty.setraw(fd)
