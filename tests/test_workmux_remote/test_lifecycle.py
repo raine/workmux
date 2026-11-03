@@ -286,9 +286,24 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
         result = mux_server.tmux(["list-windows", "-F", "#{window_name}"])
         return "leftover" in result.stdout.split()
 
+    def type_until_run(command: str, output: str) -> None:
+        """Type `command` until the remote shell prints `output`. A relay
+        attaches only at the remote client's first output and drops what
+        was typed before, which can be after the node lists the client."""
+
+        def attempt() -> bool:
+            mux_server.tmux(["send-keys", "-t", window, command, "Enter"])
+            return poll_until(
+                lambda: output in (mux_server.capture_pane(window) or ""),
+                timeout=3,
+            )
+
+        assert poll_until(attempt, timeout=20, poll_interval=0), (
+            mux_server.capture_pane(window)
+        )
+
     assert poll_until(lambda: not leftover_open(), timeout=5)
-    mux_server.tmux(["send-keys", "-t", window, "echo back-$((1+1))", "Enter"])
-    wait_for_pane_output(mux_server, window, "back-2", timeout=10)
+    type_until_run("echo back-$((1+1))", "back-2")
 
     # A detach waits for the user; keys other than r and q are dropped.
     node.tmux("detach-client", "-s", f"={ex_id}-0")
@@ -298,8 +313,7 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
     mux_server.tmux(["send-keys", "-t", window, "-l", "echo dropped"])
     mux_server.tmux(["send-keys", "-t", window, "r"])
     assert poll_until(lambda: len(client_pids()) == 1, timeout=15)
-    mux_server.tmux(["send-keys", "-t", window, "echo rejoined", "Enter"])
-    wait_for_pane_output(mux_server, window, "rejoined", timeout=10)
+    type_until_run("echo rejoined-$((2+1))", "rejoined-3")
     content = mux_server.capture_pane(window) or ""
     assert "echo droppedecho" not in content
 
