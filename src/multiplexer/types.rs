@@ -76,6 +76,17 @@ pub enum AgentStatus {
     Done,
 }
 
+impl AgentStatus {
+    /// The status as commands take and print it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+        }
+    }
+}
+
 /// Information about a specific pane running a workmux agent
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPane {

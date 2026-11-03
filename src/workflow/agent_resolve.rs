@@ -1,9 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::agent_error::{AgentError, AgentErrorKind};
 use crate::git;
 use crate::multiplexer::{AgentPane, Multiplexer};
+use crate::remote::cache::WorkspaceRecord;
 use crate::state::StateStore;
 use crate::util::canon_or_self;
 
@@ -191,9 +193,12 @@ fn resolve_global_agents(
     }
 
     match by_root.len() {
-        0 => Err(anyhow!(
-            "No agent found matching '{}'",
-            format_selector(handle, project)
+        0 => Err(AgentError::error(
+            AgentErrorKind::NotFound,
+            format!(
+                "No agent found matching '{}'",
+                format_selector(handle, project)
+            ),
         )),
         1 => {
             let (root, agents) = by_root.into_iter().next().unwrap();
@@ -210,10 +215,13 @@ fn resolve_global_agents(
                 })
                 .collect();
             options.sort();
-            Err(anyhow!(
-                "Ambiguous agent name '{}'. Found in multiple worktrees:\n  {}\n\nUse a unique 'project:handle' selector or run from the intended repository with a plain handle.",
-                format_selector(handle, project),
-                options.join("\n  ")
+            Err(AgentError::error(
+                AgentErrorKind::AmbiguousTarget,
+                format!(
+                    "Ambiguous agent name '{}'. Found in multiple worktrees:\n  {}\n\nUse a unique 'project:handle' selector or run from the intended repository with a plain handle.",
+                    format_selector(handle, project),
+                    options.join("\n  ")
+                ),
             ))
         }
     }
@@ -226,16 +234,88 @@ fn format_selector(handle: &str, project: Option<&str>) -> String {
     }
 }
 
-/// Resolve a worktree name to exactly one agent pane (the first/primary).
+/// Resolve a target to exactly one local agent pane: the agent in pane
+/// `name`, else the only agent of worktree `name`. Fails with
+/// `agent_not_found` or, when the worktree has several agents,
+/// `ambiguous_target`.
 ///
-/// Returns an error if no agent is running in the worktree.
+/// Returns the agent's worktree root and the agent.
 pub fn resolve_worktree_agent(name: &str, mux: &dyn Multiplexer) -> Result<(PathBuf, AgentPane)> {
-    let (path, agents) = resolve_worktree_agents(name, mux)?;
-    let agent = agents
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("No agent running in worktree '{}'", name))?;
+    let agent_panes = StateStore::new().and_then(|store| store.load_reconciled_agents(mux))?;
+    resolve_agent_from_snapshot(name, &agent_panes)
+}
+
+/// [`resolve_worktree_agent`] against one reconciled agent snapshot.
+pub fn resolve_agent_from_snapshot(
+    name: &str,
+    agent_panes: &[AgentPane],
+) -> Result<(PathBuf, AgentPane)> {
+    if let Some(agent) = agent_panes.iter().find(|agent| agent.pane_id == name) {
+        let root = find_worktree_root(&agent.path).unwrap_or_else(|| agent.path.clone());
+        return Ok((root, agent.clone()));
+    }
+    let (path, agents) = resolve_worktree_agents_from_snapshot(name, agent_panes)?;
+    let agent = only_agent(name, agents)?;
     Ok((path, agent))
+}
+
+/// The one agent of `agents`, which target `name` matched.
+pub fn only_agent(name: &str, agents: Vec<AgentPane>) -> Result<AgentPane> {
+    match <[AgentPane; 1]>::try_from(agents) {
+        Ok([agent]) => Ok(agent),
+        Err(agents) if agents.is_empty() => Err(AgentError::error(
+            AgentErrorKind::NotFound,
+            format!("No agent running in worktree '{name}'"),
+        )),
+        Err(agents) => Err(ambiguous(
+            name,
+            agents.iter().map(|agent| agent.pane_id.as_str()),
+        )),
+    }
+}
+
+/// `ambiguous_target` for a target that matched the agents of `pane_ids`.
+pub fn ambiguous<'a>(name: &str, pane_ids: impl IntoIterator<Item = &'a str>) -> anyhow::Error {
+    let pane_ids: Vec<&str> = pane_ids.into_iter().collect();
+    AgentError::error(
+        AgentErrorKind::AmbiguousTarget,
+        format!(
+            "'{name}' has {} agents; target one by pane ID: {}",
+            pane_ids.len(),
+            pane_ids.join(", ")
+        ),
+    )
+}
+
+/// An agent that `send` and `capture` drive.
+pub enum AgentTarget {
+    Local(AgentPane),
+    /// An agent of a remote workspace: in configured pane `pane`, else the
+    /// only one the node finds.
+    Remote {
+        record: WorkspaceRecord,
+        pane: Option<usize>,
+    },
+}
+
+/// Resolve `name` to the agent `send` and `capture` drive: a remote
+/// workspace's handle, a pane ID (including panes that relay remote agents
+/// and the IDs views give remote agents no pane relays), or a local
+/// worktree with one agent.
+pub fn resolve_agent_target(name: &str, mux: &dyn Multiplexer) -> Result<AgentTarget> {
+    if let Some(record) = crate::remote::agents::find_target(name) {
+        return Ok(AgentTarget::Remote { record, pane: None });
+    }
+    let agents = StateStore::new().and_then(|store| store.load_all_reconciled_agents(mux))?;
+    let (local, attached) = crate::state::store::split_remote(agents);
+    if let Some((record, pane)) = crate::remote::agents::find_pane(name, &attached) {
+        return Ok(AgentTarget::Remote {
+            record,
+            pane: Some(pane),
+        });
+    }
+    let (_path, agent) = resolve_agent_from_snapshot(name, &local)?;
+    Ok(AgentTarget::Local(agent))
 }
 
 /// Match agents to a worktree path from a pre-loaded agent list.
@@ -330,6 +410,42 @@ mod tests {
                 "No agent found matching 'wrong:feature'"
             );
         }
+    }
+
+    #[test]
+    fn one_agent_targets_need_a_pane_id_when_a_worktree_has_several() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("quiver__worktrees/feature");
+        let first = linked_worktree(&temp.path().join("quiver"), &root);
+        let second = agent_at(&root, "%2");
+        let panes = [first.clone(), second.clone()];
+
+        let error = resolve_agent_from_snapshot("quiver:feature", &panes).unwrap_err();
+        assert_eq!(
+            crate::agent_error::kind_of(&error),
+            Some(AgentErrorKind::AmbiguousTarget)
+        );
+        assert_eq!(
+            error.to_string(),
+            "'quiver:feature' has 2 agents; target one by pane ID: %1, %2"
+        );
+
+        let (resolved, agent) = resolve_agent_from_snapshot("%2", &panes).unwrap();
+        assert_eq!((resolved, agent), (root.clone(), second));
+        let (resolved, agent) =
+            resolve_agent_from_snapshot("quiver:feature", std::slice::from_ref(&first)).unwrap();
+        assert_eq!((resolved, agent), (root, first));
+
+        for target in ["%9", "quiver:other"] {
+            let error = resolve_agent_from_snapshot(target, &panes).unwrap_err();
+            assert_eq!(
+                crate::agent_error::kind_of(&error),
+                Some(AgentErrorKind::NotFound),
+                "{target}"
+            );
+        }
+        let error = only_agent("feature", Vec::new()).unwrap_err();
+        assert_eq!(error.to_string(), "No agent running in worktree 'feature'");
     }
 
     #[test]

@@ -22,6 +22,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- `workmux send` no longer types into an agent waiting on a dialog or guesses among several agents in one worktree; target an agent by pane ID instead, and add `--wait` to confirm the agent picked up the prompt and wait for it to finish. Failures exit with distinct codes, and `workmux wait` right after a `send` no longer returns on the previous turn's `done`. Works for remote agents too.
+
 ## v0.1.278 (2026-10-31)
 
 <!-- highlight: Remote servers -->

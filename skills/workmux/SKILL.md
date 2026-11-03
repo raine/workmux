@@ -199,11 +199,33 @@ workmux send agent-a "fix the tests"    # short message
 workmux send agent-a "/merge"           # send a skill command
 workmux send agent-a -f followup.md     # from file
 workmux send myproject:docs "update the API section"  # cross-project
+workmux send %42 "fix the tests"        # by pane ID (worktrees with several agents)
+workmux send --wait agent-a "fix it"    # confirm delivery, wait for done/waiting
+workmux send --wait --until working agent-a "fix it"  # delivery confirmation only
+workmux send --wait --timeout 600 agent-a -f task.md  # give up after 10 min
 
 # Run shell commands in an agent's worktree
 workmux run agent-a -- pytest tests/    # wait and stream output
 workmux run agent-a -b -- npm run build # run in background
 ```
+
+`send` refuses an agent waiting on a dialog (Enter would answer it) and a
+worktree with several agents; target one of those by the pane ID that
+`workmux status --json` shows. Failures print a stable error name and exit with
+its code:
+
+| Error                  | Exit | Meaning                                                |
+| ---------------------- | ---- | ------------------------------------------------------ |
+| `agent_waiting`        | 3    | Agent is waiting on a dialog; nothing sent             |
+| `ambiguous_target`     | 4    | Target matches several agents; pane IDs listed         |
+| `agent_not_found`      | 5    | No live agent for the target                           |
+| `send_stalled`         | 6    | `--wait`: idle agent showed no activity within 5s      |
+| `agent_gone`           | 7    | `--wait`: agent exited before its turn settled         |
+| `agent_status_unknown` | 8    | `--wait` on an agent with no reported status; not sent |
+| `timeout`              | 124  | `--wait --timeout` expired                             |
+
+After a `send`, `workmux wait` counts only the agent sent to and only states of
+the turn the send started.
 
 ### Other commands
 

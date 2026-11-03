@@ -2,20 +2,18 @@ use anyhow::{Result, anyhow};
 use console::strip_ansi_codes;
 
 use crate::multiplexer::{create_backend, detect_backend};
-use crate::workflow;
+use crate::workflow::{self, AgentTarget};
 
 pub fn run(name: &str, lines: u16) -> Result<()> {
-    let output = match crate::remote::agents::find_target(name) {
-        Some(record) => {
+    let mux = create_backend(detect_backend());
+    let output = match workflow::resolve_agent_target(name, mux.as_ref())? {
+        AgentTarget::Remote { record, pane } => {
             let config = crate::config::Config::load(None).unwrap_or_default();
-            crate::remote::agents::capture(&config, &record, None, lines)?
+            crate::remote::agents::capture(&config, &record, pane, lines)?
         }
-        None => {
-            let mux = create_backend(detect_backend());
-            let (_path, agent) = workflow::resolve_worktree_agent(name, mux.as_ref())?;
-            mux.capture_pane(&agent.pane_id, lines)
-                .ok_or_else(|| anyhow!("Failed to capture pane output"))?
-        }
+        AgentTarget::Local(agent) => mux
+            .capture_pane(&agent.pane_id, lines)
+            .ok_or_else(|| anyhow!("Failed to capture pane output"))?,
     };
 
     // Strip ANSI escape codes

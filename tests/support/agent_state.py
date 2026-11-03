@@ -111,27 +111,31 @@ def start_active_agent(
 
 def stabilize_tmux_agent(env: TmuxEnvironment, agent: ActiveAgent) -> None:
     """Keep a synthetic tracked agent live across subsequent test commands."""
-    env.send_keys(agent.window, "exec sleep 30")
-    assert poll_until(
-        lambda: "sleep"
-        in env.tmux(
-            ["list-panes", "-t", agent.window, "-F", "#{pane_current_command}"]
-        ).stdout.splitlines(),
-        timeout=5.0,
-    )
-    pane_id, command, pane_pid = (
-        env.tmux(
-            [
-                "list-panes",
-                "-t",
-                agent.window,
-                "-F",
-                "#{pane_id}|#{pane_current_command}|#{pane_pid}",
-            ]
+    stabilize_tmux_pane(env, agent.window)
+
+
+def stabilize_tmux_pane(env: TmuxEnvironment, target: str) -> None:
+    """Keep the synthetic tracked agent of pane `target` live across
+    subsequent test commands."""
+    env.send_keys(target, "exec sleep 30")
+
+    def pane() -> list[str]:
+        return (
+            env.tmux(
+                [
+                    "display-message",
+                    "-p",
+                    "-t",
+                    target,
+                    "#{pane_id}|#{pane_current_command}|#{pane_pid}",
+                ]
+            )
+            .stdout.strip()
+            .split("|", 2)
         )
-        .stdout.strip()
-        .split("|", 2)
-    )
+
+    assert poll_until(lambda: pane()[1] == "sleep", timeout=5.0)
+    pane_id, command, pane_pid = pane()
     for state_file in list_agent_state_files(env):
         state = read_agent_state(state_file)
         if state["pane_key"]["pane_id"] == pane_id:
