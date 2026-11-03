@@ -309,8 +309,8 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
     mux_server.tmux(["send-keys", "-t", window, "r"])
     assert poll_until(lambda: len(client_pids()) == 1, timeout=15)
     wait_for_relay(mux_server, node, window, ex_id, "AGAIN")
-    mux_server.tmux(["send-keys", "-t", window, "echo rejoined", "Enter"])
-    wait_for_pane_output(mux_server, window, "rejoined", timeout=10)
+    mux_server.tmux(["send-keys", "-t", window, "echo rejoined-$((2+1))", "Enter"])
+    wait_for_pane_output(mux_server, window, "rejoined-3", timeout=10)
     content = mux_server.capture_pane(window) or ""
     assert "echo skippedecho" not in content
 
