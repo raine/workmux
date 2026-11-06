@@ -365,9 +365,8 @@ class TestSessionOpen:
     ):
         """Verifies `workmux open` respects stored session mode and opens as session.
 
-        Note: workmux open doesn't have --background, but for session mode
-        the session is created detached anyway, so we can verify it exists
-        after the open command completes.
+        The session is created detached before the client switch is attempted,
+        so it exists even when no client is attached.
         """
         env = mux_server
         branch_name = "feature-session-reopen"

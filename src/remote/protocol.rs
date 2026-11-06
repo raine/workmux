@@ -79,6 +79,12 @@ pub mod code {
     pub const DIVERGED: &str = "diverged";
     /// A source omitted after prepare disappeared before provisioning.
     pub const MISSING_SEED: &str = "missing_seed";
+    /// The agent shows a dialog that typed input would answer.
+    pub const AGENT_WAITING: &str = "agent_waiting";
+    /// The request names no pane and more than one has an agent.
+    pub const AMBIGUOUS_TARGET: &str = "ambiguous_target";
+    /// The request needs the agent's status and it has reported none.
+    pub const AGENT_STATUS_UNKNOWN: &str = "agent_status_unknown";
     /// Anything else.
     pub const FAILED: &str = "failed";
 }

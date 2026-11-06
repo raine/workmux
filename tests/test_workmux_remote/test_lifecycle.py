@@ -76,8 +76,17 @@ def wait_for_startup_and_relay(
         ),
         timeout=20,
     )
-    node.tmux("send-keys", "-t", target, "printf 'RELAY-%s\\n' READY", "Enter")
-    wait_for_pane_output(env, window, "RELAY-READY", timeout=20)
+    wait_for_relay(env, node, window, ex_id, "READY")
+
+
+def wait_for_relay(
+    env: TmuxEnvironment, node: Node, window: str, ex_id: str, marker: str
+) -> None:
+    """Wait until fresh remote output shows in the local pane. From then on
+    the relay forwards keystrokes; it drops anything typed earlier."""
+    target = f"={ex_id}-0:"
+    node.tmux("send-keys", "-t", target, f"printf 'RELAY-%s\\n' {marker}", "Enter")
+    wait_for_pane_output(env, window, f"RELAY-{marker}", timeout=20)
 
 
 def test_first_bash_pane_keeps_startup_output(
@@ -115,6 +124,29 @@ def test_first_bash_pane_keeps_startup_output(
     wait_for_pane_output(
         mux_server, get_window_name("first"), "FIRST-PANE-READY", timeout=20
     )
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_remote_open_background_preserves_focus(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    node: Node,
+    closed: bool,
+):
+    repo = mux_repo_path
+    setup_project(repo)
+    wm(mux_server, workmux_exe_path, repo, "add feat --remote lo --background")
+    if closed:
+        wm(mux_server, workmux_exe_path, repo, "close feat")
+    original = mux_server.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
+    result = wm(mux_server, workmux_exe_path, repo, "open feat --background")
+    assert (
+        mux_server.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
+        == original
+    )
+    assert_window_exists(mux_server, get_window_name("feat"))
+    assert "Switched" not in result.stdout
 
 
 def test_remote_lifecycle(
@@ -264,6 +296,7 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
         return "leftover" in result.stdout.split()
 
     assert poll_until(lambda: not leftover_open(), timeout=5)
+    wait_for_relay(mux_server, node, window, ex_id, "BACK")
     mux_server.tmux(["send-keys", "-t", window, "echo back-$((1+1))", "Enter"])
     wait_for_pane_output(mux_server, window, "back-2", timeout=10)
 
@@ -272,13 +305,14 @@ def test_attach_relay_reconnects_and_closes_with_the_session(
     # tmux prints "detached" before the relay handles its exit and accepts
     # reconnect keys. Wait for the relay's own prompt.
     wait_for_pane_output(mux_server, window, "r reconnect", timeout=10)
-    mux_server.tmux(["send-keys", "-t", window, "-l", "echo dropped"])
+    mux_server.tmux(["send-keys", "-t", window, "-l", "echo skipped"])
     mux_server.tmux(["send-keys", "-t", window, "r"])
     assert poll_until(lambda: len(client_pids()) == 1, timeout=15)
-    mux_server.tmux(["send-keys", "-t", window, "echo rejoined", "Enter"])
-    wait_for_pane_output(mux_server, window, "rejoined", timeout=10)
+    wait_for_relay(mux_server, node, window, ex_id, "AGAIN")
+    mux_server.tmux(["send-keys", "-t", window, "echo rejoined-$((2+1))", "Enter"])
+    wait_for_pane_output(mux_server, window, "rejoined-3", timeout=10)
     content = mux_server.capture_pane(window) or ""
-    assert "echo droppedecho" not in content
+    assert "echo skippedecho" not in content
 
     # Exit messages of earlier attaches don't pile up and scroll the screen.
     node.tmux("detach-client", "-s", f"={ex_id}-0")

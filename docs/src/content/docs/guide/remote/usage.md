@@ -23,7 +23,7 @@ Remote workspaces use the usual commands. Run them from the project on the local
 
 ## Sending prompts
 
-`workmux send` and `wait` work as they do locally. An agent running directly on the server can only receive `send` once it has reported its first status, so give the first prompt with `add -p` or type it into the window. In Docker mode, `send` works as soon as the agent's container is running.
+`workmux send` and `wait` work as they do locally, including `send --wait`, the refusal of agents waiting on a dialog, and pane-ID targets for workspaces with several agents. An agent running directly on the server can only receive `send` once it has reported its first status, so give the first prompt with `add -p` or type it into the window. In Docker mode, `send` works as soon as the agent's container is running.
 
 ## Panes on the server
 

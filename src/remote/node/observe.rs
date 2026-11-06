@@ -119,14 +119,19 @@ pub struct ObservedAgent {
     pub prompt: Option<String>,
 }
 
-/// `send`: type `text` into an agent. Without `pane`, the lowest pane of
-/// the workspace that has an agent, else its agent pane while a container
-/// agent starts up and has not reported yet.
+/// `send`: type `text` into an agent. Without `pane`, the only pane of the
+/// workspace that has an agent, else its agent pane while a container
+/// agent starts up and has not reported yet. An agent in `waiting` is
+/// refused: typed input would answer its dialog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendRequest {
     pub ws_id: String,
     pub pane: Option<usize>,
     pub text: String,
+    /// Refuse an agent that has reported no status, whose turn could not
+    /// be told apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_status: bool,
 }
 
 /// Where the text went and the state of the agent there just before it,
@@ -143,7 +148,8 @@ pub struct SendResponse {
     pub status_ts: Option<u64>,
 }
 
-/// `capture`: the last `lines` of an agent pane, chosen as for `send`.
+/// `capture`: the last `lines` of an agent pane, chosen as for `send`
+/// (an agent in `waiting` included).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureRequest {
     pub ws_id: String,
@@ -518,9 +524,11 @@ struct Target {
     /// For an agent that has not reported yet, when its container runtime
     /// started (node clock).
     started: Option<u64>,
+    /// Handle of the workspace.
+    handle: String,
 }
 
-/// The pane of `ws_id` a request targets: `pane`, else the lowest pane with
+/// The pane of `ws_id` a request targets: `pane`, else the only pane with
 /// an agent, else the agent pane of a container agent that has not
 /// reported yet.
 fn target(root: &NodeRoot, ws_id: &str, pane: Option<usize>) -> Result<Target> {
@@ -560,7 +568,7 @@ fn target(root: &NodeRoot, ws_id: &str, pane: Option<usize>) -> Result<Target> {
     };
     let chosen = match pane {
         Some(index) => observed.panes.iter().find(|p| p.index == index),
-        None => observed.panes.iter().find(|p| p.agent.is_some()),
+        None => only_agent_pane(&observed, &workspace.identity.handle)?,
     };
     let target = match chosen {
         Some(chosen) => {
@@ -580,7 +588,33 @@ fn target(root: &NodeRoot, ws_id: &str, pane: Option<usize>) -> Result<Target> {
         pane_id,
         agent,
         started,
+        handle: workspace.identity.handle.clone(),
     })
+}
+
+/// The one pane of `observed` with an agent; more than one is ambiguous.
+fn only_agent_pane<'a>(
+    observed: &'a ObservedWorkspace,
+    handle: &str,
+) -> Result<Option<&'a ObservedPane>> {
+    let mut agents = observed.panes.iter().filter(|p| p.agent.is_some());
+    let first = agents.next();
+    let rest: Vec<_> = agents.collect();
+    if rest.is_empty() {
+        return Ok(first);
+    }
+    let indices: Vec<String> = first
+        .into_iter()
+        .chain(rest)
+        .map(|p| p.index.to_string())
+        .collect();
+    Err(refuse(
+        code::AMBIGUOUS_TARGET,
+        format!(
+            "workspace '{handle}' has agents in panes {}",
+            indices.join(", ")
+        ),
+    ))
 }
 
 /// The agent pane of a container workspace whose agent has not reported
@@ -641,26 +675,33 @@ fn runs_pin(command: &str, pin: &str) -> bool {
 }
 
 /// Whether a prompt typed now could leave a status change in the same
-/// second as `baseline`, the agent's state before it, which would make the
-/// change indistinguishable from it in whole-second timestamps.
+/// second as `baseline`, the agent's state before it.
 fn same_second(baseline: &ObservedAgent, now: u64) -> bool {
-    matches!(
-        baseline.status,
-        Some(AgentStatus::Done | AgentStatus::Waiting)
-    ) && baseline.status_ts.is_some_and(|ts| ts >= now)
+    crate::state::sent::same_second(baseline.status, baseline.status_ts, now)
 }
 
-/// Sleep until the next whole second of the clock.
-fn sleep_to_next_second() {
-    let into = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or_default();
-    std::thread::sleep(Duration::from_nanos(u64::from(1_000_000_000 - into)));
+/// Refuse to type into an agent whose dialog the input would answer, or,
+/// with `require_status`, one that has reported no status.
+fn check_sendable(agent: Option<&ObservedAgent>, require_status: bool, handle: &str) -> Result<()> {
+    let status = agent.and_then(|agent| agent.status);
+    if status == Some(AgentStatus::Waiting) {
+        return Err(refuse(
+            code::AGENT_WAITING,
+            format!("the agent in workspace '{handle}' is waiting on a dialog; nothing sent"),
+        ));
+    }
+    if require_status && status.is_none() {
+        return Err(refuse(
+            code::AGENT_STATUS_UNKNOWN,
+            format!("the agent in workspace '{handle}' has not reported a status"),
+        ));
+    }
+    Ok(())
 }
 
 /// Type the text into the agent and report the agent's state just before,
-/// which `wait` holds later states against. An agent that has not reported
+/// which `wait` holds later states against. An agent in `waiting` is
+/// refused, before and after any delay. An agent that has not reported
 /// yet first gets [`AGENT_STARTUP`] from its start: text typed before it
 /// reads its terminal can land unsubmitted (Codex takes a fast burst ending
 /// in Enter for a paste). A `done` or `waiting` state from the current
@@ -672,6 +713,11 @@ pub fn send(root: &NodeRoot, request: SendRequest) -> Result<SendResponse> {
         return Err(refuse(code::BAD_REQUEST, "text is too long"));
     }
     let mut target = target(root, &request.ws_id, request.pane)?;
+    check_sendable(
+        target.agent.as_ref(),
+        request.require_status,
+        &target.handle,
+    )?;
     let ready = target
         .started
         .map(|started| started + AGENT_STARTUP.as_secs());
@@ -690,9 +736,14 @@ pub fn send(root: &NodeRoot, request: SendRequest) -> Result<SendResponse> {
         {
             break;
         }
-        sleep_to_next_second();
+        crate::state::sent::sleep_to_next_second();
         target = self::target(root, &request.ws_id, request.pane)?;
     }
+    check_sendable(
+        target.agent.as_ref(),
+        request.require_status,
+        &target.handle,
+    )?;
     let agent = target.agent.unwrap_or_default();
     let baseline = !same_second(&agent, now());
     let kind = send_kind(root, &request.ws_id, agent.agent_kind);
@@ -936,17 +987,64 @@ mod tests {
     }
 
     #[test]
-    fn only_done_or_waiting_states_of_this_second_wait_for_the_next() {
-        let state = |status, ts| ObservedAgent {
+    fn send_refuses_dialogs_and_with_require_status_silent_agents() {
+        let agent = |status| ObservedAgent {
             status,
-            status_ts: ts,
+            status_ts: Some(7),
             ..Default::default()
         };
-        assert!(same_second(&state(Some(AgentStatus::Done), Some(7)), 7));
-        assert!(same_second(&state(Some(AgentStatus::Waiting), Some(8)), 7));
-        assert!(!same_second(&state(Some(AgentStatus::Done), Some(6)), 7));
-        assert!(!same_second(&state(Some(AgentStatus::Working), Some(7)), 7));
-        assert!(!same_second(&state(None, None), 7));
+        let code_of = |result: Result<()>| {
+            result
+                .unwrap_err()
+                .downcast::<crate::remote::protocol::NodeError>()
+                .unwrap()
+                .code
+        };
+        let waiting = agent(Some(AgentStatus::Waiting));
+        assert_eq!(
+            code_of(check_sendable(Some(&waiting), false, "f")),
+            code::AGENT_WAITING
+        );
+        for status in [AgentStatus::Done, AgentStatus::Working] {
+            check_sendable(Some(&agent(Some(status))), true, "f").unwrap();
+        }
+        check_sendable(Some(&agent(None)), false, "f").unwrap();
+        check_sendable(None, false, "f").unwrap();
+        assert_eq!(
+            code_of(check_sendable(None, true, "f")),
+            code::AGENT_STATUS_UNKNOWN
+        );
+    }
+
+    #[test]
+    fn an_unnamed_pane_must_be_the_only_agent() {
+        let pane = |index, agent: bool| ObservedPane {
+            index,
+            alive: true,
+            agent: agent.then(ObservedAgent::default),
+        };
+        let observed = |panes| ObservedWorkspace {
+            ws_id: "w1".into(),
+            ex_id: "x1".into(),
+            panes,
+            git: None,
+            sibling: None,
+            ended: None,
+            operation: None,
+        };
+        let one = observed(vec![pane(0, false), pane(1, true)]);
+        assert_eq!(only_agent_pane(&one, "f").unwrap().unwrap().index, 1);
+        assert!(
+            only_agent_pane(&observed(vec![pane(0, false)]), "f")
+                .unwrap()
+                .is_none()
+        );
+        let error = only_agent_pane(&observed(vec![pane(0, true), pane(2, true)]), "f")
+            .unwrap_err()
+            .downcast::<crate::remote::protocol::NodeError>()
+            .unwrap();
+        assert_eq!(error.code, code::AMBIGUOUS_TARGET);
+        assert_eq!(error.message, "workspace 'f' has agents in panes 0, 2");
     }
 
     #[test]

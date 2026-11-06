@@ -7,17 +7,17 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::PaneConfig;
-use crate::multiplexer::AgentStatus;
 use crate::remote::git::Snapshot;
 use crate::remote::node::observe::ObservedAgent;
 use crate::remote::protocol::DiffMode;
+use crate::state::sent::TurnFence;
 
 const RECORD_VERSION: u32 = 1;
 
@@ -261,39 +261,21 @@ pub fn diff_path(remote: &str, ws_id: &str, mode: DiffMode) -> Result<PathBuf> {
 pub struct SentTurn {
     pub ex_id: String,
     pub pane: usize,
-    /// None before the agent's first state.
-    pub status: Option<AgentStatus>,
-    /// Node clock.
-    pub status_ts: Option<u64>,
-    /// When the text was sent (laptop clock).
-    pub sent_at: u64,
+    /// The agent's state on the node clock; `sent_at` on the laptop's.
+    #[serde(flatten)]
+    pub fence: TurnFence,
 }
 
 impl SentTurn {
-    /// How long a send that started no turn holds `wait` back. Agents
-    /// report a turn within seconds, wherever the laptop is.
-    pub const LAPSE: Duration = Duration::from_secs(120);
-
-    /// Whether `agent` is a state of the turn the send started. The node
-    /// types only once a `done` or `waiting` state is from an earlier
-    /// second, so the turn's states are strictly newer; a `working` agent
-    /// was already in its turn, which the observation has caught up with
-    /// when it shows that state or a newer one. Before the agent's first
-    /// state, any state is newer.
+    /// Whether `agent` is a state of the turn the send started.
     pub fn admits(&self, agent: &ObservedAgent) -> bool {
-        let Some(baseline) = self.status_ts else {
-            return agent.status.is_some();
-        };
-        agent.status_ts.is_some_and(|ts| match self.status {
-            Some(AgentStatus::Working) => ts >= baseline,
-            _ => ts > baseline,
-        })
+        self.fence.admits(agent.status, agent.status_ts)
     }
 
     /// Whether the send is too old, at laptop time `now`, to hold `wait`
     /// back any longer.
     pub fn lapsed(&self, now: u64) -> bool {
-        now >= self.sent_at + Self::LAPSE.as_secs()
+        self.fence.lapsed(now)
     }
 }
 
@@ -523,42 +505,32 @@ pub fn project_id_of(main_worktree: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multiplexer::AgentStatus;
 
     #[test]
-    fn a_sent_turn_admits_only_later_states() {
-        let state = |status, ts| ObservedAgent {
-            status: Some(status),
+    fn a_sent_turn_keeps_its_shape_and_admits_through_its_fence() {
+        let turn = SentTurn {
+            ex_id: "x0123456789ab".into(),
+            pane: 1,
+            fence: TurnFence {
+                status: Some(AgentStatus::Done),
+                status_ts: Some(100),
+                sent_at: 1000,
+            },
+        };
+        let json = serde_json::to_string(&turn).unwrap();
+        assert_eq!(
+            json,
+            r#"{"ex_id":"x0123456789ab","pane":1,"status":"done","status_ts":100,"sent_at":1000}"#
+        );
+        assert_eq!(serde_json::from_str::<SentTurn>(&json).unwrap(), turn);
+        let state = |ts| ObservedAgent {
+            status: Some(AgentStatus::Done),
             status_ts: Some(ts),
             ..Default::default()
         };
-        let after = |status| SentTurn {
-            ex_id: "x0123456789ab".into(),
-            pane: 0,
-            status,
-            status_ts: status.map(|_| 100),
-            sent_at: 1000,
-        };
-        let done = after(Some(AgentStatus::Done));
-        assert!(!done.admits(&state(AgentStatus::Done, 100)));
-        assert!(!done.admits(&state(AgentStatus::Done, 90)));
-        assert!(done.admits(&state(AgentStatus::Working, 101)));
-        assert!(done.admits(&state(AgentStatus::Done, 101)));
-        assert!(!done.admits(&ObservedAgent::default()));
-        assert!(!after(Some(AgentStatus::Waiting)).admits(&state(AgentStatus::Done, 99)));
-
-        // A working agent was already in its turn; an older done is not it.
-        let working = after(Some(AgentStatus::Working));
-        assert!(working.admits(&state(AgentStatus::Working, 100)));
-        assert!(working.admits(&state(AgentStatus::Done, 104)));
-        assert!(!working.admits(&state(AgentStatus::Done, 99)));
-
-        // Before the agent's first state, any state is the turn's.
-        let first = after(None);
-        assert!(first.admits(&state(AgentStatus::Done, 1)));
-        assert!(!first.admits(&ObservedAgent::default()));
-
-        assert!(!done.lapsed(1119));
-        assert!(done.lapsed(1120));
+        assert!(!turn.admits(&state(100)));
+        assert!(turn.admits(&state(101)));
     }
 
     fn record(ws: &str, handle: &str, branch: &str) -> WorkspaceRecord {
