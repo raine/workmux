@@ -22,7 +22,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.279 (2026-11-06)
 
 - Add `--wait` to `workmux send` to wait for the agent to finish, and target agents by pane ID. `send` now refuses to type into an agent waiting on a dialog or to guess between several agents in one worktree.
 - Add `-b`/`--background` to `workmux open` to open worktrees without switching to them, like `workmux add`. ([#347](https://github.com/raine/workmux/issues/347))
