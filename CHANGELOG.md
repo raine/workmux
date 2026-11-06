@@ -24,7 +24,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
-- `workmux send` no longer types into an agent waiting on a dialog or guesses among several agents in one worktree; target an agent by pane ID instead, and add `--wait` to confirm the agent picked up the prompt and wait for it to finish. Failures exit with distinct codes, and `workmux wait` right after a `send` no longer returns on the previous turn's `done`. Works for remote agents too.
+- `workmux send` now refuses to type into an agent waiting on a dialog or to guess between several agents in one worktree; target an agent by pane ID instead. Add `--wait` to wait for the agent to finish.
+- Add `-b`/`--background` to `workmux open` to open worktrees without switching to them, like `workmux add`. ([#347](https://github.com/raine/workmux/issues/347))
+- Fix the dashboard using high CPU while idle on Zellij. ([#348](https://github.com/raine/workmux/issues/348))
+- Fix opening a worktree from another project in the dashboard doing nothing or resolving the wrong project.
+- Fix keys typed right after a remote agent's window reconnects being lost. ([#350](https://github.com/raine/workmux/pull/350))
+- Close windows as soon as the last pane's shell exits when the sidebar is enabled, instead of leaving a sidebar-only window for up to two seconds. ([#346](https://github.com/raine/workmux/pull/346))
 
 ## v0.1.278 (2026-10-31)
 
