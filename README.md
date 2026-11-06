@@ -2153,9 +2153,10 @@ at-a-glance visibility into what the agent in each window doing.
 | Codex        | ✅ Supported                                                                |
 | Copilot CLI  | ✅ Supported\*                                                              |
 | Pi           | ✅ Supported\*                                                              |
-| Oh My Pi    | ✅ Supported                                                                |
+| Oh My Pi     | ✅ Supported                                                                |
 | Gemini CLI   | ✅ Supported                                                                |
 | Grok         | ✅ Supported                                                                |
+| Kimi Code    | ✅ Supported                                                                |
 | Antigravity CLI (`agy`) | ✅ Supported\*                                                   |
 | Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
@@ -2171,7 +2172,7 @@ at-a-glance visibility into what the agent in each window doing.
 ### Setup
 
 Run `workmux setup` to automatically detect Claude Code, Antigravity CLI,
-Copilot CLI, OpenCode, Pi, Oh My Pi, Grok, and other supported agent CLIs, install
+Copilot CLI, OpenCode, Pi, Oh My Pi, Grok, Kimi Code, and other supported agent CLIs, install
 status tracking hooks, and install skills:
 
 ```bash
