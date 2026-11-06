@@ -237,6 +237,30 @@ impl RexSnapshot {
             .next()
             .ok_or_else(|| anyhow!("Window '{}' not found", full_name))
     }
+
+    /// The window a target names: by label within its parent session when it
+    /// has one, otherwise as `window_panes` resolves the label.
+    fn target_window(&self, target: &WindowTarget) -> Option<&RexPane> {
+        match target.parent_session() {
+            Some(session) => self
+                .panes
+                .iter()
+                .find(|p| !p.floating && p.window == target.full_name && p.session == session),
+            None => self.window_panes(&target.full_name).into_iter().next(),
+        }
+    }
+
+    fn require_target_window(&self, target: &WindowTarget) -> Result<&RexPane> {
+        self.target_window(target)
+            .ok_or_else(|| match target.parent_session() {
+                Some(session) => anyhow!(
+                    "Window '{}' not found in session '{}'",
+                    target.full_name,
+                    session
+                ),
+                None => anyhow!("Window '{}' not found", target.full_name),
+            })
+    }
 }
 
 /// A connected client as reported by `rex client ls --json`.
@@ -727,6 +751,55 @@ impl Multiplexer for RexBackend {
 
     fn run_deferred_script(&self, script: &str) -> Result<()> {
         util::run_detached_sh_c(script)
+    }
+
+    // Window targets carry the parent session a window-mode worktree was
+    // opened in. Without these, the defaults look only in the session workmux
+    // runs from, so `close` from another session reports no open window.
+
+    fn window_target_exists(&self, target: &WindowTarget) -> Result<bool> {
+        Ok(self.snapshot()?.target_window(target).is_some())
+    }
+
+    fn kill_window_target(&self, target: &WindowTarget) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if let Some(pane) = snapshot.target_window(target) {
+            self.call_api("session.close_window", pane.window_ref())
+                .context("Failed to close Rex window")?;
+        }
+        Ok(())
+    }
+
+    fn schedule_window_target_close(&self, target: &WindowTarget, delay: Duration) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let Some(pane) = snapshot.target_window(target) else {
+            return Ok(());
+        };
+        let script = format!(
+            "sleep {}; {}",
+            delay.as_secs_f64(),
+            Self::close_window_shell_cmd(pane)
+        );
+        util::run_detached_sh_c(&script)
+    }
+
+    fn shell_kill_window_target_cmd(&self, target: &WindowTarget) -> Result<String> {
+        let snapshot = self.snapshot()?;
+        Ok(Self::close_window_shell_cmd(
+            snapshot.require_target_window(target)?,
+        ))
+    }
+
+    fn select_window_target(&self, target: &WindowTarget) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let pane = snapshot.require_target_window(target)?;
+        if !Self::is_current_session(&pane.session_id) {
+            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
+            self.show_session(&pane.session_id, label, Some(&pane.window_id));
+        }
+        self.call_api("session.focus_window", pane.window_ref())
+            .context("Failed to focus Rex window")?;
+        Ok(())
     }
 
     fn shell_select_window_cmd(&self, full_name: &str) -> Result<String> {
