@@ -937,6 +937,7 @@ fn render_worktree_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     let sort = app.worktree_sort_mode.label();
 
     let mut items: Vec<Vec<Span<'static>>> = vec![
+        footer_cmd("Enter", "Open", dimmed, bold_text),
         footer_cmd("a", "Add", dimmed, bold_text),
         footer_cmd("r", "Remove", dimmed, bold_text),
         footer_cmd("R", "Sweep", dimmed, bold_text),

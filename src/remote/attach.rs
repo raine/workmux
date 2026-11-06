@@ -365,6 +365,16 @@ enum State {
     },
 }
 
+/// Where keystrokes go.
+enum Input {
+    /// To the event loop, which only looks for `r` and `q`.
+    Dropped,
+    /// Connection `generation` has not shown output yet; still dropped.
+    Pending(u64),
+    /// To the live connection.
+    Forwarded(Arc<File>),
+}
+
 struct Connection {
     pid: libc::pid_t,
     master: Arc<File>,
@@ -378,8 +388,7 @@ struct Relay {
     slot: String,
     events: Sender<Event>,
     receiver: Receiver<Event>,
-    /// Where keystrokes go; `Some` only while attached.
-    input_target: Arc<Mutex<Option<Arc<File>>>>,
+    input: Arc<Mutex<Input>>,
     generation: u64,
     attempt: u32,
     status: Option<StatusMirror>,
@@ -399,7 +408,7 @@ impl Relay {
             slot,
             events,
             receiver,
-            input_target: Arc::new(Mutex::new(None)),
+            input: Arc::new(Mutex::new(Input::Dropped)),
             generation: 0,
             attempt: 0,
             status: None,
@@ -441,7 +450,7 @@ impl Relay {
             };
             if woke(last_turn, now) && retrying {
                 tracing::info!(ex_id = %self.ex_id, slot = %self.slot, "remote attach woke from sleep; reconnecting");
-                *self.input_target.lock().unwrap() = None;
+                *self.input.lock().unwrap() = Input::Dropped;
                 if let Some(old) = connection.take() {
                     stop(old);
                 }
@@ -462,9 +471,6 @@ impl Relay {
                 }
                 Some(Event::Output(generation)) if generation == self.generation => {
                     if matches!(state, State::Connecting) {
-                        flush_input();
-                        *self.input_target.lock().unwrap() =
-                            connection.as_ref().map(|c| c.master.clone());
                         // The remote client repaints the whole screen.
                         self.painted_row = None;
                         state = State::Attached {
@@ -475,7 +481,7 @@ impl Relay {
                 Some(Event::Exited(generation, status, stderr))
                     if generation == self.generation =>
                 {
-                    *self.input_target.lock().unwrap() = None;
+                    *self.input.lock().unwrap() = Input::Dropped;
                     if let Some(mut finished) = connection.take()
                         && let Some(output) = finished.output.take()
                     {
@@ -598,32 +604,21 @@ impl Relay {
         let mut child = cmd.spawn().context("Failed to start ssh")?;
         let pid = child.id() as libc::pid_t;
         let master = Arc::new(File::from(master));
+        *self.input.lock().unwrap() = Input::Pending(generation);
 
         let events = self.events.clone();
+        let input = self.input.clone();
+        let forward = master.clone();
         let reader = master.clone();
         let output = thread::spawn(move || {
-            let mut reader = &*reader;
-            let mut stdout = std::io::stdout();
-            let mut buf = [0u8; 16 * 1024];
-            let mut announced = false;
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdout
-                            .write_all(&buf[..n])
-                            .and_then(|_| stdout.flush())
-                            .is_err()
-                        {
-                            break;
-                        }
-                        if !announced {
-                            announced = true;
-                            let _ = events.send(Event::Output(generation));
-                        }
-                    }
-                }
-            }
+            copy_output(
+                &*reader,
+                std::io::stdout(),
+                &input,
+                forward,
+                generation,
+                &events,
+            )
         });
 
         let events = self.events.clone();
@@ -648,7 +643,7 @@ impl Relay {
     /// loop, which only looks for `r` and `q`.
     fn read_input(&self) {
         let events = self.events.clone();
-        let target = self.input_target.clone();
+        let target = self.input.clone();
         thread::spawn(move || {
             let mut stdin = std::io::stdin().lock();
             let mut buf = [0u8; 4096];
@@ -660,11 +655,11 @@ impl Relay {
                     }
                     Ok(n) => {
                         let guard = target.lock().unwrap();
-                        match guard.as_ref() {
-                            Some(master) => {
+                        match &*guard {
+                            Input::Forwarded(master) => {
                                 let _ = (&**master).write_all(&buf[..n]);
                             }
-                            None => {
+                            Input::Dropped | Input::Pending(_) => {
                                 drop(guard);
                                 let _ = events.send(Event::Input(buf[..n].to_vec()));
                             }
@@ -712,6 +707,42 @@ fn write_out(text: &str) {
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(text.as_bytes());
     let _ = stdout.flush();
+}
+
+/// Copy connection `generation`'s output to the terminal.
+fn copy_output(
+    mut reader: impl Read,
+    mut out: impl Write,
+    input: &Mutex<Input>,
+    master: Arc<File>,
+    generation: u64,
+    events: &Sender<Event>,
+) {
+    let mut buf = [0u8; 16 * 1024];
+    let mut announced = false;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                // Forward keystrokes before the screen shows, so whatever is
+                // typed after seeing it gets through.
+                if !announced {
+                    let mut input = input.lock().unwrap();
+                    if matches!(*input, Input::Pending(pending) if pending == generation) {
+                        flush_input();
+                        *input = Input::Forwarded(master.clone());
+                    }
+                }
+                if out.write_all(&buf[..n]).and_then(|_| out.flush()).is_err() {
+                    break;
+                }
+                if !announced {
+                    announced = true;
+                    let _ = events.send(Event::Output(generation));
+                }
+            }
+        }
+    }
 }
 
 /// Drop keystrokes the terminal has queued but nobody read yet.
@@ -931,5 +962,76 @@ mod tests {
         );
         let text = status_text("box", &Ending::Detached, None);
         assert_eq!(text, " box: detached · r reconnect · q close ");
+    }
+
+    /// A terminal that notes, at each write, whether keystrokes go to the
+    /// connection.
+    struct Terminal<'a> {
+        input: &'a Mutex<Input>,
+        forwarded: Vec<bool>,
+    }
+
+    impl Write for Terminal<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let input = self.input.try_lock();
+            self.forwarded
+                .push(matches!(input.as_deref(), Ok(Input::Forwarded(_))));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn master() -> Arc<File> {
+        Arc::new(File::open("/dev/null").unwrap())
+    }
+
+    #[test]
+    fn keys_are_forwarded_before_the_screen_shows() {
+        let input = Mutex::new(Input::Pending(1));
+        let mut terminal = Terminal {
+            input: &input,
+            forwarded: Vec::new(),
+        };
+        let (events, received) = mpsc::channel();
+        copy_output(&b"screen"[..], &mut terminal, &input, master(), 1, &events);
+        assert_eq!(terminal.forwarded, [true]);
+        assert!(matches!(received.try_recv(), Ok(Event::Output(1))));
+    }
+
+    #[test]
+    fn a_replaced_connection_never_takes_the_keys() {
+        // Waking from sleep connects again without joining the old output
+        // thread, so its first output can arrive after the new connect.
+        let input = Mutex::new(Input::Pending(2));
+        let (events, _received) = mpsc::channel();
+        copy_output(&b"old"[..], Vec::new(), &input, master(), 1, &events);
+        assert!(matches!(*input.lock().unwrap(), Input::Pending(2)));
+
+        let new = master();
+        copy_output(&b"new"[..], Vec::new(), &input, new.clone(), 2, &events);
+        let input = input.lock().unwrap();
+        assert!(matches!(&*input, Input::Forwarded(master) if Arc::ptr_eq(master, &new)));
+    }
+
+    #[test]
+    fn output_after_the_exit_leaves_the_keys_with_the_relay() {
+        let input = Mutex::new(Input::Dropped);
+        let (events, _received) = mpsc::channel();
+        copy_output(&b"late"[..], Vec::new(), &input, master(), 1, &events);
+        assert!(matches!(*input.lock().unwrap(), Input::Dropped));
+    }
+
+    #[test]
+    fn each_screen_write_is_flushed() {
+        // Like stdout, this holds output back until a newline or a flush.
+        let mut terminal = std::io::LineWriter::new(Vec::new());
+        let input = Mutex::new(Input::Pending(1));
+        let (events, _received) = mpsc::channel();
+        let chunks = (&b"screen"[..]).chain(&b"typed"[..]);
+        copy_output(chunks, &mut terminal, &input, master(), 1, &events);
+        assert_eq!(terminal.get_ref(), b"screentyped");
     }
 }

@@ -332,8 +332,7 @@ def test_send_reaches_a_remote_agent_the_config_picks(
     wm(mux_server, exe, repo, "add cx --remote lo")
     assert poll_until(ready.exists, timeout=20), "Codex simulator did not start"
     assert poll_until(
-        lambda: [r["status"] for r in status_rows(mux_server, exe, repo)]
-        == ["waiting"],
+        lambda: [r["status"] for r in status_rows(mux_server, exe, repo)] == ["done"],
         timeout=10,
     )
     prompt = "continue with deterministic delivery"

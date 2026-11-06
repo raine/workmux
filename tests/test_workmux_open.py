@@ -128,6 +128,48 @@ def test_open_switches_to_existing_window_by_default(
     )
 
 
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("flag", ["-b", "--background"])
+@pytest.mark.parametrize("state", ["existing", "closed", "new", "session"])
+def test_open_background_preserves_focus(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    repo_path: Path,
+    flag: str,
+    state: str,
+):
+    env = mux_server
+    write_workmux_config(repo_path)
+    for name in ("background-one", "background-two"):
+        run_workmux_command(
+            env, workmux_exe_path, repo_path, f"add {name} --background"
+        )
+        if state in ("closed", "session"):
+            env.kill_window(get_window_name(name))
+
+    session = env.tmux(["display-message", "-p", "#{session_id}"]).stdout.strip()
+    active_window = ["display-message", "-p", "-t", session + ":", "#{window_id}"]
+    original = env.tmux(active_window).stdout.strip()
+    extra = {"new": "--new", "session": "--session"}.get(state, "")
+    for _ in range(2 if state == "session" else 1):
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open background-one background-two {flag} {extra}",
+        )
+        assert env.tmux(active_window).stdout.strip() == original
+        assert "Switched" not in result.stdout
+
+    for name in ("background-one", "background-two"):
+        if state == "session":
+            assert_session_exists(env, get_session_name(name))
+        else:
+            assert get_window_name(name) in env.list_windows()
+            if state == "new":
+                assert get_window_name(name) + "-2" in env.list_windows()
+
+
 def test_open_with_new_flag_creates_duplicate_window(
     mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):

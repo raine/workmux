@@ -61,6 +61,11 @@ def test_cleanup_inside_own_window(
         wm(mux_server, workmux_exe_path, repo, "add local --background")
         command = "remove feat other local"
     elif operation == "offline":
+        # A relay that starts after the remote is unconfigured exits and
+        # closes the window; keep a local shell in it.
+        mux_server.tmux(
+            ["split-window", "-d", "-t", get_window_name("feat"), "/bin/sh"]
+        )
         config = mux_server.home_path / ".config/workmux/config.yaml"
         config.write_text("nerdfont: false\n")
         command = "remove --force feat"

@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::git;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
 use crate::remote::{self, cache::WorkspaceRecord, node::observe::ObservedAgent};
-use crate::state::StateStore;
+use crate::state::{PaneKey, StateStore};
 use crate::util;
 use crate::workflow;
 
@@ -35,7 +35,7 @@ fn resolve_worktree_path(
     Ok(path)
 }
 
-fn parse_status(s: &str) -> Result<AgentStatus> {
+pub fn parse_status(s: &str) -> Result<AgentStatus> {
     match s {
         "working" => Ok(AgentStatus::Working),
         "waiting" => Ok(AgentStatus::Waiting),
@@ -82,6 +82,13 @@ pub fn run(
 
     let mut reached: HashSet<String> = HashSet::new();
     let mut seen_agent: HashSet<String> = HashSet::new();
+    let store = StateStore::new()?;
+    let instance = mux.instance_id();
+    let pane_key = |pane_id: &str| PaneKey {
+        backend: mux.name().to_string(),
+        instance: instance.clone(),
+        pane_id: pane_id.to_string(),
+    };
 
     loop {
         // Check timeout
@@ -145,8 +152,8 @@ pub fn run(
         }
 
         // Load current agent state
-        let agent_panes =
-            StateStore::new().and_then(|store| store.load_reconciled_agents(mux.as_ref()))?;
+        let agent_panes = store.load_reconciled_agents(mux.as_ref())?;
+        let now = remote::cache::now();
 
         for (name, wt_path) in &worktree_paths {
             if reached.contains(name) {
@@ -158,8 +165,26 @@ pub fn run(
             if !matching.is_empty() {
                 seen_agent.insert(name.clone());
 
-                // Check if ANY agent in this worktree has reached the target status
-                let has_target = matching.iter().any(|a| a.status == Some(target));
+                // After a send, only the agent sent to counts, and until the
+                // fence lapses only the turn the send started.
+                let sent = matching
+                    .iter()
+                    .filter_map(|a| {
+                        let fence = store.sent_turn(&pane_key(&a.pane_id))?;
+                        Some((a.pane_id.as_str(), fence))
+                    })
+                    .max_by_key(|(_, fence)| fence.sent_at);
+                let fence = sent
+                    .as_ref()
+                    .map(|(_, fence)| fence)
+                    .filter(|fence| !fence.lapsed(now));
+                let has_target = matching
+                    .iter()
+                    .filter(|a| sent.as_ref().is_none_or(|(pane, _)| a.pane_id == *pane))
+                    .any(|a| {
+                        a.status == Some(target)
+                            && fence.is_none_or(|fence| fence.admits(a.status, a.status_ts))
+                    });
                 if has_target {
                     let elapsed = util::format_elapsed_duration(start.elapsed());
                     eprintln!("{}: {} ({})", name, target_status, elapsed);
