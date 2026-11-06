@@ -434,12 +434,58 @@ impl StateStore {
             .join(format!("{safe_instance}.json"))
     }
 
+    fn with_agent_read_lock<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let _lock = AgentStateLock::acquire(&self.base_path)?;
+        operation(self)
+    }
+
+    fn agent_generation_locked(&self) -> Result<u64> {
+        let path = self.base_path.join("agent-state.revision");
+        match fs::read_to_string(&path) {
+            Ok(content) => content.parse().context("Invalid agent state revision"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error).context("Failed to read agent state revision"),
+        }
+    }
+
+    fn advance_agent_generation_locked(&self, generation: u64) -> Result<()> {
+        let next = generation
+            .checked_add(1)
+            .context("Agent state revision overflow")?;
+        write_atomic_durable(
+            &self.base_path.join("agent-state.revision"),
+            next.to_string().as_bytes(),
+        )
+    }
+
+    pub(crate) fn agent_generation(&self) -> Result<u64> {
+        self.with_agent_read_lock(Self::agent_generation_locked)
+    }
+
+    /// Invalidate observations before any mutation, including partially failed writes.
     pub(crate) fn with_agent_lock<T>(
         &self,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        let _lock = AgentStateLock::acquire(&self.base_path)?;
-        operation(self)
+        self.with_agent_read_lock(|store| {
+            store.advance_agent_generation_locked(store.agent_generation_locked()?)?;
+            operation(store)
+        })
+    }
+
+    /// Reject stale backend observations before compaction or any other mutation.
+    pub(crate) fn with_agent_generation<T>(
+        &self,
+        expected: u64,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_agent_read_lock(|store| {
+            if store.agent_generation_locked()? != expected {
+                return Ok(None);
+            }
+            store.advance_agent_generation_locked(expected)?;
+            operation(store).map(Some)
+        })
     }
 
     /// Path to a specific agent's state file.
@@ -935,7 +981,7 @@ impl StateStore {
         backend: &str,
         instance: &str,
     ) -> Result<Vec<ResurrectionAgentState>> {
-        self.with_agent_lock(|store| {
+        self.with_agent_read_lock(|store| {
             let mut result = Vec::new();
             let agents_dir = store.agents_dir();
             if agents_dir.exists() {
@@ -1723,6 +1769,140 @@ mod tests {
             prompt: None,
             remote: None,
         }
+    }
+
+    #[test]
+    fn agent_generations_cover_all_locked_mutations() {
+        let (store, dir) = test_store();
+        let other = StateStore::with_path(dir.path().to_path_buf()).unwrap();
+        let state = test_agent_state(tmux_pane_key("%1"));
+        assert_eq!(store.agent_generation().unwrap(), 0);
+        let mut generation = 0;
+        let check = |generation: &mut u64| {
+            let next = other.agent_generation().unwrap();
+            assert!(next > *generation);
+            assert!(
+                store
+                    .with_agent_generation::<()>(*generation, |_| {
+                        panic!("a stale observation must not mutate the store")
+                    })
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(other.agent_generation().unwrap(), next);
+            *generation = next;
+        };
+        store.upsert_agent(&state).unwrap();
+        check(&mut generation);
+        let mut another = state.clone();
+        another.pane_key = tmux_pane_key("%2");
+        store.upsert_agent(&another).unwrap();
+        check(&mut generation);
+        let (_, revision) = store
+            .get_agent_with_revision(&state.pane_key)
+            .unwrap()
+            .unwrap();
+        assert!(store.upsert_agent_if_revision(&state, &revision).unwrap());
+        check(&mut generation);
+        store.clear_agent_status(&state.pane_key, false).unwrap();
+        check(&mut generation);
+        store.delete_agent(&another.pane_key).unwrap();
+        check(&mut generation);
+        // With no historical flat files this still publishes recovery metadata.
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        check(&mut generation);
+        let mut historical = state.clone();
+        historical.boot_id = Some("old".into());
+        store.upsert_agent(&historical).unwrap();
+        check(&mut generation);
+        store
+            .compact_context("tmux", "default", Some("new"))
+            .unwrap();
+        check(&mut generation);
+        let sources: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.source)
+            .collect();
+        // Reading recovery must not invalidate an observation.
+        assert_eq!(other.agent_generation().unwrap(), generation);
+        store.consume_agent_sources(&sources).unwrap();
+        check(&mut generation);
+        let mut relay = state.clone();
+        relay.workdir = PathBuf::from("/old");
+        relay.remote = Some(crate::multiplexer::RemoteRef {
+            remote: "box".into(),
+            ws_id: "workspace".into(),
+            ex_id: "x1".into(),
+            pane: 0,
+        });
+        store.upsert_agent(&relay).unwrap();
+        check(&mut generation);
+        assert_eq!(
+            store
+                .migrate_worktree_paths(Path::new("/old"), Path::new("/new"), "old", "new")
+                .unwrap(),
+            1
+        );
+        check(&mut generation);
+        store.delete_remote_attachments("box", "workspace").unwrap();
+        check(&mut generation);
+        assert!(store.get_agent(&relay.pane_key).unwrap().is_none());
+        let generation = other.agent_generation().unwrap();
+        assert_eq!(
+            store.with_agent_generation(generation, |_| Ok(42)).unwrap(),
+            Some(42)
+        );
+        assert_eq!(other.agent_generation().unwrap(), generation + 1);
+    }
+
+    #[test]
+    fn agent_generation_errors_refuse_mutation_and_partial_errors_invalidate() {
+        let (store, _dir) = test_store();
+        let path = store.base_path.join("agent-state.revision");
+        for invalid in ["invalid", "18446744073709551615"] {
+            fs::write(&path, invalid).unwrap();
+            assert!(
+                store
+                    .with_agent_lock::<()>(|_| panic!("must not mutate"))
+                    .is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+        }
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(
+            store
+                .with_agent_lock::<()>(|_| panic!("must not mutate"))
+                .is_err()
+        );
+        fs::remove_dir(&path).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::metadata(&store.base_path).unwrap().permissions();
+        fs::set_permissions(&store.base_path, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.with_agent_lock::<()>(|_| panic!("must not mutate"));
+        fs::set_permissions(&store.base_path, permissions).unwrap();
+        assert!(result.is_err());
+        let generation = store.agent_generation().unwrap();
+        let state = test_agent_state(tmux_pane_key("%1"));
+        assert!(
+            store
+                .with_agent_lock::<()>(|store| {
+                    store.upsert_agent_locked(&state)?;
+                    Err(anyhow!("failed after writing"))
+                })
+                .is_err()
+        );
+        assert!(store.get_agent(&state.pane_key).unwrap().is_some());
+        assert!(
+            store
+                .with_agent_generation::<()>(generation, |_| panic!("must not mutate"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
