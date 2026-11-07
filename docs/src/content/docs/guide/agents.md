@@ -78,11 +78,6 @@ agents:
       - openai-codex/gpt-5.6-luna
       - --thinking
       - max
-  copilot-yolo:
-    type: copilot
-    command: copilot
-    args:
-      - --yolo
 ```
 
 Use named agents anywhere you'd use an agent name:
