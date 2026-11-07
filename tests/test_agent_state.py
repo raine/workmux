@@ -885,6 +885,72 @@ def test_persistence_combines_tmux_pane_and_boot_queries(
 
 @pytest.mark.tmux_only
 @pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
+def test_persistence_stops_after_repeated_snapshot_conflicts(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    command: str,
+):
+    """Repeated conflicts terminate without applying a rejected snapshot."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-snapshot-conflicts",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    initial = read_agent_state(state_file)
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None
+    writer_env = {
+        **env.env,
+        "WORKMUX_STATUS_BACKEND": "tmux",
+        "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+        "WORKMUX_STATUS_PANE_ID": initial["pane_key"]["pane_id"],
+    }
+    wrapper_dir = env.tmp_path / "snapshot-conflicts-bin"
+    wrapper_dir.mkdir()
+    calls = env.tmp_path / "snapshot-conflicts-calls"
+    latest = env.tmp_path / "snapshot-conflicts-latest.json"
+    env.install_script(
+        wrapper_dir / "tmux",
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if any('#{start_time}:#{pid}' in arg and '#{pane_pid}' in arg for arg in args):\n"
+        f"    calls = Path({str(calls)!r})\n"
+        "    count = int(calls.read_text()) + 1 if calls.exists() else 1\n"
+        "    calls.write_text(str(count))\n"
+        # Fail promptly if the caller exceeds its retry budget.
+        "    if count > 3: sys.exit(2)\n"
+        f"    result = subprocess.run([{real_tmux!r}, *args], capture_output=True)\n"
+        f"    subprocess.run([{str(workmux_exe_path)!r}, 'set-window-status', 'clear'],\n"
+        f"                   env={writer_env!r}, check=True, timeout=5)\n"
+        f"    Path({str(latest)!r}).write_bytes(Path({str(state_file)!r}).read_bytes())\n"
+        "    sys.stdout.buffer.write(result.stdout)\n"
+        "    sys.exit(result.returncode)\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
+    )
+    result = subprocess.run(
+        [str(workmux_exe_path), *command.split()],
+        cwd=agent.worktree,
+        env={**writer_env, "PATH": f"{wrapper_dir}:{env.env['PATH']}"},
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert calls.read_text() == "3"
+    assert state_file.read_bytes() == latest.read_bytes()
+    assert read_agent_state(state_file)["status"] is None
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
 @pytest.mark.parametrize("new_server", [False, True])
 def test_persistence_retries_snapshot_without_holding_state_lock(
     mux_server: TmuxEnvironment,

@@ -175,7 +175,10 @@ fn persist_agent_snapshot(
         pane_id: pane_id.to_string(),
     };
     let result = (|| -> anyhow::Result<()> {
-        loop {
+        // Persistence is best-effort: unrelated writers must not keep a hook
+        // retrying forever, and rejected snapshots must never be applied.
+        const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
             let generation = store.agent_generation()?;
             let snapshot = match mux.get_live_pane_snapshot(pane_id) {
                 Ok(Some(snapshot)) => snapshot,
@@ -208,6 +211,8 @@ fn persist_agent_snapshot(
                 return Ok(());
             }
         }
+        warn!(%pane_id, "agent state changed during every snapshot attempt, skipping state persist");
+        Ok(())
     })();
     if let Err(error) = result {
         warn!(%error, "failed to persist agent state");
