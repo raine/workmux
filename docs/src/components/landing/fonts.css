@@ -1,0 +1,57 @@
+/* The landing page's self-hosted fonts, shared by every page that draws the
+   landing components. */
+
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-roman-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-400-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-500-latin.woff2") format("woff2");
+}
+/* Mr Dafoe (SIL OFL 1.1) cut down to the letters of the headline's "The". */
+@font-face {
+  font-family: "Mr Dafoe";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/mr-dafoe-the.woff2") format("woff2");
+  unicode-range: U+54, U+65, U+68;
+}
+/* Iosevka Term (every glyph one cell wide) subset to Latin, punctuation,
+   arrows, box drawing, shapes, dingbats and braille: everything the live
+   terminals draw. */
+@font-face {
+  font-family: "Iosevka Live";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/iosevka-regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosevka Live";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/iosevka-bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosevka Live";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/iosevka-italic.woff2") format("woff2");
+}

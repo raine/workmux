@@ -12,6 +12,26 @@ pub fn run(
     force: bool,
     keep_branch: bool,
 ) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        if gone || all || keep_branch {
+            anyhow::bail!(
+                "remote rm does not support --gone, --all or --keep-branch; run it on the local machine"
+            );
+        }
+        return crate::remote::node::operation::submit(
+            &names,
+            crate::remote::node::operation::Operation::Remove { force },
+        );
+    }
+    if crate::sandbox::guest::is_sandbox_guest() {
+        if gone || all || keep_branch || names.len() > 1 {
+            anyhow::bail!(
+                "a sandboxed agent can only remove its own workspace, without --gone, --all or --keep-branch"
+            );
+        }
+        let name = super::resolve_name(names.first().map(String::as_str))?;
+        return run_via_rpc(&name, force);
+    }
     let config = config::Config::load(None)?;
     let confirm_unmerged = config.confirm_unmerged_removal.unwrap_or(true);
 
@@ -24,6 +44,28 @@ pub fn run(
     }
 
     run_specified(names, force, keep_branch, confirm_unmerged, config)
+}
+
+/// Ask the sandbox supervisor to remove this workspace, printing its output.
+fn run_via_rpc(name: &str, force: bool) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+
+    let mut client = RpcClient::from_env()?;
+    client.send(&RpcRequest::Remove {
+        name: name.to_string(),
+        force,
+    })?;
+    loop {
+        match client.recv()? {
+            RpcResponse::Output { message } => {
+                print!("{message}");
+                io::stdout().flush().ok();
+            }
+            RpcResponse::Ok => return Ok(()),
+            RpcResponse::Error { message } => anyhow::bail!("{message}"),
+            _ => {}
+        }
+    }
 }
 
 /// Remove specific worktrees provided by user (or current if empty)
@@ -44,6 +86,81 @@ fn run_specified(
             .collect::<Result<Vec<_>>>()?
     };
 
+    let mut local_names = Vec::new();
+    let mut remote_failures = 0;
+    let mux = create_backend(detect_backend());
+    let current_window = mux.current_window_name()?;
+    let mut removed = Vec::new();
+    // Reaching a node can finish other pending cleanups. Resolve all targets
+    // first so those records are not subsequently mistaken for local worktrees.
+    let targets: Vec<_> = resolved_names
+        .into_iter()
+        .map(|name| {
+            let record = crate::remote::cache::find_here(&name);
+            (name, record)
+        })
+        .collect();
+    let mut batch = crate::remote::lifecycle::RemovalBatch::new(
+        targets
+            .iter()
+            .filter_map(|(_, record)| record.as_ref().map(|r| r.ws_id.clone())),
+    );
+    for (name, remote) in targets {
+        let Some(record) = remote else {
+            local_names.push(name);
+            continue;
+        };
+        let options = crate::remote::lifecycle::RemoveOptions {
+            force,
+            keep_branch,
+            run_hooks: true,
+            confirm_unmerged,
+            refuse_unmerged: false,
+        };
+        if let Err(err) = batch.remove(record.clone(), options) {
+            eprintln!("✗ {err:#}");
+            remote_failures += 1;
+        } else if crate::remote::cache::find_here(&record.handle).is_none() {
+            removed.push(record);
+        }
+    }
+    let local = if local_names.is_empty() {
+        Ok(())
+    } else {
+        remove_local(local_names, force, keep_branch, confirm_unmerged, config)
+    };
+    let result = local.and_then(|()| {
+        if remote_failures > 0 {
+            Err(anyhow!(
+                "{remote_failures} remote workspace(s) could not be removed"
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    // Closing the invoking window can terminate this process. Finish every
+    // target and report failures before closing it, after all other windows.
+    if removed
+        .iter()
+        .any(|record| current_window.as_deref() == Some(&record.window_name))
+        && let Err(err) = &result
+    {
+        eprintln!("✗ {err:#}");
+    }
+    removed.sort_by_key(|record| current_window.as_deref() == Some(&record.window_name));
+    for record in removed {
+        crate::remote::lifecycle::close_relay(mux.as_ref(), &record);
+    }
+    result
+}
+
+fn remove_local(
+    resolved_names: Vec<String>,
+    force: bool,
+    keep_branch: bool,
+    confirm_unmerged: bool,
+    config: config::Config,
+) -> Result<()> {
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
 

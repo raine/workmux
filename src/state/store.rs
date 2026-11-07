@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, trace, warn};
 
+use super::sent::TurnFence;
 use super::types::{AgentState, GlobalSettings, PaneKey};
 use crate::agent_identity::AgentKind;
 use crate::config::SandboxRuntime;
@@ -22,9 +23,11 @@ use crate::util::{write_atomic, write_atomic_durable};
 /// ```text
 /// $XDG_STATE_HOME/workmux/           # ~/.local/state/workmux/
 /// ├── settings.json                   # Global dashboard settings
-/// └── agents/
-///     ├── tmux__default__%1.json     # {backend}__{instance}__{pane_id}.json
-///     └── wezterm__main__3.json
+/// ├── agents/
+/// │   ├── tmux__default__%1.json     # {backend}__{instance}__{pane_id}.json
+/// │   └── wezterm__main__3.json
+/// └── sent/
+///     └── tmux__default__%1.json     # The last turn `send` started there
 /// ```
 pub struct StateStore {
     base_path: PathBuf,
@@ -154,6 +157,7 @@ pub(crate) struct CompactionStats {
 }
 
 /// Agent observation and the state inventory used to produce it.
+#[derive(Default)]
 pub struct ReconciledAgentReport {
     pub backend: String,
     pub instance: String,
@@ -163,6 +167,8 @@ pub struct ReconciledAgentReport {
     pub state_files_invalid_matching_context: usize,
     pub state_files_matching_context: usize,
     pub agents: Vec<crate::multiplexer::AgentPane>,
+    /// Local panes relaying remote agents, kept apart from `agents`.
+    pub remote_agents: Vec<crate::multiplexer::AgentPane>,
 }
 
 struct AgentInventory {
@@ -428,17 +434,82 @@ impl StateStore {
             .join(format!("{safe_instance}.json"))
     }
 
+    fn with_agent_read_lock<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let _lock = AgentStateLock::acquire(&self.base_path)?;
+        operation(self)
+    }
+
+    fn agent_generation_locked(&self) -> Result<u64> {
+        let path = self.base_path.join("agent-state.revision");
+        match fs::read_to_string(&path) {
+            Ok(content) => content.parse().context("Invalid agent state revision"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error).context("Failed to read agent state revision"),
+        }
+    }
+
+    fn advance_agent_generation_locked(&self, generation: u64) -> Result<()> {
+        let next = generation
+            .checked_add(1)
+            .context("Agent state revision overflow")?;
+        write_atomic_durable(
+            &self.base_path.join("agent-state.revision"),
+            next.to_string().as_bytes(),
+        )
+    }
+
+    pub(crate) fn agent_generation(&self) -> Result<u64> {
+        self.with_agent_read_lock(Self::agent_generation_locked)
+    }
+
+    /// Invalidate observations before any mutation, including partially failed writes.
     pub(crate) fn with_agent_lock<T>(
         &self,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        let _lock = AgentStateLock::acquire(&self.base_path)?;
-        operation(self)
+        self.with_agent_read_lock(|store| {
+            store.advance_agent_generation_locked(store.agent_generation_locked()?)?;
+            operation(store)
+        })
+    }
+
+    /// Reject stale backend observations before compaction or any other mutation.
+    pub(crate) fn with_agent_generation<T>(
+        &self,
+        expected: u64,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_agent_read_lock(|store| {
+            if store.agent_generation_locked()? != expected {
+                return Ok(None);
+            }
+            store.advance_agent_generation_locked(expected)?;
+            operation(store).map(Some)
+        })
     }
 
     /// Path to a specific agent's state file.
     fn agent_path(&self, key: &PaneKey) -> PathBuf {
         self.agents_dir().join(key.to_filename())
+    }
+
+    /// Path to the file of the last turn `send` started in a pane.
+    fn sent_path(&self, key: &PaneKey) -> PathBuf {
+        self.base_path.join("sent").join(key.to_filename())
+    }
+
+    /// The last turn `send` started in the pane of `key`.
+    pub fn sent_turn(&self, key: &PaneKey) -> Option<TurnFence> {
+        let bytes = fs::read(self.sent_path(key)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Record `fence` as the last turn `send` started in the pane of `key`.
+    pub fn set_sent_turn(&self, key: &PaneKey, fence: &TurnFence) -> Result<()> {
+        let path = self.sent_path(key);
+        let dir = path.parent().expect("sent path has a parent");
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        write_atomic(&path, &serde_json::to_vec(fence)?)
     }
 
     /// Create or update agent state.
@@ -618,6 +689,65 @@ impl StateStore {
         Ok(true)
     }
 
+    /// Delete the state of every pane relaying workspace `ws_id` of
+    /// `remote`, on any server, including what earlier servers left for
+    /// resurrection.
+    pub fn delete_remote_attachments(&self, remote: &str, ws_id: &str) -> Result<()> {
+        let relays = |state: &AgentState| {
+            state
+                .remote
+                .as_ref()
+                .is_some_and(|at| at.remote == remote && at.ws_id == ws_id)
+        };
+        self.with_agent_lock(|store| {
+            for state in store.list_all_agents()? {
+                if relays(&state) {
+                    store.delete_agent_locked(&state.pane_key)?;
+                }
+            }
+            for path in store.recovery_manifest_paths()? {
+                let mut manifest = match store.load_recovery_manifest_path_locked(&path) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        warn!(?path, %error, "invalid recovery state file");
+                        continue;
+                    }
+                };
+                let before = manifest.entries.len();
+                manifest.entries.retain(|entry| !relays(&entry.state));
+                if manifest.entries.len() != before {
+                    store.save_recovery_manifest_locked(&manifest)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Every recovery manifest file, of any backend and instance.
+    fn recovery_manifest_paths(&self) -> Result<Vec<PathBuf>> {
+        let recovery_dir = self.recovery_dir();
+        let mut paths = Vec::new();
+        if !recovery_dir.exists() {
+            return Ok(paths);
+        }
+        for backend_dir in fs::read_dir(&recovery_dir)? {
+            let backend_dir = backend_dir?.path();
+            if !backend_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(backend_dir)? {
+                let path = entry?.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+        Ok(paths)
+    }
+
     /// Delete agent state.
     ///
     /// No-op if the file doesn't exist.
@@ -626,6 +756,7 @@ impl StateStore {
     }
 
     fn delete_agent_locked(&self, key: &PaneKey) -> Result<()> {
+        let _ = fs::remove_file(self.sent_path(key));
         let path = self.agent_path(key);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -850,7 +981,7 @@ impl StateStore {
         backend: &str,
         instance: &str,
     ) -> Result<Vec<ResurrectionAgentState>> {
-        self.with_agent_lock(|store| {
+        self.with_agent_read_lock(|store| {
             let mut result = Vec::new();
             let agents_dir = store.agents_dir();
             if agents_dir.exists() {
@@ -1154,57 +1285,42 @@ impl StateStore {
             }
         }
 
-        let recovery_dir = self.recovery_dir();
-        if recovery_dir.exists() {
-            for backend_dir in fs::read_dir(&recovery_dir)? {
-                let backend_dir = backend_dir?.path();
-                if !backend_dir.is_dir() {
+        for path in self.recovery_manifest_paths()? {
+            let mut manifest = match self.load_recovery_manifest_path_locked(&path) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    warn!(?path, %error, "invalid recovery state file");
                     continue;
                 }
-                for entry in fs::read_dir(backend_dir)? {
-                    let path = entry?.path();
-                    if path.extension().is_none_or(|extension| extension != "json") {
-                        continue;
-                    }
-                    let mut manifest = match self.load_recovery_manifest_path_locked(&path) {
-                        Ok(manifest) => manifest,
-                        Err(error) => {
-                            warn!(?path, %error, "invalid recovery state file");
-                            continue;
-                        }
-                    };
-                    let mut changed = false;
-                    for entry in &mut manifest.entries {
-                        let stored_canon = canon_or_self(&entry.state.workdir);
-                        let Ok(relpath) = stored_canon.strip_prefix(old_root_canonical) else {
-                            continue;
-                        };
-                        remap_agent_state(
-                            &mut entry.state,
-                            new_root.join(relpath),
-                            old_full_base,
-                            new_full_base,
-                        );
-                        for source in entry
-                            .pending_sources
-                            .iter_mut()
-                            .chain(&mut entry.recent_sources)
-                        {
-                            let source_canon = canon_or_self(&source.workdir);
-                            if let Ok(source_relpath) =
-                                source_canon.strip_prefix(old_root_canonical)
-                            {
-                                source.workdir = new_root.join(source_relpath);
-                            }
-                        }
-                        entry.revision = entry.revision.saturating_add(1);
-                        migrated += 1;
-                        changed = true;
-                    }
-                    if changed {
-                        self.save_recovery_manifest_locked(&manifest)?;
+            };
+            let mut changed = false;
+            for entry in &mut manifest.entries {
+                let stored_canon = canon_or_self(&entry.state.workdir);
+                let Ok(relpath) = stored_canon.strip_prefix(old_root_canonical) else {
+                    continue;
+                };
+                remap_agent_state(
+                    &mut entry.state,
+                    new_root.join(relpath),
+                    old_full_base,
+                    new_full_base,
+                );
+                for source in entry
+                    .pending_sources
+                    .iter_mut()
+                    .chain(&mut entry.recent_sources)
+                {
+                    let source_canon = canon_or_self(&source.workdir);
+                    if let Ok(source_relpath) = source_canon.strip_prefix(old_root_canonical) {
+                        source.workdir = new_root.join(source_relpath);
                     }
                 }
+                entry.revision = entry.revision.saturating_add(1);
+                migrated += 1;
+                changed = true;
+            }
+            if changed {
+                self.save_recovery_manifest_locked(&manifest)?;
             }
         }
         Ok(migrated)
@@ -1262,8 +1378,19 @@ impl StateStore {
     ///
     /// Uses batched pane queries for performance, with backend-specific fallback validation.
     ///
-    /// Returns only valid agents; removes stale state files.
+    /// Returns only valid local agents; removes stale state files. Panes
+    /// relaying remote agents are reconciled the same way but left out,
+    /// because their workdir is not a local worktree.
     pub fn load_reconciled_agents(
+        &self,
+        mux: &dyn crate::multiplexer::Multiplexer,
+    ) -> Result<Vec<crate::multiplexer::AgentPane>> {
+        Ok(split_remote(self.load_all_reconciled_agents(mux)?).0)
+    }
+
+    /// Like [`StateStore::load_reconciled_agents`], including panes that
+    /// relay remote agents.
+    pub fn load_all_reconciled_agents(
         &self,
         mux: &dyn crate::multiplexer::Multiplexer,
     ) -> Result<Vec<crate::multiplexer::AgentPane>> {
@@ -1296,8 +1423,13 @@ impl StateStore {
             .filter_map(Option::as_ref)
             .filter(|key| key.backend == backend && key.instance == instance)
             .count();
-        let agents =
-            self.reconcile_agents_for_context(inventory.states, mux, &instance, true, false)?;
+        let (agents, remote_agents) = split_remote(self.reconcile_agents_for_context(
+            inventory.states,
+            mux,
+            &instance,
+            true,
+            false,
+        )?);
 
         Ok(ReconciledAgentReport {
             backend: backend.to_string(),
@@ -1308,6 +1440,7 @@ impl StateStore {
             state_files_invalid_matching_context,
             state_files_matching_context,
             agents,
+            remote_agents,
         })
     }
 
@@ -1339,6 +1472,7 @@ impl StateStore {
         )
     }
 
+    /// Includes panes that relay remote agents.
     pub(crate) fn load_reconciled_agents_from_snapshot_cached(
         &self,
         cache: &mut AgentStateCache,
@@ -1507,6 +1641,16 @@ impl StateStore {
     }
 }
 
+/// Split reconciled agents into local agents and panes relaying remote ones.
+pub(crate) fn split_remote(
+    agents: Vec<crate::multiplexer::AgentPane>,
+) -> (
+    Vec<crate::multiplexer::AgentPane>,
+    Vec<crate::multiplexer::AgentPane>,
+) {
+    agents.into_iter().partition(|agent| agent.remote.is_none())
+}
+
 /// Legacy tmux IDs identify a possible matching server by start time alone.
 /// Callers merging pane state must also verify the pane PID.
 pub(super) fn same_server_boot(backend: &str, stored: &str, current: &str) -> bool {
@@ -1623,7 +1767,142 @@ mod tests {
             agent_kind: None,
             agent_session_id: None,
             prompt: None,
+            remote: None,
         }
+    }
+
+    #[test]
+    fn agent_generations_cover_all_locked_mutations() {
+        let (store, dir) = test_store();
+        let other = StateStore::with_path(dir.path().to_path_buf()).unwrap();
+        let state = test_agent_state(tmux_pane_key("%1"));
+        assert_eq!(store.agent_generation().unwrap(), 0);
+        let mut generation = 0;
+        let check = |generation: &mut u64| {
+            let next = other.agent_generation().unwrap();
+            assert!(next > *generation);
+            assert!(
+                store
+                    .with_agent_generation::<()>(*generation, |_| {
+                        panic!("a stale observation must not mutate the store")
+                    })
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(other.agent_generation().unwrap(), next);
+            *generation = next;
+        };
+        store.upsert_agent(&state).unwrap();
+        check(&mut generation);
+        let mut another = state.clone();
+        another.pane_key = tmux_pane_key("%2");
+        store.upsert_agent(&another).unwrap();
+        check(&mut generation);
+        let (_, revision) = store
+            .get_agent_with_revision(&state.pane_key)
+            .unwrap()
+            .unwrap();
+        assert!(store.upsert_agent_if_revision(&state, &revision).unwrap());
+        check(&mut generation);
+        store.clear_agent_status(&state.pane_key, false).unwrap();
+        check(&mut generation);
+        store.delete_agent(&another.pane_key).unwrap();
+        check(&mut generation);
+        // With no historical flat files this still publishes recovery metadata.
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        check(&mut generation);
+        let mut historical = state.clone();
+        historical.boot_id = Some("old".into());
+        store.upsert_agent(&historical).unwrap();
+        check(&mut generation);
+        store
+            .compact_context("tmux", "default", Some("new"))
+            .unwrap();
+        check(&mut generation);
+        let sources: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.source)
+            .collect();
+        // Reading recovery must not invalidate an observation.
+        assert_eq!(other.agent_generation().unwrap(), generation);
+        store.consume_agent_sources(&sources).unwrap();
+        check(&mut generation);
+        let mut relay = state.clone();
+        relay.workdir = PathBuf::from("/old");
+        relay.remote = Some(crate::multiplexer::RemoteRef {
+            remote: "box".into(),
+            ws_id: "workspace".into(),
+            ex_id: "x1".into(),
+            pane: 0,
+        });
+        store.upsert_agent(&relay).unwrap();
+        check(&mut generation);
+        assert_eq!(
+            store
+                .migrate_worktree_paths(Path::new("/old"), Path::new("/new"), "old", "new")
+                .unwrap(),
+            1
+        );
+        check(&mut generation);
+        store.delete_remote_attachments("box", "workspace").unwrap();
+        check(&mut generation);
+        assert!(store.get_agent(&relay.pane_key).unwrap().is_none());
+        let generation = other.agent_generation().unwrap();
+        assert_eq!(
+            store.with_agent_generation(generation, |_| Ok(42)).unwrap(),
+            Some(42)
+        );
+        assert_eq!(other.agent_generation().unwrap(), generation + 1);
+    }
+
+    #[test]
+    fn agent_generation_errors_refuse_mutation_and_partial_errors_invalidate() {
+        let (store, _dir) = test_store();
+        let path = store.base_path.join("agent-state.revision");
+        for invalid in ["invalid", "18446744073709551615"] {
+            fs::write(&path, invalid).unwrap();
+            assert!(
+                store
+                    .with_agent_lock::<()>(|_| panic!("must not mutate"))
+                    .is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+        }
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(
+            store
+                .with_agent_lock::<()>(|_| panic!("must not mutate"))
+                .is_err()
+        );
+        fs::remove_dir(&path).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::metadata(&store.base_path).unwrap().permissions();
+        fs::set_permissions(&store.base_path, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.with_agent_lock::<()>(|_| panic!("must not mutate"));
+        fs::set_permissions(&store.base_path, permissions).unwrap();
+        assert!(result.is_err());
+        let generation = store.agent_generation().unwrap();
+        let state = test_agent_state(tmux_pane_key("%1"));
+        assert!(
+            store
+                .with_agent_lock::<()>(|store| {
+                    store.upsert_agent_locked(&state)?;
+                    Err(anyhow!("failed after writing"))
+                })
+                .is_err()
+        );
+        assert!(store.get_agent(&state.pane_key).unwrap().is_some());
+        assert!(
+            store
+                .with_agent_generation::<()>(generation, |_| panic!("must not mutate"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2244,6 +2523,40 @@ mod tests {
         let repaired = cache.load_context(&store, "tmux", "default").unwrap();
         assert_eq!(repaired.stats.parses, 1);
         assert_eq!(repaired.agents.len(), 1);
+    }
+
+    #[test]
+    fn deleting_remote_attachments_reaches_earlier_servers() {
+        let (store, _dir) = test_store();
+        let relay = |pane: usize, boot: &str, ws_id: &str| {
+            let mut state = context_state("tmux", "default", pane, Some(boot), pane);
+            state.remote = Some(crate::multiplexer::RemoteRef {
+                remote: "box".into(),
+                ws_id: ws_id.into(),
+                ex_id: "x1".into(),
+                pane: 0,
+            });
+            state
+        };
+        write_raw_agent(&store, &relay(1, "old", "w1"));
+        write_raw_agent(&store, &relay(2, "old", "w2"));
+        write_raw_agent(&store, &context_state("tmux", "default", 3, Some("old"), 3));
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        write_raw_agent(&store, &relay(4, "current", "w1"));
+
+        store.delete_remote_attachments("box", "w1").unwrap();
+
+        let remaining: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.state.remote.map(|at| at.ws_id))
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&Some("w2".into())));
+        assert!(remaining.contains(&None));
     }
 
     #[test]

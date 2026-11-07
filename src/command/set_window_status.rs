@@ -14,7 +14,7 @@ use crate::multiplexer::{
     STATUS_TARGET_INSTANCE_ENV, STATUS_TARGET_PANE_ENV, create_backend,
     create_backend_for_instance, detect_backend,
 };
-use crate::state::{AgentState, PromptUpdate, StateStore};
+use crate::state::{AgentState, PromptUpdate, RemoteUpdate, StateStore};
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum SetWindowStatusCommand {
@@ -197,21 +197,33 @@ fn apply_status_update(
     agent_session_id: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<()> {
-    match cmd {
-        SetWindowStatusCommand::Clear => {
+    let change = match cmd {
+        SetWindowStatusCommand::Working => Some(AgentStatus::Working),
+        SetWindowStatusCommand::Waiting => Some(AgentStatus::Waiting),
+        SetWindowStatusCommand::Done => Some(AgentStatus::Done),
+        SetWindowStatusCommand::Clear => None,
+    };
+    apply_status(config, mux, pane_id, change, agent_session_id, prompt, None)
+}
+
+/// Show `status` on `pane_id` (`None` clears it): the multiplexer's status
+/// icon, the state store and the sidebar. Status hooks and panes relaying a
+/// remote agent (`remote`) both come through here.
+pub(crate) fn apply_status(
+    config: &Config,
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    agent_session_id: Option<&str>,
+    prompt: Option<&str>,
+    remote: Option<RemoteUpdate>,
+) -> Result<()> {
+    match status {
+        None => {
             mux.clear_status(pane_id)?;
             crate::state::clear_agent_status(mux, pane_id, !config.prompt_capture_enabled());
         }
-        SetWindowStatusCommand::Working
-        | SetWindowStatusCommand::Waiting
-        | SetWindowStatusCommand::Done => {
-            let status = match cmd {
-                SetWindowStatusCommand::Working => AgentStatus::Working,
-                SetWindowStatusCommand::Waiting => AgentStatus::Waiting,
-                SetWindowStatusCommand::Done => AgentStatus::Done,
-                SetWindowStatusCommand::Clear => unreachable!(),
-            };
-
+        Some(status) => {
             let (icon, auto_clear) = match status {
                 AgentStatus::Working => (config.status_icons.working(), false),
                 AgentStatus::Waiting => (config.status_icons.waiting(), true),
@@ -227,14 +239,20 @@ fn apply_status_update(
             mux.set_status(pane_id, icon, auto_clear)?;
 
             // Persist to state store so the dashboard sees this agent
-            crate::state::persist_agent_update(
-                mux,
-                pane_id,
-                Some(status),
-                None,
-                agent_session_id.map(str::to_string),
-                prompt_update(config, status, prompt),
-            );
+            let prompt = prompt_update(config, status, prompt);
+            match remote {
+                Some(update) => {
+                    crate::state::persist_remote_update(mux, pane_id, Some(status), update, prompt)
+                }
+                None => crate::state::persist_agent_update(
+                    mux,
+                    pane_id,
+                    Some(status),
+                    None,
+                    agent_session_id.map(str::to_string),
+                    prompt,
+                ),
+            }
         }
     }
 
@@ -731,6 +749,7 @@ mod tests {
             agent_kind: Some("claude".to_string()),
             agent_session_id: Some(agent_session_id.to_string()),
             prompt: None,
+            remote: None,
         }
     }
 

@@ -1,0 +1,1403 @@
+---
+// Remote servers told through the real tmux UI, with a timeline beside it:
+// an agent started on devbox, watched from a local window, left working
+// while the local machine sleeps, and merged home. The lanes for your
+// machine, the SSH link and devbox fill in as the session plays; clicking
+// them jumps the session to that moment.
+import './grid.css';
+
+interface Props {
+  // Grid width in cells: fewer cells draw larger text in a narrow column.
+  cols?: number;
+}
+const { cols = 96 } = Astro.props;
+---
+
+<live-remote>
+  <div class="lr-body">
+    <remote-session class="gl" data-cols={cols}>
+      <div
+        class="gl-grid"
+        role="img"
+        aria-label="A tmux session: workmux add --remote starts an agent on the server devbox in a new window. The local machine sleeps while the agent keeps working; on wake the window reconnects and shows the finished work, and workmux merge brings it home."
+      >
+      </div>
+      <div class="rt-sleep" aria-hidden="true">
+        <span>☾</span>
+        <b>Local machine asleep</b>
+        <small></small>
+      </div>
+      <div class="rt-cap" aria-hidden="true"><span></span></div>
+      <span class="gl-key" aria-hidden="true"></span>
+      <div class="gl-chapters"></div>
+      <span class="gl-time" aria-hidden="true"></span>
+    </remote-session>
+    <div class="tl-chart" aria-hidden="true">
+      <div class="tl-names">
+        <span data-lane="0"><b>Your machine</b><small>tmux · git</small></span>
+        <span data-lane="1" class="tl-ssh">ssh</span>
+        <span data-lane="2"><b>devbox</b><small>node · docker</small></span>
+      </div>
+      <div class="tl-track" data-k="track">
+        <div class="tl-sleep" data-k="sleep">
+          <span>☾ lid closed · 34 min</span>
+        </div>
+        <div class="tl-guide" data-lane="0"></div>
+        <div class="tl-guide" data-lane="1"></div>
+        <div class="tl-guide" data-lane="2"></div>
+        <div class="tl-items" data-k="items"></div>
+        <div class="tl-head" data-k="head"></div>
+      </div>
+    </div>
+  </div>
+</live-remote>
+
+<style is:global>
+  remote-session .t {
+    color: #d4d4d4;
+  }
+  remote-session .w {
+    color: #f0f0f0;
+  }
+  remote-session .d {
+    color: #8a8a8a;
+  }
+  remote-session .dir {
+    color: #7fb4e0;
+  }
+  remote-session .br {
+    color: #c79bdb;
+  }
+  remote-session .ac {
+    color: #48d9be;
+  }
+  remote-session .ok {
+    color: #9fd49a;
+  }
+  remote-session .er {
+    color: #f08b8b;
+  }
+  remote-session .code {
+    color: #a9c3f2;
+  }
+  remote-session .sg {
+    color: #e0896d;
+  }
+  remote-session .sv {
+    color: #e59d80;
+  }
+  remote-session .sv2 {
+    color: #f7d2bf;
+  }
+  remote-session .up {
+    color: #b0b0b0;
+  }
+  remote-session .lr {
+    color: #4a4a4a;
+  }
+  remote-session .Bup {
+    background-color: #262626;
+  }
+  remote-session .Bcur {
+    background-color: #c6c6c6;
+  }
+  remote-session .Bline {
+    background-color: #3b2a1c;
+  }
+  remote-session .ln {
+    color: #f2c49b;
+  }
+  remote-session .stl {
+    color: #b8cc7e;
+  }
+  remote-session .stw {
+    color: #e8e8e8;
+  }
+  remote-session .wa {
+    color: #151515;
+  }
+  remote-session .Bwa {
+    background-color: #aec579;
+  }
+  remote-session .clk {
+    color: #c3d48f;
+  }
+
+  /* The screen is off while the local machine sleeps. */
+  remote-session .rt-sleep {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    background: rgb(8 10 11 / 0.92);
+    color: #a1b2b1;
+    font:
+      500 0.875rem/1.3 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+    opacity: 0;
+    transition: opacity 400ms ease-out;
+    pointer-events: none;
+  }
+  remote-session .rt-sleep[data-on] {
+    opacity: 1;
+  }
+  remote-session .rt-sleep span {
+    color: #48d9be;
+    font-size: 1.75rem;
+  }
+  remote-session .rt-sleep b {
+    color: #eaf2ef;
+    font-weight: 600;
+  }
+  remote-session .rt-sleep small {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* What is happening right now, over the bottom of the session. */
+  remote-session .rt-cap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 13%;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+  remote-session .rt-cap span {
+    padding: 0.5em 0.95em;
+    border-radius: 999px;
+    background: rgb(13 18 19 / 0.9);
+    box-shadow:
+      0 0 0 1px rgb(72 217 190 / 0.25) inset,
+      0 10px 30px -10px rgb(0 0 0 / 0.8);
+    color: #eaf2ef;
+    font:
+      500 clamp(0.75rem, 1.6cqw, 0.9375rem) / 1.2 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+  }
+  remote-session .rt-cap span:empty {
+    display: none;
+  }
+  remote-session .rt-cap span[data-in] {
+    animation: rt-cap-in 220ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  @keyframes rt-cap-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  /* Light look whenever the page is light: the same roles on a paper
+     background. */
+  html[data-theme='light'] remote-session .t {
+    color: #2f3337;
+  }
+  html[data-theme='light'] remote-session .w {
+    color: #111418;
+  }
+  html[data-theme='light'] remote-session .d {
+    color: #6b7076;
+  }
+  html[data-theme='light'] remote-session .dir {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] remote-session .br {
+    color: #7a4fc2;
+  }
+  html[data-theme='light'] remote-session .ac {
+    color: #087f70;
+  }
+  html[data-theme='light'] remote-session .ok {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] remote-session .er {
+    color: #b3261e;
+  }
+  html[data-theme='light'] remote-session .code {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] remote-session .sg {
+    color: #b4532f;
+  }
+  html[data-theme='light'] remote-session .sv {
+    color: #b85c38;
+  }
+  html[data-theme='light'] remote-session .sv2 {
+    color: #8a4a2c;
+  }
+  html[data-theme='light'] remote-session .up {
+    color: #555a60;
+  }
+  html[data-theme='light'] remote-session .lr {
+    color: #c8c8c8;
+  }
+  html[data-theme='light'] remote-session .Bup {
+    background-color: #ececec;
+  }
+  html[data-theme='light'] remote-session .Bcur {
+    background-color: #3a3f45;
+  }
+  html[data-theme='light'] remote-session .Bline {
+    background-color: #f6e7d8;
+  }
+  html[data-theme='light'] remote-session .ln {
+    color: #8a4a12;
+  }
+  html[data-theme='light'] remote-session .stl {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] remote-session .stw {
+    color: #24292f;
+  }
+  html[data-theme='light'] remote-session .clk {
+    color: #5a7a1a;
+  }
+  html[data-theme='light'] remote-session .rt-sleep {
+    background: rgb(244 246 245 / 0.94);
+    color: #526465;
+  }
+  html[data-theme='light'] remote-session .rt-sleep span {
+    color: #087f70;
+  }
+  html[data-theme='light'] remote-session .rt-sleep b {
+    color: #172325;
+  }
+  html[data-theme='light'] remote-session .rt-cap span {
+    background: rgb(255 255 255 / 0.94);
+    box-shadow:
+      0 0 0 1px rgb(8 127 112 / 0.25) inset,
+      0 10px 30px -12px rgb(16 32 30 / 0.35);
+    color: #172325;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    remote-session .rt-cap span[data-in] {
+      animation: none;
+    }
+    remote-session .rt-sleep {
+      transition: none;
+    }
+  }
+</style>
+
+<style is:global>
+  /* The timeline sits beside the session when there is room for both, and
+     under it otherwise, as in a docs column. */
+  live-remote {
+    display: block;
+    container-type: inline-size;
+    --l-bg: #0f1415;
+    --l-1: #eaf2ef;
+    --l-2: #a1b2b1;
+    --l-3: #6f8281;
+    --l-ac: #48d9be;
+    --l-back: #a9c3f2;
+    --l-ok: #9fd49a;
+    --l-warn: #f2c49b;
+    --l-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  /* The lanes are the session's progress bar. */
+  live-remote .gl .gl-chapters,
+  live-remote .gl .gl-time {
+    display: none;
+  }
+  live-remote .tl-chart {
+    position: relative;
+    background: var(--l-bg);
+    color: var(--l-1);
+    font:
+      13px/1.35 Inter,
+      ui-sans-serif,
+      system-ui,
+      sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  live-remote .tl-names b {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  live-remote .tl-names small,
+  live-remote .tl-ssh {
+    color: var(--l-3);
+    font:
+      11px/1.3 'Iosevka Live',
+      ui-monospace,
+      Menlo,
+      monospace;
+    white-space: nowrap;
+  }
+  live-remote .tl-track {
+    position: relative;
+    cursor: pointer;
+  }
+  live-remote .tl-items {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  live-remote .tl-guide {
+    position: absolute;
+    border: 0 dashed rgb(255 255 255 / 0.07);
+  }
+
+  /* Items carry --a (start) and --l (length) as percentages of the loop. */
+  live-remote .tl-seg {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    border-radius: 0.4rem;
+    background: rgb(72 217 190 / 0.16);
+    box-shadow: 0 0 0 1px rgb(72 217 190 / 0.35) inset;
+    color: var(--l-1);
+    font:
+      11.5px/1 'Iosevka Live',
+      ui-monospace,
+      Menlo,
+      monospace;
+    white-space: nowrap;
+  }
+  live-remote .tl-seg[hidden],
+  live-remote .tl-mark[hidden],
+  live-remote .tl-hop[hidden] {
+    display: none;
+  }
+  live-remote .tl-seg[data-tone='quiet'] {
+    background: rgb(255 255 255 / 0.04);
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.1) inset;
+    color: var(--l-2);
+  }
+  live-remote .tl-seg[data-tone='ok'] {
+    background: rgb(159 212 154 / 0.12);
+    box-shadow: 0 0 0 1px rgb(159 212 154 / 0.35) inset;
+  }
+  live-remote .tl-seg[data-tone='wire'] {
+    border-radius: 1px;
+    background: rgb(72 217 190 / 0.55);
+    box-shadow: none;
+  }
+  live-remote .tl-seg[data-tone='down'] {
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+  live-remote .tl-seg[data-tone='working'] {
+    background:
+      linear-gradient(
+          90deg,
+          transparent,
+          rgb(72 217 190 / 0.14) 50%,
+          transparent
+        )
+        0 0 / 12rem 100%,
+      rgb(72 217 190 / 0.16);
+    animation: tl-work 1.6s linear infinite;
+  }
+  @keyframes tl-work {
+    to {
+      background-position:
+        12rem 0,
+        0 0;
+    }
+  }
+
+  live-remote .tl-mark {
+    position: absolute;
+    z-index: 1;
+    width: 0;
+    height: 0;
+    animation: tl-in 240ms var(--l-ease) both;
+  }
+  live-remote .tl-mark i {
+    position: absolute;
+    left: -5px;
+    top: -5px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--l-bg);
+    box-shadow: 0 0 0 2px var(--l-ac);
+  }
+  live-remote .tl-mark[data-tone='ok'] i {
+    box-shadow: 0 0 0 2px var(--l-ok);
+  }
+  live-remote .tl-mark span {
+    position: absolute;
+    color: var(--l-1);
+    font:
+      11.5px/1 'Iosevka Live',
+      ui-monospace,
+      Menlo,
+      monospace;
+    white-space: nowrap;
+  }
+  live-remote .tl-mark[data-tone='ok'] span {
+    color: var(--l-ok);
+  }
+
+  live-remote .tl-hop {
+    position: absolute;
+    background: var(--l-ac);
+    animation: tl-in 240ms var(--l-ease) both;
+  }
+  live-remote .tl-hop[data-back] {
+    background: var(--l-back);
+  }
+  live-remote .tl-hop span {
+    position: absolute;
+    padding: 0.25rem 0.5rem;
+    border-radius: 999px;
+    background: #0b1011;
+    box-shadow: 0 0 0 1px rgb(72 217 190 / 0.5) inset;
+    color: var(--l-1);
+    font:
+      11px/1 'Iosevka Live',
+      ui-monospace,
+      Menlo,
+      monospace;
+    white-space: nowrap;
+  }
+  live-remote .tl-hop[data-back] span {
+    box-shadow: 0 0 0 1px rgb(169 195 242 / 0.6) inset;
+  }
+
+  live-remote .tl-sleep {
+    position: absolute;
+    overflow: hidden;
+    border-radius: 0.5rem;
+    background: repeating-linear-gradient(
+      -45deg,
+      rgb(255 255 255 / 0.03) 0 6px,
+      transparent 6px 12px
+    );
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.06) inset;
+    opacity: 0;
+    transition: opacity 300ms ease-out;
+  }
+  live-remote .tl-sleep[data-on] {
+    opacity: 1;
+  }
+  live-remote .tl-sleep span {
+    position: absolute;
+    color: var(--l-2);
+    font-size: 11.5px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  live-remote .tl-head {
+    position: absolute;
+    background: rgb(234 242 239 / 0.4);
+  }
+  live-remote .tl-head::before {
+    content: '';
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--l-1);
+  }
+  @keyframes tl-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  /* Time runs top to bottom, like a log. */
+  live-remote .lr-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(15rem, 30cqw, 24rem);
+  }
+  live-remote .tl-chart {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    padding: 1rem 1.25rem 1.25rem;
+    border-left: 1px solid #222;
+  }
+  live-remote .tl-names {
+    position: relative;
+    height: 2.5rem;
+  }
+  live-remote .tl-names span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    text-align: center;
+  }
+  live-remote .tl-names .tl-ssh {
+    top: 0.2rem;
+  }
+  live-remote [data-lane='0'] {
+    left: 12%;
+  }
+  live-remote [data-lane='1'] {
+    left: 50%;
+  }
+  live-remote [data-lane='2'] {
+    left: 88%;
+  }
+  live-remote .tl-names [data-lane='0'] {
+    left: 0;
+    transform: none;
+    text-align: left;
+  }
+  live-remote .tl-names [data-lane='2'] {
+    left: auto;
+    right: 0;
+    transform: none;
+    text-align: right;
+  }
+  live-remote .tl-track {
+    margin-top: 1.25rem;
+  }
+  live-remote .tl-guide {
+    top: 0;
+    bottom: 0;
+    border-left-width: 1px;
+  }
+  live-remote .tl-seg {
+    top: var(--a);
+    height: var(--l);
+    width: 6px;
+    margin-left: -3px;
+    overflow: visible;
+    align-items: flex-start;
+    border-radius: 3px;
+  }
+  live-remote .tl-seg[data-tone='wire'] {
+    width: 2px;
+    margin-left: -1px;
+  }
+  live-remote .tl-seg[data-tone='down'] {
+    width: 0;
+    margin-left: -1px;
+    border-left: 2px dashed rgb(242 196 155 / 0.45);
+  }
+  live-remote .tl-seg[data-tone='working'] {
+    background: rgb(72 217 190 / 0.55);
+    animation: none;
+  }
+  live-remote .tl-seg span {
+    position: absolute;
+    top: 0.15rem;
+    left: 0.7rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 0.3rem;
+    background: var(--l-bg);
+    color: var(--l-2);
+  }
+  live-remote .tl-seg[data-lane='2'] span {
+    left: auto;
+    right: 0.7rem;
+  }
+  live-remote .tl-mark {
+    top: var(--a);
+  }
+  live-remote .tl-mark span {
+    top: 0;
+    left: 0.75rem;
+    transform: translateY(-50%);
+    padding: 0.1rem 0.3rem;
+    border-radius: 0.3rem;
+    background: var(--l-bg);
+  }
+  live-remote .tl-mark[data-lane='2'] span {
+    left: auto;
+    right: 0.75rem;
+  }
+  live-remote .tl-hop {
+    top: var(--a);
+    left: 12%;
+    right: 12%;
+    height: 2px;
+    margin-top: -1px;
+  }
+  live-remote .tl-hop span {
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+  live-remote .tl-sleep {
+    top: var(--a);
+    height: var(--l);
+    left: -0.5rem;
+    right: -0.5rem;
+  }
+  live-remote .tl-sleep span {
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.3rem;
+    background: var(--l-bg);
+  }
+  live-remote .tl-head {
+    top: var(--a);
+    left: -0.5rem;
+    right: -0.5rem;
+    height: 1px;
+  }
+  live-remote .tl-head::before {
+    top: -3px;
+    left: -3px;
+  }
+  @container (max-width: 46rem) {
+    live-remote .lr-body {
+      grid-template-columns: 1fr;
+    }
+    live-remote .tl-chart {
+      min-height: 22rem;
+      border-left: 0;
+      border-top: 1px solid #222;
+    }
+  }
+  html[data-theme='light'] live-remote {
+    --l-bg: #f3f5f4;
+    --l-1: #172325;
+    --l-2: #526465;
+    --l-3: #7d8d8d;
+    --l-ac: #13a090;
+    --l-back: #4a6fc2;
+    --l-ok: #3f8a3a;
+  }
+  html[data-theme='light'] live-remote .tl-chart {
+    border-color: #e2e2e0;
+  }
+  html[data-theme='light'] live-remote .tl-guide {
+    border-color: rgb(0 0 0 / 0.1);
+  }
+  html[data-theme='light'] live-remote .tl-seg[data-tone='quiet'] {
+    background: rgb(0 0 0 / 0.05);
+    box-shadow: 0 0 0 1px rgb(0 0 0 / 0.12) inset;
+  }
+  html[data-theme='light'] live-remote .tl-seg[data-tone='down'] {
+    border-color: rgb(180 83 47 / 0.55);
+  }
+  html[data-theme='light'] live-remote .tl-hop span {
+    background: #ffffff;
+  }
+  html[data-theme='light'] live-remote .tl-sleep {
+    background: repeating-linear-gradient(
+      -45deg,
+      rgb(0 0 0 / 0.04) 0 6px,
+      transparent 6px 12px
+    );
+    box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08) inset;
+  }
+  html[data-theme='light'] live-remote .tl-head {
+    background: rgb(23 35 37 / 0.35);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    live-remote .tl-chart *,
+    live-remote .tl-chart *::before {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+
+<script>
+  import { GridLoop, fit, html, sp, spread, wrapPlain } from './grid';
+  import type { Line, Seg } from './grid';
+
+  const COLS = 96;
+  const ROWS = 24;
+  const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+  const SVG: Record<string, string> = {
+    branch:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="6" cy="19" r="2.4"/><circle cx="6" cy="5" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2M18 9.4c0 5-6 4.6-11 7.6"/></svg>',
+  };
+
+  const PROMPT = 'Add per-key rate limiting to /v1/search';
+  const ADD = `workmux add rate-limit --remote devbox -b -p "${PROMPT}"`;
+  const MERGE = 'workmux merge rate-limit';
+  const ANSWER =
+    'Per-key rate limiting is in place: a token bucket per API key, 60 requests a minute by default, answering 429 with Retry-After when it runs out. All 128 tests pass.';
+
+  type Tool = { name: string; arg: string; out: string; done: boolean };
+
+  class RemoteSession extends GridLoop {
+    cols = COLS;
+    w = COLS - 2;
+    // Loop time of each moment in the story, filled in as the loop plays,
+    // so neighbours can draw the whole loop before it has played.
+    beats: Record<string, number> = {};
+    rowCount = ROWS;
+    chapters = [
+      'Start on a server',
+      'Watch it work',
+      'Close the lid',
+      'Back online',
+      'Merge it home',
+    ];
+    win = 1;
+    shell: Line[] = [];
+    input = '';
+    hasRemote = false;
+    remoteIcon = '';
+    // Agent pane
+    tools: Tool[] = [];
+    answer = '';
+    working = false;
+    workStart = 0;
+    worked = '';
+    // Relay status line, or '' when connected.
+    relay = '';
+    asleep = false;
+    sleepMins = 0;
+    // Minutes added to the clock by the sleep.
+    skip = 0;
+    cap = '';
+    capEl?: HTMLElement;
+    sleepEl?: HTMLElement;
+    shownCap = '';
+    shownSleep: boolean | null = null;
+
+    connectedCallback() {
+      this.capEl = this.querySelector<HTMLElement>('.rt-cap span')!;
+      this.sleepEl = this.querySelector<HTMLElement>('.rt-sleep')!;
+      this.cols = Number(this.dataset.cols) || COLS;
+      this.w = this.cols - 2;
+      super.connectedCallback();
+    }
+
+    reset() {
+      this.begin();
+      this.win = 1;
+      this.shell = [];
+      this.input = '';
+      this.hasRemote = false;
+      this.remoteIcon = '';
+      this.tools = [];
+      this.answer = '';
+      this.working = false;
+      this.worked = '';
+      this.relay = '';
+      this.asleep = false;
+      this.sleepMins = 0;
+      this.skip = 0;
+      this.cap = 'Start an agent on a server instead of your machine';
+      const out = (l: Line) => this.shell.push(l);
+      this.play([
+        [600, () => this.type(ADD)],
+        [
+          0,
+          () => {
+            this.key('⏎');
+            this.beat('add');
+            this.enter(ADD);
+            out([['Sending main (3f9c2a1) to devbox…', 'd']]);
+          },
+        ],
+        [
+          1100,
+          () => {
+            out([
+              ['✓ ', 'ok'],
+              [
+                "Successfully created remote workspace and tmux window for 'rate-limit' on 'devbox'",
+                't',
+              ],
+            ]);
+            out([['  Base: main', 'd']]);
+            out([
+              [
+                '  Worktree: devbox:~/.workmux-node/projects/api-1f3e/worktrees/rate-limit',
+                'd',
+              ],
+            ]);
+            out([['  Runs: in Docker (sandbox.enabled is on)', 'd']]);
+            this.beat('started');
+            this.hasRemote = true;
+            this.remoteIcon = '🤖';
+            this.working = true;
+            this.workStart = this.t;
+            this.cap =
+              'A new window joins your session; the agent runs on devbox';
+          },
+        ],
+        [
+          2200,
+          () => {
+            this.mark(1);
+            this.beat('watch');
+            this.key('C-b 2');
+            this.win = 2;
+            this.cap = 'The window is a live view of the agent on devbox';
+          },
+        ],
+        [
+          900,
+          () => this.tool('Read', 'src/middleware/mod.rs', 'Read 84 lines'),
+        ],
+        [
+          1400,
+          () =>
+            this.tool(
+              'Update',
+              'src/middleware/rate_limit.rs',
+              'Added 46 lines',
+            ),
+        ],
+        [1500, () => this.tool('Bash', 'cargo test', 'Running…', false)],
+        [
+          1600,
+          () => {
+            this.mark(2);
+            this.beat('sleep');
+            this.asleep = true;
+            this.cap = '';
+          },
+        ],
+        [
+          0,
+          () => {
+            // Minutes pass with the screen off; the agent keeps going.
+            for (let m = 1; m <= 34; m++)
+              this.later(m * 70, () => (this.sleepMins = m));
+            return 34 * 70 + 600;
+          },
+        ],
+        [
+          0,
+          () => {
+            this.mark(3);
+            this.beat('wake');
+            this.skip = 34;
+            this.asleep = false;
+            this.relay = ' devbox: connecting… ';
+            this.cap = 'Back from sleep, the window reconnects by itself';
+          },
+        ],
+        [
+          900,
+          () => {
+            this.beat('done');
+            this.relay = '';
+            const last = this.tools[this.tools.length - 1];
+            last.done = true;
+            last.out = 'test result: ok. 128 passed; 0 failed';
+            this.working = false;
+            this.answer = ANSWER;
+            this.worked = 'Worked for 34m 12s';
+            this.remoteIcon = '✅';
+            this.cap = 'It kept working on devbox while you were away';
+          },
+        ],
+        [
+          2600,
+          () => {
+            this.mark(4);
+            this.key('C-b 1');
+            this.win = 1;
+            this.shell = [];
+            this.cap = 'Merge it home like any other worktree';
+          },
+        ],
+        [500, () => this.type(MERGE)],
+        [
+          0,
+          () => {
+            this.key('⏎');
+            this.beat('merge');
+            this.enter(MERGE);
+            out([['Bringing the work to the local machine…', 'd']]);
+          },
+        ],
+        [
+          1000,
+          () =>
+            out([
+              [
+                'Preparing a local copy for the merge (files, post_create)…',
+                'd',
+              ],
+            ]),
+        ],
+        [900, () => out([['Running pre_merge hooks locally…', 'd']])],
+        [
+          1500,
+          () => {
+            out([
+              ['✓ ', 'ok'],
+              ["Merged 'rate-limit'", 't'],
+            ]);
+            out([
+              ['✓ ', 'ok'],
+              [
+                "Successfully merged 'rate-limit' and removed its remote workspace from 'devbox'",
+                't',
+              ],
+            ]);
+            this.beat('merged');
+            this.hasRemote = false;
+            this.cap = 'On main, with the server cleaned up';
+            this.poster = true;
+          },
+        ],
+        [5000, () => this.reset()],
+      ]);
+    }
+
+    beat(name: string) {
+      this.beats[name] = this.t - this.loopT0;
+    }
+
+    type(text: string): number {
+      let at = 0;
+      for (let i = 1; i <= text.length; i++) {
+        at += 14 + this.rand() * 26;
+        this.later(at, () => (this.input = text.slice(0, i)));
+      }
+      return at + 300;
+    }
+
+    enter(cmd: string) {
+      this.shell.push(this.promptLine(cmd, false));
+      this.input = '';
+    }
+
+    tool(name: string, arg: string, out: string, done = true) {
+      const t: Tool = { name, arg, out: 'Running…', done: false };
+      this.tools.push(t);
+      if (done)
+        this.later(600, () => {
+          t.done = true;
+          t.out = out;
+        });
+    }
+
+    promptLine(text: string, cursor: boolean): Line {
+      const l: Line = [
+        ['~/code/api', 'dir'],
+        [' main', 'br'],
+        [' ❯ ', 'ac'],
+        [text, 't'],
+      ];
+      if (cursor) l.push([' ', 'Bcur']);
+      return l;
+    }
+
+    // Long lines wrap as a terminal would.
+    wrap(line: Line): Line[] {
+      const rows: Line[] = [[]];
+      let used = 0;
+      for (const seg of line) {
+        if (!Array.isArray(seg)) {
+          rows[rows.length - 1].push(seg);
+          used += seg.w ?? 1;
+          continue;
+        }
+        let [text, cls] = seg;
+        while (text) {
+          if (used >= this.w) {
+            rows.push([]);
+            used = 0;
+          }
+          const part = text.slice(0, this.w - used);
+          rows[rows.length - 1].push([part, cls]);
+          used += part.length;
+          text = text.slice(part.length);
+        }
+      }
+      return rows;
+    }
+
+    shellLines(): Line[] {
+      return [...this.shell, this.promptLine(this.input, true)].flatMap((l) =>
+        this.wrap(l),
+      );
+    }
+
+    spinner(): Line {
+      const frame = Math.floor(this.t / 100);
+      const verb = 'Working';
+      const hot = (frame % (verb.length + 12)) - 3;
+      const secs = Math.floor((this.t - this.workStart) / 1000);
+      return [
+        [SPIN[frame % SPIN.length], 'sg'],
+        sp(1),
+        ...[...verb].map((ch, i): Seg => [
+          ch,
+          Math.abs(i - hot) <= 1 ? 'sv2' : 'sv',
+        ]),
+        ['…', 'sv'],
+        [` (${secs}s · esc to interrupt)`, 'd'],
+      ];
+    }
+
+    agentLines(): Line[] {
+      const lines: Line[] = [[]];
+      lines.push([['> ' + PROMPT.padEnd(this.w - 2), 'up Bup']], []);
+      const blink = Math.floor(this.t / 500) % 2 === 0;
+      for (const t of this.tools) {
+        const bullet: Seg = t.done
+          ? ['●', 'ok']
+          : blink
+            ? ['●', 'd']
+            : [' ', ''];
+        lines.push(
+          [bullet, sp(1), [t.name, 'b w'], [`(${t.arg})`, 't']],
+          [
+            ['  ⎿  ', 'd'],
+            [t.out, t.done ? 't' : 'd'],
+          ],
+          [],
+        );
+      }
+      if (this.answer) {
+        wrapPlain(this.answer, this.w - 2).forEach((l, i) =>
+          lines.push([
+            [i ? '  ' : '● ', 'w'],
+            [l, 't'],
+          ]),
+        );
+        lines.push([]);
+      }
+      if (this.worked) lines.push([['✻ ' + this.worked, 'd']], []);
+      if (this.working) lines.push(this.spinner(), []);
+      const rule: Line = [sp(this.w, 'hl lr')];
+      lines.push(
+        rule,
+        [
+          ['❯ ', 'd'],
+          [' ', 'Bcur'],
+        ],
+        rule,
+      );
+      return lines;
+    }
+
+    statusBar(): Line {
+      const mins = 2 + this.skip;
+      const clock = `14:${String(mins).padStart(2, '0')}`;
+      const tab = (n: number, name: string, icon: string, active: boolean) => {
+        const c = active ? 'wa Bwa' : 'stw';
+        const l: Line = [
+          [`${n}:`, c],
+          { svg: 'branch', cls: c },
+          [` ${name}`, c],
+        ];
+        if (icon) l.push([' ', c], [icon, active ? 'Bwa' : '']);
+        if (active) l.push(['*', c]);
+        return l;
+      };
+      const left: Line = [
+        ['api', 'stl'],
+        sp(1),
+        ...tab(1, 'main', '', this.win === 1),
+      ];
+      if (this.hasRemote)
+        left.push(
+          sp(1),
+          ...tab(2, 'rate-limit@devbox', this.remoteIcon, this.win === 2),
+        );
+      return spread(left, [[clock, 'clk']], this.cols);
+    }
+
+    frame(): string[] {
+      const body = this.win === 1 ? this.shellLines() : this.agentLines();
+      const rows = ROWS - 1 - (this.relay ? 1 : 0);
+      const view = body.slice(-rows);
+      const out: string[] = [];
+      for (let r = 0; r < rows; r++)
+        out.push(html(fit([sp(1), ...(view[r] ?? [])], this.cols), SVG));
+      if (this.relay)
+        out.push(
+          html(
+            fit(
+              [
+                [this.relay, 'ln Bline'],
+                sp(this.cols - this.relay.length, 'Bline'),
+              ],
+              this.cols,
+            ),
+            SVG,
+          ),
+        );
+      out.push(html(fit(this.statusBar(), this.cols), SVG));
+      return out;
+    }
+
+    paint() {
+      const turned = this.shownSleep !== this.asleep;
+      if (turned && this.sleepEl) {
+        this.sleepEl.toggleAttribute('data-on', this.asleep);
+        this.shownSleep = this.asleep;
+      }
+      const small = this.sleepEl?.querySelector('small');
+      const label = `${this.sleepMins} min · the agent is still working on devbox`;
+      if (small && small.textContent !== label) small.textContent = label;
+      // The screen is off: nothing on it changes while asleep, after one
+      // paint for the moment it went off, which a seek may have skipped.
+      if (!this.asleep || turned) super.paint();
+      else this.drawBar();
+      // The timeline beside the session follows it through this.
+      this.dispatchEvent(
+        new CustomEvent('rs-time', {
+          bubbles: true,
+          detail: this.t - this.loopT0,
+        }),
+      );
+      if (this.capEl && this.cap !== this.shownCap) {
+        this.shownCap = this.cap;
+        this.capEl.textContent = this.cap;
+        this.capEl.removeAttribute('data-in');
+        void this.capEl.offsetWidth;
+        this.capEl.setAttribute('data-in', '');
+      }
+    }
+  }
+
+  if (!customElements.get('remote-session'))
+    customElements.define('remote-session', RemoteSession);
+</script>
+
+<script>
+  type Beats = Record<string, number>;
+  type Item = {
+    kind: 'seg' | 'mark' | 'hop';
+    lane: number;
+    start: number;
+    end?: number;
+    label: string;
+    tone?: string;
+    back?: boolean;
+    el?: HTMLElement;
+  };
+  type Session = HTMLElement & {
+    beats: Beats;
+    seek(ms: number): void;
+  };
+
+  // The sleep passes in seconds but stands for 34 minutes, so the timeline
+  // gives it more room than its share of the loop.
+  const SLEEP_WEIGHT = 2.4;
+  const LANES = ['12%', '50%', '88%'];
+
+  class LiveRemote extends HTMLElement {
+    els: Record<string, HTMLElement> = {};
+    session?: Session;
+    items: Item[] = [];
+    b?: Beats;
+    from = 0;
+    span = 0;
+    onTime = (e: Event) => {
+      this.session = e.target as Session;
+      this.update((e as CustomEvent<number>).detail);
+    };
+    onClick = (e: MouseEvent) => {
+      if (!this.session || !this.b) return;
+      const r = this.els.track.getBoundingClientRect();
+      const f = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      this.session.seek(Math.max(0, this.unpos(f)));
+    };
+
+    connectedCallback() {
+      for (const el of this.querySelectorAll<HTMLElement>('[data-k]'))
+        this.els[el.dataset.k!] = el;
+      this.addEventListener('rs-time', this.onTime);
+      this.els.track.addEventListener('click', this.onClick);
+    }
+
+    disconnectedCallback() {
+      this.removeEventListener('rs-time', this.onTime);
+      this.els.track.removeEventListener('click', this.onClick);
+    }
+
+    // Loop time to a fraction of the timeline, and back.
+    weighted(ms: number) {
+      const b = this.b!;
+      const pre = Math.min(ms, b.sleep);
+      const mid = Math.max(0, Math.min(ms, b.wake) - b.sleep);
+      const post = Math.max(0, ms - b.wake);
+      return pre + mid * SLEEP_WEIGHT + post;
+    }
+    pos(ms: number) {
+      const w0 = this.weighted(this.from);
+      return Math.max(
+        0,
+        (this.weighted(ms) - w0) / (this.weighted(this.span) - w0),
+      );
+    }
+    unpos(f: number) {
+      const b = this.b!;
+      const w0 = this.weighted(this.from);
+      const w = w0 + f * (this.weighted(this.span) - w0);
+      if (w <= b.sleep) return w;
+      const sleepW = (b.wake - b.sleep) * SLEEP_WEIGHT;
+      if (w <= b.sleep + sleepW) return b.sleep + (w - b.sleep) / SLEEP_WEIGHT;
+      return b.wake + (w - b.sleep - sleepW);
+    }
+    pct(ms: number) {
+      return `${(this.pos(ms) * 100).toFixed(3)}%`;
+    }
+
+    build(b: Beats) {
+      this.b = b;
+      // Typing the first command is the session's to show.
+      this.from = b.add - 500;
+      this.span = b.merged + 1200;
+      // The agent finishes late in the sleep: the session says it worked
+      // for 34 minutes.
+      const done = b.sleep + (b.wake - b.sleep) * 0.82;
+      this.items = [
+        {
+          kind: 'seg',
+          lane: 0,
+          start: b.started,
+          end: b.sleep,
+          label: 'window 2',
+        },
+        {
+          kind: 'seg',
+          lane: 0,
+          start: b.done,
+          end: b.merge,
+          label: 'done',
+          tone: 'quiet',
+        },
+        {
+          kind: 'seg',
+          lane: 1,
+          start: b.started,
+          end: b.sleep,
+          label: '',
+          tone: 'wire',
+        },
+        {
+          kind: 'seg',
+          lane: 1,
+          start: b.sleep,
+          end: b.done,
+          label: '',
+          tone: 'down',
+        },
+        {
+          kind: 'seg',
+          lane: 1,
+          start: b.done,
+          end: b.merged,
+          label: '',
+          tone: 'wire',
+        },
+        {
+          kind: 'seg',
+          lane: 2,
+          start: b.add + 200,
+          end: b.started,
+          label: '',
+          tone: 'quiet',
+        },
+        {
+          kind: 'seg',
+          lane: 2,
+          start: b.started,
+          end: done,
+          label: 'working',
+          tone: 'working',
+        },
+        {
+          kind: 'seg',
+          lane: 2,
+          start: done,
+          end: b.merged,
+          label: '',
+          tone: 'ok',
+        },
+        { kind: 'mark', lane: 0, start: b.add, label: 'add' },
+        { kind: 'mark', lane: 0, start: b.wake, label: 'wake' },
+        { kind: 'mark', lane: 0, start: b.merge, label: 'merge' },
+        {
+          kind: 'mark',
+          lane: 0,
+          start: b.merged,
+          label: 'a91c04e',
+          tone: 'ok',
+        },
+        {
+          kind: 'mark',
+          lane: 2,
+          start: done,
+          label: '✓ tests pass',
+          tone: 'ok',
+        },
+        { kind: 'mark', lane: 2, start: b.merged, label: 'removed' },
+        { kind: 'hop', lane: 1, start: b.add + 250, label: '3f9c2a1 →' },
+        {
+          kind: 'hop',
+          lane: 1,
+          start: b.merge + 400,
+          label: '← branch',
+          back: true,
+        },
+      ];
+      const box = this.els.items;
+      box.replaceChildren();
+      for (const it of this.items) {
+        const el = document.createElement('div');
+        el.className = `tl-${it.kind}`;
+        el.dataset.lane = String(it.lane);
+        if (it.tone) el.dataset.tone = it.tone;
+        if (it.back) el.dataset.back = '';
+        el.style.setProperty('--a', this.pct(it.start));
+        if (it.kind !== 'hop') el.style.left = LANES[it.lane];
+        if (it.kind === 'seg') {
+          if (it.label) {
+            const s = document.createElement('span');
+            s.textContent = it.label;
+            el.append(s);
+          }
+        } else {
+          el.innerHTML =
+            it.kind === 'mark' ? '<i></i><span></span>' : '<span></span>';
+          el.querySelector('span')!.textContent = it.label;
+        }
+        el.hidden = true;
+        box.append(el);
+        it.el = el;
+      }
+      for (const g of this.querySelectorAll<HTMLElement>('.tl-guide'))
+        g.style.left = LANES[Number(g.dataset.lane)];
+      this.els.sleep.style.setProperty('--a', this.pct(b.sleep));
+    }
+
+    update(at: number) {
+      if (!this.b) {
+        const b = this.session!.beats;
+        if (b.merged === undefined) return;
+        this.build(b);
+      }
+      const t = Math.min(at, this.span);
+      for (const it of this.items) {
+        const el = it.el!;
+        const on = t >= it.start;
+        if (el.hidden === on) el.hidden = !on;
+        if (on && it.kind === 'seg') {
+          const l = this.pos(Math.min(t, it.end!)) - this.pos(it.start);
+          el.style.setProperty('--l', `${(l * 100).toFixed(3)}%`);
+        }
+      }
+      const b = this.b!;
+      const sleep = this.els.sleep;
+      sleep.toggleAttribute('data-on', t >= b.sleep);
+      const slept = this.pos(Math.min(t, b.wake)) - this.pos(b.sleep);
+      sleep.style.setProperty(
+        '--l',
+        `${(Math.max(0, slept) * 100).toFixed(3)}%`,
+      );
+      this.els.head.style.setProperty('--a', this.pct(t));
+    }
+  }
+
+  if (!customElements.get('live-remote'))
+    customElements.define('live-remote', LiveRemote);
+</script>

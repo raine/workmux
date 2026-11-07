@@ -236,6 +236,16 @@ pub struct DiffView {
     pub comment_input: Option<String>,
     /// List of files in the diff for the sidebar
     pub file_list: Vec<FileEntry>,
+    /// The remote workspace whose node produced the diff, which nothing
+    /// local can stage.
+    pub remote: Option<RemoteDiff>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteDiff {
+    pub at: crate::multiplexer::RemoteRef,
+    /// The title without a note on the diff's age.
+    pub title: String,
 }
 
 impl DiffView {
@@ -660,6 +670,13 @@ pub fn get_diff_content(
     include_untracked: bool,
     parse_hunks: bool,
 ) -> Result<(String, usize, usize, Vec<DiffHunk>), String> {
+    let diff_content = raw_diff(path, diff_arg, include_untracked)?;
+    render_diff(diff_content, parse_hunks)
+}
+
+/// Uncolored `git diff <diff_arg>` of `path`, with untracked files as new
+/// files when `include_untracked`.
+pub fn raw_diff(path: &Path, diff_arg: &str, include_untracked: bool) -> Result<Vec<u8>, String> {
     // Run git diff without color - delta will add syntax highlighting
     let mut cmd =
         crate::git::pinned_git(path).map_err(|e| format!("Cannot validate Git metadata: {e}"))?;
@@ -683,7 +700,15 @@ pub fn get_diff_content(
             diff_content.extend_from_slice(untracked_diff.as_bytes());
         }
     }
+    Ok(diff_content)
+}
 
+/// Colored display text of a raw diff, with its line counts and, when
+/// `parse_hunks`, its hunks.
+pub fn render_diff(
+    diff_content: Vec<u8>,
+    parse_hunks: bool,
+) -> Result<(String, usize, usize, Vec<DiffHunk>), String> {
     // Count stats before any transformation
     let (lines_added, lines_removed) = count_diff_stats(&diff_content);
 

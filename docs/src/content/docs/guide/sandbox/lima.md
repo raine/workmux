@@ -62,7 +62,7 @@ sandbox:
 | `backend`                                    | `container`        | Set to `lima` for VM sandboxing                                                                                             |
 | `lima.isolation`                             | `project`          | `project` (one VM per repo) or `shared` (single global VM)                                                                  |
 | `lima.projects_dir`                          | -                  | Required for `shared` isolation: parent directory of all projects                                                           |
-| `image`                                      | Debian 12          | Custom qcow2 image URL or `file://` path. **Global config only.**                                                           |
+| `image`                                      | Debian 13          | Custom qcow2 image URL or `file://` path. **Global config only.**                                                           |
 | `lima.skip_default_provision`                | `false`            | Skip built-in provisioning (system deps + tool install)                                                                     |
 | `lima.accept_reduced_git_metadata_isolation` | `false`            | Accept Lima's reduced Git metadata guarantee without an interactive prompt                                                  |
 | `lima.cpus`                                  | `4`                | Number of CPUs for Lima VMs                                                                                                 |
@@ -138,11 +138,13 @@ The agent CLI installed depends on your `agent` configuration:
 | Agent              | What gets installed                        |
 | ------------------ | ------------------------------------------ |
 | `claude` (default) | Claude Code CLI via `claude.ai/install.sh` |
-| `codex`            | Codex CLI binary from GitHub releases      |
+| `codex`            | Codex package from GitHub releases         |
 | `gemini`           | Node.js + Gemini CLI via npm               |
 | `opencode`         | OpenCode binary via `opencode.ai/install`  |
 | `pi`               | Pi CLI via npm                             |
 | `omp`              | Oh My Pi CLI via Bun + Python              |
+
+Codex needs the whole Codex package, which VMs created by older workmux versions don't have. Codex also needs to be 0.156 or newer (see [Agent flags](/guide/sandbox/features/#agent-flags)). Recreate such a VM with `workmux sandbox prune`.
 
 Changing the `agent` setting after VM creation has no effect on existing VMs. Recreate the VM with `workmux sandbox prune` to provision with a different agent.
 
@@ -196,7 +198,7 @@ sandbox:
     skip_default_provision: true
 ```
 
-When `image` is set, it replaces the default Debian 12 genericcloud image. The value can be a `file://` path to a local qcow2 image or an HTTP(S) URL.
+When `image` is set, it replaces the default Debian 13 genericcloud image. The value can be a `file://` path to a local qcow2 image or an HTTP(S) URL.
 
 When `skip_default_provision` is true, the built-in provisioning steps are skipped:
 

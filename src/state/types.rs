@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub(crate) const FILENAME_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b'/').add(b'\\').add(b':').add(b'%');
 
-use crate::multiplexer::types::{AgentPane, AgentStatus};
+use crate::multiplexer::types::{AgentPane, AgentStatus, RemoteAgent, RemoteRef};
 
 /// Composite pane identifier for unique state file naming.
 ///
@@ -144,6 +144,12 @@ pub struct AgentState {
     /// configuration displays prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+
+    /// Set when the pane relays a remote workspace pane: `workdir` is then
+    /// the workspace's display path, and status, title and kind come from
+    /// the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteRef>,
 }
 
 impl AgentState {
@@ -175,6 +181,7 @@ impl AgentState {
             agent_command: Some(self.command.clone()),
             agent_kind: self.agent_kind.clone(),
             prompt: self.prompt.clone(),
+            remote: self.remote.clone().map(RemoteAgent::new),
         }
     }
 }

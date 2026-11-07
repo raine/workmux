@@ -418,6 +418,11 @@ fn handle_key_press(
         (KeyCode::Char('G'), _) => app.select_last(),
         (KeyCode::Char('g'), _) => app.select_first(),
         (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
+        (KeyCode::Char('V'), _) => {
+            if let Err(error) = super::view::set_enabled(None) {
+                tracing::warn!(%error, "failed to toggle sidebar views");
+            }
+        }
         (KeyCode::Char('z'), _) => app.toggle_sleeping(),
         (KeyCode::Char('f'), _) => app.toggle_filter_mode(),
         (KeyCode::Char('t'), _) => app.toggle_grouping(),

@@ -1,6 +1,6 @@
 [package]
 name = "workmux"
-version = "0.1.276"
+version = "0.1.280"
 edition = "2024"
 authors = ["workmux contributors"]
 description = "An opinionated workflow tool that orchestrates git worktrees and tmux"
@@ -65,14 +65,19 @@ similar = "3"
 terminal-light = "1.8"
 unicode-width = "0.2"
 signal-hook = "0.4"
-notify = "9.0.0-rc.3"
+notify = "=9.0.0-rc.3"
 ignore = "0.4"
+flate2 = "1.1.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1", features = ["fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"
+bitflags = "2.7"
+log = "0.4"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDate", "CFString", "CFArray", "CFRunLoop", "CFError", "CFURL"] }
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents"] }
 
 [dev-dependencies]
 filetime = "0.2.27"
@@ -105,3 +110,8 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-amd64.{ archi
 
 [package.metadata.binstall.overrides.aarch64-apple-darwin]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-darwin-arm64.{ archive-format }"
+
+# Dev pins hash the configured binary (a debug build is ~70 MB) on every
+# remote command; unoptimized SHA-256 takes seconds for that.
+[profile.dev.package.sha2]
+opt-level = 3

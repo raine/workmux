@@ -15,6 +15,8 @@ workmux open [name...] [flags]
 
 ## Options
 
+Use `-b` or `--background` to open without switching away from your current window or session. This also applies to existing targets, multiple worktrees, and remote workspaces.
+
 | Flag                       | Description                                                                                                                                                                                                                                                                                                              |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `-n, --new`                | Force opening in a new window even if one already exists. Creates a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having multiple terminal views into the same worktree. In tmux, the duplicate appears immediately to the right of the window where the command runs. Cannot be used with session mode. |
@@ -34,11 +36,11 @@ workmux open [name...] [flags]
 ## What happens
 
 1. Verifies that a worktree with `<name>` exists.
-2. If the target exists and `--new` is not set, switches to it.
+2. If the target exists and `--new` is not set, switches to it unless `--background` is set.
 3. Otherwise, creates a new tmux window or session. In tmux, duplicate windows appear immediately to the right of the window identified by `$TMUX_PANE`. `--target-name` can override the managed target, and `--parent-session` can choose the parent session for a window-mode target.
 4. (If specified) Runs file operations and `post_create` hooks.
 5. Sets up your configured tmux pane layout.
-6. Automatically switches your tmux client to the new window.
+6. Switches your tmux client to the new window unless `--background` is set.
 
 In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
 calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
@@ -47,11 +49,22 @@ one session. A tmux server with one session is the final fallback. Remaining
 ambiguity requires `--parent-session <name>`. The working directory selects the
 Git repository and only provides conservative evidence for tmux placement.
 
+## Remote workspaces
+
+For a workspace on a [remote server](/guide/remote/), `open` reopens the local window and reattaches it to the remote session. The agent was never stopped by `close`, so nothing restarts. If the remote session has ended, `open` starts the workspace's panes again. After a remote host reboot, agents resume their most recent conversation, and `open` says whether the agent continued its conversation or started a new one.
+
+A remote workspace created with `add --parent-session` reopens in its recorded parent session, creating the session again if needed.
+
+Prompts, `--continue`, `--new`, `--run-hooks`, `--force-files`, `--target-name`, `--parent-session` and session mode aren't available for remote workspaces. With `mode: session` in the config, pass `--mode window` to open a remote workspace.
+
 ## Examples
 
 ```bash
 # Open or switch to a window for an existing worktree
 workmux open user-auth
+
+# Open without switching away from the current window
+workmux open user-auth --background
 
 # Force open a second window for the same worktree (creates user-auth-2)
 workmux open user-auth --new

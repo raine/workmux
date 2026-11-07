@@ -1,5 +1,6 @@
-use crate::command::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
+use crate::command::args::{MultiArgs, PlacementArgs, PromptArgs, RescueArgs, SetupFlags};
 use crate::config::{MuxMode, SidebarHeight, SidebarPosition, SidebarWidth};
+use crate::multiplexer::AgentStatus;
 use crate::workflow::pr::{Forge, PrReference};
 use crate::{claude, command, config, git, nerdfont};
 use anyhow::{Context, Result};
@@ -213,6 +214,7 @@ Setup and configuration:
   setup        Set up agent status tracking hooks and install skills
   config       Manage global configuration
   sandbox      Manage sandbox settings
+  remote       Manage SSH remotes that run agents
   sync-files   Re-apply file operations (copy/symlink) to worktrees
   claude       Claude Code integration commands
 
@@ -258,6 +260,12 @@ impl From<CliMuxMode> for MuxMode {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "_remote-operation", hide = true)]
+    RemoteOperation {
+        remote: String,
+        ws_id: String,
+        id: String,
+    },
     #[command(name = "_deferred-cleanup", hide = true)]
     DeferredCleanup {
         #[arg(long, allow_hyphen_values = true)]
@@ -339,6 +347,9 @@ enum Commands {
         #[command(flatten)]
         multi: MultiArgs,
 
+        #[command(flatten)]
+        placement: PlacementArgs,
+
         /// Use a named pane layout from config instead of default panes
         #[arg(short = 'l', long, conflicts_with = "agent")]
         layout: Option<String>,
@@ -383,6 +394,10 @@ enum Commands {
 
     /// Open a tmux window for an existing worktree
     Open {
+        /// Open without switching to the window or session
+        #[arg(short = 'b', long)]
+        background: bool,
+
         /// Worktree name(s) (directory name, visible in tmux window). Optional with --new.
         #[arg(value_parser = WorktreeHandleParser::new(), required_unless_present = "new")]
         names: Vec<String>,
@@ -557,8 +572,16 @@ enum Commands {
     },
 
     /// Send a prompt or instruction to a running agent
+    ///
+    /// Nothing is sent to an agent waiting on a dialog, which the input
+    /// would answer, or to a worktree with several agents; target one of
+    /// those by pane ID. Failures print a stable error name and exit with
+    /// its code: agent_waiting (3), ambiguous_target (4), agent_not_found
+    /// (5), send_stalled (6), agent_gone (7), agent_status_unknown (8),
+    /// timeout (124).
     Send {
-        /// Worktree name (supports cross-project with project:handle syntax)
+        /// Worktree name (supports cross-project with project:handle
+        /// syntax), or an agent's pane ID
         #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
@@ -569,11 +592,47 @@ enum Commands {
         /// Read prompt from file
         #[arg(short, long, conflicts_with = "text")]
         file: Option<String>,
+
+        /// Confirm the agent acted on the prompt, then wait for an --until
+        /// status. An agent that was not working must show activity within
+        /// 5 seconds (send_stalled)
+        #[arg(long)]
+        wait: bool,
+
+        /// Statuses that end --wait, comma-separated [default: done,waiting]
+        #[arg(
+            long,
+            requires = "wait",
+            value_delimiter = ',',
+            value_parser = ["working", "waiting", "done"]
+        )]
+        until: Vec<String>,
+
+        /// Give up --wait after this many seconds (exit 124)
+        #[arg(long, requires = "wait")]
+        timeout: Option<u64>,
+    },
+
+    /// Open a shell in a remote workspace, in this terminal
+    ///
+    /// The shell starts in the workspace's working directory on its server,
+    /// in a new container when the agent runs in one. Exiting the shell
+    /// leaves the agent and its workspace running.
+    Shell {
+        /// Remote workspace handle or branch (supports project:handle);
+        /// defaults to the remote workspace of the current window
+        #[arg(value_parser = AgentTargetParser::new())]
+        name: Option<String>,
+
+        /// Run on the server itself even when the agent runs in a container
+        #[arg(long)]
+        host: bool,
     },
 
     /// Capture terminal output from a running agent
     Capture {
-        /// Worktree name (supports cross-project with project:handle syntax)
+        /// Worktree name (supports cross-project with project:handle
+        /// syntax), or an agent's pane ID
         #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
@@ -769,6 +828,13 @@ enum Commands {
     /// Manage sandbox settings
     Sandbox(command::sandbox::SandboxArgs),
 
+    /// Manage SSH remotes that run agents
+    Remote(command::remote::RemoteArgs),
+
+    /// Remote node entry point (runs on the remote, JSON in and out)
+    #[command(hide = true)]
+    Node(command::node::NodeArgs),
+
     /// Set agent status for the current tmux window (used by hooks)
     #[command(hide = true)]
     SetWindowStatus {
@@ -883,6 +949,12 @@ pub enum SidebarAction {
         #[arg(value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         index: u64,
     },
+    /// Toggle rule-based views for all sidebars, or explicitly turn them on/off.
+    View {
+        /// on: each window uses its matching view; off: show all agents
+        #[arg(value_name = "MODE", value_parser = ["on", "off"])]
+        mode: Option<String>,
+    },
     /// Set sidebar filter mode. Toggles if no mode given.
     Filter {
         /// Filter mode: "none"/"all" or "session"/"project"
@@ -940,6 +1012,19 @@ fn should_check_update(cmd: &Commands) -> bool {
     !is_headless_add(cmd) && matches!(cmd, Commands::Add { .. })
 }
 
+/// Check if the command may end with the one-time remote servers notice.
+/// JSON output and headless runs (`add --json` requires `--headless`) are
+/// read by scripts and agents, so they never do.
+fn should_announce_remotes(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Add {
+            headless: false,
+            ..
+        } | Commands::List { json: false, .. }
+    )
+}
+
 // --- Public Entry Point ---
 pub fn run() -> Result<()> {
     let cli = match Cli::try_parse() {
@@ -970,6 +1055,13 @@ pub fn run() -> Result<()> {
             }
             e.exit()
         }
+    };
+
+    // Node verbs speak JSON to another workmux; they must not load config,
+    // prompt, or check for updates.
+    let cli = match cli.command {
+        Commands::Node(args) => return command::node::run(args),
+        command => Cli { command },
     };
 
     // Extract config override early so the side-effect loads (nerdfont, update
@@ -1016,7 +1108,10 @@ pub fn run() -> Result<()> {
         command::update::check_and_notify(&cfg);
     }
 
-    match cli.command {
+    let announce_remotes = config_ok && should_announce_remotes(&cli.command);
+    let remotes_configured = !cfg.remotes.is_empty();
+
+    let result = match cli.command {
         Commands::DeferredCleanup {
             worktree_path,
             branch_name,
@@ -1077,6 +1172,7 @@ pub fn run() -> Result<()> {
             setup,
             rescue,
             multi,
+            placement,
             layout,
             continue_session,
             fork,
@@ -1088,6 +1184,7 @@ pub fn run() -> Result<()> {
             json,
             config,
         } => {
+            let remote = command::add::check_placement(&cfg, &placement)?;
             let mode_override = mode
                 .map(MuxMode::from)
                 .or(session.then_some(MuxMode::Session));
@@ -1113,9 +1210,11 @@ pub fn run() -> Result<()> {
                 headless,
                 json,
                 config.as_deref(),
+                remote,
             )
         }
         Commands::Open {
+            background,
             names,
             run_hooks,
             force_files,
@@ -1133,6 +1232,7 @@ pub fn run() -> Result<()> {
                 .or(session.then_some(MuxMode::Session));
             command::open::run(
                 &names,
+                background,
                 run_hooks,
                 force_files,
                 new,
@@ -1143,6 +1243,9 @@ pub fn run() -> Result<()> {
                 prompt,
                 config.as_deref(),
             )
+        }
+        Commands::RemoteOperation { remote, ws_id, id } => {
+            crate::remote::operation::run(&remote, &ws_id, &id)
         }
         Commands::Close { name } => command::close::run(name.as_deref()),
         Commands::Resurrect { dry_run } => command::resurrect::run(dry_run),
@@ -1177,17 +1280,46 @@ pub fn run() -> Result<()> {
             force,
             keep_branch,
         } => command::remove::run(names, gone, all, force, keep_branch),
-        Commands::Rename { names, branch } => command::rename::run(names, branch),
+        Commands::Rename { names, branch } => {
+            reject_remote("rename", names.iter())?;
+            command::rename::run(names, branch)
+        }
         Commands::List {
             pr,
             json,
             all,
             filter,
         } => command::list::run(pr, json, all, &filter),
-        Commands::Path { name } => command::path::run(&name),
-        Commands::Send { name, text, file } => {
-            command::send::run(&name, text.as_deref(), file.as_deref())
+        Commands::Path { name } => {
+            reject_remote("path", [&name])?;
+            command::path::run(&name)
         }
+        Commands::Send {
+            name,
+            text,
+            file,
+            wait,
+            until,
+            timeout,
+        } => {
+            let wait = if wait {
+                Some(command::send::WaitFor {
+                    until: if until.is_empty() {
+                        vec![AgentStatus::Done, AgentStatus::Waiting]
+                    } else {
+                        until
+                            .iter()
+                            .map(|status| command::wait::parse_status(status))
+                            .collect::<Result<_>>()?
+                    },
+                    timeout: timeout.map(std::time::Duration::from_secs),
+                })
+            } else {
+                None
+            };
+            command::send::run(&name, text.as_deref(), file.as_deref(), wait)
+        }
+        Commands::Shell { name, host } => command::shell::run(name.as_deref(), host),
         Commands::Capture { name, lines } => command::capture::run(&name, lines),
         Commands::Status {
             worktrees,
@@ -1207,7 +1339,10 @@ pub fn run() -> Result<()> {
             background,
             keep,
             timeout,
-        } => command::run::run(&name, command, background, keep, timeout),
+        } => {
+            reject_remote("run", [&name])?;
+            command::run::run(&name, command, background, keep, timeout)
+        }
         Commands::ReapAgents { hours, force } => {
             command::reap_agents::run(hours.saturating_mul(3600), force)
         }
@@ -1259,6 +1394,9 @@ pub fn run() -> Result<()> {
             Some(SidebarAction::Jump { index }) => {
                 command::sidebar::navigate(command::sidebar::NavAction::Jump(index as usize))
             }
+            Some(SidebarAction::View { mode }) => {
+                command::sidebar::view::set_enabled(mode.as_deref())
+            }
             Some(SidebarAction::Filter { mode }) => {
                 command::sidebar::set_filter_mode(mode.as_deref())
             }
@@ -1297,6 +1435,8 @@ pub fn run() -> Result<()> {
             ClaudeCommands::Prune => prune_claude_config(),
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
+        Commands::Remote(args) => command::remote::run(args),
+        Commands::Node(_) => unreachable!("node is dispatched before config load"),
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::RegisterAgent => command::set_window_status::register_agent(),
         Commands::SetBase { base } => command::set_base::run(&base),
@@ -1342,7 +1482,19 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Commands::CheckUpdate => command::update::run_background_check(),
+    };
+
+    if announce_remotes && result.is_ok() {
+        crate::remote::notice::show_once(remotes_configured);
     }
+    result
+}
+
+/// Refuse `command` for names that are remote workspaces.
+fn reject_remote<'a>(command: &str, names: impl IntoIterator<Item = &'a String>) -> Result<()> {
+    names
+        .into_iter()
+        .try_for_each(|name| crate::remote::cache::reject_remote_handle(name, command))
 }
 
 fn prune_claude_config() -> Result<()> {
@@ -1427,6 +1579,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_notice_only_follows_human_facing_commands() {
+        let announces =
+            |args: &[&str]| should_announce_remotes(&Cli::try_parse_from(args).unwrap().command);
+        assert!(announces(&["workmux", "add", "feat"]));
+        assert!(announces(&["workmux", "list"]));
+        assert!(!announces(&[
+            "workmux",
+            "add",
+            "feat",
+            "--headless",
+            "--json"
+        ]));
+        assert!(!announces(&["workmux", "list", "--json"]));
+        assert!(!announces(&["workmux", "status"]));
+        assert!(!announces(&["workmux", "dashboard"]));
+        assert!(!announces(&["workmux", "set-window-status", "working"]));
+        assert!(!announces(&["workmux", "remote"]));
+    }
+
+    #[test]
     fn add_continue_accepts_prompt() {
         for flag in ["--continue", "-c"] {
             let cli = Cli::try_parse_from([
@@ -1450,6 +1622,51 @@ mod tests {
             assert!(continue_session);
             assert_eq!(prompt.prompt_file, Some(PathBuf::from("followup.md")));
         }
+    }
+
+    #[test]
+    fn add_placement_flags_parse() {
+        let parse = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Add {
+                branch_name,
+                placement,
+                ..
+            } = cli.command
+            else {
+                panic!("expected add command");
+            };
+            (branch_name, placement.remote, placement.local)
+        };
+        assert_eq!(
+            parse(&["wm", "add", "feat", "--remote"]),
+            (Some("feat".into()), Some(None), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "--remote", "hetzner", "feat"]),
+            (Some("feat".into()), Some(Some("hetzner".into())), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "--remote=hetzner", "feat"]),
+            (Some("feat".into()), Some(Some("hetzner".into())), false)
+        );
+        assert_eq!(
+            parse(&["wm", "add", "feat", "--local"]),
+            (Some("feat".into()), None, true)
+        );
+        let err = Cli::try_parse_from(["wm", "add", "feat", "--local", "--remote"])
+            .err()
+            .expect("--local and --remote must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn node_and_remote_commands_parse() {
+        assert!(Cli::try_parse_from(["wm", "node", "hello", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "node", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["wm", "remote"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "remote", "setup", "hetzner"]).is_ok());
+        assert!(Cli::try_parse_from(["wm", "remote", "doctor", "hetzner"]).is_ok());
     }
 
     #[test]

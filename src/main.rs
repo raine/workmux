@@ -1,4 +1,5 @@
 mod agent_display;
+mod agent_error;
 mod agent_identity;
 mod agent_setup;
 mod agent_staleness;
@@ -19,6 +20,7 @@ mod multiplexer;
 mod naming;
 mod nerdfont;
 mod prompt;
+mod remote;
 mod sandbox;
 mod shell;
 mod skills;
@@ -61,6 +63,10 @@ fn main() -> Result<()> {
         Err(err) => {
             if !deferred_cleanup_worker {
                 error!(error = ?err, "workmux failed");
+            }
+            if let Some(kind) = agent_error::kind_of(&err) {
+                eprintln!("Error: {}: {err:#}", kind.name());
+                std::process::exit(kind.exit_code());
             }
             Err(err)
         }

@@ -611,10 +611,23 @@ pub(super) fn reflow_after_sidebar_add(
         pos = pos.saturating_add(new_len).saturating_add(1);
     }
 
+    // Record the applied extent before the layout changes, so the sidebar
+    // can tell the resize this causes apart from one made by the user.
+    let content_size = content_size.to_string();
+    let record_size = [
+        "set-option",
+        "-p",
+        "-t",
+        sidebar_pane_id,
+        super::SIDEBAR_APPLIED_SIZE_OPTION,
+        &content_size,
+    ];
+
     // Compare trees rather than strings: tmux may report the layout in a
     // different format from the one serialized here.
     if root == original_root {
         debug!(window_id, "reflow: layout already matches");
+        let _ = Cmd::new("tmux").args(&record_size).run();
         return;
     }
     let new_layout = serialize_layout(&root);
@@ -626,9 +639,9 @@ pub(super) fn reflow_after_sidebar_add(
         "reflow: applying"
     );
 
-    let _ = Cmd::new("tmux")
-        .args(&["select-layout", "-t", window_id, &new_layout])
-        .run();
+    let mut args = record_size.to_vec();
+    args.extend_from_slice(&[";", "select-layout", "-t", window_id, &new_layout]);
+    let _ = Cmd::new("tmux").args(&args).run();
 }
 
 // ── Sidebar removal ────────────────────────────────────────────

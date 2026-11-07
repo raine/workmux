@@ -34,6 +34,8 @@ pub enum Action {
     IncreasePreviewSize,
     DecreasePreviewSize,
     LoadWipDiff,
+    OpenRemoteGuide,
+    DismissRemoteTip,
     SendCommitDashboard,
     TriggerMergeDashboard,
     KillSelected,
@@ -99,6 +101,21 @@ pub enum Action {
 /// Apply an action to the app state.
 /// Returns true if preview should be refreshed immediately.
 pub fn apply_action(app: &mut App, action: Action) -> bool {
+    // A remote agent no local pane relays has no pane to type into, kill or
+    // diff; its row opens a window instead.
+    if matches!(
+        action,
+        Action::EnterInputMode
+            | Action::LoadWipDiff
+            | Action::SendCommitDashboard
+            | Action::TriggerMergeDashboard
+            | Action::KillSelected
+    ) && app.active_tab == DashboardTab::Agents
+        && let Some(remote) = app.selected_detached()
+    {
+        app.report_detached(&remote);
+        return false;
+    }
     match action {
         // Global
         Action::ShowHelp => {
@@ -210,6 +227,14 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
         }
         Action::KillSelected => {
             app.kill_selected();
+            false
+        }
+        Action::OpenRemoteGuide => {
+            app.open_remote_guide();
+            false
+        }
+        Action::DismissRemoteTip => {
+            app.dismiss_remote_tip();
             false
         }
 

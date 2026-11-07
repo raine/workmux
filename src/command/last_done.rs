@@ -176,6 +176,7 @@ mod tests {
             agent_kind: None,
             agent_session_id: None,
             prompt: None,
+            remote: None,
         }
     }
 

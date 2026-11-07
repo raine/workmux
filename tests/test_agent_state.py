@@ -12,11 +12,13 @@ through the dashboard TUI, which calls load_reconciled_agents(). These tests
 verify the state files have the fields needed for reconciliation to work.
 """
 
+import fcntl
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -202,10 +204,12 @@ def test_done_status_acknowledges_focused_pane_and_waits_for_background_focus(
 
     try:
         assert poll_until(
-            lambda: env.mux_command(
-                ["display-message", "-p", "-t", window_name, "#{session_attached}"]
-            ).stdout.strip()
-            == "1",
+            lambda: (
+                env.mux_command(
+                    ["display-message", "-p", "-t", window_name, "#{session_attached}"]
+                ).stdout.strip()
+                == "1"
+            ),
             timeout=5.0,
         )
         env.select_window(window_name)
@@ -779,10 +783,346 @@ def test_same_status_update_discards_state_from_prior_tmux_server(
 
 
 @pytest.mark.tmux_only
-def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
-    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+@pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
+def test_persistence_combines_tmux_pane_and_boot_queries(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    command: str,
 ):
-    """A failed server identity query leaves valid pane state intact."""
+    """Persistence obtains live pane and server identity in one tmux query."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-combined-snapshot",
+        status="done",
+    )
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None
+    wrapper_dir = env.tmp_path / "snapshot-query-bin"
+    wrapper_dir.mkdir()
+    calls = env.tmp_path / "snapshot-query-calls"
+    captured = env.tmp_path / "snapshot-query-captured"
+    release = env.tmp_path / "snapshot-query-release"
+    returned = env.tmp_path / "snapshot-query-returned"
+    env.install_script(
+        wrapper_dir / "tmux",
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if any('#{start_time}:#{pid}' in arg for arg in args):\n"
+        "    kind = 'combined' if any('#{pane_pid}' in arg for arg in args) else 'boot_only'\n"
+        f"    with open({str(calls)!r}, 'a') as log:\n"
+        "        log.write(kind + '\\n')\n"
+        f"    result = subprocess.run([{real_tmux!r}, *args], capture_output=True)\n"
+        f"    Path({str(captured)!r}).touch()\n"
+        "    deadline = time.monotonic() + 15\n"
+        f"    while not Path({str(release)!r}).exists():\n"
+        "        if time.monotonic() > deadline: sys.exit(2)\n"
+        "        time.sleep(0.01)\n"
+        "    sys.stdout.buffer.write(result.stdout)\n"
+        "    sys.stdout.buffer.flush()\n"
+        f"    Path({str(returned)!r}).touch()\n"
+        "    sys.exit(result.returncode)\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
+    )
+    initial = read_agent_state(list_agent_state_files(env)[0])
+    target_env = env.env.copy()
+    target_env.update(
+        {
+            "PATH": f"{wrapper_dir}:{env.env['PATH']}",
+            "WORKMUX_STATUS_BACKEND": "tmux",
+            "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+            "WORKMUX_STATUS_PANE_ID": initial["pane_key"]["pane_id"],
+        }
+    )
+    child = subprocess.Popen(
+        [str(workmux_exe_path), *command.split()],
+        cwd=agent.worktree,
+        env=target_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert poll_until(captured.exists, timeout=5)
+        lock_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "agent-state.lock"
+        with lock_path.open("r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release.touch()
+            assert poll_until(returned.exists, timeout=5)
+            # Cross a clock tick with the query returned and the OS lock held.
+            query_second = int(time.time())
+            assert poll_until(lambda: int(time.time()) > query_second, timeout=3)
+            accepted_after = int(time.time())
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        stdout, stderr = child.communicate(timeout=5)
+        assert child.returncode == 0, (stdout, stderr)
+    finally:
+        release.touch()
+        try:
+            child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate(timeout=5)
+    assert calls.read_text().splitlines() == ["combined"]
+    state = read_agent_state(list_agent_state_files(env)[0])
+    boot = env.tmux(["display-message", "-p", "#{start_time}:#{pid}"])
+    assert state["boot_id"] == boot.stdout.strip()
+    assert state["pane_pid"] > 0
+    assert state["status"] == (None if command == "register-agent" else "working")
+    assert state["updated_ts"] >= accepted_after
+    if command == "register-agent":
+        assert state["activity_ts"] >= accepted_after
+    else:
+        assert state["status_ts"] >= accepted_after
+        assert state["activity_ts"] >= accepted_after
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
+def test_persistence_stops_after_repeated_snapshot_conflicts(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    command: str,
+):
+    """Repeated conflicts terminate without applying a rejected snapshot."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-snapshot-conflicts",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    initial = read_agent_state(state_file)
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None
+    writer_env = {
+        **env.env,
+        "WORKMUX_STATUS_BACKEND": "tmux",
+        "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+        "WORKMUX_STATUS_PANE_ID": initial["pane_key"]["pane_id"],
+    }
+    wrapper_dir = env.tmp_path / "snapshot-conflicts-bin"
+    wrapper_dir.mkdir()
+    calls = env.tmp_path / "snapshot-conflicts-calls"
+    latest = env.tmp_path / "snapshot-conflicts-latest.json"
+    env.install_script(
+        wrapper_dir / "tmux",
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if any('#{start_time}:#{pid}' in arg and '#{pane_pid}' in arg for arg in args):\n"
+        f"    calls = Path({str(calls)!r})\n"
+        "    count = int(calls.read_text()) + 1 if calls.exists() else 1\n"
+        "    calls.write_text(str(count))\n"
+        # Fail promptly if the caller exceeds its retry budget.
+        "    if count > 3: sys.exit(2)\n"
+        f"    result = subprocess.run([{real_tmux!r}, *args], capture_output=True)\n"
+        f"    subprocess.run([{str(workmux_exe_path)!r}, 'set-window-status', 'clear'],\n"
+        f"                   env={writer_env!r}, check=True, timeout=5)\n"
+        f"    Path({str(latest)!r}).write_bytes(Path({str(state_file)!r}).read_bytes())\n"
+        "    sys.stdout.buffer.write(result.stdout)\n"
+        "    sys.exit(result.returncode)\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
+    )
+    result = subprocess.run(
+        [str(workmux_exe_path), *command.split()],
+        cwd=agent.worktree,
+        env={**writer_env, "PATH": f"{wrapper_dir}:{env.env['PATH']}"},
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert calls.read_text() == "3"
+    assert state_file.read_bytes() == latest.read_bytes()
+    assert read_agent_state(state_file)["status"] is None
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("command", ["register-agent", "set-window-status working"])
+@pytest.mark.parametrize("new_server", [False, True])
+def test_persistence_retries_snapshot_without_holding_state_lock(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    command: str,
+    new_server: bool,
+):
+    """A blocked observation neither blocks writers nor compacts their newer state."""
+    env = mux_server
+    agent = start_active_agent(
+        env, workmux_exe_path, mux_repo_path, "feature-snapshot-race", status="working"
+    )
+    with (agent.worktree / ".workmux.yaml").open("a") as config:
+        config.write("\ndashboard:\n  agent_columns: [title, prompt]\n")
+    state_file = list_agent_state_files(env)[0]
+    initial = read_agent_state(state_file)
+    pane_id = initial["pane_key"]["pane_id"]
+    other_pane = env.tmux(
+        ["new-session", "-d", "-s", "other-writer", "-P", "-F", "#{pane_id}"]
+    ).stdout.strip()
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None
+    wrapper_dir = env.tmp_path / "snapshot-race-bin"
+    wrapper_dir.mkdir()
+    captured = env.tmp_path / "snapshot-captured"
+    release = env.tmp_path / "snapshot-release"
+    calls = env.tmp_path / "snapshot-calls"
+    newer_boot = "1900000000:4242" if new_server else initial["boot_id"]
+    env.install_script(
+        wrapper_dir / "tmux",
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if any('#{start_time}:#{pid}' in arg and '#{pane_pid}' in arg for arg in args):\n"
+        f"    captured, release = Path({str(captured)!r}), Path({str(release)!r})\n"
+        "    first = os.environ.get('HOLD_SNAPSHOT') == '1' and not captured.exists()\n"
+        "    if os.environ.get('HOLD_SNAPSHOT') == '0':\n"
+        "        args = [arg.replace('#{pane_title}', 'concurrent title') for arg in args]\n"
+        "    if not first:\n"
+        f"        args = [arg.replace('#{{start_time}}:#{{pid}}', {newer_boot!r}) for arg in args]\n"
+        f"    result = subprocess.run([{real_tmux!r}, *args], capture_output=True)\n"
+        f"    with open({str(calls)!r}, 'a') as log:\n"
+        "        log.write(('held' if first else 'fresh') + '\\n')\n"
+        "    if first:\n"
+        "        captured.touch()\n"
+        "        deadline = time.monotonic() + 20\n"
+        "        while not release.exists():\n"
+        "            if time.monotonic() > deadline: sys.exit(2)\n"
+        "            time.sleep(0.01)\n"
+        "    sys.stdout.buffer.write(result.stdout)\n"
+        "    sys.exit(result.returncode)\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
+    )
+    target_env = env.env.copy()
+    target_env.update(
+        {
+            "WORKMUX_STATUS_BACKEND": "tmux",
+            "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+            "WORKMUX_STATUS_PANE_ID": pane_id,
+            "PATH": f"{wrapper_dir}:{env.env['PATH']}",
+            "HOLD_SNAPSHOT": "1",
+        }
+    )
+    child = subprocess.Popen(
+        [str(workmux_exe_path), *command.split()],
+        cwd=agent.worktree,
+        env=target_env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdin is not None
+    child.stdin.write("{}")
+    child.stdin.close()
+    child.stdin = None
+    try:
+        assert poll_until(captured.exists, timeout=5), child.poll()
+        lock_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "agent-state.lock"
+        # A separate process must be able to take the OS lock during the query.
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, sys; "
+                "f = open(sys.argv[1], 'r+'); "
+                "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                str(lock_path),
+            ],
+            check=True,
+            timeout=5,
+        )
+        writer_env = {**target_env, "HOLD_SNAPSHOT": "0"}
+        for target in [other_pane, pane_id]:
+            result = subprocess.run(
+                [
+                    str(workmux_exe_path),
+                    *(
+                        ["register-agent"]
+                        if target == pane_id
+                        else ["set-window-status", "working"]
+                    ),
+                ],
+                cwd=agent.worktree,
+                env={**writer_env, "WORKMUX_STATUS_PANE_ID": target},
+                input=json.dumps(
+                    {
+                        "session_id": "latest-session",
+                        "initialPrompt": "latest prompt",
+                        "prompt": "latest prompt",
+                    }
+                ),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            assert result.returncode == 0, result.stderr
+        latest = read_agent_state(state_file)
+        assert latest["boot_id"] == newer_boot
+        assert latest["prompt"] == "latest prompt"
+        assert latest["agent_session_id"] == "latest-session"
+        assert latest["pane_title"] == "concurrent title"
+        release.touch()
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, (stdout, stderr)
+        # Two intervening writes plus the rejected writer's fresh observation.
+        assert calls.read_text().splitlines() == ["held", "fresh", "fresh", "fresh"]
+        states = [read_agent_state(path) for path in list_agent_state_files(env)]
+        assert {state["pane_key"]["pane_id"] for state in states} == {
+            pane_id,
+            other_pane,
+        }
+        assert all(state["boot_id"] == newer_boot for state in states)
+        updated = read_agent_state(state_file)
+        if command == "register-agent":
+            assert updated["status"] is None
+            assert updated.get("prompt") is None
+            assert updated.get("agent_session_id") is None
+            assert updated["pane_title"] != "concurrent title"
+        else:
+            for field in [
+                "prompt",
+                "agent_session_id",
+                "pane_title",
+            ]:
+                assert updated[field] == latest[field]
+        recovery = lock_path.parent / "agent-recovery"
+        for path in recovery.rglob("*.json"):
+            assert all(
+                entry["state"]["boot_id"] != newer_boot
+                for entry in json.loads(path.read_text())["entries"]
+            )
+    finally:
+        release.touch()
+        try:
+            child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate(timeout=5)
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("boot_response", ["error", "", "unknown", "1700000000:"])
+def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    boot_response: str,
+):
+    """A failed or incomplete snapshot leaves valid pane state intact."""
     env = mux_server
     agent = start_active_agent(
         env,
@@ -805,12 +1145,15 @@ def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
     tmux_wrapper = wrapper_dir / "tmux"
     env.install_script(
         tmux_wrapper,
-        "#!/bin/sh\n"
-        'if [ "$1" = display-message ] && [ "$2" = -p ] '
-        "&& [ \"$3\" = '#{start_time}:#{pid}' ]; then\n"
-        "  exit 1\n"
-        "fi\n"
-        f'exec {shlex.quote(real_tmux)} "$@"\n',
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        f"response = {boot_response!r}\n"
+        "if any('#{start_time}:#{pid}' in arg for arg in args):\n"
+        "    if response == 'error':\n"
+        "        sys.exit(1)\n"
+        "    args = [arg.replace('#{start_time}:#{pid}', response) for arg in args]\n"
+        f"os.execv({real_tmux!r}, [{real_tmux!r}, *args])\n",
     )
 
     marker = env.tmp_path / "boot-id-failure-status-finished"

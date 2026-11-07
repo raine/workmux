@@ -7,6 +7,19 @@ use super::cleanup::{self, get_worktree_mode};
 use super::context::WorkflowContext;
 use super::types::MergeResult;
 
+/// A merge that stopped on conflicts, left for the user to resolve in the
+/// source worktree. Found with `downcast_ref` on the error `merge` returns.
+#[derive(Debug)]
+pub struct MergeConflict(pub String);
+
+impl std::fmt::Display for MergeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MergeConflict {}
+
 /// Merge a branch into the target branch and clean up
 #[allow(clippy::too_many_arguments)]
 pub fn merge(
@@ -253,7 +266,7 @@ pub fn merge(
         } else {
             format!("workmux merge {}", branch)
         };
-        anyhow!(
+        anyhow::Error::new(MergeConflict(format!(
             "Merge failed due to conflicts. Target worktree kept clean.\n\n\
             To resolve, update your branch in worktree at {}:\n\
               git rebase {}  (recommended)\n\
@@ -264,7 +277,7 @@ pub fn merge(
             target_branch,
             target_branch,
             retry_cmd
-        )
+        )))
     };
 
     if rebase {
@@ -277,12 +290,12 @@ pub fn merge(
             "merge:rebase start"
         );
         git::rebase_branch_onto_base(&worktree_path, target_branch).with_context(|| {
-            format!(
+            MergeConflict(format!(
                 "Rebase failed, likely due to conflicts.\n\n\
                 Please resolve them manually inside the worktree at '{}'.\n\
                 Then, run 'git rebase --continue' to proceed or 'git rebase --abort' to cancel.",
                 worktree_path.display()
-            )
+            ))
         })?;
 
         // After a successful rebase, merge into target. This will be a fast-forward.

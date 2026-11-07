@@ -1,0 +1,219 @@
+---
+// The social preview image (public/social-preview.png) as a page, served by
+// the dev server only. The live terminal shows its poster frame when motion
+// is reduced, so capture it with reduced motion at 1280x640 and a device
+// scale of 2, giving a 2560x1280 image, e.g.
+//
+//   agent-browser set viewport 1280 640 2
+//   agent-browser set media dark reduced-motion
+//   agent-browser open <dev server>/dev/social-card/
+//   agent-browser screenshot social-preview.png
+//   sips -s dpiWidth 144 -s dpiHeight 144 social-preview.png
+//
+// The 144 DPI marks the capture as 2x, so image viewers show it at
+// 1280x640 at actual size.
+import LiveTmux from '../../components/landing/LiveTmux.astro';
+import '../../components/landing/fonts.css';
+
+export function getStaticPaths() {
+  return import.meta.env.DEV ? [{ params: { card: 'social-card' } }] : [];
+}
+---
+
+<!doctype html>
+<html lang="en-US" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <title>workmux social card</title>
+  </head>
+  <body>
+    <main class="c">
+      <div class="c-copy">
+        <div class="c-brand">
+          <img src="/branch-icon.svg" alt="" width="34" height="34" />
+          workmux
+        </div>
+        <h1>
+          <span class="c-the">The</span>tmux<sup>*</sup> workflow<br /><span
+            >for parallel agents.</span
+          >
+        </h1>
+        <p>
+          Give every task its own git worktree and tmux window. See which agents
+          are working or waiting on you.
+        </p>
+        <code><b>$</b> brew install raine/workmux/workmux</code>
+      </div>
+      <div class="c-frame">
+        <div class="c-titlebar">
+          <span class="c-lights"><i></i><i></i><i></i></span>
+          ~/code/workmux
+        </div>
+        <LiveTmux />
+      </div>
+    </main>
+  </body>
+</html>
+
+<style is:global>
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  html,
+  body {
+    margin: 0;
+    background: #0d1213;
+  }
+  body {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  [hidden] {
+    display: none !important;
+  }
+</style>
+
+<style>
+  .c {
+    position: relative;
+    width: 1280px;
+    height: 640px;
+    overflow: hidden;
+    color: #eaf2ef;
+    background:
+      radial-gradient(52rem 26rem at 78% -12%, #0f2e29, transparent 70%),
+      #0d1213;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .c-copy {
+    position: absolute;
+    top: 64px;
+    bottom: 64px;
+    left: 72px;
+    display: flex;
+    flex-direction: column;
+    width: 560px;
+  }
+
+  .c-brand {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+
+  h1 {
+    margin: auto 0 0;
+    font-size: 72px;
+    font-weight: 650;
+    letter-spacing: -0.045em;
+    line-height: 1.02;
+  }
+
+  h1 span {
+    color: #6f8281;
+  }
+
+  /* The headline's article in a retro script, slanted against "tmux", as on
+     the landing page. */
+  h1 .c-the {
+    display: inline-block;
+    margin-right: 0.14em;
+    color: #eaf2ef;
+    font-family: 'Mr Dafoe', cursive;
+    font-size: 0.8em;
+    font-weight: 400;
+    letter-spacing: 0;
+    transform: rotate(-8deg);
+  }
+
+  sup {
+    position: relative;
+    top: -0.05em;
+    margin-left: 0.02em;
+    color: #48d9be;
+    font-size: 0.5em;
+    font-weight: 600;
+    line-height: 0;
+  }
+
+  p {
+    margin: 28px 0 0;
+    color: #a1b2b1;
+    font-size: 23px;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  code {
+    align-self: flex-start;
+    margin-top: auto;
+    padding: 12px 18px;
+    border: 1px solid #253235;
+    border-radius: 12px;
+    background: #151d1f;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 19px;
+  }
+
+  code b {
+    color: #6f8281;
+    font-weight: 400;
+  }
+
+  /* The landing page's terminal, run off the card's right and bottom edges
+     so the sidebar and the agent beside it fill the visible part. */
+  .c-frame {
+    position: absolute;
+    top: 76px;
+    left: 690px;
+    width: 1040px;
+    border: 1px solid #253235;
+    border-radius: 14px;
+    background: #141414;
+    box-shadow:
+      0 0 0 1px rgb(255 255 255 / 0.03) inset,
+      0 30px 80px -24px rgb(0 0 0 / 0.7);
+    overflow: hidden;
+  }
+
+  .c-titlebar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    border-bottom: 1px solid #222;
+    color: #8a8a8a;
+    background: #1b1b1b;
+    font-size: 13px;
+  }
+
+  .c-lights {
+    position: absolute;
+    left: 14px;
+    display: flex;
+    gap: 8px;
+  }
+
+  .c-lights i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ff5f57;
+  }
+
+  .c-lights i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .c-lights i:nth-child(3) {
+    background: #28c840;
+  }
+</style>

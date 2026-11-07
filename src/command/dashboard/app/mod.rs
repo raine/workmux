@@ -62,6 +62,12 @@ pub struct App {
     pub preview: Option<String>,
     /// Track which pane_id the preview was captured from (to detect selection changes)
     preview_pane_id: Option<String>,
+    /// Last capture of each remote agent no local pane relays, fetched from
+    /// its node in the background.
+    remote_previews: HashMap<String, String>,
+    /// When the last remote preview fetch started, and whether it is still
+    /// running.
+    remote_preview_fetch: Option<(std::time::Instant, bool)>,
     /// Input mode: keystrokes are sent directly to the selected agent's pane
     pub input_mode: bool,
     /// Manual scroll offset for the preview (None = auto-scroll to bottom)
@@ -161,6 +167,11 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
     /// Whether to show the "New: workmux sidebar" tip in the tab header
     pub show_sidebar_tip: bool,
+    /// Whether the agents footer may show the remote servers tip; it is
+    /// drawn only when the footer has room for it.
+    pub show_remote_tip: bool,
+    /// Whether this session has counted a drawn remote servers tip.
+    remote_tip_counted: bool,
     /// Pane IDs of agents detected as interrupted by the sidebar daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pending command palette state (shown in command palette modal)
@@ -223,6 +234,9 @@ impl App {
         let check_statuses = crate::github::load_check_cache();
         let hide_stale = load_hide_stale();
         let last_pane_id = load_last_pane_id();
+        // One feature tip at a time: the remote tip waits for the sidebar tip.
+        let show_sidebar_tip = crate::tips::should_show_sidebar_tip();
+        let show_remote_tip = !show_sidebar_tip && should_show_remote_tip(mux.as_ref(), &config);
 
         let mut app = Self {
             terminal_area: Rect::default(),
@@ -241,6 +255,8 @@ impl App {
             view_mode: ViewMode::default(),
             preview: None,
             preview_pane_id: None,
+            remote_previews: HashMap::new(),
+            remote_preview_fetch: None,
             input_mode: false,
             preview_scroll: None,
             preview_line_count: 0,
@@ -292,7 +308,9 @@ impl App {
             worktree_preview: None,
             worktree_preview_path: None,
             status_message: None,
-            show_sidebar_tip: crate::tips::should_show_sidebar_tip(),
+            show_sidebar_tip,
+            show_remote_tip,
+            remote_tip_counted: false,
             interrupted_pane_ids: std::collections::HashSet::new(),
             pending_command_palette: None,
             pending_row_context: None,
@@ -321,8 +339,13 @@ impl App {
         self.sleeping_pane_ids = load_sleeping_pane_ids(self.mux.as_ref());
 
         // Load agents from StateStore with reconciliation against live pane state
+        let now_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.all_agents = StateStore::new()
-            .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
+            .and_then(|store| store.load_all_reconciled_agents(self.mux.as_ref()))
+            .map(|agents| crate::remote::agents::for_views(&self.config, agents, now_ts))
             .unwrap_or_default();
 
         // Load interrupted pane IDs from daemon runtime state
@@ -342,10 +365,18 @@ impl App {
             }
         }
 
-        // Cache repo roots for ALL agents before filtering (project picker needs all projects)
+        // Cache repo roots for ALL agents before filtering (project picker needs all projects).
+        // A remote agent's path is not a local checkout.
+        for agent in &self.all_agents {
+            if let Some(remote) = &agent.remote {
+                self.repo_roots
+                    .insert(agent.path.clone(), remote.project_root.clone());
+            }
+        }
         let paths_to_resolve: Vec<PathBuf> = self
             .all_agents
             .iter()
+            .filter(|a| a.remote.is_none())
             .filter(|a| {
                 !self.repo_roots.contains_key(&a.path) || !self.repo_keys.contains_key(&a.path)
             })
@@ -445,6 +476,15 @@ impl App {
             }
         }
     }
+}
+
+/// Remote agents run in tmux windows on the local machine, so the tip only
+/// shows in a local tmux dashboard.
+fn should_show_remote_tip(mux: &dyn Multiplexer, config: &Config) -> bool {
+    mux.name() == "tmux"
+        && !crate::remote::node::operation::in_session()
+        && !crate::sandbox::guest::is_sandbox_guest()
+        && crate::tips::remote_tip_due(!config.remotes.is_empty())
 }
 
 fn load_sleeping_pane_ids(mux: &dyn Multiplexer) -> HashSet<String> {
