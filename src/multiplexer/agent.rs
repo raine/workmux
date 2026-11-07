@@ -147,7 +147,7 @@ impl AgentProfile for CopilotProfile {
     }
 
     fn prompt_argument(&self, prompt_path: &str) -> String {
-        format!("-i \"$(cat {})\"", prompt_path)
+        format!("--interactive=\"$(cat {})\"", prompt_path)
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -714,7 +714,7 @@ mod tests {
         assert!(!profile.needs_auto_status());
         assert_eq!(
             profile.prompt_argument("PROMPT.md"),
-            "-i \"$(cat PROMPT.md)\""
+            "--interactive=\"$(cat PROMPT.md)\""
         );
         assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
         assert_eq!(profile.auto_name_command(), None);

@@ -653,7 +653,10 @@ mod tests {
             "/bin/zsh",
         )
         .unwrap();
-        assert_eq!(resolved.command, " copilot --yolo -i \"$(cat PROMPT.md)\"");
+        assert_eq!(
+            resolved.command,
+            " copilot --yolo --interactive=\"$(cat PROMPT.md)\""
+        );
         assert!(resolved.prompt_injected);
         assert_eq!(resolved.selected_agent.unwrap().kind(), "copilot");
     }
