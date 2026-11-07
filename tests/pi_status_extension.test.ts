@@ -117,11 +117,11 @@ async function createHarness(
     async input(text: string, source = 'interactive', cwd = '/project') {
       await handlers.get('input')?.({ type: 'input', text, source }, { cwd });
     },
-    async emit(name: string, isIdle?: boolean) {
+    async emit(name: string, isIdle?: boolean, aborted?: boolean) {
       if (name === 'agent_start') idle = false;
       if (name === 'agent_settled') idle = true;
       if (isIdle !== undefined) idle = isIdle;
-      await handlers.get(name)?.({}, {
+      await handlers.get(name)?.({ aborted }, {
         isIdle: () => idle,
         sessionManager: { getBranch: () => branch },
       });
@@ -156,13 +156,38 @@ describe('pi workmux status extension', () => {
     expect(harness.statuses).toEqual(['working', 'done']);
   });
 
-  test.each(abortedMessages)('stays working after an aborted turn without a publisher', async (message) => {
+  test.each(abortedMessages)('clears an aborted turn without a publisher', async (message) => {
     const harness = await createHarness(message);
 
     await harness.emit('agent_start');
     await harness.emit('agent_settled');
 
-    expect(harness.statuses).toEqual(['working']);
+    expect(harness.statuses).toEqual(['working', 'clear']);
+  });
+
+  test('uses the settled abort signal even without an aborted assistant message', async () => {
+    const harness = await createHarness();
+    await harness.emit('agent_start');
+    await harness.emit('agent_settled', true, true);
+    expect(harness.statuses).toEqual(['working', 'clear']);
+  });
+
+  test('an explicit non-aborted settle overrides historical aborted messages', async () => {
+    const harness = await createHarness(abortedMessages[0]);
+    await harness.emit('agent_start');
+    await harness.emit('agent_settled', true, false);
+    expect(harness.statuses).toEqual(['working', 'done']);
+  });
+
+  test('child snapshots cannot restore a completion checkmark after an abort', async () => {
+    const harness = await createHarness();
+    await harness.emit('agent_start');
+    await harness.emit('agent_settled', true, true);
+    await harness.activity(0);
+    await harness.activity(1);
+    await harness.activity(0);
+    await harness.emit('session_shutdown');
+    expect(harness.statuses).toEqual(['working', 'clear', 'working', 'clear']);
   });
 
   test('reports done after the continuation completes', async () => {
@@ -174,7 +199,7 @@ describe('pi workmux status extension', () => {
     await harness.emit('agent_start');
     await harness.emit('agent_settled');
 
-    expect(harness.statuses).toEqual(['working', 'working', 'done']);
+    expect(harness.statuses).toEqual(['working', 'clear', 'working', 'done']);
   });
 
   test('ordinary errors still report done without a publisher', async () => {
@@ -248,26 +273,26 @@ describe('pi workmux status extension', () => {
     expect(harness.statuses).toEqual(['working', 'done', 'working', 'done']);
   });
 
-  test.each(abortedMessages)('keeps aborted continuations working with an authoritative publisher', async (message) => {
+  test.each(abortedMessages)('keeps active children working after parent abort, then clears', async (message) => {
     const harness = await createHarness(message);
     await harness.emit('agent_start');
     await harness.activity(1);
     await harness.emit('agent_settled');
     expect(harness.statuses).toEqual(['working']);
     await harness.activity(0);
-    expect(harness.statuses).toEqual(['working']);
+    expect(harness.statuses).toEqual(['working', 'clear']);
     harness.setMessage(stoppedMessage());
     await harness.emit('agent_start');
     await harness.emit('agent_settled');
-    expect(harness.statuses).toEqual(['working', 'done']);
+    expect(harness.statuses).toEqual(['working', 'clear', 'working', 'done']);
   });
 
-  test('a zero-child snapshot does not interrupt an aborted continuation', async () => {
+  test('clears a settled aborted parent with a zero-child snapshot', async () => {
     const harness = await createHarness(abortedMessages[0]);
     await harness.emit('agent_start');
     await harness.activity(0);
     await harness.emit('agent_settled');
-    expect(harness.statuses).toEqual(['working']);
+    expect(harness.statuses).toEqual(['working', 'clear']);
   });
 
   test('ignores malformed snapshots without enabling aggregate behavior', async () => {
@@ -280,7 +305,7 @@ describe('pi workmux status extension', () => {
     }
     await harness.flush();
     await harness.emit('agent_settled');
-    expect(harness.statuses).toEqual(['working']);
+    expect(harness.statuses).toEqual(['working', 'clear']);
   });
 
   test('serializes overlapping child and parent status commands', async () => {
@@ -369,7 +394,7 @@ describe('pi workmux status extension', () => {
     await harness.emit('session_start');
     await harness.emit('agent_start');
     await harness.emit('agent_settled');
-    expect(harness.statuses).toEqual(['working', 'done', 'working']);
+    expect(harness.statuses).toEqual(['working', 'clear', 'working', 'clear']);
     expect(harness.listeners.get('suba:activity')!.size).toBe(1);
   });
 

@@ -34,6 +34,7 @@ function execWithPrompt(args: string[], prompt: PendingPrompt): Promise<number> 
 export default function (pi: ExtensionAPI) {
   let sessionActive = false;
   let parentWorking = false;
+  let parentAborted = false;
   let activeCount: number | undefined;
   let unsubscribe: (() => void) | undefined;
   let writes = Promise.resolve();
@@ -67,7 +68,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function reportActivity() {
-    return setStatus(isWorking() ? "working" : "done");
+    return setStatus(isWorking() ? "working" : parentAborted ? "clear" : "done");
   }
 
   function latestAssistantWasAborted(ctx: ExtensionContext) {
@@ -97,6 +98,7 @@ export default function (pi: ExtensionAPI) {
     lastStatus = undefined;
     pendingPrompt = undefined;
     parentWorking = !ctx.isIdle();
+    parentAborted = latestAssistantWasAborted(ctx);
     await pi.exec("workmux", ["register-agent"]).catch(() => {});
     sessionActive = true;
     unsubscribe = pi.events.on("suba:activity", (data) => {
@@ -122,18 +124,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", async () => {
     if (!sessionActive) return;
     parentWorking = true;
+    parentAborted = false;
     await setStatus("working");
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     if (!sessionActive) return;
-    const wasAborted = latestAssistantWasAborted(ctx);
-    parentWorking = !ctx.isIdle() || wasAborted;
-    if (activeCount !== undefined) {
-      await reportActivity();
-    } else if (!wasAborted) {
-      await setStatus("done");
-    }
+    parentAborted = event.aborted ?? latestAssistantWasAborted(ctx);
+    parentWorking = !ctx.isIdle();
+    await reportActivity();
   });
 
   pi.on("session_shutdown", async () => {
@@ -141,7 +140,9 @@ export default function (pi: ExtensionAPI) {
     unsubscribe = undefined;
     const wasActive = sessionActive;
     sessionActive = false;
-    if (wasActive && activeCount !== undefined) await setStatus("done");
+    if (wasActive && activeCount !== undefined) {
+      await setStatus(parentAborted ? "clear" : "done");
+    }
     await writes;
   });
 }
