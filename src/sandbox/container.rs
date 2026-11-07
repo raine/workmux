@@ -797,16 +797,9 @@ pub(crate) fn push_agent_home(
     };
 
     // Mount agent config directory
-    if let Some(config_dir) = config.resolved_agent_config_dir(agent) {
-        let target = match agent {
-            "claude" => "/tmp/.claude",
-            "gemini" => "/tmp/.gemini",
-            "codex" => "/home/user/.codex",
-            "opencode" => "/tmp/.local/share/opencode",
-            "pi" => "/tmp/.pi/agent",
-            "omp" => "/tmp/.omp/agent",
-            _ => unreachable!(), // resolved_agent_config_dir returns None for unknown agents
-        };
+    if let Some(config_dir) = config.resolved_agent_config_dir(agent)
+        && let Some(target) = agent_config_target(agent)
+    {
         let _ = std::fs::create_dir_all(&config_dir);
         args.push("--mount".to_string());
         args.push(format!(
@@ -850,6 +843,22 @@ pub(crate) fn push_agent_home(
     }
 
     needs_claude_config_symlink
+}
+
+/// Where an agent's config directory is mounted in the container, or `None`
+/// for agents whose config directory workmux doesn't mount.
+fn agent_config_target(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some("/tmp/.claude"),
+        "copilot" => Some("/tmp/.copilot"),
+        "gemini" => Some("/tmp/.gemini"),
+        "agy" => Some("/tmp/.gemini/antigravity-cli"),
+        "codex" => Some("/home/user/.codex"),
+        "opencode" => Some("/tmp/.local/share/opencode"),
+        "pi" => Some("/tmp/.pi/agent"),
+        "omp" => Some("/tmp/.omp/agent"),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2707,6 +2716,36 @@ mod tests {
             "no claude mount expected for omp"
         );
         assert!(!args_str.contains("/tmp/.claude,"));
+    }
+
+    #[test]
+    fn test_build_args_copilot_and_agy_mount_config_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = agent_sandbox_config_with_dir(SandboxRuntime::Docker, tmp.path());
+        for (agent, target) in [
+            ("copilot", "/tmp/.copilot"),
+            ("agy", "/tmp/.gemini/antigravity-cli"),
+        ] {
+            let args_str = test_build_run_args_for_agent(agent, &config).join(" ");
+            assert!(
+                args_str.contains(&format!(
+                    "type=bind,source={},target={target}",
+                    tmp.path().join(agent).display()
+                )),
+                "{agent} config mount missing: {args_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_args_skips_config_mount_for_agent_without_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = agent_sandbox_config_with_dir(SandboxRuntime::Docker, tmp.path());
+        let args_str = test_build_run_args_for_agent("vibe", &config).join(" ");
+        assert!(
+            !args_str.contains(&tmp.path().join("vibe").display().to_string()),
+            "unexpected vibe config mount: {args_str}"
+        );
     }
 
     #[test]

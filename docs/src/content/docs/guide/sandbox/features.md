@@ -110,14 +110,18 @@ Codex also gets `--dangerously-bypass-hook-trust`. Codex otherwise asks you to r
 
 Both sandbox backends mount agent-specific credential directories from the host. The mounted directory depends on the configured `agent`:
 
-| Agent      | Host directory             | Container mount               | Lima mount                     |
-| ---------- | -------------------------- | ----------------------------- | ------------------------------ |
-| `claude`   | `~/.claude/`               | `/tmp/.claude/`               | `$HOME/.claude/`               |
-| `gemini`   | `~/.gemini/`               | `/tmp/.gemini/`               | `$HOME/.gemini/`               |
-| `codex`    | `~/.codex/`                | `/home/user/.codex/`          | `$HOME/.codex/`                |
-| `opencode` | `~/.local/share/opencode/` | `/tmp/.local/share/opencode/` | `$HOME/.local/share/opencode/` |
-| `pi`       | `~/.pi/agent/`             | `/tmp/.pi/agent/`             | `$HOME/.pi/agent/`             |
-| `omp`      | `~/.omp/agent/`            | `/tmp/.omp/agent/`            | `$HOME/.omp/agent/`            |
+| Agent      | Host directory               | Container mount                 | Lima mount                       |
+| ---------- | ---------------------------- | ------------------------------- | -------------------------------- |
+| `claude`   | `~/.claude/`                 | `/tmp/.claude/`                 | `$HOME/.claude/`                 |
+| `copilot`  | `~/.copilot/`                | `/tmp/.copilot/`                | `$HOME/.copilot/`                |
+| `gemini`   | `~/.gemini/`                 | `/tmp/.gemini/`                 | `$HOME/.gemini/`                 |
+| `agy`      | `~/.gemini/antigravity-cli/` | `/tmp/.gemini/antigravity-cli/` | `$HOME/.gemini/antigravity-cli/` |
+| `codex`    | `~/.codex/`                  | `/home/user/.codex/`            | `$HOME/.codex/`                  |
+| `opencode` | `~/.local/share/opencode/`   | `/tmp/.local/share/opencode/`   | `$HOME/.local/share/opencode/`   |
+| `pi`       | `~/.pi/agent/`               | `/tmp/.pi/agent/`               | `$HOME/.pi/agent/`               |
+| `omp`      | `~/.omp/agent/`              | `/tmp/.omp/agent/`              | `$HOME/.omp/agent/`              |
+
+Other agents get no config directory mount.
 
 OpenCode's global config directory (`~/.config/opencode/`) is also mounted read-only, providing access to `opencode.json`, plugins, and global MCP definitions.
 
