@@ -405,8 +405,8 @@ and the dev server spans the bottom.
 - `<agent>`: resolves to the configured agent (from `agent` config or `--agent`
   flag)
 
-Built-in agents (`claude`, `gemini`, `agy`, `codex`, `opencode`, `kiro-cli`, `vibe`,
-`pi`, `omp`, `grok`) are auto-detected when used as literal commands and receive prompt
+Built-in agents (`claude`, `gemini`, `agy`, `codex`, `copilot`, `opencode`, `kiro-cli`,
+`vibe`, `pi`, `omp`, `grok`) are auto-detected when used as literal commands and receive prompt
 injection automatically, without needing the `<agent>` placeholder or a matching
 `agent` config:
 
@@ -893,7 +893,7 @@ done
 
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
-command (e.g., `claude`, `codex`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
+command (e.g., `claude`, `codex`, `copilot`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
 `pi`, `omp`, `grok`, or whatever you've set via the `agent` config or `--agent` flag) without
 requiring any `.workmux.yaml` changes:
 
