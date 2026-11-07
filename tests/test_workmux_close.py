@@ -182,14 +182,23 @@ def test_close_does_not_adopt_same_name_window_from_another_directory(
     assert impostor_id in window_ids
 
 
-@pytest.mark.tmux_only
 def test_close_window_in_parent_session(
-    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
+    """Close finds a window in its parent session from another session."""
     env = mux_server
+    if env.backend_name not in ("tmux", "rex"):
+        pytest.skip(f"{env.backend_name} has no parent sessions")
     branch_name = "feature/parent-session-close"
     session_name = "prs-close"
     window_name = get_window_name(branch_name)
+
+    def windows_in_parent() -> list[str]:
+        # The parent session may be gone once its last window closes
+        try:
+            return env.list_windows_in_session(session_name)
+        except Exception:
+            return []
 
     write_workmux_config(mux_repo_path)
     run_workmux_command(
@@ -199,21 +208,12 @@ def test_close_window_in_parent_session(
         f"add {branch_name} --parent-session {session_name} --background",
     )
 
-    result = env.tmux(
-        ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-    )
-    assert window_name in [w for w in result.stdout.strip().split("\n") if w]
+    assert window_name in windows_in_parent()
 
+    # Runs from the test session, not the parent session
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
-    assert poll_until(
-        lambda: window_name
-        not in env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"],
-            check=False,
-        ).stdout.splitlines(),
-        timeout=5.0,
-    )
+    assert poll_until(lambda: window_name not in windows_in_parent(), timeout=5.0)
     worktree_path = get_worktree_path(mux_repo_path, branch_name)
     assert worktree_path.exists(), "Worktree should still exist after close"
 

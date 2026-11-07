@@ -731,7 +731,7 @@ class TestExistingBranch:
             workmux_exe_path,
             mux_repo_path,
             f"add {branch_name} -o",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         assert_session_exists(env, session_name)
@@ -764,7 +764,7 @@ class TestExistingBranch:
             workmux_exe_path,
             mux_repo_path,
             f"add {branch_name} -o --mode session",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         assert_session_exists(env, session_name)

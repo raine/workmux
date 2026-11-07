@@ -329,7 +329,7 @@ def test_headless_remove_does_not_close_same_named_window(
     assert result.returncode == 0, result.stderr
 
     same_name = f"wm-{branch}"
-    mux_server.mux_command(["new-window", "-d", "-n", same_name])
+    mux_server.new_window(same_name, detached=True)
     mux_server.run_command(
         [
             "git",

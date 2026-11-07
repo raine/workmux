@@ -9,6 +9,7 @@ pub struct Cmd<'a> {
     command: &'a str,
     args: Vec<&'a str>,
     workdir: Option<&'a Path>,
+    env_remove: Vec<&'a str>,
 }
 
 impl<'a> Cmd<'a> {
@@ -18,6 +19,7 @@ impl<'a> Cmd<'a> {
             command,
             args: Vec::new(),
             workdir: None,
+            env_remove: Vec::new(),
         }
     }
 
@@ -39,6 +41,12 @@ impl<'a> Cmd<'a> {
         self
     }
 
+    /// Remove an environment variable from the command's environment
+    pub fn env_remove(mut self, key: &'a str) -> Self {
+        self.env_remove.push(key);
+        self
+    }
+
     /// Execute the command and return the output
     /// Returns an error if the command fails (non-zero exit code)
     pub fn run(self) -> Result<Output> {
@@ -46,6 +54,7 @@ impl<'a> Cmd<'a> {
             command,
             args,
             workdir,
+            env_remove,
         } = self;
         let workdir_display = workdir.map(|p| p.display().to_string());
 
@@ -60,6 +69,9 @@ impl<'a> Cmd<'a> {
             }
             command
         };
+        for key in env_remove {
+            cmd.env_remove(key);
+        }
         let output = cmd.args(&args).output().with_context(|| {
             format!("Failed to execute command: {} {}", command, args.join(" "))
         })?;
@@ -97,6 +109,7 @@ impl<'a> Cmd<'a> {
             command,
             args,
             workdir,
+            env_remove,
         } = self;
         let workdir_display = workdir.map(|p| p.display().to_string());
         trace!(command, args = ?args, workdir = ?workdir_display, "cmd:check start");
@@ -110,6 +123,9 @@ impl<'a> Cmd<'a> {
             }
             command
         };
+        for key in env_remove {
+            cmd.env_remove(key);
+        }
         let output = cmd.args(&args).output().with_context(|| {
             format!("Failed to execute command: {} {}", command, args.join(" "))
         })?;
