@@ -449,9 +449,9 @@ pub struct TemplatesConfig {
 }
 
 /// Templates for the grouped presentation. A section header carries the
-/// project or session name, so rows there can drop what the header already
-/// says. Anything left unset falls back to the ungrouped template of the same
-/// name, then to the built-in grouped default.
+/// project, session or worktree name, so rows there can drop what the header
+/// already says. Anything left unset falls back to the ungrouped template of
+/// the same name, then to the built-in grouped default.
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GroupedTemplatesConfig {
@@ -461,6 +461,9 @@ pub struct GroupedTemplatesConfig {
     pub tiles: Option<Vec<String>>,
     /// Single-line template for group header rows.
     pub header: Option<String>,
+    /// Single-line template for the worktree rows nested under a project
+    /// header. Falls back to `header`.
+    pub subheader: Option<String>,
 }
 
 /// Detailed per-agent icon override: `{ icon, color }`.
@@ -626,8 +629,9 @@ pub struct SidebarConfig {
     /// Row ordering: "recency" (default), "priority" or "window".
     pub sort: Option<SidebarSort>,
 
-    /// Group agents into labeled sections: "project" or "session". Unset or
-    /// "none" keeps one combined list.
+    /// Group agents into labeled sections: "project", "session" or
+    /// "worktree" (worktrees nested under their project). Unset or "none"
+    /// keeps one combined list.
     pub group_by: Option<SidebarGroupBy>,
 
     /// Dim agents whose sidebar activity state exceeds the stale threshold.
@@ -697,6 +701,17 @@ pub enum SidebarGroupBy {
     Project,
     /// One section per multiplexer session.
     Session,
+    /// One section per repository, holding one subsection per worktree. A
+    /// worktree is identified by the agent's directory, not by its window or
+    /// session name.
+    Worktree,
+}
+
+impl SidebarGroupBy {
+    /// Whether the grouping nests subgroups inside its groups.
+    pub fn nests(self) -> bool {
+        self == Self::Worktree
+    }
 }
 
 /// Sidebar pane position.
@@ -2850,6 +2865,7 @@ fn merge_grouped_templates(
             compact: p.compact.clone().or_else(|| g.compact.clone()),
             tiles: p.tiles.clone().or_else(|| g.tiles.clone()),
             header: p.header.clone().or_else(|| g.header.clone()),
+            subheader: p.subheader.clone().or_else(|| g.subheader.clone()),
         }),
     }
 }
@@ -3906,9 +3922,10 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Row ordering: "recency" (default), "priority" or "window".
 #   sort: recency
 #
-#   # Group agents into labeled sections: "project" or "session". Unset keeps
-#   # one flat list; the 't' key switches at runtime. Headers are rendered only
-#   # in left sidebars.
+#   # Group agents into labeled sections: "project", "session" or "worktree"
+#   # (a project header with a subheader per worktree). Unset keeps one flat
+#   # list; the 't' key switches at runtime. Headers are rendered only in left
+#   # sidebars.
 #   group_by: project
 #
 #   # Dim agents classified as stale using `stale_after`. Default: true.
@@ -3931,6 +3948,9 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #     grouped:
 #       # Group header row; accepts {group}, {group_count}, {fill} and #[...].
 #       header: "{group} {fill} {group_count}"
+#       # Worktree row under a project header with group_by: worktree.
+#       # Accepts the same tokens; falls back to header.
+#       subheader: "{group} {fill} {group_count}"
 #       tiles:
 #         - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
 #         - "{pane_title} {fill} {git_stats}"
@@ -5217,6 +5237,14 @@ sidebar:
             Some(super::SidebarGroupBy::Session)
         );
         assert!(!unfolded.sidebar.collapse_stale());
+
+        let nested: Config = serde_yaml::from_str("sidebar:\n  group_by: worktree\n").unwrap();
+        assert_eq!(
+            nested.sidebar.group_by(),
+            Some(super::SidebarGroupBy::Worktree)
+        );
+        assert!(nested.sidebar.group_by().unwrap().nests());
+        assert!(!super::SidebarGroupBy::Project.nests());
 
         for raw in [
             "sidebar:\n  group_by: none\n",

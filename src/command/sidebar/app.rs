@@ -25,7 +25,7 @@ use crate::multiplexer::{AgentPane, Multiplexer};
 
 use crate::ui::theme::ThemePalette;
 
-use super::snapshot::{SidebarSnapshot, group_label};
+use super::snapshot::{SidebarSnapshot, group_label, section_key, subgroup_key, subgroup_label};
 use super::template::parser::{ParseError, Token, TokenId, parse_line};
 
 /// Sidebar layout mode.
@@ -192,6 +192,7 @@ pub struct ParsedTemplates {
     pub tiles: Vec<Vec<Token>>,
     pub horizontal: Vec<Vec<Token>>,
     pub group_header: Vec<Token>,
+    pub group_subheader: Vec<Token>,
 }
 
 /// Template strings currently parsed into `ParsedTemplates`. Tracked so an
@@ -203,6 +204,7 @@ pub struct TemplateStrings {
     pub tiles: Vec<String>,
     pub horizontal: Vec<String>,
     pub group_header: String,
+    pub group_subheader: String,
 }
 
 /// Latest sidebar template parsing failure.
@@ -263,6 +265,38 @@ pub enum SidebarRow {
         count: usize,
         expanded: bool,
     },
+    /// Header of a subgroup inside a group, under groupings that nest.
+    /// `group` is the subgroup's state key, qualified by its group.
+    Subheader {
+        group: String,
+        label: String,
+        count: usize,
+    },
+    /// Header of a subgroup with no live agents inside a group that has some,
+    /// which doubles as the subgroup's toggle.
+    StaleSubgroup {
+        group: String,
+        label: String,
+        count: usize,
+        expanded: bool,
+    },
+}
+
+/// Length of the run of equal entries opening `items`.
+fn run_len<T: PartialEq>(items: &[T]) -> usize {
+    items.iter().take_while(|item| **item == items[0]).count()
+}
+
+/// Index ranges of the runs of equal entries in `items`, offset by `base`.
+fn runs<T: PartialEq>(items: &[T], base: usize) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let len = run_len(&items[start..]);
+        ranges.push(base + start..base + start + len);
+        start += len;
+    }
+    ranges
 }
 
 /// Label of the rule above the groups that hold nothing but stale agents.
@@ -433,6 +467,7 @@ impl SidebarApp {
                 tiles: vec![parse_line("{primary}").unwrap()],
                 horizontal: vec![parse_line("{primary}").unwrap()],
                 group_header: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
+                group_subheader: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
             },
             template_error: Some(template_error),
             agent_icons: ResolvedAgentIcons::default(),
@@ -446,6 +481,7 @@ impl SidebarApp {
                 tiles: vec!["{primary}".to_string()],
                 horizontal: vec!["{primary}".to_string()],
                 group_header: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
+                group_subheader: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
             },
             template_config: None,
             current_width: None,
@@ -773,6 +809,12 @@ impl SidebarApp {
         projects.len()
     }
 
+    /// Whether rows sit under subgroup headers, which then name their
+    /// worktree. The top bar draws no headers.
+    pub fn draws_subgroups(&self) -> bool {
+        self.position != SidebarPosition::Top && self.group_by.is_some_and(SidebarGroupBy::nests)
+    }
+
     /// The hint has served its purpose once the user answers it.
     pub fn dismiss_hint(&mut self) {
         if !self.hint_pending {
@@ -875,65 +917,61 @@ impl SidebarApp {
             .iter()
             .map(|agent| group_label(agent, group_by))
             .collect();
+        let subgroups: Vec<Option<String>> = self
+            .agents
+            .iter()
+            .map(|agent| subgroup_label(agent, group_by))
+            .collect();
         let stale = self.stale_agents();
         let mut rows = Vec::with_capacity(self.agents.len() + labels.len());
-        let mut pinned_agents: Vec<usize> = Vec::new();
         // Row a group opens on, and whether it holds only stale agents. The
         // daemon already sorted those groups to the end.
         let mut groups: Vec<(usize, bool)> = Vec::new();
         let mut start = 0;
         while start < labels.len() {
-            let count = labels[start..]
-                .iter()
-                .take_while(|label| **label == labels[start])
-                .count();
+            let count = run_len(&labels[start..]);
             let label = labels[start].clone();
             let group = start..start + count;
-            let hidden = group.clone().filter(|idx| stale[*idx]).count();
-            let expanded = self.expanded_groups.contains(&label);
-            // A collapsed group still shows the agent the sidebar's own window
-            // sits in, so the sidebar never hides where the user is. Only that
-            // one row differs between panes, rather than a whole group.
-            let pinned = self
-                .host_agent_idx
-                .filter(|idx| !expanded && group.contains(idx) && stale[*idx]);
-            pinned_agents.extend(pinned);
-            let folded = hidden - usize::from(pinned.is_some());
-            groups.push((rows.len(), hidden == count));
+            let all_stale = group.clone().all(|idx| stale[idx]);
+            groups.push((rows.len(), all_stale));
 
-            if hidden == count {
+            if subgroups[start].is_none() {
+                self.push_section(&mut rows, &stale, &label, &label, group, false);
+            } else if all_stale {
+                // A dormant group folds whole behind its own header, subgroups
+                // and all, so it costs one row like an unnested one.
+                let expanded = self.expanded_groups.contains(&label);
                 rows.push(SidebarRow::StaleGroup {
-                    label,
+                    label: label.clone(),
                     count,
                     expanded,
                 });
-                if expanded {
-                    rows.extend(group.map(SidebarRow::Agent));
-                } else {
-                    rows.extend(pinned.map(SidebarRow::Agent));
+                let pinned = self.host_agent_idx.filter(|idx| group.contains(idx));
+                for sub in runs(&subgroups[group.clone()], start) {
+                    if !expanded && !pinned.is_some_and(|idx| sub.contains(&idx)) {
+                        continue;
+                    }
+                    let sublabel = subgroups[sub.start].clone().unwrap_or_default();
+                    rows.push(SidebarRow::Subheader {
+                        group: subgroup_key(&label, &sublabel),
+                        label: sublabel,
+                        count: sub.len(),
+                    });
+                    if expanded {
+                        rows.extend(sub.map(SidebarRow::Agent));
+                    } else {
+                        rows.extend(pinned.map(SidebarRow::Agent));
+                    }
                 }
             } else {
                 rows.push(SidebarRow::Header {
                     label: label.clone(),
                     count,
                 });
-                rows.extend(
-                    group
-                        .clone()
-                        .filter(|idx| !stale[*idx])
-                        .map(SidebarRow::Agent),
-                );
-                if folded > 0 {
-                    rows.push(SidebarRow::StaleTail {
-                        group: label,
-                        count: folded,
-                        expanded,
-                    });
-                }
-                if expanded {
-                    rows.extend(group.filter(|idx| stale[*idx]).map(SidebarRow::Agent));
-                } else {
-                    rows.extend(pinned.map(SidebarRow::Agent));
+                for sub in runs(&subgroups[group.clone()], start) {
+                    let sublabel = subgroups[sub.start].clone().unwrap_or_default();
+                    let key = subgroup_key(&label, &sublabel);
+                    self.push_section(&mut rows, &stale, &key, &sublabel, sub, true);
                 }
             }
             start += count;
@@ -960,6 +998,84 @@ impl SidebarApp {
         self.rebuild_jump_numbers();
     }
 
+    /// Rows of one section: its header, its live agents, then its stale
+    /// agents behind a toggle. A section with no live agents is its own
+    /// toggle. `nested` marks a subgroup inside a group.
+    fn push_section(
+        &self,
+        rows: &mut Vec<SidebarRow>,
+        stale: &[bool],
+        key: &str,
+        label: &str,
+        section: std::ops::Range<usize>,
+        nested: bool,
+    ) {
+        let count = section.len();
+        let hidden = section.clone().filter(|idx| stale[*idx]).count();
+        let expanded = self.expanded_groups.contains(key);
+        // A collapsed section still shows the agent the sidebar's own window
+        // sits in, so the sidebar never hides where the user is. Only that
+        // one row differs between panes, rather than a whole section.
+        let pinned = self
+            .host_agent_idx
+            .filter(|idx| !expanded && section.contains(idx) && stale[*idx]);
+        let folded = hidden - usize::from(pinned.is_some());
+
+        if hidden == count {
+            rows.push(if nested {
+                SidebarRow::StaleSubgroup {
+                    group: key.to_string(),
+                    label: label.to_string(),
+                    count,
+                    expanded,
+                }
+            } else {
+                SidebarRow::StaleGroup {
+                    label: label.to_string(),
+                    count,
+                    expanded,
+                }
+            });
+            if expanded {
+                rows.extend(section.map(SidebarRow::Agent));
+            } else {
+                rows.extend(pinned.map(SidebarRow::Agent));
+            }
+            return;
+        }
+
+        rows.push(if nested {
+            SidebarRow::Subheader {
+                group: key.to_string(),
+                label: label.to_string(),
+                count,
+            }
+        } else {
+            SidebarRow::Header {
+                label: label.to_string(),
+                count,
+            }
+        });
+        rows.extend(
+            section
+                .clone()
+                .filter(|idx| !stale[*idx])
+                .map(SidebarRow::Agent),
+        );
+        if folded > 0 {
+            rows.push(SidebarRow::StaleTail {
+                group: key.to_string(),
+                count: folded,
+                expanded,
+            });
+        }
+        if expanded {
+            rows.extend(section.filter(|idx| stale[*idx]).map(SidebarRow::Agent));
+        } else {
+            rows.extend(pinned.map(SidebarRow::Agent));
+        }
+    }
+
     /// Show or hide the stale agents of one group, for every sidebar pane.
     pub fn toggle_group(&mut self, group: &str) {
         if !self.expanded_groups.remove(group) {
@@ -970,25 +1086,40 @@ impl SidebarApp {
 
     /// Group of the selected agent, so a key can toggle what the mouse can.
     pub fn selected_group(&self) -> Option<String> {
-        let agent = self.agents.get(self.selected_agent_idx()?)?;
-        Some(group_label(agent, self.group_by?))
+        self.fold_key(self.selected_agent_idx()?)
+    }
+
+    /// Key of the toggle that folds an agent: its innermost section, except
+    /// that a group holding no live agents folds whole behind its header.
+    fn fold_key(&self, agent_idx: usize) -> Option<String> {
+        let group_by = self.group_by?;
+        let agent = self.agents.get(agent_idx)?;
+        let group = group_label(agent, group_by);
+        let dormant = || {
+            self.agents
+                .iter()
+                .filter(|other| group_label(other, group_by) == group)
+                .all(|other| self.renders_collapsed(other))
+        };
+        if subgroup_label(agent, group_by).is_none() || dormant() {
+            Some(group)
+        } else {
+            Some(section_key(agent, group_by))
+        }
     }
 
     /// Expand every group holding stale agents, or collapse them all when any
     /// is already expanded. This is the only way to reach a collapsed group
     /// from the keyboard, since its rows are not selectable.
     pub fn toggle_all_groups(&mut self) {
-        let Some(group_by) = self.group_by else {
+        if self.group_by.is_none() {
             return;
-        };
+        }
         if self.expanded_groups.is_empty() {
             let stale = self.stale_agents();
-            self.expanded_groups = self
-                .agents
-                .iter()
-                .zip(stale)
-                .filter(|(_, stale)| *stale)
-                .map(|(agent, _)| group_label(agent, group_by))
+            self.expanded_groups = (0..self.agents.len())
+                .filter(|idx| stale[*idx])
+                .filter_map(|idx| self.fold_key(idx))
                 .collect();
         } else {
             self.expanded_groups.clear();
@@ -1148,7 +1279,8 @@ impl SidebarApp {
             .filter_map(|(row, entry)| match entry {
                 SidebarRow::Agent(_)
                 | SidebarRow::StaleTail { .. }
-                | SidebarRow::StaleGroup { .. } => Some(row),
+                | SidebarRow::StaleGroup { .. }
+                | SidebarRow::StaleSubgroup { .. } => Some(row),
                 _ => None,
             })
             .collect()
@@ -1158,9 +1290,9 @@ impl SidebarApp {
     /// one after the rows are rebuilt.
     fn toggle_row_of(&self, group: &str) -> Option<usize> {
         self.rows.iter().position(|row| match row {
-            SidebarRow::StaleTail { group: label, .. } | SidebarRow::StaleGroup { label, .. } => {
-                label == group
-            }
+            SidebarRow::StaleTail { group: label, .. }
+            | SidebarRow::StaleGroup { label, .. }
+            | SidebarRow::StaleSubgroup { group: label, .. } => label == group,
             _ => false,
         })
     }
@@ -1172,8 +1304,11 @@ impl SidebarApp {
             .selected()
             .and_then(|row| self.rows.get(row))
         {
-            Some(SidebarRow::StaleTail { group, .. }) => Some(group.clone()),
-            Some(SidebarRow::StaleGroup { label, .. }) => Some(label.clone()),
+            Some(
+                SidebarRow::StaleTail { group, .. }
+                | SidebarRow::StaleSubgroup { group, .. }
+                | SidebarRow::StaleGroup { label: group, .. },
+            ) => Some(group.clone()),
             _ => None,
         }
     }
@@ -1277,8 +1412,11 @@ impl SidebarApp {
             .hit_test_row(column, row)
             .and_then(|row| self.rows.get(row))
         {
-            Some(SidebarRow::StaleTail { group, .. }) => Some(group.clone()),
-            Some(SidebarRow::StaleGroup { label, .. }) => Some(label.clone()),
+            Some(
+                SidebarRow::StaleTail { group, .. }
+                | SidebarRow::StaleSubgroup { group, .. }
+                | SidebarRow::StaleGroup { label: group, .. },
+            ) => Some(group.clone()),
             _ => None,
         }
     }
@@ -1788,6 +1926,9 @@ fn resolved_template_strings(
         group_header: group_overrides
             .and_then(|g| g.header.clone())
             .unwrap_or_else(|| DEFAULT_GROUP_HEADER_TEMPLATE.to_string()),
+        group_subheader: group_overrides
+            .and_then(|g| g.subheader.clone().or_else(|| g.header.clone()))
+            .unwrap_or_else(|| DEFAULT_GROUP_HEADER_TEMPLATE.to_string()),
     }
 }
 
@@ -1851,7 +1992,14 @@ fn parse_templates(strings: &TemplateStrings) -> (ParsedTemplates, Option<Templa
         }
     };
 
-    let group_header = match parse_group_header(&strings.group_header) {
+    let group_header = match parse_group_header(&strings.group_header, "group_header") {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            first_error.get_or_insert(e);
+            parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).expect("default template is valid")
+        }
+    };
+    let group_subheader = match parse_group_header(&strings.group_subheader, "group_subheader") {
         Ok(tokens) => tokens,
         Err(e) => {
             first_error.get_or_insert(e);
@@ -1865,6 +2013,7 @@ fn parse_templates(strings: &TemplateStrings) -> (ParsedTemplates, Option<Templa
             tiles,
             horizontal,
             group_header,
+            group_subheader,
         },
         first_error,
     )
@@ -1950,7 +2099,7 @@ fn record_applied_size(extent: u16) {
 /// Reject agent tokens in a group header template. A header does not
 /// represent one agent, so only group tokens, `{fill}`, literals and style
 /// directives are meaningful there.
-fn validate_group_header_tokens(tokens: &[Token]) -> Result<(), TemplateError> {
+fn validate_group_header_tokens(tokens: &[Token], location: &str) -> Result<(), TemplateError> {
     for token in tokens {
         if let Token::Field(id) = token
             && !matches!(
@@ -1959,7 +2108,7 @@ fn validate_group_header_tokens(tokens: &[Token]) -> Result<(), TemplateError> {
             )
         {
             return Err(TemplateError {
-                location: "group_header".to_string(),
+                location: location.to_string(),
                 message: format!("unsupported token '{}'", id),
             });
         }
@@ -1967,9 +2116,9 @@ fn validate_group_header_tokens(tokens: &[Token]) -> Result<(), TemplateError> {
     Ok(())
 }
 
-fn parse_group_header(template: &str) -> Result<Vec<Token>, TemplateError> {
-    let tokens = parse_line(template).map_err(|e| TemplateError::new("group_header", &e))?;
-    validate_group_header_tokens(&tokens)?;
+fn parse_group_header(template: &str, location: &str) -> Result<Vec<Token>, TemplateError> {
+    let tokens = parse_line(template).map_err(|e| TemplateError::new(location, &e))?;
+    validate_group_header_tokens(&tokens, location)?;
     Ok(tokens)
 }
 
@@ -2016,8 +2165,20 @@ fn try_reparse_templates(
         }
     }
 
-    match parse_group_header(&new.group_header) {
+    match parse_group_header(&new.group_header, "group_header") {
         Ok(tokens) => templates.group_header = tokens,
+        Err(e) => {
+            tracing::warn!(
+                "{} template parse error, keeping previous: {}",
+                e.location,
+                e.message
+            );
+            first_error.get_or_insert(e);
+        }
+    }
+
+    match parse_group_header(&new.group_subheader, "group_subheader") {
+        Ok(tokens) => templates.group_subheader = tokens,
         Err(e) => {
             tracing::warn!(
                 "{} template parse error, keeping previous: {}",
@@ -2220,6 +2381,7 @@ mod tests {
             tiles: vec![parse_line(s).unwrap()],
             horizontal: vec![parse_line(s).unwrap()],
             group_header: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
+            group_subheader: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
         }
     }
 
@@ -2229,6 +2391,7 @@ mod tests {
             tiles: vec![s.to_string()],
             horizontal: vec![s.to_string()],
             group_header: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
+            group_subheader: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
         }
     }
 
@@ -2242,6 +2405,7 @@ mod tests {
             tiles: vec!["{primary} {fill} {elapsed}".to_string()],
             horizontal: vec!["{secondary} {fill} {git_stats}".to_string()],
             group_header: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
+            group_subheader: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
         };
         let error = try_reparse_templates(&mut templates, &mut current, new.clone());
 
@@ -2548,6 +2712,7 @@ mod tests {
             tiles: vec!["{pr_status}".to_string()],
             horizontal: vec!["{elapsed}".to_string()],
             group_header: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
+            group_subheader: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
         };
         let error = try_reparse_templates(&mut templates, &mut current, new);
 
@@ -2877,12 +3042,12 @@ mod grouping_tests {
     #[test]
     fn agent_tokens_are_rejected_in_a_group_header() {
         let tokens = parse_line("{group} {fill} {primary}").unwrap();
-        let error = validate_group_header_tokens(&tokens).unwrap_err();
+        let error = validate_group_header_tokens(&tokens, "group_header").unwrap_err();
         assert_eq!(error.location, "group_header");
         assert!(error.message.contains("unsupported token 'primary'"));
 
         let valid = parse_line("#[bold]{group} {fill} {group_status} {group_count}").unwrap();
-        assert!(validate_group_header_tokens(&valid).is_ok());
+        assert!(validate_group_header_tokens(&valid, "group_header").is_ok());
     }
 
     #[test]
@@ -2902,6 +3067,7 @@ mod grouping_tests {
             tiles: vec![parse_line("{primary}").unwrap()],
             horizontal: vec![parse_line("{primary}").unwrap()],
             group_header: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
+            group_subheader: parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap(),
         };
         let previous = templates.group_header.clone();
         let mut current = TemplateStrings {
@@ -2909,6 +3075,7 @@ mod grouping_tests {
             tiles: vec!["{primary}".to_string()],
             horizontal: vec!["{primary}".to_string()],
             group_header: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
+            group_subheader: DEFAULT_GROUP_HEADER_TEMPLATE.to_string(),
         };
         let mut new = current.clone();
         new.group_header = "{group} {elapsed}".to_string();
@@ -3192,6 +3359,209 @@ mod grouping_tests {
         );
     }
 
+    /// Agent in worktree `worktree` of `project`; `main` is the checkout.
+    fn worktree_agent(pane: &str, project: &str, worktree: &str) -> AgentPane {
+        let mut agent = agent(pane, project, project);
+        agent.path = if worktree == "main" {
+            PathBuf::from(format!("/tmp/{project}"))
+        } else {
+            PathBuf::from(format!("/tmp/{project}__worktrees/{worktree}"))
+        };
+        agent
+    }
+
+    /// A worktree-grouped snapshot ordered by the daemon, so the rows here
+    /// are built from the order the published pane list carries.
+    fn worktree_snapshot() -> SidebarSnapshot {
+        super::super::snapshot::build_snapshot(super::super::snapshot::SnapshotInputs {
+            agents: vec![
+                worktree_agent("%6", "zed", "main"),
+                active(worktree_agent("%4", "web", "main")),
+                worktree_agent("%3", "api", "add-billing"),
+                worktree_agent("%2", "api", "fix-auth"),
+                active(worktree_agent("%5", "web", "fix-auth")),
+                active(worktree_agent("%1", "api", "fix-auth")),
+            ],
+            group_by: Some(SidebarGroupBy::Worktree),
+            collapse_stale: true,
+            ..Default::default()
+        })
+    }
+
+    fn pane_order(app: &SidebarApp) -> Vec<&str> {
+        app.agents.iter().map(|a| a.pane_id.as_str()).collect()
+    }
+
+    #[test]
+    fn worktree_grouping_nests_worktrees_under_their_project() {
+        let mut app = app();
+        app.apply_snapshot(worktree_snapshot());
+
+        // Projects alphabetically with the dormant one last, worktrees
+        // alphabetically within them with the dormant one last.
+        assert_eq!(pane_order(&app), ["%1", "%2", "%3", "%5", "%4", "%6"]);
+        let sub = |project: &str, worktree: &str, count| SidebarRow::Subheader {
+            group: format!("{project}/{worktree}"),
+            label: worktree.to_string(),
+            count,
+        };
+        assert_eq!(
+            app.rows,
+            vec![
+                SidebarRow::Header {
+                    label: "api".to_string(),
+                    count: 3
+                },
+                sub("api", "fix-auth", 2),
+                SidebarRow::Agent(0),
+                SidebarRow::StaleTail {
+                    group: "api/fix-auth".to_string(),
+                    count: 1,
+                    expanded: false
+                },
+                SidebarRow::StaleSubgroup {
+                    group: "api/add-billing".to_string(),
+                    label: "add-billing".to_string(),
+                    count: 1,
+                    expanded: false
+                },
+                SidebarRow::Header {
+                    label: "web".to_string(),
+                    count: 2
+                },
+                sub("web", "fix-auth", 1),
+                SidebarRow::Agent(3),
+                sub("web", "main", 1),
+                SidebarRow::Agent(4),
+                SidebarRow::Rule {
+                    label: STALE_RULE_LABEL.to_string()
+                },
+                SidebarRow::StaleGroup {
+                    label: "zed".to_string(),
+                    count: 1,
+                    expanded: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn worktree_rows_number_the_agents_the_published_list_carries() {
+        let snapshot = worktree_snapshot();
+        let published: Vec<String> = snapshot
+            .agents
+            .iter()
+            .filter(|agent| super::super::snapshot::is_jump_target(&snapshot, agent))
+            .map(|agent| agent.pane_id.clone())
+            .collect();
+        let mut app = app();
+        app.apply_snapshot(snapshot);
+
+        assert_eq!(
+            app.jump_numbers,
+            vec![Some(0), None, None, Some(1), Some(2), None]
+        );
+        let mut numbered: Vec<(usize, &str)> = app
+            .jump_numbers
+            .iter()
+            .zip(&app.agents)
+            .filter_map(|(n, agent)| Some(((*n)?, agent.pane_id.as_str())))
+            .collect();
+        numbered.sort_unstable();
+        let numbered: Vec<&str> = numbered.into_iter().map(|(_, pane)| pane).collect();
+        assert_eq!(numbered, published);
+    }
+
+    #[test]
+    fn a_worktree_name_shared_by_two_projects_folds_independently() {
+        let mut app = app();
+        let mut snapshot = worktree_snapshot();
+        // Both projects hold a fix-auth worktree; only api's is expanded.
+        snapshot.expanded_groups = vec!["web/fix-auth".to_string()];
+        app.apply_snapshot(snapshot);
+        assert!(!app.rows.contains(&SidebarRow::Agent(1)));
+
+        app.expanded_groups = ["api/fix-auth".to_string()].into();
+        app.rebuild_rows();
+        assert!(app.rows.contains(&SidebarRow::Agent(1)));
+        assert!(app.rows.contains(&SidebarRow::StaleTail {
+            group: "api/fix-auth".to_string(),
+            count: 1,
+            expanded: true
+        }));
+        // The sibling worktree with the same toggle shape stays folded.
+        assert!(!app.rows.contains(&SidebarRow::Agent(2)));
+
+        // Each agent folds behind its own worktree, or behind the whole
+        // project when the project holds no live work.
+        assert_eq!(app.fold_key(0).as_deref(), Some("api/fix-auth"));
+        assert_eq!(app.fold_key(2).as_deref(), Some("api/add-billing"));
+        assert_eq!(app.fold_key(3).as_deref(), Some("web/fix-auth"));
+        assert_eq!(app.fold_key(5).as_deref(), Some("zed"));
+    }
+
+    #[test]
+    fn a_dormant_project_expands_into_its_worktrees_and_pins_the_host() {
+        let mut app = app();
+        app.apply_snapshot(worktree_snapshot());
+        let zed_rows = |app: &SidebarApp| {
+            let start = app
+                .rows
+                .iter()
+                .position(|row| matches!(row, SidebarRow::StaleGroup { .. }))
+                .unwrap();
+            app.rows[start + 1..].to_vec()
+        };
+        let zed_main = SidebarRow::Subheader {
+            group: "zed/main".to_string(),
+            label: "main".to_string(),
+            count: 1,
+        };
+        assert!(zed_rows(&app).is_empty());
+
+        // The sidebar's own agent stays in sight, under its worktree.
+        app.host_agent_idx = Some(5);
+        app.rebuild_rows();
+        assert_eq!(zed_rows(&app), vec![zed_main.clone(), SidebarRow::Agent(5)]);
+        assert_eq!(app.jump_numbers[5], None);
+
+        app.host_agent_idx = None;
+        app.expanded_groups = ["zed".to_string()].into();
+        app.rebuild_rows();
+        assert_eq!(zed_rows(&app), vec![zed_main, SidebarRow::Agent(5)]);
+    }
+
+    #[test]
+    fn a_dormant_worktree_toggle_is_selectable_and_restored() {
+        let mut app = app();
+        app.apply_snapshot(worktree_snapshot());
+        let toggle = app
+            .rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::StaleSubgroup { .. }))
+            .unwrap();
+        assert!(app.selectable_rows().contains(&toggle));
+        app.list_state.select(Some(toggle));
+        assert_eq!(app.selected_toggle().as_deref(), Some("api/add-billing"));
+
+        let mut next = worktree_snapshot();
+        next.expanded_groups = vec!["api/add-billing".to_string()];
+        app.apply_snapshot(next);
+        assert_eq!(app.selected_toggle().as_deref(), Some("api/add-billing"));
+        assert_eq!(app.rows.get(toggle + 1), Some(&SidebarRow::Agent(2)));
+    }
+
+    #[test]
+    fn worktree_grouping_in_the_top_bar_keeps_order_without_headers() {
+        let mut app = app();
+        let mut snapshot = worktree_snapshot();
+        snapshot.position = SidebarPosition::Top;
+        app.apply_snapshot(snapshot);
+        assert_eq!(pane_order(&app), ["%1", "%2", "%3", "%5", "%4", "%6"]);
+        assert_eq!(app.rows, (0..6).map(SidebarRow::Agent).collect::<Vec<_>>());
+        assert!(!app.draws_subgroups());
+    }
+
     #[test]
     fn a_list_with_only_stale_groups_starts_with_a_stale_rule() {
         let mut app = app();
@@ -3281,6 +3651,40 @@ mod grouping_tests {
         let strings = resolved_template_strings(cfg.sidebar.templates.as_ref(), true);
         assert_eq!(strings.group_header, "{group}");
         assert_eq!(strings.compact, DEFAULT_COMPACT_TEMPLATE);
+    }
+
+    #[test]
+    fn a_subheader_template_falls_back_to_the_header_template() {
+        assert_eq!(
+            resolved_template_strings(None, true).group_subheader,
+            DEFAULT_GROUP_HEADER_TEMPLATE
+        );
+        let grouped = |header: Option<&str>, subheader: Option<&str>| TemplatesConfig {
+            grouped: Some(crate::config::GroupedTemplatesConfig {
+                header: header.map(String::from),
+                subheader: subheader.map(String::from),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let header_only = grouped(Some("{group}"), None);
+        assert_eq!(
+            resolved_template_strings(Some(&header_only), true).group_subheader,
+            "{group}"
+        );
+        let both = grouped(Some("{group}"), Some("- {group}"));
+        let strings = resolved_template_strings(Some(&both), true);
+        assert_eq!(strings.group_header, "{group}");
+        assert_eq!(strings.group_subheader, "- {group}");
+
+        // Subheaders accept only what headers accept.
+        let broken = grouped(None, Some("{group} {primary}"));
+        let (parsed, error) = parse_templates(&resolved_template_strings(Some(&broken), true));
+        assert_eq!(error.unwrap().location, "group_subheader");
+        assert_eq!(
+            parsed.group_subheader,
+            parse_line(DEFAULT_GROUP_HEADER_TEMPLATE).unwrap()
+        );
     }
 
     #[test]

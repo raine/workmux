@@ -98,8 +98,9 @@ sidebar:
   # Row ordering: "recency" (default), "priority" or "window"
   sort: recency
 
-  # Group agents into labeled sections: "project" or "session". Unset by
-  # default, which keeps one flat list without headers
+  # Group agents into labeled sections: "project", "session" or "worktree"
+  # (worktrees nested under their project). Unset by default, which keeps
+  # one flat list without headers
   group_by: project
 
   # While grouped, fold each group's stale agents behind a toggle
@@ -182,11 +183,12 @@ as many configured lines as the current height allows.
 ## Grouping
 
 Grouping splits the list into sections with a header above each, one per
-repository or one per tmux session. It is off by default:
+repository or one per tmux session, or one per repository with a subsection per
+worktree. It is off by default:
 
 ```yaml
 sidebar:
-  group_by: project # or session
+  group_by: project # or session, or worktree
 ```
 
 <Screenshot
@@ -216,6 +218,7 @@ From anywhere, use the command line:
 workmux sidebar group          # Toggle between grouped and flat
 workmux sidebar group project  # One section per repository
 workmux sidebar group session  # One section per tmux session
+workmux sidebar group worktree # Worktree sections inside each repository
 workmux sidebar group none     # One flat list, no headers
 workmux sidebar group --clear  # Follow the config file again
 ```
@@ -224,6 +227,47 @@ Every sidebar switches together, the agent navigation commands follow the same
 order, and the choice survives a tmux restart. It also overrides `group_by`
 until you clear it, so run `workmux sidebar group --clear` once you have settled
 on a value in config.
+
+### Worktrees within projects
+
+`group_by: worktree` heads each repository like `project` does, then gives each
+of its worktrees a subheader, so several agents working in one worktree sit
+together without repeating its name:
+
+```
+api                    3
+  add-billing          1
+⚡ Stripe webhook handler
+  fix-auth             2
+⚡ Refresh token rotation
+💬 Review middleware
+web                    1
+  main                 1
+✅ Dark mode toggle
+```
+
+A worktree is the git worktree the agent's directory belongs to, found from the
+nearest `.git` above it: a linked worktree is named after its directory, and a
+repository's main checkout is `main`. Window and session names play no part, so
+this works the same with `mode: window` and `mode: session`, and two sessions
+open on one worktree share its subheader. Remote agents are grouped by their
+workspace handle, shown as `handle@remote`, apart from any local worktree of
+the same name.
+
+Worktrees sort alphabetically inside their project, and `sort` orders the
+agents inside each worktree, so an agent never leaves its worktree. A worktree
+name that appears in several projects, such as `main`, is a separate
+subsection in each.
+
+Under the subheaders, `{primary}` names the agent instead of its worktree: its
+pane title, then a meaningful window name, then its agent kind such as
+`Claude`, falling back to the worktree name only when none of those is known.
+`{secondary}` takes the next of the same list. `{worktree}` and `{project}`
+still render their names wherever a template asks for them. The top bar draws
+no headers, so its chips keep the usual labels.
+
+When scrolled, the sidebar pins both the project header and the worktree
+subheader above the list.
 
 ### Grouped templates
 
@@ -240,9 +284,11 @@ sidebar:
         - "{pane_title} {fill} {pr_checks} {git_stats}"
 ```
 
-`grouped` accepts `compact`, `tiles` and `header`. A field you leave out falls
-back to your ungrouped template of the same name, then to the grouped default,
-so a sidebar you have already customized keeps its rows when you group it. See
+`grouped` accepts `compact`, `tiles`, `header` and `subheader`. A field you
+leave out falls back to your ungrouped template of the same name, then to the
+grouped default, so a sidebar you have already customized keeps its rows when
+you group it. `subheader` renders the worktree rows of `group_by: worktree` and
+falls back to `header`. See
 [Customization](/guide/sidebar/customization/) for the available tokens.
 
 ## Folding stale agents
@@ -270,6 +316,13 @@ rather than a full tile.
 A group whose agents are all stale has no live rows to head, so its header
 becomes its own toggle and the whole group costs one row. Those groups sort
 below every group still holding live work, under a `STALE` rule.
+
+With `group_by: worktree`, each worktree folds its own stale agents, and a
+worktree with no live agents turns its subheader into its toggle and sorts
+below the project's live worktrees. A project with no live agents in any
+worktree folds whole behind its header; opening it shows every worktree with
+its agents. Folds are kept per project and worktree, so opening `fix-auth` in
+one project leaves a `fix-auth` in another closed.
 
 Which groups are open is shared by every sidebar pane, for as long as the tmux
 server runs: closing and reopening the sidebar keeps your folds, restarting

@@ -3,7 +3,8 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::agent_display::{
-    extract_project_name, extract_worktree_name, resolve_labels, sanitize_pane_title,
+    extract_project_name, extract_worktree_name, resolve_labels, resolve_nested_labels,
+    sanitize_pane_title,
 };
 use crate::agent_identity::AgentKind;
 use crate::git::GitStatus;
@@ -99,13 +100,27 @@ impl<'a> RowContext<'a> {
         } else {
             agent.window_name.as_str()
         };
-        let (primary, secondary) = resolve_labels(
-            &project,
-            session,
-            &label_worktree,
-            window,
-            agent.window_cmd.as_deref(),
-        );
+        let kind =
+            effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
+        let agent_label = resolve_agent_label(kind);
+        let (primary, secondary) = if app.draws_subgroups() {
+            resolve_nested_labels(
+                sanitize_pane_title(agent.pane_title.as_deref(), &label_worktree, &project)
+                    .filter(|title| !is_hostname_title(title)),
+                window,
+                agent.window_cmd.as_deref(),
+                &agent_label,
+                &label_worktree,
+            )
+        } else {
+            resolve_labels(
+                &project,
+                session,
+                &label_worktree,
+                window,
+                agent.window_cmd.as_deref(),
+            )
+        };
         let pane_suffix = pane_suffixes[idx].clone();
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
@@ -157,11 +172,8 @@ impl<'a> RowContext<'a> {
         };
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
-        let kind =
-            effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
         let agent_icon_color = resolve_agent_icon_color(kind, &app.agent_icons);
-        let agent_label = resolve_agent_label(kind);
 
         Self {
             agent,

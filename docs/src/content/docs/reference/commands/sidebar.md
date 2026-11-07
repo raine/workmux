@@ -57,16 +57,16 @@ Switch between agents from any tmux pane, in the same order shown in the
 sidebar. Navigation uses the same filter mode as the sidebar view, so it cycles
 through all sessions by default:
 
-| Command                         | Action                                               |
-| ------------------------------- | ---------------------------------------------------- |
-| `workmux sidebar next`          | Switch to the next agent (wraps)                     |
-| `workmux sidebar prev`          | Switch to the previous agent (wraps)                 |
-| `workmux sidebar jump <N>`      | Jump to the Nth agent (1-indexed)                    |
-| `workmux sidebar filter`        | Toggle session filter (none/session)                 |
-| `workmux sidebar filter <MODE>` | Set filter mode: `none`/`all` or `session`/`project` |
-| `workmux sidebar group`         | Toggle grouping between grouped and flat             |
-| `workmux sidebar group <MODE>`  | Set grouping: `none`/`off`, `project` or `session`   |
-| `workmux sidebar group --clear` | Drop the runtime grouping and follow config again    |
+| Command                         | Action                                                         |
+| ------------------------------- | -------------------------------------------------------------- |
+| `workmux sidebar next`          | Switch to the next agent (wraps)                               |
+| `workmux sidebar prev`          | Switch to the previous agent (wraps)                           |
+| `workmux sidebar jump <N>`      | Jump to the Nth agent (1-indexed)                              |
+| `workmux sidebar filter`        | Toggle session filter (none/session)                           |
+| `workmux sidebar filter <MODE>` | Set filter mode: `none`/`all` or `session`/`project`           |
+| `workmux sidebar group`         | Toggle grouping between grouped and flat                       |
+| `workmux sidebar group <MODE>`  | Set grouping: `none`/`off`, `project`, `session` or `worktree` |
+| `workmux sidebar group --clear` | Drop the runtime grouping and follow config again              |
 
 ### Example tmux keybindings
 
@@ -99,7 +99,7 @@ sidebar:
   enter_action: focus # "focus" (default) or "select"
   git_status: true # collect Git status and GitHub PR/check data (default)
   dim_stale: true # dim stale agents using stale_after
-  group_by: project # "project" or "session"; unset keeps one flat list
+  group_by: project # "project", "session" or "worktree"; unset keeps one flat list
   collapse_stale: true # while grouped, fold stale agents behind a toggle
 ```
 

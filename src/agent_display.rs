@@ -26,9 +26,31 @@ pub fn extract_worktree_name(
     }
 }
 
+/// Name of the git worktree a local directory belongs to, and whether it is
+/// the main checkout.
+///
+/// The nearest `.git` above the path decides: a file marks a linked worktree,
+/// named after the directory holding it, and a directory marks the main
+/// checkout. A path with no `.git` above it falls back to the worktree
+/// directory patterns.
+pub fn worktree_of_path(path: &Path) -> (String, bool) {
+    for ancestor in path.ancestors() {
+        let git = ancestor.join(".git");
+        if git.is_file()
+            && let Some(name) = ancestor.file_name()
+        {
+            return (name.to_string_lossy().to_string(), false);
+        }
+        if git.is_dir() {
+            return ("main".to_string(), true);
+        }
+    }
+    derive_worktree_name_from_path(path)
+}
+
 /// Derive a worktree name from a filesystem path by matching known worktree
 /// directory patterns. Pure string/path-component parsing, no filesystem I/O.
-fn derive_worktree_name_from_path(path: &Path) -> (String, bool) {
+pub fn derive_worktree_name_from_path(path: &Path) -> (String, bool) {
     let components: Vec<_> = path
         .components()
         .filter_map(|c| c.as_os_str().to_str())
@@ -170,6 +192,31 @@ pub fn resolve_labels(
     };
 
     (primary_text, secondary)
+}
+
+/// Resolve the primary and secondary labels for a row drawn under headers
+/// that already name its project and worktree.
+///
+/// Repeating those on every row says nothing, so the labels name the agent
+/// itself instead: its pane title, then a meaningful window name, then its
+/// agent kind. A row with none of those keeps the worktree as its primary
+/// label rather than going blank.
+pub fn resolve_nested_labels(
+    title: Option<&str>,
+    window: &str,
+    window_cmd: Option<&str>,
+    agent_label: &str,
+    worktree: &str,
+) -> (String, String) {
+    let window = is_window_meaningful(window, window_cmd).then_some(window);
+    let agent_label = (!agent_label.is_empty()).then_some(agent_label);
+    let mut labels = [title, window, agent_label].into_iter().flatten();
+    let primary = labels.next().unwrap_or(worktree).to_string();
+    let secondary = labels
+        .find(|label| *label != primary)
+        .unwrap_or_default()
+        .to_string();
+    (primary, secondary)
 }
 
 /// Generic window names that should never be promoted as a primary label,
@@ -356,6 +403,52 @@ mod tests {
         let (name, is_main) = extract_worktree_name("0", "zsh", "workmux:", path);
         assert_eq!(name, "fix-bug");
         assert!(!is_main);
+    }
+
+    #[test]
+    fn worktree_of_path_reads_the_nearest_git_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("api");
+        let linked = root.path().join("elsewhere/fix-auth");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::create_dir_all(linked.join("src")).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: /x\n").unwrap();
+
+        assert_eq!(
+            worktree_of_path(&checkout.join("src")),
+            ("main".into(), true)
+        );
+        // A linked worktree outside the usual layout is still found, from a
+        // subdirectory too.
+        assert_eq!(
+            worktree_of_path(&linked.join("src")),
+            ("fix-auth".into(), false)
+        );
+        // No git entry on this machine: the directory pattern decides.
+        assert_eq!(
+            worktree_of_path(Path::new("/nonexistent/api__worktrees/feat/src")),
+            ("feat".into(), false)
+        );
+    }
+
+    #[test]
+    fn nested_labels_name_the_agent_rather_than_its_worktree() {
+        assert_eq!(
+            resolve_nested_labels(Some("Review middleware"), "w", None, "Claude", "fix-auth"),
+            ("Review middleware".into(), "Claude".into())
+        );
+        assert_eq!(
+            resolve_nested_labels(None, "server", Some("node"), "Claude", "fix-auth"),
+            ("server".into(), "Claude".into())
+        );
+        assert_eq!(
+            resolve_nested_labels(None, "zsh", Some("node"), "Claude", "fix-auth"),
+            ("Claude".into(), String::new())
+        );
+        assert_eq!(
+            resolve_nested_labels(None, "w", None, "", "fix-auth"),
+            ("fix-auth".into(), String::new())
+        );
     }
 
     #[test]

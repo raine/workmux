@@ -92,10 +92,11 @@ fn default_stale_threshold_secs() -> u64 {
     STALE_THRESHOLD_SECS
 }
 
-/// The group an agent belongs to under the given grouping mode.
+/// The group an agent belongs to under the given grouping mode. Worktree
+/// grouping nests worktrees under their project, so its groups are projects.
 pub fn group_label(agent: &AgentPane, group_by: SidebarGroupBy) -> String {
     let raw = match group_by {
-        SidebarGroupBy::Project => extract_project_name(&agent.path),
+        SidebarGroupBy::Project | SidebarGroupBy::Worktree => extract_project_name(&agent.path),
         // A remote agent no local pane relays is in no session.
         SidebarGroupBy::Session => match &agent.remote {
             Some(remote) if agent.session.is_empty() => format!("@{}", remote.at.remote),
@@ -103,6 +104,50 @@ pub fn group_label(agent: &AgentPane, group_by: SidebarGroupBy) -> String {
         },
         SidebarGroupBy::None => String::new(),
     };
+    nonempty_label(raw)
+}
+
+/// The subgroup an agent belongs to inside its group, for groupings that nest.
+/// Under worktree grouping that is the worktree the agent's directory sits in.
+/// A remote agent's worktree is its workspace handle qualified by its remote,
+/// the `{worktree}` label it shows, so it never merges with a local worktree
+/// of the same name.
+pub fn subgroup_label(agent: &AgentPane, group_by: SidebarGroupBy) -> Option<String> {
+    if !group_by.nests() {
+        return None;
+    }
+    let raw = match &agent.remote {
+        Some(remote) => {
+            let handle = if remote.handle.is_empty() {
+                crate::agent_display::derive_worktree_name_from_path(&agent.path).0
+            } else {
+                remote.handle.clone()
+            };
+            crate::remote::agents::label(&handle, &remote.at.remote)
+        }
+        None => crate::agent_display::worktree_of_path(&agent.path).0,
+    };
+    Some(nonempty_label(raw))
+}
+
+/// State key of a subgroup: the label alone repeats across groups (every
+/// project has a `main`), so the key is qualified by its group. Group labels
+/// are directory names, which cannot hold the separator.
+pub fn subgroup_key(group: &str, subgroup: &str) -> String {
+    format!("{group}/{subgroup}")
+}
+
+/// State key of the innermost section an agent belongs to: its subgroup when
+/// the grouping nests, else its group.
+pub fn section_key(agent: &AgentPane, group_by: SidebarGroupBy) -> String {
+    let group = group_label(agent, group_by);
+    match subgroup_label(agent, group_by) {
+        Some(subgroup) => subgroup_key(&group, &subgroup),
+        None => group,
+    }
+}
+
+fn nonempty_label(raw: String) -> String {
     if raw.trim().is_empty() {
         UNKNOWN_GROUP_LABEL.to_string()
     } else {
@@ -110,16 +155,10 @@ pub fn group_label(agent: &AgentPane, group_by: SidebarGroupBy) -> String {
     }
 }
 
-/// Alphabetical group ordering: case-insensitive, with the raw label breaking
-/// ties so labels differing only in case keep a deterministic order.
-fn group_sort_key(agent: &AgentPane, group_by: Option<SidebarGroupBy>) -> (String, String) {
-    match group_by {
-        Some(mode) => {
-            let label = group_label(agent, mode);
-            (label.to_lowercase(), label)
-        }
-        None => (String::new(), String::new()),
-    }
+/// Alphabetical ordering of a label: case-insensitive, with the raw label
+/// breaking ties so labels differing only in case keep a deterministic order.
+fn label_sort_key(label: String) -> (String, String) {
+    (label.to_lowercase(), label)
 }
 
 /// Numeric pane id for stable ordering. Handles tmux (`%3`) and numeric ids.
@@ -188,9 +227,9 @@ fn priority_category(agent: &AgentPane, now: u64, staleness: &StalenessContext<'
     }
 }
 
-/// Labels of the groups holding no live work. They sort below every other
-/// group, so a project that is entirely asleep stops sitting between projects
-/// that are not.
+/// Keys of the groups and subgroups holding no live work. They sort below
+/// every other group, or every other subgroup of their group, so a project
+/// that is entirely asleep stops sitting between projects that are not.
 fn dormant_groups(
     agents: &[AgentPane],
     group_by: Option<SidebarGroupBy>,
@@ -203,19 +242,25 @@ fn dormant_groups(
     let mut all = HashSet::new();
     let mut live = HashSet::new();
     for agent in agents {
+        let stale = staleness.is_stale(agent, now);
         let label = group_label(agent, mode);
-        if !staleness.is_stale(agent, now) {
-            live.insert(label.clone());
+        let keys = std::iter::once(section_key(agent, mode))
+            .chain(subgroup_label(agent, mode).is_some().then_some(label));
+        for key in keys {
+            if !stale {
+                live.insert(key.clone());
+            }
+            all.insert(key);
         }
-        all.insert(label);
     }
-    all.retain(|label| !live.contains(label));
+    all.retain(|key| !live.contains(key));
     all
 }
 
-/// Order agents for publication: groups alphabetically, then the configured
-/// ordering within each group. Grouping only prefixes the key, so an agent can
-/// never leave its group. Ordering stays with the daemon so the published pane
+/// Order agents for publication: groups alphabetically, subgroups
+/// alphabetically within them, then the configured ordering within each.
+/// Grouping only prefixes the key, so an agent can never leave its group or
+/// subgroup. Ordering stays with the daemon so the published pane
 /// list, `{idx}` and `workmux sidebar jump` agree with what clients draw.
 fn order_agents(
     agents: &mut [AgentPane],
@@ -234,9 +279,21 @@ fn order_agents(
     // form one contiguous tail that a single toggle row can stand for, whatever
     // the configured sort does.
     let group_sort_key = |agent: &AgentPane| {
-        let (lower, label) = group_sort_key(agent, group_by);
         let stale = sink_dormant_groups && staleness.is_stale(agent, now);
-        (dormant.contains(&label), lower, label, stale)
+        let Some(mode) = group_by else {
+            return (false, Default::default(), None, stale);
+        };
+        let label = group_label(agent, mode);
+        let subgroup = subgroup_label(agent, mode).map(|subgroup| {
+            let dormant = dormant.contains(&subgroup_key(&label, &subgroup));
+            (dormant, label_sort_key(subgroup))
+        });
+        (
+            dormant.contains(&label),
+            label_sort_key(label),
+            subgroup,
+            stale,
+        )
     };
     match sort {
         SidebarSort::Recency => agents.sort_by_cached_key(|a| {
@@ -788,6 +845,131 @@ mod tests {
             UNKNOWN_GROUP_LABEL
         );
         assert_eq!(group_label(&a, SidebarGroupBy::Project), "api");
+    }
+
+    /// Agents across two projects that share a worktree name, with the
+    /// worktree runs interleaved so only the grouping can keep them together.
+    fn worktree_fixture(now: u64) -> Vec<AgentPane> {
+        let at = |project: &str, worktree: &str, pane: u32, age: u64| {
+            let mut a = grouped_agent(project, "s", pane, age, now);
+            a.path = PathBuf::from(format!("/tmp/{project}__worktrees/{worktree}"));
+            a.window_index = Some(10 - pane);
+            a
+        };
+        let mut waiting = at("api", "zeta", 1, 10_000);
+        waiting.status = Some(AgentStatus::Waiting);
+        vec![
+            waiting,
+            at("web", "fix", 2, 5),
+            at("api", "fix", 3, 1),
+            at("api", "zeta", 4, 2),
+            at("api", "fix", 5, 3),
+            at("web", "fix", 6, 4),
+        ]
+    }
+
+    #[test]
+    fn worktree_grouping_keeps_worktrees_contiguous_under_every_sort() {
+        let empty = HashSet::new();
+        let staleness = StalenessContext {
+            sleeping: &empty,
+            interrupted: &empty,
+            stale_threshold_secs: STALE_THRESHOLD_SECS,
+        };
+        let expected = [
+            (SidebarSort::Recency, ["%3", "%5", "%4", "%1", "%6", "%2"]),
+            (SidebarSort::Priority, ["%3", "%5", "%1", "%4", "%6", "%2"]),
+            (SidebarSort::Window, ["%5", "%3", "%4", "%1", "%6", "%2"]),
+        ];
+        for (sort, expected) in expected {
+            let mut agents = worktree_fixture(NOW);
+            order_agents(
+                &mut agents,
+                Some(SidebarGroupBy::Worktree),
+                sort,
+                NOW,
+                &staleness,
+                false,
+            );
+            assert_eq!(order(&agents), expected, "{sort:?}");
+            let sections: Vec<String> = agents
+                .iter()
+                .map(|a| section_key(a, SidebarGroupBy::Worktree))
+                .collect();
+            let mut runs = sections.clone();
+            runs.dedup();
+            assert_eq!(runs, ["api/fix", "api/zeta", "web/fix"], "{sort:?}");
+        }
+    }
+
+    #[test]
+    fn dormant_worktrees_sink_within_their_project() {
+        let mut agents = worktree_fixture(NOW);
+        // api/fix goes quiet; api/zeta keeps a waiting agent.
+        for a in &mut agents {
+            if a.path.ends_with("fix") && a.path.starts_with("/tmp/api__worktrees") {
+                a.activity_ts = Some(NOW - 10_000);
+            }
+        }
+        let empty = HashSet::new();
+        let staleness = StalenessContext {
+            sleeping: &empty,
+            interrupted: &empty,
+            stale_threshold_secs: STALE_THRESHOLD_SECS,
+        };
+        order_agents(
+            &mut agents,
+            Some(SidebarGroupBy::Worktree),
+            SidebarSort::Recency,
+            NOW,
+            &staleness,
+            true,
+        );
+        let mut runs: Vec<String> = agents
+            .iter()
+            .map(|a| section_key(a, SidebarGroupBy::Worktree))
+            .collect();
+        runs.dedup();
+        assert_eq!(runs, ["api/zeta", "api/fix", "web/fix"]);
+    }
+
+    #[test]
+    fn subgroups_are_qualified_by_their_project_and_remote() {
+        let local = agent("/tmp/api__worktrees/fix");
+        let mut other = agent("/tmp/web__worktrees/fix");
+        other.pane_id = "%2".to_string();
+        let mode = SidebarGroupBy::Worktree;
+        assert_eq!(subgroup_label(&local, mode).as_deref(), Some("fix"));
+        assert_eq!(subgroup_label(&other, mode).as_deref(), Some("fix"));
+        assert_eq!(section_key(&local, mode), "api/fix");
+        assert_eq!(section_key(&other, mode), "web/fix");
+        // Flat groupings have no subgroups, and their section is the group.
+        assert_eq!(subgroup_label(&local, SidebarGroupBy::Project), None);
+        assert_eq!(section_key(&local, SidebarGroupBy::Project), "api");
+
+        // A remote copy of the same worktree is a different worktree.
+        let mut remote = local.clone();
+        remote.remote = Some(crate::multiplexer::RemoteAgent {
+            at: crate::multiplexer::RemoteRef {
+                remote: "box".to_string(),
+                ws_id: "ws".to_string(),
+                ex_id: "ex".to_string(),
+                pane: 0,
+            },
+            handle: "fix".to_string(),
+            project_root: PathBuf::from("/tmp/api"),
+            host: String::new(),
+            attached: false,
+            connected: true,
+            last_seen: None,
+            git: None,
+            ended: None,
+        });
+        assert_eq!(section_key(&remote, mode), "api/fix@box");
+
+        // The main checkout is `main` in every project.
+        let checkout = agent("/tmp/web");
+        assert_eq!(section_key(&checkout, mode), "web/main");
     }
 
     #[test]

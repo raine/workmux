@@ -964,7 +964,7 @@ pub enum SidebarAction {
     /// Set sidebar grouping. Toggles between grouped and flat if no mode is
     /// given.
     Group {
-        /// Grouping: "none"/"off", "project" or "session"
+        /// Grouping: "none"/"off", "project", "session" or "worktree"
         #[arg(value_name = "MODE")]
         mode: Option<String>,
         /// Drop the runtime grouping and follow the config file again

@@ -903,7 +903,10 @@ pub(crate) fn parse_sidebar_group_by(raw: &str) -> Result<Option<crate::config::
         "none" | "off" | "flat" => Ok(None),
         "project" => Ok(Some(crate::config::SidebarGroupBy::Project)),
         "session" => Ok(Some(crate::config::SidebarGroupBy::Session)),
-        other => bail!("invalid sidebar grouping {other:?}; expected none, project or session"),
+        "worktree" => Ok(Some(crate::config::SidebarGroupBy::Worktree)),
+        other => {
+            bail!("invalid sidebar grouping {other:?}; expected none, project, session or worktree")
+        }
     }
 }
 
@@ -914,6 +917,7 @@ pub(crate) fn group_by_option_value(
         None | Some(crate::config::SidebarGroupBy::None) => "none",
         Some(crate::config::SidebarGroupBy::Project) => "project",
         Some(crate::config::SidebarGroupBy::Session) => "session",
+        Some(crate::config::SidebarGroupBy::Worktree) => "worktree",
     }
 }
 
@@ -1172,6 +1176,10 @@ mod tests {
             parse_sidebar_group_by("session").unwrap(),
             Some(crate::config::SidebarGroupBy::Session)
         );
+        assert_eq!(
+            parse_sidebar_group_by("Worktree").unwrap(),
+            Some(crate::config::SidebarGroupBy::Worktree)
+        );
         assert!(parse_sidebar_group_by("porject").is_err());
     }
 
@@ -1181,6 +1189,7 @@ mod tests {
             None,
             Some(crate::config::SidebarGroupBy::Project),
             Some(crate::config::SidebarGroupBy::Session),
+            Some(crate::config::SidebarGroupBy::Worktree),
         ] {
             assert_eq!(
                 parse_sidebar_group_by(group_by_option_value(mode)).unwrap(),

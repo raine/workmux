@@ -29,6 +29,9 @@ sidebar:
     # then to the grouped default.
     grouped:
       header: "{group} {fill} {group_count}"
+      # Worktree rows under a project header with group_by: worktree.
+      # Falls back to header.
+      subheader: "{group} {fill} {group_count}"
       tiles:
         - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
         - "{pane_title} {fill} {git_stats}"
@@ -48,7 +51,7 @@ sidebars without a restart.
 
 | Token            | Description                                                                                                                                     |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{primary}`      | Primary identity label (worktree / window / session / project chain).                                                                           |
+| `{primary}`      | Primary identity label (worktree / window / session / project chain). Under `group_by: worktree` subheaders it names the agent instead.         |
 | `{secondary}`    | Secondary label from the same chain, with worktree appended if not already primary.                                                             |
 | `{worktree}`     | Worktree directory name.                                                                                                                        |
 | `{project}`      | Project name (parent of the worktree).                                                                                                          |
@@ -75,14 +78,17 @@ sidebars without a restart.
 | `{jump_key}`     | The `M-1`..`M-9` chord label for the first nine rows. Empty for row 10 and beyond.                                                              |
 | `{fill}`         | Layout marker that splits a line into a left and right segment. At most one per line.                                                           |
 
-Group headers use their own token set, and agent tokens are rejected there
-because a header does not represent one agent:
+Group headers and subheaders use their own token set, and agent tokens are
+rejected there because a header does not represent one agent:
 
-| Token            | Description                                                              |
-| ---------------- | ------------------------------------------------------------------------ |
-| `{group}`        | Group name: the project name or the tmux session name.                   |
-| `{group_count}`  | Number of agents the sidebar shows in the group, sleeping ones included. |
-| `{group_status}` | Status tally for the group, using your status icons, most urgent first.  |
+| Token            | Description                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `{group}`        | Group name: the project or tmux session name, or the worktree name in a subheader. |
+| `{group_count}`  | Number of agents the sidebar shows in the group, sleeping ones included.           |
+| `{group_status}` | Status tally for the group, using your status icons, most urgent first.            |
+
+In a subheader, `{group_count}` and `{group_status}` count only that worktree's
+agents.
 
 `{group}` is flexible, so a long group name truncates before `{group_count}` is
 dropped.
