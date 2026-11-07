@@ -1,0 +1,57 @@
+---
+title: "Rex"
+description: Use Rex as an alternative multiplexer backend
+---
+
+:::caution[Experimental]
+The Rex backend is new and experimental. Expect rough edges and potential issues.
+:::
+
+[Rex](https://www.superlogical.com/rex) can be used as an alternative to tmux. Detected automatically via `$REX_BLOCK`, which Rex sets in every terminal it starts.
+
+## Differences from tmux
+
+| Feature              | tmux                 | Rex                           |
+| -------------------- | -------------------- | ----------------------------- |
+| Agent status in tabs | Yes (window names)   | Shown by Rex itself           |
+| Tab ordering         | Insert after current | Appends to end                |
+| Scope                | tmux server          | Rex server                    |
+| Switching sessions   | Always               | Needs Remote Control (below)  |
+
+- **Terminology**: What workmux calls a "pane" is a "block" in Rex, and a workmux "window" is a Rex window (shown as a tab). Rex sessions map to tmux sessions.
+- **Session mode**: Not supported yet. Like the other alternative backends, Rex uses window mode.
+- **Tab ordering**: New windows appear at the end of the tab bar (no "insert after" support like tmux).
+- **Agent status**: workmux tracks agent status as usual and shows it in the [dashboard](/guide/dashboard/). It doesn't write status icons into tab titles, because Rex already shows each agent's state from the status programs report to it.
+- **Pane sizing**: `percentage` is supported. Absolute `size` values are ignored.
+
+## Requirements
+
+- Rex with the `rex` CLI on your `PATH`
+- workmux run from inside a Rex terminal, so `$REX_SERVER`, `$REX_SESSION` and `$REX_BLOCK` are set
+
+No Rex configuration is needed for creating windows and splits, sending input, capturing output or jumping between panes in the same session.
+
+## Switching sessions
+
+Showing a different session in the Rex app is a client action. Rex only accepts client actions from the CLI when **Remote Control** is on, under Settings > Rex Server.
+
+With Remote Control off, everything else still works. When workmux would switch you to another session, for example when jumping to an agent in another session from the dashboard, it prints the session's name instead, so you can open it yourself.
+
+## How it talks to Rex
+
+workmux drives Rex only through the `rex` CLI. To list panes, it runs one Lua script through `rex do` that returns every session and pane on the server, with each pane's foreground process, working directory and title. That is a single process per refresh, which keeps the dashboard responsive.
+
+## Testing
+
+The integration tests can run against Rex. Each test gets its own session on your running Rex server and removes it afterwards:
+
+```bash
+just itest --backend=rex
+```
+
+## Known limitations
+
+- Session mode (`--session`) is not supported yet
+- Switching sessions needs Remote Control (see above)
+- Tab insertion ordering is not supported (new windows always appear at the end)
+- Some edge cases may not be as thoroughly tested as the tmux backend

@@ -2914,11 +2914,14 @@ alternative terminal multiplexers:
   configuration.
 - **[Zellij](https://workmux.dev/guide/zellij)** (experimental) - For
   users who prefer Zellij. Detected automatically via `$ZELLIJ`.
+- **[Rex](https://workmux.dev/guide/rex)** (experimental) - For users of
+  the Rex multiplexer. Detected automatically via `$REX_BLOCK`.
 
 workmux auto-detects the backend from environment variables (`$TMUX`,
-`$WEZTERM_PANE`, `$KITTY_WINDOW_ID`, or `$ZELLIJ`). Session-specific variables
-are checked first, so running tmux inside kitty correctly selects the tmux
-backend. Set `$WORKMUX_BACKEND` to override detection.
+`$WEZTERM_PANE`, `$ZELLIJ`, `$KITTY_WINDOW_ID`, or `$REX_BLOCK`).
+Session-specific variables are checked first, so running tmux inside kitty or
+Rex correctly selects the tmux backend. Set `$WORKMUX_BACKEND` to override
+detection.
 
 ## Inspiration and related tools
 

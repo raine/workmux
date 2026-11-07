@@ -11,7 +11,7 @@ import screenshot from "../../../assets/screenshots/hero-screenshot.webp";
 workmux is a giga opinionated zero-friction workflow tool for managing
 [git worktrees](https://git-scm.com/docs/git-worktree) and tmux windows as
 isolated development environments. Also supports [kitty](/guide/kitty/),
-[WezTerm](/guide/wezterm/), and [Zellij](/guide/zellij/) (experimental). Perfect
+[WezTerm](/guide/wezterm/), [Zellij](/guide/zellij/), and [Rex](/guide/rex/) (experimental). Perfect
 for running multiple AI agents in parallel without conflict.
 
 **Philosophy**: Build on tools you already use. tmux/zellij/kitty/etc. for
@@ -43,8 +43,8 @@ agent commit, rebase, and merge autonomously.
 **Terminal workflow.** Build on your terminal setup instead of yet another
 agentic GUI that won't exist next year. If you don't have one yet,
 [tmux might be worth picking up](https://raine.dev/blog/my-tmux-setup/). Also
-supports [Kitty](/guide/kitty/), [WezTerm](/guide/wezterm/), and
-[Zellij](/guide/zellij/).
+supports [Kitty](/guide/kitty/), [WezTerm](/guide/wezterm/),
+[Zellij](/guide/zellij/), and [Rex](/guide/rex/).
 
 <Screenshot
   src={screenshot}
@@ -54,7 +54,7 @@ supports [Kitty](/guide/kitty/), [WezTerm](/guide/wezterm/), and
 
 ## Features
 
-- Create git worktrees with matching tmux windows (or kitty/WezTerm/Zellij tabs)
+- Create git worktrees with matching tmux windows (or kitty/WezTerm/Zellij/Rex tabs)
   in a single command (`add`)
 - Merge branches and clean up everything (worktree, tmux window, branches) in
   one command (`merge`)
@@ -142,8 +142,8 @@ fully isolated development environments.
 ## Requirements
 
 - Git 2.5+ (for worktree support)
-- tmux (or [WezTerm](/guide/wezterm/), [kitty](/guide/kitty/), or
-  [Zellij](/guide/zellij/))
+- tmux (or [WezTerm](/guide/wezterm/), [kitty](/guide/kitty/),
+  [Zellij](/guide/zellij/), or [Rex](/guide/rex/))
 
 ## Inspiration and related tools
 
