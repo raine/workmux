@@ -22,6 +22,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.280 (2026-11-07)
+
+- Fix slow multiplexer queries delaying agent registration and status updates in other sessions. ([#352](https://github.com/raine/workmux/pull/352))
+- Fix commands failing from a project root whose `.git` file points to a bare repository. ([#296](https://github.com/raine/workmux/pull/296))
+
 ## v0.1.279 (2026-11-06)
 
 - Add `--wait` to `workmux send` to wait for the agent to finish, and target agents by pane ID. `send` now refuses to type into an agent waiting on a dialog or to guess between several agents in one worktree.
