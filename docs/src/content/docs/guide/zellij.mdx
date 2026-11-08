@@ -49,33 +49,21 @@ workmux sidebar on --position top
 workmux sidebar off
 ```
 
-Zellij has no global hook equivalent to tmux, so the sidebar daemon detects new
-tabs while it polls session state and adds a sidebar within about two seconds.
-Closing the sidebar or running `workmux sidebar off` removes it from every tab
-in the session.
+Zellij has no hook for new tabs, so the sidebar daemon polls session state and
+adds a sidebar to a new tab when it becomes active, usually within about two
+seconds. Closing the sidebar or running `workmux sidebar off` removes it from
+every tab in the session.
 
-Zellij sessions are already isolated, so `workmux sidebar --session` behaves
-the same as `workmux sidebar`. Left and top placement are supported. workmux
-uses `override-layout` to wrap the complete existing content tree and apply
-`sidebar.width`, `sidebar.height`, `--width`, or `--height` exactly when the
-layout is created. Running terminal panes, focus, floating pane coordinates,
-and nested split proportions are retained. Reapplying the sidebar replaces its
-existing panes rather than adding duplicates. Sidebar clients use the Zellij
-backend even when the session runs inside another supported terminal.
-Enabling the sidebar does not launch the configured `panes` again. Temporary
-layout slots are removed without closing user panes, and the built-in tab and
-status bars keep their original plugin aliases.
+The sidebar is limited to the current Zellij session, so
+`workmux sidebar --session` behaves the same as `workmux sidebar`. Left and top
+placement are supported.
 
-If an earlier sidebar build has already clipped the bars, reload them in place:
-
-```bash
-zellij action start-or-reload-plugin zellij:tab-bar
-zellij action start-or-reload-plugin zellij:status-bar
-```
-
-This leaves terminal panes running. Unmarked extra shells created by older
-builds must be closed manually; workmux cannot safely distinguish them from
-user-created shells.
+Adding or removing the sidebar rebuilds each tab's layout. Running terminal
+panes keep running, and pane order, focus, floating panes and split proportions
+are preserved. The configured `panes` are not launched again. `sidebar.width`,
+`sidebar.height`, `--width` and `--height` apply when the sidebar is added; a
+manually resized sidebar keeps its size until you run `workmux sidebar on`
+again, which replaces the existing sidebars.
 
 :::caution[Zellij 0.45.1 and earlier]
 These releases reuse client IDs, so concurrent `zellij action` calls can

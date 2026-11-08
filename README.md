@@ -2003,12 +2003,9 @@ bind C-t run-shell "workmux sidebar"
 
 Then press `prefix + Ctrl-t` to toggle the sidebar.
 
-> **Note:** Zellij sidebar support is experimental. It creates a pane in every
-> tab of the current Zellij session and detects new tabs during the daemon's
-> two-second poll. workmux applies the sidebar with Zellij's `override-layout`
-> action, retaining running terminal panes and the existing nested split
-> proportions. Configured width and height are applied exactly when the layout
-> is created.
+> **Note:** Zellij sidebar support is experimental. See the
+> [Zellij guide](https://workmux.dev/guide/zellij/#sidebar) for its behavior and
+> limitations.
 
 ---
 
