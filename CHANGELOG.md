@@ -22,6 +22,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.281 (2026-11-08)
+
+- Add experimental Zellij support for the agent sidebar. See the [Zellij guide](https://workmux.dev/guide/zellij). ([#331](https://github.com/raine/workmux/pull/331))
+- The Zellij backend now works with Zellij 0.44.1 or later instead of requiring a source build.
+- Add GitHub Copilot CLI as a built-in agent. ([#314](https://github.com/raine/workmux/pull/314))
+- Show Copilot agents as waiting when they ask for permission or ask a question. Requires Copilot CLI 1.0.18 or later; `workmux setup` offers to update existing hooks. ([#336](https://github.com/raine/workmux/pull/336))
+- Fix sandboxes crashing on start for agents with no known config mount, such as `agy`, or with a custom `sandbox.agent_config_dir`.
+- Fix Zellij commands occasionally failing when a pane closes.
+
 ## v0.1.280 (2026-11-07)
 
 - Fix slow multiplexer queries delaying agent registration and status updates in other sessions. ([#352](https://github.com/raine/workmux/pull/352))
