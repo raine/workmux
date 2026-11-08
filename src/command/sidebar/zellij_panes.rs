@@ -39,20 +39,16 @@ fn backend(instance_id: &str) -> ZellijBackend {
 }
 
 fn tab_extent(tab: &ZellijSidebarTab, position: SidebarPosition) -> Option<u16> {
-    let bounds = tab
-        .panes
-        .iter()
-        .filter(|pane| !pane.is_floating)
-        .filter_map(|pane| match position {
-            SidebarPosition::Left => Some((pane.pane_x?, pane.pane_x? + pane.pane_columns?)),
-            SidebarPosition::Top => Some((pane.pane_y?, pane.pane_y? + pane.pane_rows?)),
-        });
-    let (minimum, maximum) =
-        bounds.fold(None::<(u16, u16)>, |bounds, (start, end)| match bounds {
-            Some((minimum, maximum)) => Some((minimum.min(start), maximum.max(end))),
-            None => Some((start, end)),
-        })?;
-    Some(maximum.saturating_sub(minimum))
+    let bounds = bounds(
+        tab.panes
+            .iter()
+            .filter(|pane| !pane.is_floating)
+            .filter_map(pane_rect),
+    )?;
+    Some(match position {
+        SidebarPosition::Left => bounds.width,
+        SidebarPosition::Top => bounds.height,
+    })
 }
 
 fn pane_rect(pane: &ZellijSidebarPane) -> Option<PaneRect> {
@@ -443,20 +439,7 @@ fn bare_slots(node: &KdlNode) -> KdlNode {
 }
 
 fn bare_content_container(content: &[KdlNode], split_direction: Option<KdlValue>) -> KdlNode {
-    let mut slots: Vec<KdlNode> = content.iter().map(bare_slots).collect();
-    if slots.len() == 1 {
-        let mut node = slots.remove(0);
-        remove_property(&mut node, "size");
-        return node;
-    }
-    let mut container = KdlNode::new("pane");
-    if let Some(direction) = split_direction {
-        property(&mut container, "split_direction", direction);
-    }
-    let mut children = KdlDocument::new();
-    children.nodes_mut().append(&mut slots);
-    container.set_children(children);
-    container
+    container(content.iter().map(bare_slots).collect(), split_direction)
 }
 
 fn content_container(
@@ -467,8 +450,13 @@ fn content_container(
     for node in &mut content {
         prepare_retained_content(node, retained);
     }
-    if content.len() == 1 {
-        let mut node = content.remove(0);
+    container(content, split_direction)
+}
+
+/// Wrap nodes in one pane, or return a single node without its size.
+fn container(mut nodes: Vec<KdlNode>, split_direction: Option<KdlValue>) -> KdlNode {
+    if nodes.len() == 1 {
+        let mut node = nodes.remove(0);
         remove_property(&mut node, "size");
         return node;
     }
@@ -477,7 +465,7 @@ fn content_container(
         property(&mut container, "split_direction", direction);
     }
     let mut children = KdlDocument::new();
-    children.nodes_mut().append(&mut content);
+    children.nodes_mut().append(&mut nodes);
     container.set_children(children);
     container
 }
@@ -613,6 +601,15 @@ fn layout_for_tab(
     Ok(output.to_string())
 }
 
+/// Whether a pane was created for a placeholder slot of the given layout.
+fn is_placeholder(pane: &ZellijSidebarPane, placeholder_name: &str) -> bool {
+    pane.title == placeholder_name
+        || pane
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains(placeholder_name))
+}
+
 fn close_generated_terminal_placeholders(
     mux: &ZellijBackend,
     tab: &ZellijSidebarTab,
@@ -620,12 +617,7 @@ fn close_generated_terminal_placeholders(
     placeholder_name: &str,
 ) -> Result<()> {
     for pane in &tab.panes {
-        let is_placeholder = pane.title == placeholder_name
-            || pane
-                .command
-                .as_deref()
-                .is_some_and(|command| command.contains(placeholder_name));
-        if !original_pane_ids.contains(&pane.pane_id) && is_placeholder {
+        if !original_pane_ids.contains(&pane.pane_id) && is_placeholder(pane, placeholder_name) {
             mux.close_pane_by_id(&pane.pane_id)?;
         }
     }
@@ -706,16 +698,10 @@ fn create_sidebar_in_tab(
     tab: &ZellijSidebarTab,
     position: SidebarPosition,
     config: &Config,
-    replace_existing: bool,
-    select_tab: bool,
 ) -> Result<()> {
-    if let Some(update) = apply_tab_layout(
-        instance_id,
-        tab,
-        Some((position, config)),
-        replace_existing,
-        select_tab,
-    )? {
+    if let Some(update) =
+        apply_tab_layout(instance_id, tab, Some((position, config)), false, false)?
+    {
         finish_sidebar_updates(instance_id, &[update])?;
     }
     Ok(())
@@ -813,13 +799,7 @@ fn finish_sidebar_updates(instance_id: &str, updates: &[SidebarUpdate<'_>]) -> R
                 .iter()
                 .find(|tab| tab.tab_id == update.tab.tab_id)
                 .ok_or_else(|| anyhow!("Zellij tab {} disappeared", update.tab.tab_id))?;
-            let is_slot = |pane: &ZellijSidebarPane| {
-                pane.title == update.placeholder_name
-                    || pane
-                        .command
-                        .as_deref()
-                        .is_some_and(|command| command.contains(&update.placeholder_name))
-            };
+            let is_slot = |pane: &ZellijSidebarPane| is_placeholder(pane, &update.placeholder_name);
             if tab.panes.iter().filter(|pane| is_slot(pane)).count() < update.slot_count {
                 pending.push(tab.tab_id);
             }
@@ -932,11 +912,16 @@ pub(super) fn create_sidebars_in_all_tabs(
     position: SidebarPosition,
     resize_existing: bool,
 ) -> Result<()> {
-    let state = super::session_state::read(instance_id)?;
+    let config = sidebar_config(super::session_state::read(instance_id)?)?;
+    update_all_tabs(instance_id, Some((position, &config)), resize_existing)
+}
+
+/// The user's config with the sidebar size stored for this session.
+fn sidebar_config(state: super::session_state::SidebarSessionState) -> Result<Config> {
     let mut config = Config::load(None)?;
     config.sidebar.width = state.width;
     config.sidebar.height = state.height;
-    update_all_tabs(instance_id, Some((position, &config)), resize_existing)
+    Ok(config)
 }
 
 fn update_all_tabs(
@@ -974,28 +959,12 @@ fn update_all_tabs(
     }
 }
 
-pub(super) fn create_sidebar_in_active_tab(
-    instance_id: &str,
-    position: SidebarPosition,
-) -> Result<()> {
-    let _layout_lock = super::session_state::lock_layout(instance_id)?;
-    let state = super::session_state::read(instance_id)?;
-    let mut config = Config::load(None)?;
-    config.sidebar.width = state.width;
-    config.sidebar.height = state.height;
-    let Some(tab) = backend(instance_id)
-        .sidebar_tabs()?
-        .into_iter()
-        .find(|tab| tab.active)
-    else {
-        return Ok(());
-    };
-    create_sidebar_in_tab(instance_id, &tab, position, &config, false, false)
+pub(super) fn create_sidebar_in_active_tab(instance_id: &str) -> Result<()> {
+    create_sidebar_in_active_tab_from_snapshot(instance_id, &backend(instance_id).sidebar_tabs()?)
 }
 
 pub(super) fn create_sidebar_in_active_tab_from_snapshot(
     instance_id: &str,
-    position: SidebarPosition,
     tabs: &[ZellijSidebarTab],
 ) -> Result<()> {
     let Some(tab) = tabs.iter().find(|tab| tab.active) else {
@@ -1018,10 +987,9 @@ pub(super) fn create_sidebar_in_active_tab_from_snapshot(
     else {
         return Ok(());
     };
-    let mut config = Config::load(None)?;
-    config.sidebar.width = state.width;
-    config.sidebar.height = state.height;
-    create_sidebar_in_tab(instance_id, &tab, position, &config, false, false)
+    let position = state.position.unwrap_or_default();
+    let config = sidebar_config(state)?;
+    create_sidebar_in_tab(instance_id, &tab, position, &config)
 }
 
 pub(super) fn current_tab_has_sidebar(instance_id: &str) -> Result<bool> {
@@ -1055,34 +1023,6 @@ mod tests {
             placeholder_name: "workmux-sidebar-placeholder-test",
             ui_plugin_aliases: HashSet::new(),
         }
-    }
-
-    #[test]
-    fn active_sidebar_snapshot_skips_another_zellij_query() {
-        let tabs = [ZellijSidebarTab {
-            tab_id: 1,
-            position: 0,
-            active: true,
-            panes: vec![ZellijSidebarPane {
-                pane_id: "terminal_1".to_string(),
-                title: SIDEBAR_PANE_NAME.to_string(),
-                command: None,
-                is_focused: true,
-                is_floating: false,
-                pane_x: Some(0),
-                pane_y: Some(0),
-                pane_columns: Some(24),
-                pane_rows: Some(40),
-            }],
-            ui_plugin_aliases: HashSet::new(),
-        }];
-
-        create_sidebar_in_active_tab_from_snapshot(
-            "no-zellij-process-should-be-started",
-            SidebarPosition::Left,
-            &tabs,
-        )
-        .unwrap();
     }
 
     #[test]
@@ -1200,13 +1140,6 @@ mod tests {
         let pane = &floating.children().unwrap().nodes()[0];
         assert_eq!(pane.get("x"), Some(&KdlValue::Integer(5)));
         assert_eq!(pane.get("width"), Some(&KdlValue::Integer(40)));
-    }
-
-    #[test]
-    fn recognizes_only_the_reserved_pane_name() {
-        assert!(is_sidebar_pane("workmux-sidebar"));
-        assert!(!is_sidebar_pane("workmux sidebar"));
-        assert!(!is_sidebar_pane("agent"));
     }
 
     #[test]

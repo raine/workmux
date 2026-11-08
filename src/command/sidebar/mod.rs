@@ -474,9 +474,6 @@ fn effective_size_for(
 
 /// Reflow all sidebar windows except the given one.
 pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
-    if create_backend(detect_backend()).name() == "zellij" {
-        return;
-    }
     let config = crate::config::Config::load(None).unwrap_or_default();
     let synced = read_sidebar_width();
     let sidebars = panes::list_sidebar_panes();
@@ -508,9 +505,6 @@ pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
 
 /// Reflow sidebar layouts in all windows.
 pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
-    if create_backend(detect_backend()).name() == "zellij" {
-        return Ok(());
-    }
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());
@@ -682,8 +676,7 @@ pub fn toggle(
     if mux.name() == "zellij" {
         let instance_id = mux.instance_id();
         return if zellij_panes::current_tab_has_sidebar(&instance_id).unwrap_or(false) {
-            off_zellij(mux.as_ref())?;
-            Ok(())
+            off_zellij(mux.as_ref())
         } else {
             on_zellij(mux.as_ref(), position, width, height)
         };
@@ -764,8 +757,7 @@ pub fn on_session(
 pub fn off_session() -> Result<()> {
     let mux = sidebar_mux()?;
     if mux.name() == "zellij" {
-        off_zellij(mux.as_ref())?;
-        return Ok(());
+        return off_zellij(mux.as_ref());
     }
     let scope = current_scope();
     let session_id = get_current_session_id()?;
@@ -861,14 +853,7 @@ pub fn sync(window_id: Option<&str>) -> Result<()> {
     let mux = sidebar_mux()?;
     if mux.name() == "zellij" {
         let instance_id = mux.instance_id();
-        let state = session_state::read(&instance_id)?;
-        if state.enabled {
-            zellij_panes::create_sidebar_in_active_tab(
-                &instance_id,
-                state.position.unwrap_or_default(),
-            )?;
-        }
-        return Ok(());
+        return zellij_panes::create_sidebar_in_active_tab(&instance_id);
     }
 
     let scope = current_scope();
@@ -905,9 +890,6 @@ pub fn sync(window_id: Option<&str>) -> Result<()> {
 /// Finds the sidebar pane in the target window and runs the layout tree
 /// reflow to keep the sidebar at the correct width and content panes balanced.
 pub fn reflow(window_id: Option<&str>) -> Result<()> {
-    if create_backend(detect_backend()).name() == "zellij" {
-        return Ok(());
-    }
     let scope = current_scope();
     if matches!(scope, SidebarScope::Off) {
         return Ok(());

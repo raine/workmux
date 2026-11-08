@@ -69,8 +69,8 @@ again, which replaces the existing sidebars.
 These releases reuse client IDs, so concurrent `zellij action` calls can
 intermittently fail with `There is no active session!` or return empty output.
 Toggling the sidebar runs many such calls while the daemon polls session state,
-so a toggle can occasionally fail partway and leave panes out of order. Zellij
-built from `main` includes the fix
+so a toggle can occasionally fail partway and leave panes out of order. This
+is fixed in Zellij releases after 0.45.1
 ([zellij-org/zellij#5630](https://github.com/zellij-org/zellij/pull/5630)).
 :::
 
