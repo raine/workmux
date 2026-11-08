@@ -2162,7 +2162,7 @@ at-a-glance visibility into what the agent in each window doing.
 
 **Notes:**
 
-- **Copilot CLI**: No 💬 waiting state
+- **Copilot CLI**: 💬 waiting state requires Copilot CLI 1.0.18 or later
 - **Pi**: No 💬 waiting state
 - **Antigravity CLI (`agy`)**: No 💬 waiting state
 - **Kiro**: Hooks support is messy: requires a custom agent since the default
@@ -2214,8 +2214,8 @@ curl -o ~/.copilot/hooks/workmux-status.json \
 
 Copilot loads personal hooks in every repository. If the repository contains a
 `.github/hooks/workmux-status` installation, remove that directory to avoid
-running both copies of the hook. The waiting state is not supported due to
-limitations in the Copilot CLI hooks implementation.
+running both copies of the hook. The waiting state requires Copilot CLI 1.0.18
+or later.
 
 **Antigravity CLI (`agy`)**: `workmux setup` installs lifecycle hooks in
 `~/.gemini/config/hooks.json`. `PreInvocation` marks the pane working, and the
