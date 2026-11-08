@@ -58,10 +58,10 @@ sidebars without a restart.
 | `{pane_title}`   | Sanitized agent task title from the pane title.                                                                                                 |
 | `{prompt}`       | Latest prompt you sent to the agent. Empty until one is captured; see [Prompt column](/guide/dashboard/configuration/#prompt-column).           |
 | `{pane_suffix}`  | Disambiguator like `(1)`, `(2)` when multiple agents share a window. Empty otherwise.                                                           |
-| `{status_icon}`  | Status indicator (working spinner, waiting, done, sleeping, etc.).                                                                              |
+| `{status_icon}`  | Status indicator (working spinner, waiting, done, quiet `○`, or sleeping).                                                                      |
 | `{agent_icon}`   | Per-agent icon based on the running agent's profile (see [Agent identity](#agent-identity)).                                                    |
 | `{agent_label}`  | Capitalized agent name (e.g. `Claude`, `Codex`).                                                                                                |
-| `{elapsed}`      | Elapsed time since the agent's last status change.                                                                                              |
+| `{elapsed}`      | Elapsed time since the agent's last status change; empty while quiet.                                                                           |
 | `{git_stats}`    | Composite git diff stats: committed (`+1278 -400`), pen icon, uncommitted (`+21`). Self-degrades to fit the space it gets.                      |
 | `{git_branch}`   | Current branch name. Empty when detached HEAD or git status unavailable.                                                                        |
 | `{pr_number}`    | Pull request number as `#123`. Empty when the current branch has no matching PR.                                                                |
@@ -70,7 +70,7 @@ sidebars without a restart.
 | `{git_behind}`   | Commits behind upstream as `↓N` when N greater than 0. Empty when 0 or no upstream.                                                             |
 | `{git_dirty}`    | Diff glyph when the working tree is dirty. Empty when clean.                                                                                    |
 | `{git_conflict}` | Conflict glyph when the worktree has merge conflicts. Empty otherwise.                                                                          |
-| `{status_label}` | Display name for the agent status: `Working`, `Waiting`, `Done`, or empty when no status.                                                       |
+| `{status_label}` | Display name: `Working`, `Waiting`, `Done`, `Quiet`, or empty when no status.                                                                   |
 | `{idx}`          | 1-based position among the sidebar's agents; group headers are not counted.                                                                     |
 | `{jump_key}`     | The `M-1`..`M-9` chord label for the first nine rows. Empty for row 10 and beyond.                                                              |
 | `{fill}`         | Layout marker that splits a line into a left and right segment. At most one per line.                                                           |
@@ -98,10 +98,16 @@ sidebar:
       header: "{group} {fill} {group_status} {group_count}"
 ```
 
-One pair per status present, counting waiting, done, working and stale agents in
-that order. An idle agent has no icon of its own, so it is left out of the tally
-while `{group_count}` still counts it. When the header runs out of room the
-least urgent pairs drop first.
+One pair per status present, counting waiting, done, working, quiet and stale
+agents in that order. A statusless agent has no icon of its own, so it is left out
+of the tally while `{group_count}` still counts it. Stale agents remain in the
+sleep bucket even with `dim_stale: false`, because the tally describes stale
+membership rather than row styling. When the header runs out of room the least
+urgent pairs drop first.
+
+Quiet means no recent output or status updates were observed, not confirmed
+cancellation or completion. The default layouts use a static `○` with no elapsed
+timer. Include `{status_label}` in a row template if you prefer a text label.
 
 `{git_ahead}` and `{git_behind}` already include the arrow prefix, so do not
 wrap them with another `↑` / `↓` literal in your template, otherwise a stray

@@ -487,7 +487,7 @@ fn styled_span(
 
 #[cfg(test)]
 mod tests {
-    use super::super::context::RowContext;
+    use super::super::context::{RowContext, SidebarStatus};
     use super::super::parser::{Token, TokenId};
     use super::*;
     use crate::git::GitStatus;
@@ -533,6 +533,7 @@ mod tests {
         // Build a minimal RowContext manually for unit tests
         RowContext {
             agent,
+            sidebar_status: SidebarStatus::Reported(agent.status),
             primary: "feature-auth".to_string(),
             secondary: "myproject".to_string(),
             template_worktree: "feature-auth".to_string(),

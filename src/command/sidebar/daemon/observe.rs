@@ -160,7 +160,7 @@ pub(super) fn include_unregistered_zellij_agents(
 /// - New pane output or an RPC update clears interrupted state.
 /// - After clearing, the agent gets a fresh timeout window before it can
 ///   be marked interrupted again.
-/// - Interrupted agents show no icon and no timer in the sidebar.
+/// - Interrupted agents show a quiet indicator and no timer in the sidebar.
 /// - When an agent resumes, the timer resets to zero.
 pub(super) struct InactivityTracker {
     /// pane_id -> (server lifecycle, pane PID)

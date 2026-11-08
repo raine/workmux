@@ -17,7 +17,7 @@ use crate::ui::theme::ThemePalette;
 use super::app::{SidebarApp, SidebarFilterMode, SidebarLayoutMode, SidebarRow};
 use super::snapshot::group_label;
 use super::template::TokenId;
-use super::template::context::RowContext;
+use super::template::context::{RowContext, SidebarStatus};
 use super::template::layout::{
     RenderOptions, is_blank_template_line, render_line, render_line_with_options,
 };
@@ -945,14 +945,19 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, bg: Option<C
 }
 
 fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
-    status_icon_overhang(ctx.agent.status, ctx.is_stale)
+    status_icon_overhang(ctx.sidebar_status, ctx.is_stale)
 }
 
 /// Columns a status icon draws past its measured width. The waiting, done and
 /// sleeping glyphs are drawn double width while measuring one, so whatever sits
 /// beside them needs the extra column reserved.
-fn status_icon_overhang(status: Option<AgentStatus>, is_stale: bool) -> usize {
-    if is_stale || matches!(status, Some(AgentStatus::Waiting | AgentStatus::Done)) {
+fn status_icon_overhang(status: SidebarStatus, is_stale: bool) -> usize {
+    if is_stale
+        || matches!(
+            status,
+            SidebarStatus::Reported(Some(AgentStatus::Waiting | AgentStatus::Done))
+        )
+    {
         1
     } else {
         0
@@ -1059,19 +1064,21 @@ fn group_status_counts(app: &SidebarApp, label: &str) -> Vec<GroupStatusCount> {
     };
     // An agent with no status and no staleness has no icon of its own, so it
     // is left out rather than tallied behind a blank.
-    let mut counts: Vec<usize> = vec![0; 4];
+    let mut counts: Vec<usize> = vec![0; 5];
     for agent in &app.agents {
         if group_label(agent, group_by) != label {
             continue;
         }
         let bucket = if app.stale_pane_ids.contains(&agent.pane_id) {
-            Some(3)
+            Some(4)
         } else {
-            match agent.status {
-                Some(AgentStatus::Waiting) => Some(0),
-                Some(AgentStatus::Done) => Some(1),
-                Some(AgentStatus::Working) => Some(2),
-                None => None,
+            match SidebarStatus::for_agent(agent, app.interrupted_pane_ids.contains(&agent.pane_id))
+            {
+                SidebarStatus::Reported(Some(AgentStatus::Waiting)) => Some(0),
+                SidebarStatus::Reported(Some(AgentStatus::Done)) => Some(1),
+                SidebarStatus::Reported(Some(AgentStatus::Working)) => Some(2),
+                SidebarStatus::Quiet => Some(3),
+                SidebarStatus::Reported(None) => None,
             }
         };
         if let Some(bucket) = bucket {
@@ -1080,10 +1087,11 @@ fn group_status_counts(app: &SidebarApp, label: &str) -> Vec<GroupStatusCount> {
     }
 
     let buckets = [
-        (Some(AgentStatus::Waiting), false),
-        (Some(AgentStatus::Done), false),
-        (Some(AgentStatus::Working), false),
-        (None, true),
+        (SidebarStatus::Reported(Some(AgentStatus::Waiting)), false),
+        (SidebarStatus::Reported(Some(AgentStatus::Done)), false),
+        (SidebarStatus::Reported(Some(AgentStatus::Working)), false),
+        (SidebarStatus::Quiet, false),
+        (SidebarStatus::Reported(None), true),
     ];
     counts
         .into_iter()
@@ -1724,7 +1732,7 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
 /// stripe color, etc.).
 pub(crate) fn status_icon_and_style(
     app: &SidebarApp,
-    status: Option<AgentStatus>,
+    status: SidebarStatus,
     is_stale: bool,
 ) -> (Vec<(String, Style)>, Style) {
     let use_nf = crate::nerdfont::is_enabled();
@@ -1738,6 +1746,13 @@ pub(crate) fn status_icon_and_style(
         };
         return (vec![(icon.to_string(), style)], style);
     }
+    let status = match status {
+        SidebarStatus::Quiet => {
+            let style = Style::default().fg(app.palette.dimmed);
+            return (vec![("○".to_string(), style)], style);
+        }
+        SidebarStatus::Reported(status) => status,
+    };
     match status {
         Some(AgentStatus::Working) => {
             let base_style = Style::default().fg(app.palette.info);
@@ -2473,6 +2488,95 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Quit sidebar?"));
         assert!(text.contains("yes / no"));
+    }
+
+    #[test]
+    fn quiet_rows_render_without_animation_or_timers_in_every_layout() {
+        use super::super::template::parser::parse_line;
+        for (position, layout) in [
+            (
+                crate::config::SidebarPosition::Left,
+                SidebarLayoutMode::Compact,
+            ),
+            (
+                crate::config::SidebarPosition::Left,
+                SidebarLayoutMode::Tiles,
+            ),
+            (
+                crate::config::SidebarPosition::Top,
+                SidebarLayoutMode::Tiles,
+            ),
+        ] {
+            for width in [24, 40] {
+                let mut app = tile_fixture();
+                app.agents.truncate(1);
+                app.position = position;
+                app.layout_mode = layout;
+                app.host_agent_idx = None;
+                app.agents[0].status_ts = Some(1);
+                app.agents[0].activity_ts = Some(1);
+                app.interrupted_pane_ids
+                    .insert(app.agents[0].pane_id.clone());
+                app.templates.compact =
+                    parse_line("{status_icon} {primary} {status_label}{fill}{elapsed}").unwrap();
+                app.templates.tiles = vec![app.templates.compact.clone()];
+                app.templates.horizontal = vec![app.templates.compact.clone()];
+                app.rebuild_rows();
+                let first = rendered(&mut app, width, 8);
+                assert!(first.iter().any(|line| line.contains('○')), "{first:?}");
+                assert!(first.iter().any(|line| line.contains("Quiet")), "{first:?}");
+                assert!(!first.iter().any(|line| line.contains("Working")));
+                app.spinner_frame += 1;
+                assert_eq!(first, rendered(&mut app, width, 8));
+                assert_eq!(app.agents[0].status, Some(AgentStatus::Working));
+                assert_eq!(app.agents[0].status_ts, Some(1));
+            }
+        }
+    }
+
+    #[test]
+    fn quiet_group_counts_and_stale_buckets_match_row_presentation() {
+        let mut app = grouped_compact_app();
+        app.collapse_stale = true;
+        app.agents.truncate(3);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for agent in &mut app.agents {
+            agent.status = Some(AgentStatus::Working);
+            agent.status_ts = Some(now);
+            agent.activity_ts = Some(now);
+            app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        }
+        app.refresh_stale_pane_ids();
+        app.rebuild_rows();
+        let counts = group_status_counts(&app, "api");
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].count, 3);
+        assert_eq!(counts[0].icon[0].0, "○");
+        assert_eq!(counts[0].pad, 0);
+        app.templates.group_header =
+            super::super::template::parser::parse_line("{group} {group_status}").unwrap();
+        let lines = rendered(&mut app, 40, 8);
+        assert!(lines[0].contains("○3"), "{lines:?}");
+        assert_eq!(lines.iter().filter(|line| line.contains('○')).count(), 4);
+
+        // Stale membership still folds and tallies separately when dimming is off.
+        app.agents[0].activity_ts = Some(1);
+        app.refresh_stale_pane_ids();
+        app.rebuild_rows();
+        let counts = group_status_counts(&app, "api");
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0].count, 2);
+        assert_eq!(counts[0].icon[0].0, "○");
+        assert_eq!(counts[1].count, 1);
+        assert_ne!(counts[1].icon[0].0, "○");
+        assert!(
+            app.rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::StaleTail { count: 1, .. }))
+        );
     }
 
     #[test]
