@@ -62,11 +62,20 @@ bind C-t run-shell "workmux sidebar"
 
 Each agent is displayed as a tile showing:
 
-- Status icon with spinner animation (working/waiting/done)
+- Status icon (working spinner, waiting, done, or quiet)
 - Worktree name and elapsed time since last status change
 - Project name and git diff stats (committed + uncommitted lines)
 - Optional pull request number and check status for the current branch
 - Agent task description
+
+`○` **Quiet** means no recent output or status updates were observed. The agent
+may have been interrupted or may still be running silently. Quiet rows have no
+elapsed timer and a neutral status stripe; their names remain readable. Quiet
+does not mean the task completed or needs permission.
+
+Quiet detection is separate from stale dimming and folding. A quiet row gets the
+sleep icon when stale styling applies. New output or status updates restore the
+reported status; even a decorative terminal redraw can count as output.
 
 The exact layout, styling, and per-agent icons are fully customizable; see
 [Customization](/guide/sidebar/customization/).
@@ -252,9 +261,11 @@ so a sidebar you have already customized keeps its rows when you group it. See
 
 While grouped, each group's stale agents fold behind one toggle row that says
 how many it stands for, so a project nobody is waiting on costs a line instead
-of a screen. An agent counts as stale once it is sleeping, or once the configured
-`stale_after` period passes with no activity and no working or waiting status:
-the same agents `dim_stale` dims and the dashboard marks or filters out.
+of a screen. Sleeping agents are stale immediately. Quiet and statusless agents
+become stale when their recorded activity age exceeds `stale_after`. The age is
+measured from recorded activity, not from when Quiet began. Working agents that
+are not quiet, waiting agents, and unacknowledged done agents remain actionable
+regardless of age. `dim_stale` controls dimming, independently of folding.
 
 Set `collapse_stale: false` to list every agent at full height instead:
 

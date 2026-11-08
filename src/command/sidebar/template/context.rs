@@ -16,9 +16,41 @@ use super::super::app::{ResolvedAgentIcons, SidebarApp};
 use super::TokenId;
 use crate::util::display_width;
 
+/// Activity presentation without changing the agent's reported status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarStatus {
+    Reported(Option<AgentStatus>),
+    Quiet,
+}
+
+impl SidebarStatus {
+    pub(crate) fn for_agent(agent: &AgentPane, interrupted: bool) -> Self {
+        let preserve_remote_status = agent
+            .remote
+            .as_ref()
+            .is_some_and(|remote| !remote.connected || remote.ended.is_some());
+        if interrupted && agent.status == Some(AgentStatus::Working) && !preserve_remote_status {
+            Self::Quiet
+        } else {
+            Self::Reported(agent.status)
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Quiet => "Quiet",
+            Self::Reported(Some(AgentStatus::Working)) => "Working",
+            Self::Reported(Some(AgentStatus::Waiting)) => "Waiting",
+            Self::Reported(Some(AgentStatus::Done)) => "Done",
+            Self::Reported(None) => "",
+        }
+    }
+}
+
 /// Pre-computed values for every piece of row metadata.
 pub struct RowContext<'a> {
     pub agent: &'a AgentPane,
+    pub(crate) sidebar_status: SidebarStatus,
     /// Resolved primary label.
     pub primary: String,
     /// Resolved secondary label.
@@ -130,11 +162,12 @@ impl<'a> RowContext<'a> {
         let jump_idx = app.jump_numbers.get(idx).copied().flatten();
         let is_selected = selected_idx == Some(idx);
 
+        let sidebar_status = SidebarStatus::for_agent(agent, is_interrupted);
         // A remote's last status stays recognizable, only dimmed.
         let (mut status_icon_spans, mut status_icon_style) =
             super::super::ui::status_icon_and_style(
                 app,
-                agent.status,
+                sidebar_status,
                 is_stale && connectivity.is_none(),
             );
         if connectivity.is_some() {
@@ -145,10 +178,14 @@ impl<'a> RowContext<'a> {
         }
         let status_color = status_icon_style.fg.unwrap_or(Color::Reset);
 
-        let elapsed = agent
-            .status_ts
-            .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
-            .unwrap_or_default();
+        let elapsed = if sidebar_status == SidebarStatus::Quiet {
+            String::new()
+        } else {
+            agent
+                .status_ts
+                .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
+                .unwrap_or_default()
+        };
 
         let pane_title = connectivity.clone().or(title);
         let git_status = match &agent.remote {
@@ -165,6 +202,7 @@ impl<'a> RowContext<'a> {
 
         Self {
             agent,
+            sidebar_status,
             primary,
             secondary,
             template_worktree,
@@ -249,12 +287,7 @@ impl<'a> RowContext<'a> {
                 .pr_summary
                 .map(|pr| format!("#{}", pr.number))
                 .unwrap_or_default(),
-            TokenId::StatusLabel => match self.agent.status {
-                Some(AgentStatus::Working) => "Working".to_string(),
-                Some(AgentStatus::Waiting) => "Waiting".to_string(),
-                Some(AgentStatus::Done) => "Done".to_string(),
-                None => String::new(),
-            },
+            TokenId::StatusLabel => self.sidebar_status.label().to_string(),
             // A header owns these; an agent row has no group of its own.
             TokenId::Group | TokenId::GroupCount | TokenId::GroupStatus => String::new(),
             TokenId::Idx => self
@@ -467,6 +500,7 @@ pub(crate) fn agent_is_stale(
     is_sleeping: bool,
     is_interrupted: bool,
 ) -> bool {
+    let is_interrupted = is_interrupted && agent.status == Some(AgentStatus::Working);
     is_agent_stale(
         agent.activity_ts(),
         agent.status,
@@ -695,6 +729,117 @@ mod tests {
     }
 
     #[test]
+    fn quiet_presentation_is_independent_of_stale_dimming() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Working);
+        agent.status_ts = Some(100);
+        agent.activity_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+
+        for dim in [false, true] {
+            app.dim_stale = dim;
+            for now in [130, 161] {
+                let ctx = RowContext::build(&app, &agent, 0, &suffixes, now, None);
+                assert_eq!(ctx.sidebar_status, SidebarStatus::Quiet);
+                assert_eq!(ctx.resolve(TokenId::StatusLabel), "Quiet");
+                assert_eq!(ctx.resolve(TokenId::Elapsed), "");
+                assert_eq!(ctx.status_color, app.palette.dimmed);
+                assert_eq!(ctx.is_stale, dim && now == 161);
+                if !ctx.is_stale {
+                    assert_eq!(ctx.resolve(TokenId::StatusIcon), "○");
+                    assert_eq!(
+                        ctx.intrinsic_style(TokenId::Primary).fg,
+                        Some(app.palette.text)
+                    );
+                } else {
+                    assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+                }
+            }
+        }
+
+        app.interrupted_pane_ids.clear();
+        let ctx = RowContext::build(&app, &agent, 0, &suffixes, 161, None);
+        assert_eq!(ctx.resolve(TokenId::StatusLabel), "Working");
+        assert_eq!(ctx.resolve(TokenId::Elapsed), "1:01");
+        assert_eq!(ctx.status_color, app.palette.info);
+        assert!(!ctx.is_stale);
+        assert_eq!(agent.status, Some(AgentStatus::Working));
+        assert_eq!(agent.status_ts, Some(100));
+        assert_eq!(agent.activity_ts, Some(100));
+    }
+
+    #[test]
+    fn obsolete_interruption_flags_do_not_override_actionable_statuses() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = true;
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.status_ts = Some(100);
+        agent.activity_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+        for (status, label) in [
+            (AgentStatus::Waiting, "Waiting"),
+            (AgentStatus::Done, "Done"),
+        ] {
+            agent.status = Some(status);
+            let ctx = RowContext::build(&app, &agent, 0, &suffixes, 200, None);
+            assert!(!ctx.is_stale);
+            assert_eq!(ctx.resolve(TokenId::StatusLabel), label);
+            assert_eq!(ctx.resolve(TokenId::Elapsed), "1:40");
+            assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+        }
+        agent.status = None;
+        assert_eq!(
+            SidebarStatus::for_agent(&agent, true),
+            SidebarStatus::Reported(None)
+        );
+    }
+
+    #[test]
+    fn remote_connectivity_takes_precedence_over_quiet() {
+        use crate::multiplexer::types::{EndReason, RemoteAgent, RemoteRef};
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Working);
+        agent.status_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+        let mut remote = RemoteAgent::new(RemoteRef {
+            remote: "host".into(),
+            ws_id: "ws".into(),
+            ex_id: "ex".into(),
+            pane: 0,
+        });
+        for (connected, ended) in [(false, None), (true, Some(EndReason::HostReboot))] {
+            remote.connected = connected;
+            remote.ended = ended;
+            agent.remote = Some(remote.clone());
+            let ctx = RowContext::build(&app, &agent, 0, &suffixes, 130, None);
+            assert_eq!(ctx.resolve(TokenId::StatusLabel), "Working");
+            assert_eq!(ctx.resolve(TokenId::Elapsed), "0:30");
+            assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+            assert_eq!(ctx.status_color, app.palette.dimmed);
+        }
+        remote.connected = true;
+        remote.ended = None;
+        agent.remote = Some(remote);
+        assert_eq!(SidebarStatus::for_agent(&agent, true), SidebarStatus::Quiet);
+    }
+
+    #[test]
     fn newly_registered_agent_is_fresh_without_elapsed_status_time() {
         let mut app = SidebarApp::test_with_template_error(TemplateError {
             location: String::new(),
@@ -813,6 +958,7 @@ mod tests {
     ) -> RowContext<'a> {
         RowContext {
             agent,
+            sidebar_status: SidebarStatus::Reported(agent.status),
             primary: String::new(),
             secondary: String::new(),
             template_worktree: String::new(),
