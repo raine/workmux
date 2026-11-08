@@ -1642,6 +1642,14 @@ impl SidebarApp {
     /// Process any pending resize after the debounce period has elapsed.
     /// Skips detection during startup grace period.
     pub fn process_pending_resize(&mut self, startup: &Instant, startup_grace: Duration) {
+        // Zellij keeps a manually resized sidebar as is, so there is nothing
+        // to reflow or persist.
+        if self.mux.name() == "zellij" {
+            self.pending_resize_cols = None;
+            self.pending_resize_rows = None;
+            self.resize_deadline = None;
+            return;
+        }
         if startup.elapsed() < startup_grace {
             // Suppress detection during startup to avoid false positives from
             // initial pane creation layout divergence.

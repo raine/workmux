@@ -2409,12 +2409,9 @@ pub fn run() -> Result<()> {
                 Ok((tmux_state, zellij_tabs)) => {
                     if let Some(tabs) = zellij_tabs
                         && server.client_count() > 0
-                        && let Ok(state) = super::session_state::read(&instance_id)
-                        && state.enabled
                         && let Err(error) =
                             super::zellij_panes::create_sidebar_in_active_tab_from_snapshot(
                                 &instance_id,
-                                state.position.unwrap_or_default(),
                                 &tabs,
                             )
                     {

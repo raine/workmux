@@ -1,11 +1,10 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
 
@@ -48,22 +47,19 @@ pub(super) fn socket_path(instance_id: &str) -> PathBuf {
     ))
 }
 
-fn lock_path(instance_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "workmux-sidebar-state-{:016x}.lock",
-        instance_key(instance_id)
-    ))
-}
-
-fn layout_lock_file(instance_id: &str) -> Result<File> {
+fn lock_file(path: PathBuf) -> Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(path(instance_id).with_extension("layout.lock"))
-        .context("failed to open Zellij sidebar layout lock")
+        .open(path)
+        .context("failed to open sidebar lock file")
+}
+
+fn layout_lock_file(instance_id: &str) -> Result<File> {
+    lock_file(path(instance_id).with_extension("layout.lock"))
 }
 
 pub(super) fn lock_layout(instance_id: &str) -> Result<File> {
@@ -84,40 +80,12 @@ pub(super) fn try_lock_layout(instance_id: &str) -> Result<Option<File>> {
     }
 }
 
-struct StateLock {
-    path: PathBuf,
-}
-
-impl Drop for StateLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn acquire_lock(instance_id: &str) -> Result<StateLock> {
-    let path = lock_path(instance_id);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(StateLock { path }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(5));
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if Instant::now() >= deadline {
-                    return Err(anyhow!("timed out locking sidebar session state"));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error).context("failed to lock sidebar session state"),
-        }
-    }
+/// Hold an exclusive lock on the state file's companion lock for writes.
+fn lock_state(instance_id: &str) -> Result<File> {
+    let file = lock_file(path(instance_id).with_extension("lock"))?;
+    file.lock()
+        .context("failed to lock sidebar session state")?;
+    Ok(file)
 }
 
 fn read_path(path: &Path) -> Result<SidebarSessionState> {
@@ -140,7 +108,7 @@ pub(super) fn update(
     instance_id: &str,
     update: impl FnOnce(&mut SidebarSessionState),
 ) -> Result<SidebarSessionState> {
-    let _lock = acquire_lock(instance_id)?;
+    let _lock = lock_state(instance_id)?;
     let path = path(instance_id);
     let mut state = read_path(&path)?;
     update(&mut state);
@@ -208,6 +176,6 @@ mod tests {
         assert_eq!(state.ordered_agents, vec!["terminal_7"]);
 
         let _ = fs::remove_file(path(&instance));
-        let _ = fs::remove_file(lock_path(&instance));
+        let _ = fs::remove_file(path(&instance).with_extension("lock"));
     }
 }

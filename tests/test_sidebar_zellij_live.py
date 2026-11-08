@@ -289,7 +289,7 @@ def test_sidebar_retains_nested_content(live_zellij: LiveZellij):
 def test_damaged_bars_can_be_reloaded_without_closing_panes(live_zellij: LiveZellij):
     top_prefix = live_zellij.screen.display[0][:20]
     bottom_prefix = live_zellij.screen.display[-1][:20]
-    # Replaying dump-layout reproduces the old alias loss without restarting user commands.
+    # Replaying dump-layout expands plugin aliases, clipping the bars, without restarting user commands.
     layout = live_zellij.action("dump-layout").stdout
     live_zellij.action(
         "override-layout",
