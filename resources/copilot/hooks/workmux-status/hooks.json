@@ -25,10 +25,10 @@
         "bash": "workmux set-window-status working"
       }
     ],
-    "preToolUse": [
+    "notification": [
       {
         "type": "command",
-        "matcher": "ask_user",
+        "matcher": "permission_prompt|elicitation_dialog",
         "bash": "workmux set-window-status waiting"
       }
     ],

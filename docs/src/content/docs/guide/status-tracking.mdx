@@ -38,7 +38,7 @@ doing.
 
 **Notes:**
 
-- **Copilot CLI**: Waiting state tracks `ask_user` questions, not permission prompts
+- **Copilot CLI**: 💬 waiting state requires Copilot CLI 1.0.18 or later
 - **Pi**: No 💬 waiting state
 - **Codex**: Registration occurs when the first turn begins because its session hook is turn-bound
 - **Antigravity CLI (`agy`)**: No 💬 waiting state; registration occurs when agent execution begins
@@ -234,13 +234,10 @@ curl -o "$copilot_home/hooks/workmux-status.json" \
 
 Copilot loads personal hooks in every repository. If the repository contains a `.github/hooks/workmux-status` installation, remove that directory to avoid running both copies of the hook.
 
-`preToolUse` marks the pane waiting before an `ask_user` question opens.
-`postToolUse` and `postToolUseFailure` restore working when the tool finishes,
-and `userPromptSubmitted` marks a new prompt working.
-
-Permission prompts are not tracked. The hooks use the tool lifecycle rather than
-asynchronous `notification` events, so waiting does not depend on delivery of an
-`elicitation_dialog` notification.
+The `notification` hook marks the pane waiting when Copilot shows a permission
+prompt or asks a question. `postToolUse` and `postToolUseFailure` restore working
+when the tool finishes, and `userPromptSubmitted` marks a new prompt working.
+Copilot CLI 1.0.18 or later is required for the waiting state.
 
 Run `workmux setup` to update older workmux hooks, then start a new Copilot session
 to load the changes.

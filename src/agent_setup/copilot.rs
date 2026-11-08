@@ -83,9 +83,9 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
             None,
         ),
         (
-            "preToolUse",
+            "notification",
             "workmux set-window-status waiting",
-            Some("ask_user"),
+            Some("permission_prompt|elicitation_dialog"),
         ),
         ("agentStop", "workmux set-window-status done", None),
     ];
@@ -266,66 +266,20 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_hook_waits_until_tool_completion() {
-        let config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
-        assert_eq!(
-            run_hooks(&config, "preToolUse", "ask_user"),
-            "set-window-status waiting\n"
-        );
-        for tool in ["bash", "view", "task", "glob", "custom_ask_user"] {
-            assert_eq!(run_hooks(&config, "preToolUse", tool), "");
-        }
-        assert_eq!(
-            run_hooks(&config, "postToolUse", "ask_user"),
-            "set-window-status working\n"
-        );
-        assert_eq!(
-            run_hooks(&config, "postToolUseFailure", "ask_user"),
-            "set-window-status working\n"
-        );
-        assert_eq!(
-            run_hooks(&config, "userPromptSubmitted", ""),
-            "set-window-status working\n"
-        );
-    }
-
-    fn run_hooks(config: &Value, event: &str, match_value: &str) -> String {
-        let mut output = String::new();
-        for hook in config["hooks"][event].as_array().into_iter().flatten() {
-            if let Some(matcher) = hook["matcher"].as_str()
-                && !regex::Regex::new(&format!("^(?:{matcher})$"))
-                    .unwrap()
-                    .is_match(match_value)
-            {
-                continue;
-            }
-            let command = hook["bash"].as_str().unwrap();
-            let result = std::process::Command::new("bash")
-                .args([
-                    "-c",
-                    &format!("workmux() {{ printf '%s\\n' \"$*\"; }}; {command}"),
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            output.push_str(&String::from_utf8(result.stdout).unwrap());
-        }
-        output
-    }
-
-    #[test]
-    fn hooks_without_ask_user_waiting_need_update() {
+    fn hooks_without_waiting_notification_need_update() {
         let tmp = tempfile::tempdir().unwrap();
         let path = hooks_file_at(tmp.path());
         let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
-        config["hooks"]
-            .as_object_mut()
-            .unwrap()
-            .remove("preToolUse");
+        let hooks = config["hooks"].as_object_mut().unwrap();
+        hooks.remove("notification");
+        hooks.insert(
+            "preToolUse".to_string(),
+            serde_json::json!([{
+                "type": "command",
+                "matcher": "ask_user",
+                "bash": "workmux set-window-status waiting",
+            }]),
+        );
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
 
@@ -336,18 +290,18 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_hook_with_missing_or_incorrect_matcher_needs_update() {
+    fn waiting_notification_with_missing_or_incorrect_matcher_needs_update() {
         let tmp = tempfile::tempdir().unwrap();
         let path = hooks_file_at(tmp.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        for matcher in [None, Some("bash"), Some(".*")] {
+        for matcher in [None, Some("permission_prompt"), Some(".*")] {
             let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
-            config["hooks"]["preToolUse"] = serde_json::json!([{
+            config["hooks"]["notification"] = serde_json::json!([{
                 "type": "command",
                 "bash": "workmux set-window-status waiting",
             }]);
             if let Some(matcher) = matcher {
-                config["hooks"]["preToolUse"][0]["matcher"] = Value::from(matcher);
+                config["hooks"]["notification"][0]["matcher"] = Value::from(matcher);
             }
             fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
             assert!(matches!(
