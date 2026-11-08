@@ -49,9 +49,8 @@ When the global sidebar is active, `workmux sidebar --session` hides it in the
 current tmux session only. Run it again to show the sidebar in that session
 again without affecting other sessions.
 
-On Zellij, the sidebar appears in every tab of the current Zellij session.
-Zellij sessions are already isolated, so `--session` has the same effect as the
-default command. New tabs receive a sidebar within about two seconds.
+On the experimental Zellij backend, the sidebar covers every tab in the current
+Zellij session. See [Zellij sidebar](/guide/zellij/#sidebar).
 
 Optionally, add a tmux binding for quick access:
 
@@ -145,13 +144,6 @@ horizontal lines you want to show. Horizontal item width defaults to 24 columns
 and is clamped between 12 and 80. Position changes take effect the next time you
 toggle the sidebar off and on. Use `workmux sidebar --position top` or
 `--position left` to override the configured placement for that toggle.
-
-tmux and Zellij apply these sizes exactly when the sidebar layout is created.
-For Zellij, workmux wraps the complete existing content tree with
-`override-layout`, so the sidebar takes space proportionally from the existing
-nested layout instead of resizing only the adjacent pane. Running terminal
-panes and focus are retained. Manual resizing remains in effect until
-`workmux sidebar on` is run again.
 
 ## Layout modes
 
@@ -438,16 +430,11 @@ well. It uses a daemon + client architecture with event-driven rendering:
 
 ### Zellij
 
-Zellij uses the same daemon and client architecture, scoped to the current
-Zellij session. Stable tab and pane IDs let workmux create one named sidebar
-pane per tab and collect live pane state. To add the sidebar, workmux dumps the
-active tab layout, wraps its complete content tree, and applies one
-`override-layout` operation while retaining running terminal panes. It then
-restores visible pane ordering if Zellij maps anonymous panes by a different
-logical order. Because Zellij has no tmux-style new-window hooks, the daemon
-notices new tabs during its two-second state poll. Zellij restores the
-remaining pane layout when a sidebar closes, so no custom layout-tree reflow is
-needed.
+The experimental Zellij backend uses the same daemon and per-tab clients,
+scoped to the current Zellij session. Zellij has no hook for new tabs, so the
+daemon adds sidebars to them during its two-second poll. Adding or removing the
+sidebar rebuilds each tab's layout while running panes keep running. See
+[Zellij sidebar](/guide/zellij/#sidebar).
 
 ### Resource usage
 

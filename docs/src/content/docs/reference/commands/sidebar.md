@@ -55,8 +55,8 @@ mouse configuration.
 ## Navigation commands
 
 Switch between agents from any pane, in the same order shown in the
-sidebar. Navigation uses the same filter mode as the sidebar view, so it cycles
-through all sessions by default:
+sidebar. Navigation uses the same filter mode as the sidebar view, so on tmux it
+cycles through all sessions by default:
 
 | Command                         | Action                                               |
 | ------------------------------- | ---------------------------------------------------- |
@@ -230,19 +230,9 @@ sidebar panes, the daemon, and removing hooks. `workmux sidebar on` and
 `workmux sidebar off` provide idempotent alternatives for scripts and tmux
 configuration.
 
-On Zellij, the same daemon polls the current session and creates one sidebar
-pane in every tab. New tabs are detected within about two seconds. Zellij
-sidebars are applied with `override-layout`, retaining running terminal panes
-and wrapping the complete nested content tree. workmux also restores the
-visible pane ordering when Zellij's logical pane order differs from its layout
-order, including when enabled after multiple `workmux add` commands. Temporary
-layout slots are removed without closing the original running panes. Closing
-the sidebar reapplies the content-only layout so the original panes retain
-their order and fill the tab. Layout changes are serialized with background
-synchronization, and pane observations are shared across tabs to keep toggles
-responsive. Snapshots taken during a layout change use Zellij's plain pane
-table, which skips the per-pane command lookups that JSON output performs.
-workmux does not install Zellij hooks.
+On Zellij, the daemon polls the current session and adds a sidebar to each tab,
+including new tabs within about two seconds. workmux installs no Zellij hooks.
+See [Zellij sidebar](/guide/zellij/#sidebar).
 
 ### Session-scoped mode
 
@@ -266,10 +256,9 @@ Starting global mode still replaces any session-scoped sidebars.
 
 ## Limitations
 
-- Zellij sidebars are experimental and limited to the current Zellij session.
-- `--session` is equivalent to the default command on Zellij.
-- Fixed sidebar sizes follow Zellij's layout behavior when the terminal itself
-  is resized.
+- Zellij support is experimental and limited to the current Zellij session, so
+  `--session` has no additional effect there. See
+  [Zellij limitations](/guide/zellij/#known-limitations).
 
 ## Example tmux binding
 
