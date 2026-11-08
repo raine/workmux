@@ -243,6 +243,7 @@ fn remove_local(
         // Check unmerged (promptable), only if configured and we're deleting the branch
         if confirm_unmerged
             && !keep_branch
+            && git::worktree_branch_in(&path, &context.execution_dir)?.is_some()
             && let Some(base) = is_unmerged(&branch)?
         {
             unmerged.push((handle, branch, base));
@@ -647,16 +648,14 @@ fn remove_worktree(
         .context("Failed to remove worktree")?;
 
     if !result.cleanup_scheduled {
-        if keep_branch {
-            println!(
-                "✓ Removed worktree '{}' (branch '{}' kept)",
-                handle, result.branch_removed
-            );
-        } else {
-            println!(
-                "✓ Removed worktree '{}' and branch '{}'",
-                handle, result.branch_removed
-            );
+        match result.branch_removed.as_deref() {
+            Some(branch) if keep_branch => {
+                println!("✓ Removed worktree '{}' (branch '{}' kept)", handle, branch);
+            }
+            Some(branch) => {
+                println!("✓ Removed worktree '{}' and branch '{}'", handle, branch);
+            }
+            None => println!("✓ Removed worktree '{}'", handle),
         }
         io::stdout().flush()?;
     }

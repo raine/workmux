@@ -32,6 +32,110 @@ from .support.worktrees import (
 )
 
 
+@pytest.mark.parametrize("force,collision", [(True, False), (False, True)])
+def test_remove_detached_worktree(
+    mux_server: MuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    force: bool,
+    collision: bool,
+):
+    env = mux_server
+    handle = "detached-tree"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "checkout", "--detach"], cwd=tree)
+    env.run_command(
+        ["git", "config", f"workmux.worktree.{handle}.attachment", "headless"],
+        cwd=mux_repo_path,
+    )
+    if collision:
+        # An unmerged branch with the display label must neither prompt nor be deleted.
+        commit = env.run_command(
+            ["git", "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "unmerged"],
+            cwd=mux_repo_path,
+        ).stdout.strip()
+        env.run_command(["git", "branch", "(detached)", commit], cwd=mux_repo_path)
+
+    flags = "--force " if force else ""
+    result = run_workmux_command(
+        env, workmux_exe_path, mux_repo_path, f"remove {flags}{handle}"
+    )
+    assert "(detached)" not in result.stdout
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    assert poll_until(
+        lambda: not tree.exists()
+        and not list(tree.parent.glob(f".workmux_trash_{handle}_*"))
+        and not list(pending.glob("*.json")),
+        timeout=10,
+    )
+    assert (
+        str(tree)
+        not in env.run_command(
+            ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
+        ).stdout
+    )
+    assert (
+        env.run_command(
+            ["git", "config", "--get-regexp", f"^workmux\\.worktree\\.{handle}\\."],
+            cwd=mux_repo_path,
+            check=False,
+        ).returncode
+        != 0
+    )
+    assert_branches_present(env, mux_repo_path, [handle])
+    if collision:
+        assert_branches_present(env, mux_repo_path, ["(detached)"])
+
+
+def test_remove_branch_named_detached(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    handle = "named-detached"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "branch", "-m", "(detached)"], cwd=tree)
+    run_workmux_remove(env, workmux_exe_path, mux_repo_path, handle, force=True)
+    assert not tree.exists()
+    assert_branches_deleted(env, mux_repo_path, ["(detached)"])
+
+
+@pytest.mark.tmux_only
+def test_remove_detached_from_own_window(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    handle = "deferred-detached"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "checkout", "--detach"], cwd=tree)
+    env.run_command(["git", "branch", "(detached)"], cwd=mux_repo_path)
+    output = env.tmp_path / "detached-removal-output"
+    env.send_keys(
+        get_window_name(handle),
+        f"cd {shlex.quote(str(tree))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {handle} "
+        f">{shlex.quote(str(output))} 2>&1",
+    )
+    assert poll_until(
+        lambda: output.exists() and "Scheduled removal" in output.read_text()
+    )
+    assert "(detached)" not in output.read_text()
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    assert poll_until(
+        lambda: not tree.exists()
+        and not list(tree.parent.glob(f".workmux_trash_{handle}_*"))
+        and not list(pending.glob("*.json")),
+        timeout=10,
+    )
+    assert_branches_present(env, mux_repo_path, [handle, "(detached)"])
+    assert get_window_name(handle) not in env.list_windows()
+
+
 def test_remove_clean_branch_succeeds_without_prompt(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

@@ -231,10 +231,32 @@ pub fn prune_worktrees_in(git_common_dir: &Path) -> Result<()> {
 
 /// Parse the output of `git worktree list --porcelain`
 pub(super) fn parse_worktree_list_porcelain(output: &str) -> Result<Vec<(PathBuf, String)>> {
+    Ok(parse_worktree_branches(output)
+        .into_iter()
+        .map(|(path, branch)| (path, branch.unwrap_or_else(|| "(detached)".to_string())))
+        .collect())
+}
+
+/// Resolve the checked-out branch without conflating detached HEAD with a branch name.
+/// Registration is used so this also works when the worktree directory is absent.
+pub fn worktree_branch_in(worktree_path: &Path, workdir: &Path) -> Result<Option<String>> {
+    let output = Cmd::new("git")
+        .workdir(workdir)
+        .args(&["worktree", "list", "--porcelain"])
+        .run_and_capture_stdout()?;
+    parse_worktree_branches(&output)
+        .into_iter()
+        .find(|(path, _)| path == worktree_path)
+        .map(|(_, branch)| branch)
+        .ok_or_else(|| anyhow!("Worktree '{}' is not registered", worktree_path.display()))
+}
+
+fn parse_worktree_branches(output: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut worktrees = Vec::new();
     for block in output.trim().split("\n\n") {
         let mut path: Option<PathBuf> = None;
         let mut branch: Option<String> = None;
+        let mut detached = false;
 
         for line in block.lines() {
             if let Some(p) = line.strip_prefix("worktree ") {
@@ -242,15 +264,17 @@ pub(super) fn parse_worktree_list_porcelain(output: &str) -> Result<Vec<(PathBuf
             } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
                 branch = Some(b.to_string());
             } else if line.trim() == "detached" {
-                branch = Some("(detached)".to_string());
+                detached = true;
             }
         }
 
-        if let (Some(p), Some(b)) = (path, branch) {
-            worktrees.push((p, b));
+        if let Some(path) = path
+            && (branch.is_some() || detached)
+        {
+            worktrees.push((path, branch));
         }
     }
-    Ok(worktrees)
+    worktrees
 }
 
 /// Get the path to a worktree for a given branch
@@ -680,6 +704,20 @@ mod tests {
                     .all(|(path, _)| *path != listing.main_path)
             );
         }
+    }
+
+    #[test]
+    fn worktree_branches_distinguish_detached_head_from_named_branch() {
+        let branches = parse_worktree_branches(
+            "worktree /detached\nHEAD abc\ndetached\n\nworktree /named\nHEAD abc\nbranch refs/heads/(detached)\n",
+        );
+        assert_eq!(
+            branches,
+            vec![
+                (PathBuf::from("/detached"), None),
+                (PathBuf::from("/named"), Some("(detached)".to_string())),
+            ]
+        );
     }
 
     #[test]

@@ -104,8 +104,17 @@ fn remove_with_hook_output(
         ));
     }
 
+    let checked_out_branch = if branch_name.is_empty() {
+        None
+    } else {
+        git::worktree_branch_in(&worktree_path, &context.execution_dir)?
+    };
+    // Detached HEAD has no branch to delete, including when a branch named
+    // "(detached)" exists elsewhere in the repository.
+    let keep_branch = keep_branch || checked_out_branch.is_none();
+
     // Safety Check: Prevent deleting the main branch by name (secondary check)
-    if branch_name == context.main_branch {
+    if checked_out_branch.as_deref() == Some(context.main_branch.as_str()) {
         return Err(anyhow!(
             "Cannot delete the main branch ('{}')",
             context.main_branch
@@ -159,7 +168,9 @@ fn remove_with_hook_output(
 
     let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
     if cleanup_scheduled && show_hook_output {
-        if keep_branch {
+        if checked_out_branch.is_none() {
+            println!("✓ Scheduled removal of worktree '{}'", actual_handle);
+        } else if keep_branch {
             println!(
                 "✓ Scheduled removal of worktree '{}' (branch '{}' will be kept)",
                 actual_handle, branch_name
@@ -174,7 +185,7 @@ fn remove_with_hook_output(
     }
 
     Ok(RemoveResult {
-        branch_removed: branch_name.to_string(),
+        branch_removed: checked_out_branch,
         cleanup_scheduled,
     })
 }

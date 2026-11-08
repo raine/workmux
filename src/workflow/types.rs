@@ -67,7 +67,7 @@ pub struct MergeResult {
 
 /// Result of removing a worktree
 pub struct RemoveResult {
-    pub branch_removed: String,
+    pub branch_removed: Option<String>,
     pub cleanup_scheduled: bool,
 }
 
