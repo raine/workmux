@@ -538,11 +538,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         for (agent, subpath) in [("copilot", ".copilot"), ("agy", ".gemini/antigravity-cli")] {
             let mounts = project_mounts_for_test(tmp.path(), "test-vm", agent);
+            let host_path = agent_config_host_path(tmp.path(), agent);
             let mount = mounts
                 .iter()
-                .find(|m| m.host_path == agent_config_host_path(tmp.path(), agent))
+                .find(|m| m.host_path == host_path)
                 .unwrap_or_else(|| panic!("{agent} config mount missing"));
-            assert!(mount.guest_path.ends_with(subpath));
+            // Without $USER (e.g. the Nix build sandbox) the guest path falls
+            // back to the host path.
+            let expected = lima_guest_home()
+                .map(|h| h.join(subpath))
+                .unwrap_or(host_path);
+            assert_eq!(mount.guest_path, expected);
         }
     }
 
