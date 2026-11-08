@@ -77,6 +77,15 @@ This leaves terminal panes running. Unmarked extra shells created by older
 builds must be closed manually; workmux cannot safely distinguish them from
 user-created shells.
 
+:::caution[Zellij 0.45.1 and earlier]
+These releases reuse client IDs, so concurrent `zellij action` calls can
+intermittently fail with `There is no active session!` or return empty output.
+Toggling the sidebar runs many such calls while the daemon polls session state,
+so a toggle can occasionally fail partway and leave panes out of order. Zellij
+built from `main` includes the fix
+([zellij-org/zellij#5630](https://github.com/zellij-org/zellij/pull/5630)).
+:::
+
 ## Requirements
 
 - Zellij built from source (uses unreleased features: `--pane-id` targeting, `close-tab-by-id`, `go-to-tab-by-id`, tab ID APIs). These will ship in a future release after 0.43.

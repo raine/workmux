@@ -4,7 +4,7 @@
 //! - No percentage-based pane size control (can resize with +/- but not set exact %)
 //! - No window insertion order (tabs always append)
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -330,6 +330,30 @@ where
         .with_context(|| parse_context.to_string())
 }
 
+/// Run a query whose successful output is never empty, retrying empty output.
+///
+/// Zellij can end a CLI action with an empty reply when another client's
+/// pane closes while the action is in flight, so empty output is transient.
+/// Returns the last output, which is empty only if every attempt was empty.
+fn query_text_with_retry<F>(mut query: F, delay: Duration) -> Result<String>
+where
+    F: FnMut() -> Result<String>,
+{
+    const ATTEMPTS: usize = 5;
+
+    let mut output = String::new();
+    for attempt in 0..ATTEMPTS {
+        output = query()?;
+        if !output.is_empty() {
+            break;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(delay);
+        }
+    }
+    Ok(output)
+}
+
 /// Extract the base command name from a full command path/string.
 ///
 /// Takes an optional command string (e.g., "/usr/bin/bash --login"),
@@ -441,11 +465,15 @@ impl ZellijBackend {
 
     /// Get the name of the currently focused tab using `current-tab-info`.
     fn focused_tab_name(&self) -> Option<String> {
-        let output = self
-            .command()
-            .args(&["action", "current-tab-info"])
-            .run_and_capture_stdout()
-            .ok()?;
+        let output = query_text_with_retry(
+            || {
+                self.command()
+                    .args(&["action", "current-tab-info"])
+                    .run_and_capture_stdout()
+            },
+            Duration::from_millis(50),
+        )
+        .ok()?;
 
         parse_tab_name_from_output(&output)
     }
@@ -532,10 +560,19 @@ impl ZellijBackend {
     }
 
     pub(crate) fn dump_layout(&self) -> Result<String> {
-        self.command()
-            .args(&["action", "dump-layout"])
-            .run_and_capture_stdout()
-            .context("Failed to dump Zellij layout")
+        let layout = query_text_with_retry(
+            || {
+                self.command()
+                    .args(&["action", "dump-layout"])
+                    .run_and_capture_stdout()
+                    .context("Failed to dump Zellij layout")
+            },
+            Duration::from_millis(50),
+        )?;
+        if layout.is_empty() {
+            bail!("Zellij returned an empty layout dump");
+        }
+        Ok(layout)
     }
 
     pub(crate) fn override_active_tab_layout(&self, layout: &str) -> Result<()> {
@@ -1749,6 +1786,32 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("parse panes"));
+    }
+
+    #[test]
+    fn query_text_with_retry_retries_empty_output() {
+        let mut outputs = ["", "", "layout {}"].into_iter();
+        let output =
+            query_text_with_retry(|| Ok(outputs.next().unwrap().to_string()), Duration::ZERO)
+                .unwrap();
+
+        assert_eq!(output, "layout {}");
+    }
+
+    #[test]
+    fn query_text_with_retry_returns_empty_after_all_attempts() {
+        let mut calls = 0;
+        let output = query_text_with_retry(
+            || {
+                calls += 1;
+                Ok(String::new())
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert!(output.is_empty());
+        assert_eq!(calls, 5);
     }
 
     // === extract_base_command ===
