@@ -2,8 +2,13 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/workmux/arm64}"
-rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-trixie}"
+# The shared sandbox image is Ubuntu 22.04 (glibc 2.35), and a binary only runs
+# on a glibc at least as new as the one it was built against, so build on an
+# older Debian release.
+rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-bullseye}"
+# Keep build output per image so objects built against another glibc are not
+# reused.
+build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/workmux/arm64-${rust_image//[^A-Za-z0-9._-]/_}}"
 
 usage() {
   cat <<'USAGE'
