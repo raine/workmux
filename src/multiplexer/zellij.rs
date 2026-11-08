@@ -772,6 +772,17 @@ impl ZellijBackend {
         Ok(())
     }
 
+    /// Stack the panes onto the first pane, in the given order.
+    pub(crate) fn stack_panes(&self, pane_ids: &[String]) -> Result<()> {
+        let mut args = vec!["action", "stack-panes", "--"];
+        args.extend(pane_ids.iter().map(String::as_str));
+        self.command()
+            .args(&args)
+            .run()
+            .with_context(|| format!("Failed to stack zellij panes {pane_ids:?}"))?;
+        Ok(())
+    }
+
     pub(crate) fn move_pane_by_id(&self, pane_id: &str, direction: &str) -> Result<()> {
         self.command()
             .args(&["action", "move-pane", "--pane-id", pane_id, direction])

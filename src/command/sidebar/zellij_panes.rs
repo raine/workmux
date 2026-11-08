@@ -295,6 +295,83 @@ fn remove_existing_sidebar(node: &mut KdlNode) {
     }
 }
 
+/// Flatten stacks into plain splits. Zellij reports one shared rectangle for every
+/// pane in a stack, so slot matching needs each retained pane in its own slot.
+/// Stacks are rebuilt once the panes are back in order.
+fn unstack(node: &mut KdlNode) {
+    remove_property(node, "stacked");
+    remove_property(node, "expanded");
+    if let Some(children) = node.children_mut() {
+        for child in children.nodes_mut() {
+            unstack(child);
+        }
+    }
+}
+
+fn pane_number(pane_id: &str) -> u32 {
+    pane_id
+        .rsplit('_')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(u32::MAX)
+}
+
+/// Original slot of every retained tiled pane, and the panes of each stack.
+///
+/// Tiled panes never overlap, so panes sharing a rectangle form a stack. Its
+/// members get the rows the flattened stack occupies, in pane order.
+fn retained_slots(
+    panes: &[ZellijSidebarPane],
+) -> (
+    std::collections::HashMap<String, PaneRect>,
+    Vec<Vec<String>>,
+) {
+    let mut groups: Vec<(PaneRect, Vec<String>)> = Vec::new();
+    for pane in panes
+        .iter()
+        .filter(|pane| !is_sidebar_pane(&pane.title) && !pane.is_floating)
+    {
+        let Some(rect) = pane_rect(pane) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(group, _)| *group == rect) {
+            Some((_, members)) => members.push(pane.pane_id.clone()),
+            None => groups.push((rect, vec![pane.pane_id.clone()])),
+        }
+    }
+    let mut slots = std::collections::HashMap::new();
+    let mut stacks = Vec::new();
+    for (rect, mut members) in groups {
+        if members.len() == 1 {
+            slots.insert(members.remove(0), rect);
+            continue;
+        }
+        members.sort_by_key(|pane_id| pane_number(pane_id));
+        let count = members.len() as u16;
+        let row_height = (rect.height / count).max(1);
+        for (index, pane_id) in members.iter().enumerate() {
+            let index = index as u16;
+            let y = rect.y + index * row_height;
+            let height = if index + 1 == count {
+                (rect.y + rect.height).saturating_sub(y).max(1)
+            } else {
+                row_height
+            };
+            slots.insert(
+                pane_id.clone(),
+                PaneRect {
+                    x: rect.x,
+                    y,
+                    width: rect.width,
+                    height,
+                },
+            );
+        }
+        stacks.push(members);
+    }
+    (slots, stacks)
+}
+
 struct RetainedContent<'a> {
     placeholder_name: &'a str,
     ui_plugin_aliases: HashSet<String>,
@@ -437,6 +514,7 @@ fn layout_for_tab(
     let mut tab = active_dumped_tab(layout, tab_position)
         .ok_or_else(|| anyhow!("dumped Zellij layout has no target tab"))?;
     remove_existing_sidebar(&mut tab);
+    unstack(&mut tab);
     let original_direction = tab.get("split_direction").cloned();
     let original_children = tab
         .children_mut()
@@ -830,14 +908,11 @@ fn finish_sidebar_updates(instance_id: &str, updates: &[SidebarUpdate<'_>]) -> R
                     mux.set_pane_name(&pane.pane_id, &original.title)?;
                 }
             }
-            let original_rects = update
-                .tab
-                .panes
-                .iter()
-                .filter(|pane| !is_sidebar_pane(&pane.title) && !pane.is_floating)
-                .filter_map(|pane| pane_rect(pane).map(|rect| (pane.pane_id.clone(), rect)))
-                .collect();
+            let (original_rects, stacks) = retained_slots(&update.tab.panes);
             restore_pane_slots(instance_id, tab.tab_id, &original_rects, &tab.panes)?;
+            for stack in &stacks {
+                mux.stack_panes(stack)?;
+            }
             mux.focus_pane_by_id(update.focus_pane_id)?;
             Ok(())
         })();
@@ -1359,6 +1434,108 @@ mod tests {
         assert!(is_zellij_ui_pane(&root_panes[2]), "{output}");
         assert_eq!(root_panes[2].get("size"), Some(&KdlValue::Integer(1)));
         assert_eq!(root_panes[2].get("borderless"), Some(&KdlValue::Bool(true)));
+    }
+
+    fn tiled_pane(pane_id: &str, x: u16, y: u16, width: u16, height: u16) -> ZellijSidebarPane {
+        ZellijSidebarPane {
+            pane_id: pane_id.to_string(),
+            title: pane_id.to_string(),
+            command: None,
+            is_focused: false,
+            is_floating: false,
+            pane_x: Some(x),
+            pane_y: Some(y),
+            pane_columns: Some(width),
+            pane_rows: Some(height),
+        }
+    }
+
+    #[test]
+    fn stacked_panes_get_distinct_rows_and_are_restacked_in_pane_order() {
+        let panes = [
+            tiled_pane("terminal_3", 0, 1, 72, 39),
+            tiled_pane("terminal_1", 72, 1, 72, 39),
+            tiled_pane("terminal_0", 0, 1, 72, 39),
+            tiled_pane("terminal_2", 0, 1, 72, 39),
+        ];
+        let (slots, stacks) = retained_slots(&panes);
+
+        assert_eq!(
+            stacks,
+            vec![vec![
+                "terminal_0".to_string(),
+                "terminal_2".to_string(),
+                "terminal_3".to_string(),
+            ]]
+        );
+        let rect = |id: &str| slots[id];
+        assert_eq!(
+            rect("terminal_1"),
+            PaneRect {
+                x: 72,
+                y: 1,
+                width: 72,
+                height: 39
+            }
+        );
+        assert_eq!(
+            rect("terminal_0"),
+            PaneRect {
+                x: 0,
+                y: 1,
+                width: 72,
+                height: 13
+            }
+        );
+        assert_eq!(
+            rect("terminal_2"),
+            PaneRect {
+                x: 0,
+                y: 14,
+                width: 72,
+                height: 13
+            }
+        );
+        assert_eq!(
+            rect("terminal_3"),
+            PaneRect {
+                x: 0,
+                y: 27,
+                width: 72,
+                height: 13
+            }
+        );
+    }
+
+    #[test]
+    fn layout_flattens_stacks_into_plain_slots() {
+        let dumped = r#"
+            layout {
+                tab name="one" focus=true {
+                    pane split_direction="vertical" {
+                        pane size="50%"
+                        pane size="50%" stacked=true {
+                            pane
+                            pane focus=true expanded=true
+                        }
+                    }
+                }
+            }
+        "#;
+        let output = layout_with_sidebar(
+            dumped,
+            0,
+            SidebarPosition::Left,
+            KdlValue::Integer(24),
+            "/tmp/workmux",
+            "/tmp",
+            &retained_content(),
+        )
+        .unwrap();
+
+        assert!(!output.contains("stacked"), "{output}");
+        assert!(!output.contains("expanded"), "{output}");
+        assert_eq!(output.matches("WORKMUX_SIDEBAR_PLACEHOLDER=").count(), 3);
     }
 
     #[test]
