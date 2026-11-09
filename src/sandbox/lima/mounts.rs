@@ -199,6 +199,22 @@ pub(crate) fn seed_claude_json(vm_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where an agent's config directory is mounted under the guest home, or
+/// `None` for agents whose config directory workmux doesn't mount.
+fn agent_config_guest_subpath(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some(".claude"),
+        "copilot" => Some(".copilot"),
+        "gemini" => Some(".gemini"),
+        "agy" => Some(".gemini/antigravity-cli"),
+        "codex" => Some(".codex"),
+        "opencode" => Some(".local/share/opencode"),
+        "pi" => Some(".pi/agent"),
+        "omp" => Some(".omp/agent"),
+        _ => None,
+    }
+}
+
 /// Generate mount points for Lima VM based on isolation level and config.
 ///
 /// The `agent` parameter controls agent-specific mounts (e.g. `~/.claude`
@@ -272,16 +288,9 @@ fn generate_mounts_with_state_root(
     }
 
     // Mount agent config directory
-    if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent) {
-        let guest_subpath = match agent {
-            "claude" => ".claude",
-            "gemini" => ".gemini",
-            "codex" => ".codex",
-            "opencode" => ".local/share/opencode",
-            "pi" => ".pi/agent",
-            "omp" => ".omp/agent",
-            _ => unreachable!(),
-        };
+    if let Some(auth_dir) = config.sandbox.resolved_agent_config_dir(agent)
+        && let Some(guest_subpath) = agent_config_guest_subpath(agent)
+    {
         let guest_path = lima_guest_home()
             .map(|h| h.join(guest_subpath))
             .unwrap_or_else(|| auth_dir.clone());
@@ -522,6 +531,33 @@ mod tests {
                 .any(|m| m.host_path.to_string_lossy().contains("pi-agent-bin")),
             "omp agent should not get pi bin overlay"
         );
+    }
+
+    #[test]
+    fn test_copilot_and_agy_mount_config_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (agent, subpath) in [("copilot", ".copilot"), ("agy", ".gemini/antigravity-cli")] {
+            let mounts = project_mounts_for_test(tmp.path(), "test-vm", agent);
+            let host_path = agent_config_host_path(tmp.path(), agent);
+            let mount = mounts
+                .iter()
+                .find(|m| m.host_path == host_path)
+                .unwrap_or_else(|| panic!("{agent} config mount missing"));
+            // Without $USER (e.g. the Nix build sandbox) the guest path falls
+            // back to the host path.
+            let expected = lima_guest_home()
+                .map(|h| h.join(subpath))
+                .unwrap_or(host_path);
+            assert_eq!(mount.guest_path, expected);
+        }
+    }
+
+    #[test]
+    fn test_agent_without_guest_subpath_gets_no_config_mount() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mounts = project_mounts_for_test(tmp.path(), "test-vm", "vibe");
+        let vibe_host_path = agent_config_host_path(tmp.path(), "vibe");
+        assert!(!mounts.iter().any(|m| m.host_path == vibe_host_path));
     }
 
     #[test]

@@ -70,15 +70,29 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
         .with_context(|| format!("Copilot hooks file is not valid JSON: {}", path.display()))?;
 
     let required = [
-        ("sessionStart", "workmux register-agent"),
-        ("userPromptSubmitted", "workmux set-window-status working"),
-        ("postToolUse", "workmux set-window-status working"),
-        ("agentStop", "workmux set-window-status done"),
+        ("sessionStart", "workmux register-agent", None),
+        (
+            "userPromptSubmitted",
+            "workmux set-window-status working",
+            None,
+        ),
+        ("postToolUse", "workmux set-window-status working", None),
+        (
+            "postToolUseFailure",
+            "workmux set-window-status working",
+            None,
+        ),
+        (
+            "notification",
+            "workmux set-window-status waiting",
+            Some("permission_prompt|elicitation_dialog"),
+        ),
+        ("agentStop", "workmux set-window-status done", None),
     ];
     if config.get("version").and_then(Value::as_u64) == Some(1)
         && required
             .iter()
-            .all(|(event, command)| has_command_hook(&config, event, command))
+            .all(|(event, command, matcher)| has_command_hook(&config, event, command, *matcher))
     {
         Ok(StatusCheck::Installed)
     } else if has_workmux_hook(&config) {
@@ -88,7 +102,7 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
     }
 }
 
-fn has_command_hook(config: &Value, event: &str, expected: &str) -> bool {
+fn has_command_hook(config: &Value, event: &str, expected: &str, matcher: Option<&str>) -> bool {
     config["hooks"][event]
         .as_array()
         .into_iter()
@@ -96,6 +110,7 @@ fn has_command_hook(config: &Value, event: &str, expected: &str) -> bool {
         .any(|hook| {
             hook.get("type").and_then(Value::as_str) == Some("command")
                 && hook.get("bash").and_then(Value::as_str) == Some(expected)
+                && hook.get("matcher").and_then(Value::as_str) == matcher
         })
 }
 
@@ -248,6 +263,52 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), HOOKS_JSON);
         assert!(matches!(check_at(&path).unwrap(), StatusCheck::Installed));
+    }
+
+    #[test]
+    fn hooks_without_waiting_notification_need_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        let hooks = config["hooks"].as_object_mut().unwrap();
+        hooks.remove("notification");
+        hooks.insert(
+            "preToolUse".to_string(),
+            serde_json::json!([{
+                "type": "command",
+                "matcher": "ask_user",
+                "bash": "workmux set-window-status waiting",
+            }]),
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn waiting_notification_with_missing_or_incorrect_matcher_needs_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for matcher in [None, Some("permission_prompt"), Some(".*")] {
+            let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+            config["hooks"]["notification"] = serde_json::json!([{
+                "type": "command",
+                "bash": "workmux set-window-status waiting",
+            }]);
+            if let Some(matcher) = matcher {
+                config["hooks"]["notification"][0]["matcher"] = Value::from(matcher);
+            }
+            fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+            assert!(matches!(
+                check_at(&path).unwrap(),
+                StatusCheck::UpdateAvailable
+            ));
+        }
     }
 
     #[test]
