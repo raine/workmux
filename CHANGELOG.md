@@ -22,6 +22,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.282 (2026-11-10)
+
+- Fix `workmux remove` failing on detached worktrees. ([#354](https://github.com/raine/workmux/issues/354))
+- `{project}` now resolves to the repository name for bare repositories, such as `my-project/.bare` or `my-project.git`. See [project names and worktree paths](https://workmux.dev/guide/configuration#project-names-and-worktree-paths). ([#355](https://github.com/raine/workmux/issues/355))
+
 ## v0.1.281 (2026-11-08)
 
 - Add experimental Zellij support for the agent sidebar. See the [Zellij guide](https://workmux.dev/guide/zellij). ([#331](https://github.com/raine/workmux/pull/331))
