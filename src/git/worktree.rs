@@ -630,6 +630,52 @@ pub fn get_main_worktree_root() -> Result<PathBuf> {
 
 /// Get the main worktree root directory from a specific workdir
 pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
+    main_worktree_info_in(workdir).map(|(path, _)| path)
+}
+
+/// Resolve the configuration `{project}` name without changing repository paths.
+pub fn config_project_name_in(workdir: Option<&Path>) -> Result<String> {
+    let (root, bare) = main_worktree_info_in(workdir)?;
+    let directory = if bare {
+        // Porcelain reports a bare `.git` directory as its parent. Naming must
+        // inspect the actual directory so the parent's name is used verbatim.
+        super::get_git_common_dir_in(workdir)?
+    } else {
+        root
+    };
+    config_project_name(&directory, bare)
+}
+
+fn config_project_name(directory: &Path, bare: bool) -> Result<String> {
+    let name = directory
+        .file_name()
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not determine project name from path: {}",
+                directory.display()
+            )
+        })?
+        .to_string_lossy();
+    if bare && name.starts_with('.') {
+        return directory
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Could not determine project name from parent of: {}",
+                    directory.display()
+                )
+            });
+    }
+    Ok(if bare {
+        name.strip_suffix(".git").unwrap_or(&name).to_string()
+    } else {
+        name.into_owned()
+    })
+}
+
+fn main_worktree_info_in(workdir: Option<&Path>) -> Result<(PathBuf, bool)> {
     let cmd = Cmd::new("git").args(&["worktree", "list", "--porcelain"]);
     let cmd = match workdir {
         Some(path) => cmd.workdir(path),
@@ -659,7 +705,7 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
         // If this is a bare repo, return its path immediately.
         // Git commands like `git worktree prune` work correctly from bare repo directories.
         if is_bare && let Some(p) = path {
-            return Ok(p);
+            return Ok((p, true));
         }
     }
 
@@ -669,13 +715,13 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 
     for (path, _) in &worktrees {
         if path.exists() {
-            return Ok(path.clone());
+            return Ok((path.clone(), false));
         }
     }
 
     // Fallback: return the first worktree even if it doesn't exist
     if let Some((path, _)) = worktrees.first() {
-        Ok(path.clone())
+        Ok((path.clone(), false))
     } else {
         Err(anyhow!("No main worktree found"))
     }
@@ -687,6 +733,31 @@ mod tests {
     use crate::test_support;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn config_project_names_preserve_regular_names_and_normalize_bare_names() {
+        for (path, bare, expected) in [
+            ("/repos/northwind", false, "northwind"),
+            ("/repos/.northwind", false, ".northwind"),
+            ("/repos/northwind.git", false, "northwind.git"),
+            ("/repos/northwind", true, "northwind"),
+            ("/repos/northwind/.bare", true, "northwind"),
+            ("/repos/northwind/.anything", true, "northwind"),
+            ("/repos/northwind/.git", true, "northwind"),
+            ("/repos/northwind.git", true, "northwind"),
+            ("/repos/northwind.git.git", true, "northwind.git"),
+            ("/repos/northwind.git/.git", true, "northwind.git"),
+            ("/repos/.northwind/.git", true, ".northwind"),
+        ] {
+            assert_eq!(
+                config_project_name(Path::new(path), bare).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
+        assert!(config_project_name(Path::new("/"), false).is_err());
+        assert!(config_project_name(Path::new("/.bare"), true).is_err());
+    }
 
     #[test]
     fn listing_preserves_bare_anchor_when_first_linked_worktree_changes() {

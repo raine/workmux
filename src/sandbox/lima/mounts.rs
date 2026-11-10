@@ -277,7 +277,14 @@ fn generate_mounts_with_state_root(
 
             // 4. Mount custom worktree directory if configured
             if let Some(custom_template) = config.worktree_dir.as_ref() {
-                let custom_dir = crate::util::expand_worktree_dir(custom_template, &project_root)?;
+                let base = crate::git::get_main_worktree_root_in(Some(worktree))?;
+                let project_name = if custom_template.contains(crate::util::PROJECT_PLACEHOLDER) {
+                    crate::git::config_project_name_in(Some(worktree))?
+                } else {
+                    String::new()
+                };
+                let custom_dir =
+                    crate::util::expand_worktree_dir(custom_template, &base, &project_name)?;
                 std::fs::create_dir_all(&custom_dir)?;
 
                 if custom_dir != worktrees_dir {
@@ -359,6 +366,60 @@ fn generate_mounts_with_state_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_custom_worktree_mounts_use_git_anchor_and_project_name() {
+        for layout in ["northwind/.bare", "northwind/.git", "northwind.git"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            let bare = root.join(layout);
+            assert!(
+                Command::new("git")
+                    .args(["init", "--bare", "-q"])
+                    .arg(&bare)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let anchor = if bare.file_name().unwrap() == ".git" {
+                bare.parent().unwrap()
+            } else {
+                &bare
+            };
+            for (template, expected) in [
+                (
+                    "../out/{project}".to_string(),
+                    anchor.parent().unwrap().join("out/northwind"),
+                ),
+                ("../".to_string(), anchor.parent().unwrap().to_path_buf()),
+                (
+                    format!("{}/absolute/{{project}}", root.display()),
+                    root.join("absolute/northwind"),
+                ),
+            ] {
+                let mut config = Config {
+                    worktree_dir: Some(template),
+                    ..Config::default()
+                };
+                config.sandbox.agent_config_dir = Some(custom_agent_config_dir(&root));
+                let mounts = generate_mounts_with_state_root(
+                    &bare,
+                    IsolationLevel::Project,
+                    &config,
+                    "test-vm",
+                    "pi",
+                    Some(&root),
+                )
+                .unwrap();
+                assert!(
+                    mounts.iter().any(|mount| mount.host_path == expected),
+                    "{layout}: {}",
+                    expected.display()
+                );
+                assert!(expected.is_dir());
+            }
+        }
+    }
 
     #[test]
     fn test_seed_claude_json_writes_onboarding_config() {

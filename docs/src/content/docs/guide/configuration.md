@@ -96,6 +96,36 @@ local Git state and does not fetch. An explicit `workmux add --base` takes
 precedence. When `base_branch` is omitted, new branches use the checked-out
 branch.
 
+### Project names and worktree paths
+
+In `window_prefix` and `worktree_dir`, `{project}` resolves to the same name
+from any checkout of a repository. Regular repositories use the main checkout's
+directory name. For bare repositories, a dot-prefixed directory uses its parent's
+name; other directory names have one trailing `.git` removed.
+
+| Repository                         | `{project}`  | Relative `worktree_dir` base  |
+| ---------------------------------- | ------------ | ----------------------------- |
+| Regular `/repos/my-project`        | `my-project` | `/repos/my-project`           |
+| Bare `/repos/my-project`           | `my-project` | `/repos/my-project`           |
+| Bare `/repos/my-project/.bare`     | `my-project` | `/repos/my-project/.bare`     |
+| Bare `/repos/my-project/.anything` | `my-project` | `/repos/my-project/.anything` |
+| Bare `/repos/my-project/.git`      | `my-project` | `/repos/my-project`           |
+| Bare `/repos/my-project.git`       | `my-project` | `/repos/my-project.git`       |
+
+Git reports a bare directory named `.git` using its parent as the main
+worktree anchor. Other bare directories are their own anchors. For example,
+`worktree_dir: "../"` places checkouts beside `.bare`, but alongside
+`my-project` for the `my-project/.git` layout.
+
+Regular checkouts named `.my-project` or `my-project.git` keep those names.
+A bare `my-project.git/.bare` uses its parent name `my-project.git` verbatim.
+Without an explicit `worktree_dir`, the default directory is a sibling of
+the anchor, named `<anchor-directory-name>__worktrees`.
+
+Changing a resolved prefix does not rename existing windows or sessions;
+close them before changing the prefix and reopen them afterward. Changing a
+templated worktree directory affects new worktrees, not existing ones.
+
 ### Remotes
 
 `remotes` defines the SSH servers that can run agents. See [remote servers](/guide/remote/) for setup and usage.

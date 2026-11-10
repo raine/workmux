@@ -67,7 +67,16 @@ impl WorkflowContext {
     /// `<project>__worktrees` beside the main worktree.
     pub fn worktree_base_dir(&self) -> Result<PathBuf> {
         if let Some(ref worktree_dir) = self.config.worktree_dir {
-            return crate::util::expand_worktree_dir(worktree_dir, &self.main_worktree_root);
+            let project_name = if worktree_dir.contains(crate::util::PROJECT_PLACEHOLDER) {
+                git::config_project_name_in(Some(&self.execution_dir))?
+            } else {
+                String::new()
+            };
+            return crate::util::expand_worktree_dir(
+                worktree_dir,
+                &self.main_worktree_root,
+                &project_name,
+            );
         }
         let project_name = self
             .main_worktree_root

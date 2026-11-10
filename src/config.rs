@@ -911,7 +911,7 @@ pub struct Config {
     pub worktree_dir: Option<String>,
 
     /// Prefix for tmux window names (optional, defaults to "wm-")
-    /// Supports a `{project}` placeholder for the main worktree's directory name.
+    /// Supports a `{project}` placeholder for the repository's configuration name.
     #[serde(default)]
     pub window_prefix: Option<String>,
 
@@ -2991,14 +2991,14 @@ impl Config {
             &defaults_root,
         )?;
 
-        // Expand `{project}` against the main worktree so every worktree of a
+        // Resolve `{project}` consistently so every worktree of a
         // repository resolves the same prefix, whatever directory it runs from.
         // Outside a repository there is no project, so the template stands.
         if let Some(prefix) = config.window_prefix.as_deref()
             && prefix.contains(PROJECT_PLACEHOLDER)
-            && let Ok(main_root) = git::get_main_worktree_root_in(Some(start_dir))
+            && let Ok(project_name) = git::config_project_name_in(Some(start_dir))
         {
-            config.window_prefix = Some(expand_project_placeholder(prefix, &main_root)?);
+            config.window_prefix = Some(expand_project_placeholder(prefix, &project_name));
         }
 
         debug!(
@@ -3687,8 +3687,11 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 
 # Directory where worktrees are created.
 # Can be relative to repo root or absolute. Supports `~` for home directory
-# and `{project}` for the main worktree's directory name, so a global config
-# can namespace each repo, e.g. `~/.workmux/{project}`.
+# and `{project}` for the project name, e.g. `~/.workmux/{project}`.
+# Regular checkouts use the main directory name. Bare repositories use the
+# parent name for dot-prefixed directories, otherwise strip one trailing `.git`.
+# Relative paths use Git's main worktree anchor: the bare directory itself,
+# except a bare `.git` directory uses its parent. Naming does not change this base.
 # Default: Sibling directory '<project>__worktrees'.
 # worktree_dir: .worktrees
 
@@ -3699,8 +3702,8 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Prefix added to worktree directories and tmux window names.
 # worktree_prefix: ""
 
-# Prefix for tmux window and session names. Supports `{project}` for the main
-# worktree's directory name, e.g. `{project} ` to scope session names by repo.
+# Prefix for tmux window and session names. Supports the same `{project}` name
+# as worktree_dir, e.g. `{project} ` to scope session names by repo.
 # Default: "wm-"
 # window_prefix: "wm-"
 
