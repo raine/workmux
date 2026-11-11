@@ -351,13 +351,16 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
 
     if worktrees.is_empty() {
         if !all && git::get_repo_root_if_present()?.is_some() {
-            let all_worktrees = git::list_worktrees()?;
+            let listing = git::list_worktrees_with_main_in(None)?;
+            let worktree_paths = listing.canonical_paths();
+            let all_worktrees = listing.worktrees;
             let main_root = git::get_main_worktree_root()?;
             remote_records = remote::cache::for_project(&main_root);
             remote_records.retain(|record| !record.cleanup_pending());
             repository = Some(main_root);
             let has_scoped_agents = all_worktrees.iter().any(|(wt_path, _)| {
-                !workflow::match_agents_to_worktree(&agent_panes, wt_path).is_empty()
+                !workflow::match_agents_to_worktree(&agent_panes, wt_path, &worktree_paths)
+                    .is_empty()
             });
             let unmerged_branches = if show_git && has_scoped_agents {
                 let main = git::get_default_branch()?;
@@ -368,7 +371,8 @@ pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Resul
             };
 
             for (wt_path, branch) in &all_worktrees {
-                let matching = workflow::match_agents_to_worktree(&agent_panes, wt_path);
+                let matching =
+                    workflow::match_agents_to_worktree(&agent_panes, wt_path, &worktree_paths);
                 if matching.is_empty() {
                     continue;
                 }

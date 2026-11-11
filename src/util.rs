@@ -6,6 +6,18 @@ use std::time::{Duration, SystemTime};
 
 const STALE_ATOMIC_TEMP_AGE: Duration = Duration::from_secs(60);
 
+/// Find the deepest worktree containing a path. Both the path and all worktree
+/// roots must be canonicalized, and roots must include unselected worktrees.
+pub fn owning_worktree<'a>(
+    path: &Path,
+    worktrees: impl IntoIterator<Item = &'a PathBuf>,
+) -> Option<&'a PathBuf> {
+    worktrees
+        .into_iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
 /// Write content through a same-directory temporary file and atomically replace the target.
 pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     write_atomic_with_durability(path, content, false)
@@ -307,6 +319,39 @@ pub fn format_elapsed_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_ownership_uses_components_and_ignores_order() {
+        let mut roots = vec![
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo/worktrees/feature"),
+            PathBuf::from("/repo/worktrees/feature/nested"),
+        ];
+        for _ in 0..2 {
+            for (path, owner) in [
+                ("/repo", Some("/repo")),
+                ("/repo/src", Some("/repo")),
+                (
+                    "/repo/worktrees/feature/src",
+                    Some("/repo/worktrees/feature"),
+                ),
+                (
+                    "/repo/worktrees/feature/nested/src",
+                    Some("/repo/worktrees/feature/nested"),
+                ),
+                ("/repo/worktrees/feature-other", Some("/repo")),
+                ("/repo-other", None),
+            ] {
+                assert_eq!(
+                    owning_worktree(Path::new(path), &roots).map(PathBuf::as_path),
+                    owner.map(Path::new),
+                    "{path}"
+                );
+            }
+            roots.reverse();
+        }
+        assert_eq!(owning_worktree(Path::new("/repo"), &[]), None);
+    }
 
     #[test]
     fn write_atomic_replaces_target_and_removes_temp() {

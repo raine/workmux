@@ -160,7 +160,17 @@ pub fn run(
                 continue;
             }
 
-            let matching = workflow::match_agents_to_worktree(&agent_panes, wt_path);
+            // Refresh ownership while polling: nested worktrees can be added or
+            // removed while waiting. A removed target must still reach the
+            // existing merged-worktree handling below.
+            let worktree_paths =
+                if wt_path.exists() && git::get_repo_root_if_present_in(Some(wt_path))?.is_some() {
+                    git::list_worktrees_with_main_in(Some(wt_path))?.canonical_paths()
+                } else {
+                    vec![util::canon_or_self(wt_path)]
+                };
+            let matching =
+                workflow::match_agents_to_worktree(&agent_panes, wt_path, &worktree_paths);
 
             if !matching.is_empty() {
                 seen_agent.insert(name.clone());
