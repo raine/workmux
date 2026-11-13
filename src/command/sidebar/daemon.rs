@@ -2394,6 +2394,16 @@ pub fn run() -> Result<()> {
     let _ = std::fs::remove_file(&sock_path);
     let server = SocketServer::bind(&sock_path)?;
 
+    // Rex has no hooks: its event stream wakes observations early
+    let rex_events = (mux.name() == "rex").then(|| {
+        let observation_dirty = observation_dirty.clone();
+        let wake_tx = wake_tx.clone();
+        crate::multiplexer::rex::sidebar::EventFollower::spawn(move || {
+            observation_dirty.store(true, Ordering::Relaxed);
+            let _ = wake_tx.try_send(());
+        })
+    });
+
     let config_paths_tx = spawn_config_watcher(
         term.clone(),
         config.clone(),
@@ -2819,6 +2829,9 @@ pub fn run() -> Result<()> {
     }
     signal_handle.close();
     let _ = signal_thread.join();
+    if let Some(follower) = rex_events {
+        follower.stop();
+    }
     let _ = std::fs::remove_file(&sock_path);
     if let Ok(store) = StateStore::new() {
         store.delete_runtime(&backend_name, &instance_id);

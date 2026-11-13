@@ -418,3 +418,34 @@ def test_quitting_a_sidebar_turns_it_off(rex_sidebar: RexSidebar):
 
     s.wait_for(s.no_sidebars, message="sidebars stayed after quitting one")
     assert not s.state().get("enabled")
+
+
+def event_followers(s: RexSidebar) -> list[str]:
+    return subprocess.run(
+        ["pgrep", "-f", f"{s.env.server_endpoint} --autostart=false events"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+
+
+def test_events_place_sidebars_before_the_next_poll(rex_sidebar: RexSidebar):
+    s = rex_sidebar
+    s.sidebar("on")
+    s.wait_for(lambda: len(event_followers(s)) == 1, message="no event follower")
+    for _ in range(3):
+        window = s.new_window(s.env.session_id)
+        started = time.monotonic()
+        s.wait_for(
+            lambda: s.root_sidebar(s.window(window)) is not None,
+            message="no sidebar in the new window",
+        )
+        assert time.monotonic() - started < 1.5
+
+    # A dropped stream reconnects
+    for pid in event_followers(s):
+        os.kill(int(pid), signal.SIGKILL)
+    s.wait_for(lambda: len(event_followers(s)) == 1, message="follower did not reconnect")
+
+    s.sidebar("off")
+    s.wait_for(lambda: not event_followers(s), message="follower outlived the daemon")

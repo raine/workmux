@@ -9,12 +9,18 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::config::SidebarPosition;
 use crate::multiplexer::types::LivePaneInfo;
 
-use super::{RexBackend, RexPane, SHELL_FLAVOR, lua_list, util};
+use super::{RexBackend, RexPane, SHELL_FLAVOR, lua_list, server_endpoint, util};
 
 /// Label of every block that runs a workmux sidebar.
 pub(crate) const SIDEBAR_LABEL: &str = "workmux-sidebar";
@@ -345,6 +351,111 @@ impl RexBackend {
     }
 }
 
+/// Whether a server event can change where sidebars belong: a session or
+/// window coming or going, a layout change, or a block changing hands.
+/// Events from clients connecting, including the daemon's own CLI calls,
+/// don't.
+fn wakes(line: &str) -> bool {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    match event["type"].as_str() {
+        Some("session_created" | "session_destroyed") => true,
+        Some("session_event") => matches!(
+            event["payload"]["event"]["type"].as_str(),
+            Some("session_view_changed" | "block_created" | "block_closed" | "block_owner_changed")
+        ),
+        _ => false,
+    }
+}
+
+/// Follows the server's event stream and calls back on events that can
+/// change where sidebars belong. The stream is a hint: callers still poll.
+pub(crate) struct EventFollower {
+    stop: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl EventFollower {
+    const MIN_BACKOFF: Duration = Duration::from_millis(500);
+    const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+    pub(crate) fn spawn(wake: impl Fn() + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
+        let thread = {
+            let stop = stop.clone();
+            let child = child.clone();
+            std::thread::spawn(move || Self::run(&stop, &child, &wake))
+        };
+        Self {
+            stop,
+            child,
+            thread: Some(thread),
+        }
+    }
+
+    fn run(stop: &AtomicBool, slot: &Mutex<Option<Child>>, wake: &dyn Fn()) {
+        let mut backoff = Self::MIN_BACKOFF;
+        while !stop.load(Ordering::Relaxed) {
+            let started = Instant::now();
+            let mut command = Command::new("rex");
+            if let Some(server) = server_endpoint() {
+                command.args(["-S", server]);
+            }
+            let spawned = command
+                .args(["--autostart=false", "events", "--all", "--json"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            match spawned {
+                Ok(mut child) => {
+                    let stdout = child.stdout.take();
+                    *slot.lock().unwrap() = Some(child);
+                    if !stop.load(Ordering::Relaxed)
+                        && let Some(stdout) = stdout
+                    {
+                        for line in BufReader::new(stdout).lines() {
+                            let Ok(line) = line else { break };
+                            if wakes(&line) {
+                                wake();
+                            }
+                        }
+                    }
+                    if let Some(mut child) = slot.lock().unwrap().take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+                Err(error) => tracing::debug!(%error, "failed to follow Rex events"),
+            }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // Events may have been missed while disconnected
+            wake();
+            if started.elapsed() > Duration::from_secs(10) {
+                backoff = Self::MIN_BACKOFF;
+            }
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Self::MAX_BACKOFF);
+        }
+    }
+
+    pub(crate) fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 fn split_direction(position: SidebarPosition) -> &'static str {
     match position {
         SidebarPosition::Left => "horizontal",
@@ -448,6 +559,24 @@ mod tests {
             .context("Failed to call Rex API method block.close");
         assert!(is_last_block_refusal(&error));
         assert!(!is_last_block_refusal(&anyhow!("block not found")));
+    }
+
+    #[test]
+    fn layout_and_session_events_wake_the_daemon() {
+        let session_event = |kind: &str| {
+            json!({
+                "type": "session_event",
+                "payload": {"session_id": "session:1", "event": {"type": kind, "payload": {}}},
+            })
+            .to_string()
+        };
+        assert!(wakes(r#"{"type":"session_created","payload":{}}"#));
+        assert!(wakes(&session_event("session_view_changed")));
+        assert!(wakes(&session_event("block_closed")));
+        assert!(!wakes(&session_event("client_connected")));
+        assert!(!wakes(&session_event("block_event")));
+        assert!(!wakes(r#"{"type":"client_joined","payload":{}}"#));
+        assert!(!wakes("not json"));
     }
 
     #[test]
