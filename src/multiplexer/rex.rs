@@ -190,7 +190,7 @@ impl RexSnapshot {
     /// The session with this label. Rex labels need not be unique, so the
     /// current session wins, then the first one in server order.
     fn session_id(&self, label: &str) -> Option<String> {
-        self.session_id_from(label, RexBackend::current_session_id().as_deref())
+        self.session_id_from(label, RexBackend::env_session_id().as_deref())
     }
 
     fn session_id_from(&self, label: &str, current: Option<&str>) -> Option<String> {
@@ -222,7 +222,7 @@ impl RexSnapshot {
             .iter()
             .filter(|p| !p.floating && p.window == full_name)
             .collect();
-        match RexBackend::current_session_id() {
+        match RexBackend::env_session_id() {
             Some(current) if named.iter().any(|p| p.session_id == current) => named
                 .into_iter()
                 .filter(|p| p.session_id == current)
@@ -236,6 +236,30 @@ impl RexSnapshot {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("Window '{}' not found", full_name))
+    }
+
+    /// The window a target names: by label within its parent session when it
+    /// has one, otherwise as `window_panes` resolves the label.
+    fn target_window(&self, target: &WindowTarget) -> Option<&RexPane> {
+        match target.parent_session() {
+            Some(session) => self
+                .panes
+                .iter()
+                .find(|p| !p.floating && p.window == target.full_name && p.session == session),
+            None => self.window_panes(&target.full_name).into_iter().next(),
+        }
+    }
+
+    fn require_target_window(&self, target: &WindowTarget) -> Result<&RexPane> {
+        self.target_window(target)
+            .ok_or_else(|| match target.parent_session() {
+                Some(session) => anyhow!(
+                    "Window '{}' not found in session '{}'",
+                    target.full_name,
+                    session
+                ),
+                None => anyhow!("Window '{}' not found", target.full_name),
+            })
     }
 }
 
@@ -282,14 +306,14 @@ impl RexBackend {
         Cmd::new("rex")
     }
 
-    fn current_session_id() -> Option<String> {
+    fn env_session_id() -> Option<String> {
         std::env::var("REX_SESSION")
             .ok()
             .filter(|id| !id.trim().is_empty())
     }
 
     fn is_current_session(session_id: &str) -> bool {
-        Self::current_session_id().as_deref() == Some(session_id)
+        Self::env_session_id().as_deref() == Some(session_id)
     }
 
     /// Call a server API method and return its JSON result.
@@ -321,23 +345,40 @@ impl RexBackend {
     }
 
     fn snapshot(&self) -> Result<RexSnapshot> {
+        // The script lists every session itself. Drop the session and block
+        // from the environment: once workmux closes the session it runs in,
+        // `rex do` can't resolve them and fails.
         let output = self
             .rex_cmd()
             .args(&["do", "-e", SNAPSHOT_SCRIPT])
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .run_and_capture_stdout()
             .context("Failed to list Rex panes")?;
         RexSnapshot::parse(&output)
     }
 
-    /// A one-block layout running a shell in `cwd`, or `command` through
-    /// `sh -c` so quoting behaves like the other backends.
+    /// A one-block layout in `cwd` running `command` through `sh -c`, so
+    /// quoting behaves like the other backends, or a login shell.
+    ///
+    /// The shell is started as `$SHELL -l`, like tmux does. A Rex terminal with
+    /// no command, or with the `shell: "none"` option, goes through login(1),
+    /// which resets HOME and PATH to the account's. Panes then wouldn't
+    /// inherit the environment workmux runs in.
     fn shell_layout(cwd: &Path, command: Option<&str>) -> Value {
-        let mut options = json!({ "cwd": cwd.to_string_lossy() });
-        if let Some(command) = command {
-            options["command"] = json!(["sh", "-c", command]);
-            options["shell"] = json!("none");
-        }
-        json!({ "block": { "flavor": SHELL_FLAVOR, "options": options } })
+        let argv = match command {
+            Some(command) => json!(["sh", "-c", command]),
+            None => {
+                let shell = util::default_shell("/bin/sh").unwrap_or_else(|_| "/bin/sh".into());
+                json!([shell, "-l"])
+            }
+        };
+        json!({
+            "block": {
+                "flavor": SHELL_FLAVOR,
+                "options": { "cwd": cwd.to_string_lossy(), "command": argv },
+            }
+        })
     }
 
     fn first_block_id(result: &Value) -> Result<String> {
@@ -359,7 +400,7 @@ impl RexBackend {
         let list: RexClientList =
             serde_json::from_str(&output).context("Failed to parse the Rex client list")?;
         let apps: Vec<&RexClient> = list.clients.iter().filter(|c| c.is_app()).collect();
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         apps.iter()
             .find(|c| current.as_deref().is_some_and(|s| c.has_session(s)))
             .or(apps.first())
@@ -487,6 +528,10 @@ impl RexBackend {
     }
 
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        // Rex rejects empty text, and there is nothing to send anyway
+        if text.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_pane(pane_id)?;
         // `--` so text starting with "-" isn't read as a flag
@@ -519,12 +564,29 @@ impl Multiplexer for RexBackend {
         "rex"
     }
 
+    fn supports_session_mode(&self) -> bool {
+        true
+    }
+
     // === Server/Session ===
 
     fn is_running(&self) -> Result<bool> {
         self.rex_cmd()
             .args(&["--autostart=false", "api", "call", "server.status", "{}"])
             .run_as_check()
+    }
+
+    fn current_session_id(&self) -> Result<Option<String>> {
+        Ok(Self::env_session_id())
+    }
+
+    /// Navigation runs before this command, so `preferred_session` is unused.
+    fn shell_close_session_by_id_guard_cmd(
+        &self,
+        id: &str,
+        _preferred_session: Option<&str>,
+    ) -> Result<String> {
+        Ok(format!("rex kill '{id}' >/dev/null 2>&1 || true"))
     }
 
     fn current_pane_id(&self) -> Option<String> {
@@ -535,7 +597,7 @@ impl Multiplexer for RexBackend {
 
     fn active_pane_id(&self) -> Option<String> {
         let snapshot = self.snapshot().ok()?;
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         snapshot
             .panes
             .iter()
@@ -562,7 +624,7 @@ impl Multiplexer for RexBackend {
 
     fn create_window(&self, params: CreateWindowParams) -> Result<String> {
         let full_name = util::prefixed(params.prefix, params.name);
-        let session_id = Self::current_session_id()
+        let session_id = Self::env_session_id()
             .ok_or_else(|| anyhow!("REX_SESSION not set; run workmux inside a Rex terminal"))?;
         // Rex appends new windows at the end; params.after_window is ignored
         let result = self
@@ -617,8 +679,10 @@ impl Multiplexer for RexBackend {
         Ok(())
     }
 
+    /// Accepts a session label or a stable session ID.
     fn session_exists(&self, full_name: &str) -> Result<bool> {
-        Ok(self.snapshot()?.session_id(full_name).is_some())
+        let snapshot = self.snapshot()?;
+        Ok(snapshot.session_label(full_name).is_some() || snapshot.session_id(full_name).is_some())
     }
 
     fn kill_session(&self, full_name: &str) -> Result<()> {
@@ -689,6 +753,55 @@ impl Multiplexer for RexBackend {
         util::run_detached_sh_c(script)
     }
 
+    // Window targets carry the parent session a window-mode worktree was
+    // opened in. Without these, the defaults look only in the session workmux
+    // runs from, so `close` from another session reports no open window.
+
+    fn window_target_exists(&self, target: &WindowTarget) -> Result<bool> {
+        Ok(self.snapshot()?.target_window(target).is_some())
+    }
+
+    fn kill_window_target(&self, target: &WindowTarget) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if let Some(pane) = snapshot.target_window(target) {
+            self.call_api("session.close_window", pane.window_ref())
+                .context("Failed to close Rex window")?;
+        }
+        Ok(())
+    }
+
+    fn schedule_window_target_close(&self, target: &WindowTarget, delay: Duration) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let Some(pane) = snapshot.target_window(target) else {
+            return Ok(());
+        };
+        let script = format!(
+            "sleep {}; {}",
+            delay.as_secs_f64(),
+            Self::close_window_shell_cmd(pane)
+        );
+        util::run_detached_sh_c(&script)
+    }
+
+    fn shell_kill_window_target_cmd(&self, target: &WindowTarget) -> Result<String> {
+        let snapshot = self.snapshot()?;
+        Ok(Self::close_window_shell_cmd(
+            snapshot.require_target_window(target)?,
+        ))
+    }
+
+    fn select_window_target(&self, target: &WindowTarget) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let pane = snapshot.require_target_window(target)?;
+        if !Self::is_current_session(&pane.session_id) {
+            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
+            self.show_session(&pane.session_id, label, Some(&pane.window_id));
+        }
+        self.call_api("session.focus_window", pane.window_ref())
+            .context("Failed to focus Rex window")?;
+        Ok(())
+    }
+
     fn shell_select_window_cmd(&self, full_name: &str) -> Result<String> {
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_window(full_name)?;
@@ -736,7 +849,7 @@ impl Multiplexer for RexBackend {
     }
 
     fn get_all_window_names(&self) -> Result<HashSet<String>> {
-        let current = Self::current_session_id();
+        let current = Self::env_session_id();
         Ok(self
             .snapshot()?
             .panes
@@ -899,7 +1012,7 @@ impl Multiplexer for RexBackend {
     // === Multi-Session Support ===
 
     fn current_session(&self) -> Option<String> {
-        let current = Self::current_session_id()?;
+        let current = Self::env_session_id()?;
         self.snapshot()
             .ok()?
             .session_label(&current)
@@ -1054,13 +1167,22 @@ mod tests {
     }
 
     #[test]
+    fn shell_layout_starts_a_login_shell_directly() {
+        let layout = RexBackend::shell_layout(Path::new("/tmp"), None);
+        let options = &layout["block"]["options"];
+        assert_eq!(options["command"][1], "-l");
+        // `shell: "none"` would route the terminal through login(1)
+        assert!(options.get("shell").is_none());
+    }
+
+    #[test]
     fn shell_layout_runs_commands_through_sh() {
         let layout = RexBackend::shell_layout(Path::new("/tmp"), Some("echo 'hi'"));
         let options = &layout["block"]["options"];
         assert_eq!(layout["block"]["flavor"], SHELL_FLAVOR);
         assert_eq!(options["cwd"], "/tmp");
         assert_eq!(options["command"], json!(["sh", "-c", "echo 'hi'"]));
-        assert_eq!(options["shell"], "none");
+        assert!(options.get("shell").is_none());
     }
 
     #[test]
