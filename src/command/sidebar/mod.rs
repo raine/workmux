@@ -14,6 +14,7 @@
 //! - `hooks` - tmux hook installation and removal
 //! - `layout_tree` - tmux layout tree parser, reflow, and sidebar removal
 //! - `panes` - sidebar pane creation, destruction, and shutdown
+//! - `rex_panes` - sidebar placement, sizing, and scope on Rex
 //! - `runtime` - TUI event loop
 //! - `snapshot` - snapshot data types and builder
 //! - `ui` - ratatui rendering (compact and tile layouts)
@@ -27,6 +28,7 @@ mod fsevent;
 mod hooks;
 mod layout_tree;
 mod panes;
+mod rex_panes;
 mod runtime;
 mod session_state;
 mod snapshot;
@@ -84,7 +86,8 @@ pub(super) enum SidebarScope {
     Sessions(std::collections::HashSet<String>),
 }
 
-fn navigate_zellij(mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
+/// Navigate using the agent order the daemon keeps in the session state file.
+fn navigate_from_state(mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
     let state = session_state::read(&mux.instance_id())?;
     let mut panes: Vec<String> = state.ordered_agents;
     if panes.is_empty() {
@@ -106,10 +109,17 @@ fn navigate_zellij(mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
         .collect();
 
     if read_sidebar_filter_mode() == app::SidebarFilterMode::Session {
-        let current_session = mux.instance_id();
+        // Rex session labels need not be unique, so Rex compares IDs.
+        let current_session = match mux.name() {
+            "rex" => std::env::var("REX_SESSION").unwrap_or_default(),
+            _ => mux.instance_id(),
+        };
         panes.retain(|pane_id| {
             live.get(pane_id)
-                .and_then(|info| info.session.as_deref())
+                .and_then(|info| match mux.name() {
+                    "rex" => info.session_id.as_deref(),
+                    _ => info.session.as_deref(),
+                })
                 .is_none_or(|session| session == current_session)
         });
     }
@@ -537,9 +547,9 @@ fn apply_cli_dimensions(
 
 fn sidebar_mux() -> Result<std::sync::Arc<dyn Multiplexer>> {
     let mux = create_backend(detect_backend_strict()?);
-    if !matches!(mux.name(), "tmux" | "zellij") {
+    if !matches!(mux.name(), "tmux" | "zellij" | "rex") {
         return Err(anyhow!(
-            "Sidebar is supported only by tmux and Zellij, not {}",
+            "Sidebar is supported only by tmux, Zellij and Rex, not {}",
             mux.name()
         ));
     }
@@ -590,6 +600,190 @@ fn off_zellij(mux: &dyn Multiplexer) -> Result<()> {
     zellij_panes::kill_all_sidebars(&instance_id)
 }
 
+/// Backends where workmux places sidebars itself instead of through
+/// multiplexer hooks.
+#[derive(Clone, Copy)]
+enum PlacedHost {
+    Zellij,
+    Rex,
+}
+
+/// Which sessions a scope change reaches.
+#[derive(Clone, Copy)]
+enum Reach {
+    All,
+    CurrentSession,
+}
+
+impl PlacedHost {
+    fn of(mux: &dyn Multiplexer) -> Option<Self> {
+        match mux.name() {
+            "zellij" => Some(Self::Zellij),
+            "rex" => Some(Self::Rex),
+            _ => None,
+        }
+    }
+
+    fn on(
+        self,
+        mux: &dyn Multiplexer,
+        reach: Reach,
+        position: Option<SidebarPosition>,
+        width: Option<SidebarWidth>,
+        height: Option<SidebarHeight>,
+    ) -> Result<()> {
+        match self {
+            // Zellij sidebars always cover the whole session.
+            Self::Zellij => on_zellij(mux, position, width, height),
+            Self::Rex => on_rex(mux, reach, position, width, height),
+        }
+    }
+
+    fn off(self, mux: &dyn Multiplexer, reach: Reach) -> Result<()> {
+        match self {
+            Self::Zellij => off_zellij(mux),
+            Self::Rex => off_rex(mux, reach),
+        }
+    }
+
+    fn toggle(
+        self,
+        mux: &dyn Multiplexer,
+        reach: Reach,
+        position: Option<SidebarPosition>,
+        width: Option<SidebarWidth>,
+        height: Option<SidebarHeight>,
+    ) -> Result<()> {
+        let shown = match self {
+            Self::Zellij => {
+                zellij_panes::current_tab_has_sidebar(&mux.instance_id()).unwrap_or(false)
+            }
+            Self::Rex => rex_shown(mux, reach)?,
+        };
+        if shown {
+            self.off(mux, reach)
+        } else {
+            self.on(mux, reach, position, width, height)
+        }
+    }
+
+    fn sync(self, mux: &dyn Multiplexer) -> Result<()> {
+        let instance_id = mux.instance_id();
+        match self {
+            Self::Zellij => zellij_panes::create_sidebar_in_active_tab(&instance_id),
+            Self::Rex => {
+                if session_state::read(&instance_id)?.is_active() {
+                    let _ = ensure_daemon_running();
+                    rex_panes::sync(&instance_id)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn current_rex_session() -> Result<String> {
+    std::env::var("REX_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty())
+        .ok_or_else(|| anyhow!("run this inside a Rex terminal to target its session"))
+}
+
+fn on_rex(
+    mux: &dyn Multiplexer,
+    reach: Reach,
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    let instance_id = mux.instance_id();
+    let session = match reach {
+        Reach::All => None,
+        Reach::CurrentSession => Some(current_rex_session()?),
+    };
+    let previous = session_state::read(&instance_id)?;
+    // A running sidebar keeps its size unless the command names one.
+    let set_width = width.is_some() || !previous.is_active();
+    let set_height = height.is_some() || !previous.is_active();
+    let mut config = crate::config::Config::load(None)?;
+    apply_cli_dimensions(&mut config, width, height);
+    let position = match position {
+        Some(position) => position,
+        None if previous.is_active() => previous
+            .position
+            .unwrap_or_else(|| configured_position(&config, None)),
+        None => configured_position(&config, None),
+    };
+    let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
+    session_state::update(&instance_id, |state| {
+        match &session {
+            None => {
+                state.enabled = true;
+                state.optout_sessions.clear();
+                state.sessions.clear();
+            }
+            Some(session) if state.enabled => {
+                state.optout_sessions.remove(session);
+            }
+            Some(session) => {
+                state.sessions.insert(session.clone());
+            }
+        }
+        rex_panes::clear_dismissals(state, &observation, session.as_deref());
+        state.position = Some(position);
+        if set_width {
+            state.width.clone_from(&config.sidebar.width);
+        }
+        if set_height {
+            state.height.clone_from(&config.sidebar.height);
+        }
+    })?;
+    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
+    ensure_daemon_running()?;
+    rex_panes::sync(&instance_id)?;
+    Ok(())
+}
+
+fn off_rex(mux: &dyn Multiplexer, reach: Reach) -> Result<()> {
+    let instance_id = mux.instance_id();
+    let session = match reach {
+        Reach::All => None,
+        Reach::CurrentSession => Some(current_rex_session()?),
+    };
+    let state = session_state::update(&instance_id, |state| match &session {
+        None => {
+            state.enabled = false;
+            state.sessions.clear();
+            state.optout_sessions.clear();
+        }
+        Some(session) if state.enabled => {
+            state.optout_sessions.insert(session.clone());
+        }
+        Some(session) => {
+            state.sessions.remove(session);
+        }
+    })?;
+    rex_panes::sync(&instance_id)?;
+    if !state.is_active() {
+        kill_daemon();
+    }
+    Ok(())
+}
+
+/// Whether the sidebar shows where a toggle with this reach looks: the
+/// current window, or the current session's scope.
+fn rex_shown(mux: &dyn Multiplexer, reach: Reach) -> Result<bool> {
+    let state = session_state::read(&mux.instance_id())?;
+    match reach {
+        Reach::CurrentSession => Ok(state.covers_session(&current_rex_session()?)),
+        Reach::All if std::env::var_os("REX_BLOCK").is_none() => Ok(state.is_active()),
+        Reach::All => {
+            let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
+            Ok(rex_panes::current_window_has_sidebar(&observation))
+        }
+    }
+}
+
 /// Ensure the sidebar is running globally across all tmux windows.
 pub fn on(
     position: Option<SidebarPosition>,
@@ -597,8 +791,8 @@ pub fn on(
     height: Option<SidebarHeight>,
 ) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        return on_zellij(mux.as_ref(), position, width, height);
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.on(mux.as_ref(), Reach::All, position, width, height);
     }
     let mut config = crate::config::Config::load(None)?;
     let scope = current_scope();
@@ -631,10 +825,9 @@ pub fn on(
 /// Ensure the global sidebar is stopped.
 pub fn off() -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        off_zellij(mux.as_ref())?;
-    } else {
-        stop_all();
+    match PlacedHost::of(mux.as_ref()) {
+        Some(host) => host.off(mux.as_ref(), Reach::All)?,
+        None => stop_all(),
     }
     Ok(())
 }
@@ -646,13 +839,8 @@ pub fn toggle(
     height: Option<SidebarHeight>,
 ) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        let instance_id = mux.instance_id();
-        return if zellij_panes::current_tab_has_sidebar(&instance_id).unwrap_or(false) {
-            off_zellij(mux.as_ref())
-        } else {
-            on_zellij(mux.as_ref(), position, width, height)
-        };
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.toggle(mux.as_ref(), Reach::All, position, width, height);
     }
 
     // Determine intent based on the current window's state
@@ -678,8 +866,8 @@ pub fn on_session(
     height: Option<SidebarHeight>,
 ) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        return on_zellij(mux.as_ref(), position, width, height);
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.on(mux.as_ref(), Reach::CurrentSession, position, width, height);
     }
     let mut config = crate::config::Config::load(None)?;
     let appearance_changed = position.is_some() || width.is_some() || height.is_some();
@@ -729,8 +917,8 @@ pub fn on_session(
 /// Ensure the sidebar is stopped for the current tmux session.
 pub fn off_session() -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        return off_zellij(mux.as_ref());
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.off(mux.as_ref(), Reach::CurrentSession);
     }
     let scope = current_scope();
     let session_id = get_current_session_id()?;
@@ -762,8 +950,8 @@ pub fn toggle_session(
     height: Option<SidebarHeight>,
 ) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        return toggle(position, width, height);
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.toggle(mux.as_ref(), Reach::CurrentSession, position, width, height);
     }
 
     let scope = current_scope();
@@ -824,9 +1012,8 @@ fn resolve_target_window(window_id: Option<&str>) -> Result<String> {
 /// Sync sidebar into a window (called by tmux hooks for new windows/sessions).
 pub fn sync(window_id: Option<&str>) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        let instance_id = mux.instance_id();
-        return zellij_panes::create_sidebar_in_active_tab(&instance_id);
+    if let Some(host) = PlacedHost::of(mux.as_ref()) {
+        return host.sync(mux.as_ref());
     }
 
     let scope = current_scope();
@@ -1116,8 +1303,8 @@ fn navigation_anchor_pane<'a>(
 /// among agents in the current tmux session.
 pub fn navigate(action: NavAction) -> Result<()> {
     let mux = sidebar_mux()?;
-    if mux.name() == "zellij" {
-        return navigate_zellij(mux.as_ref(), action);
+    if PlacedHost::of(mux.as_ref()).is_some() {
+        return navigate_from_state(mux.as_ref(), action);
     }
 
     // Resolve the caller's window even if another client is focused elsewhere.

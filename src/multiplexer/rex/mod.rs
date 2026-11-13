@@ -34,8 +34,9 @@ const SHELL_FLAVOR: &str = "com.superlogical.terminal.shell";
 /// Terminal blocks add their foreground process and title.
 ///
 /// It also reports each window's tiled layout, every block's label and the
-/// name of the process a terminal started, and the size of sidebar blocks,
-/// which the sidebar daemon uses to place and size sidebars.
+/// name of the process a terminal started, and the size of sidebar blocks and
+/// each window's focused block, which the sidebar daemon uses to place and
+/// size sidebars.
 const SNAPSHOT_SCRIPT: &str = r#"
 local terminal = "com.superlogical.terminal"
 local sessions, panes, windows = {}, {}, {}
@@ -47,7 +48,7 @@ for _, s in ipairs(rex.call("session.list").sessions or {}) do
   if type(view) == "table" then
     for index, w in ipairs(view.windows or {}) do
       local window = {
-        session_id = s.session_id, window_id = w.window_id, window_index = index,
+        session_id = s.session_id, window_id = w.window_id,
         active = view.active_window_id == w.window_id,
       }
       for _, layer in ipairs(w.layers or {}) do
@@ -76,7 +77,7 @@ for _, s in ipairs(rex.call("session.list").sessions or {}) do
             end
             local ok_title, t = pcall(rex.block.call, terminal, "title", target)
             if ok_title and type(t) == "table" then pane.title = t.title end
-            if b.label == "workmux-sidebar" then
+            if b.label == "workmux-sidebar" or b.block_id == w.focused_block_id then
               local ok_size, size = pcall(rex.block.call, terminal, "size", target)
               if ok_size and type(size) == "table" then pane.size = size end
             end

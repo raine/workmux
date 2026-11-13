@@ -254,7 +254,8 @@ fn pane_kill_command(pane_id: &str) -> String {
 }
 
 fn schedule_pane_kill(mux: &dyn crate::multiplexer::Multiplexer, pane_id: &str) {
-    if mux.name() == "zellij" {
+    // Zellij and Rex close the pane when its process exits.
+    if matches!(mux.name(), "zellij" | "rex") {
         return;
     }
     let cmd = pane_kill_command(pane_id);
@@ -274,8 +275,16 @@ fn sidebar_is_only_pane(
     window_id: &str,
     pane_id: &str,
 ) -> bool {
-    if mux.name() == "zellij" {
-        return super::zellij_panes::sidebar_is_only_pane(&mux.instance_id(), window_id, pane_id);
+    match mux.name() {
+        "zellij" => {
+            return super::zellij_panes::sidebar_is_only_pane(
+                &mux.instance_id(),
+                window_id,
+                pane_id,
+            );
+        }
+        "rex" => return super::rex_panes::sidebar_is_only_pane(window_id, pane_id),
+        _ => {}
     }
     Cmd::new("tmux")
         .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])

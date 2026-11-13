@@ -1554,9 +1554,9 @@ impl SidebarApp {
     /// Process any pending resize after the debounce period has elapsed.
     /// Skips detection during startup grace period.
     pub fn process_pending_resize(&mut self, startup: &Instant, startup_grace: Duration) {
-        // Zellij keeps a manually resized sidebar as is, so there is nothing
-        // to reflow or persist.
-        if self.mux.name() == "zellij" {
+        // Zellij keeps a manually resized sidebar as is, and the Rex daemon
+        // sizes sidebars itself, so there is nothing to reflow or persist.
+        if matches!(self.mux.name(), "zellij" | "rex") {
             self.pending_resize_cols = None;
             self.pending_resize_rows = None;
             self.resize_deadline = None;
@@ -1993,12 +1993,12 @@ fn try_reparse_templates(
 
 /// Detect the sidebar's stable host identity from its tmux pane.
 fn detect_host_identity(mux: &dyn Multiplexer) -> Option<HostIdentity> {
-    if mux.name() == "zellij" {
+    if matches!(mux.name(), "zellij" | "rex") {
         let pane_id = mux.current_pane_id()?;
         let info = mux.get_live_pane_info(&pane_id).ok()??;
         let session_name = info.session.unwrap_or_else(|| mux.instance_id());
         return Some(HostIdentity {
-            session_id: session_name.clone(),
+            session_id: info.session_id.unwrap_or_else(|| session_name.clone()),
             session_name,
             window_id: info.window_id?,
             pane_id,

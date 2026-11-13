@@ -752,9 +752,9 @@ enum Commands {
     /// Update workmux to the latest version
     Update,
 
-    /// Control a live agent status sidebar in tmux or Zellij
+    /// Control a live agent status sidebar in tmux, Zellij or Rex
     Sidebar {
-        /// Scope tmux to this session; Zellij is always scoped to its current session
+        /// Scope tmux or Rex to this session; Zellij is always scoped to its current session
         #[arg(short = 's', long)]
         session: bool,
 

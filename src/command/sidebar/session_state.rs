@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -22,6 +22,54 @@ pub(super) struct SidebarSessionState {
     pub expanded_groups: Vec<String>,
     pub ordered_agents: Vec<String>,
     pub daemon_pid: Option<u32>,
+    /// Session IDs the sidebar covers while `enabled` is off. Rex only.
+    pub sessions: BTreeSet<String>,
+    /// Session IDs left out while `enabled` is on. Rex only.
+    pub optout_sessions: BTreeSet<String>,
+    /// Sidebars the daemon placed, by window ID. Rex only.
+    pub placements: BTreeMap<String, Placement>,
+    /// Windows whose sidebar the user closed. They get no new sidebar until
+    /// the sidebar is turned on again. Rex only.
+    pub dismissed: BTreeSet<String>,
+    /// The server boot that `placements` and `dismissed` belong to.
+    pub boot_id: Option<String>,
+}
+
+/// A sidebar the daemon placed and the size it last gave it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct Placement {
+    pub block_id: String,
+    /// The root split ratio the daemon last set or accepted.
+    pub applied_ratio: f64,
+    /// The window extent in cells when the ratio was applied, once a client
+    /// displays the window.
+    pub applied_window_cells: Option<u16>,
+    /// Hash of the window's blocks when the ratio was applied.
+    pub topology: u64,
+    /// The blocks just changed, so the next ratio change may be the app
+    /// rebalancing the row rather than the user dragging the border.
+    #[serde(default)]
+    pub settling: bool,
+    /// A ratio seen once that differs from `applied_ratio`. Seen twice, it
+    /// is a drag.
+    #[serde(default)]
+    pub drag_candidate: Option<f64>,
+}
+
+impl SidebarSessionState {
+    /// Whether the sidebar covers this session.
+    pub(super) fn covers_session(&self, session_id: &str) -> bool {
+        if self.enabled {
+            !self.optout_sessions.contains(session_id)
+        } else {
+            self.sessions.contains(session_id)
+        }
+    }
+
+    /// Whether the sidebar covers any session.
+    pub(super) fn is_active(&self) -> bool {
+        self.enabled || !self.sessions.is_empty()
+    }
 }
 
 fn instance_key(instance_id: &str) -> u64 {
@@ -162,13 +210,25 @@ mod tests {
         assert_ne!(path("alpha"), socket_path("alpha"));
     }
 
+    /// A process another test is spawning shares every open file until it
+    /// execs, so a released lock can stay held for a moment.
+    fn eventually<T>(attempt: impl Fn() -> Option<T>) -> Option<T> {
+        for _ in 0..100 {
+            if let Some(value) = attempt() {
+                return Some(value);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
     #[test]
     fn layout_updates_exclude_concurrent_synchronization_and_release_on_drop() {
         let instance = format!("sidebar-layout-test-{:016x}", getrandom::u64().unwrap());
         let guard = lock_layout(&instance).unwrap();
         assert!(try_lock_layout(&instance).unwrap().is_none());
         drop(guard);
-        assert!(try_lock_layout(&instance).unwrap().is_some());
+        assert!(eventually(|| try_lock_layout(&instance).unwrap()).is_some());
         fs::remove_file(path(&instance).with_extension("layout.lock")).unwrap();
     }
 
@@ -179,7 +239,7 @@ mod tests {
         assert!(first.is_some());
         assert!(try_lock_daemon(&instance).unwrap().is_none());
         drop(first);
-        assert!(try_lock_daemon(&instance).unwrap().is_some());
+        assert!(eventually(|| try_lock_daemon(&instance).unwrap()).is_some());
         fs::remove_file(path(&instance).with_extension("daemon.lock")).unwrap();
     }
 

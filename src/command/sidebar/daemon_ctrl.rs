@@ -28,7 +28,7 @@ pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
 
     // Stale socket from a crashed daemon
     let _ = std::fs::remove_file(&sock_path);
-    spawn_daemon()?;
+    spawn_daemon(mux.as_ref())?;
     if !wait_for_daemon(&sock_path, Duration::from_secs(4)) {
         return Err(anyhow!("Sidebar daemon failed to start"));
     }
@@ -36,14 +36,33 @@ pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
 }
 
 /// Spawn the sidebar daemon as a detached background process.
-fn spawn_daemon() -> Result<()> {
+fn spawn_daemon(mux: &dyn Multiplexer) -> Result<()> {
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("_sidebar-daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    if mux.name() == "rex" {
+        use std::os::unix::process::CommandExt;
+        // The daemon serves the whole server, not the block that started it:
+        // it must outlive that block's terminal and act on no session of its
+        // own.
+        command
+            .env("WORKMUX_BACKEND", "rex")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    command.spawn()?;
     Ok(())
 }
 

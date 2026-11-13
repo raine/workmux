@@ -117,7 +117,6 @@ impl LayoutNode {
 pub(crate) struct RexWindowLayout {
     pub session_id: String,
     pub window_id: String,
-    pub window_index: u32,
     #[serde(default)]
     pub active: bool,
     pub layout: Option<LayoutNode>,
@@ -143,11 +142,7 @@ impl RexSidebarBlock {
 #[derive(Debug, Clone)]
 pub(crate) struct RexSidebarWindow {
     pub session_id: String,
-    pub session_label: String,
     pub window_id: String,
-    pub window_index: u32,
-    /// Whether this is its session's active window.
-    pub active: bool,
     pub layout: Option<LayoutNode>,
     pub blocks: Vec<RexSidebarBlock>,
 }
@@ -233,17 +228,14 @@ impl super::RexSnapshot {
                 .unwrap_or_default();
             if window.active {
                 obs.active_windows
-                    .insert((session_label.clone(), window.window_id.clone()));
+                    .insert((session_label, window.window_id.clone()));
             }
             obs.windows.push(RexSidebarWindow {
                 blocks: blocks
                     .remove(&(window.session_id.clone(), window.window_id.clone()))
                     .unwrap_or_default(),
                 session_id: window.session_id,
-                session_label,
                 window_id: window.window_id,
-                window_index: window.window_index,
-                active: window.active,
                 layout: window.layout,
             });
         }
@@ -396,7 +388,6 @@ mod tests {
         )));
 
         let window = &obs.windows[0];
-        assert_eq!(window.session_label, "t");
         assert_eq!(window.blocks.len(), 3);
         let block = window
             .blocks

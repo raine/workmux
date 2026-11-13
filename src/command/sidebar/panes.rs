@@ -367,12 +367,20 @@ fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
 /// when no scoped sessions remain.
 pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
     let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
-    if mux.name() == "zellij" {
+    if matches!(mux.name(), "zellij" | "rex") {
         use std::os::unix::process::CommandExt;
+        // Under a session scope, quitting leaves the other sessions' sidebars.
+        let session_scoped = mux.name() == "rex"
+            && super::session_state::read(&mux.instance_id())
+                .is_ok_and(|state| !state.enabled && state.sessions.contains(&identity.session_id));
         // The helper must survive closing this pane so it can restore this tab too.
         let result = std::env::current_exe().and_then(|exe| {
             let mut command = std::process::Command::new(exe);
-            command.args(["sidebar", "off"]);
+            if session_scoped {
+                command.args(["sidebar", "--session", "off"]);
+            } else {
+                command.args(["sidebar", "off"]);
+            }
             unsafe {
                 command.pre_exec(|| {
                     if libc::setsid() == -1 {
@@ -387,9 +395,9 @@ pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
             Ok(output) if output.status.success() => {}
             Ok(output) => tracing::warn!(
                 stderr = %String::from_utf8_lossy(&output.stderr),
-                "failed to stop Zellij sidebars"
+                "failed to stop sidebars"
             ),
-            Err(error) => tracing::warn!(%error, "failed to stop Zellij sidebars"),
+            Err(error) => tracing::warn!(%error, "failed to stop sidebars"),
         }
         return;
     }

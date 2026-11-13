@@ -25,6 +25,7 @@ use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{
     AgentPane, LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend,
+    rex::{RexBackend, sidebar::RexSidebarObservation},
     zellij::{ZellijBackend, ZellijSidebarTab},
 };
 use crate::state::StateStore;
@@ -38,7 +39,7 @@ pub fn socket_path(instance_id: &str) -> PathBuf {
 }
 
 /// Result of one batched multiplexer query.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct MuxState {
     live_panes: HashMap<String, LivePaneInfo>,
     window_statuses: HashMap<String, Option<String>>,
@@ -79,57 +80,89 @@ fn query_tmux_state(tmux: &TmuxBackend) -> Result<MuxState> {
     })
 }
 
+/// Sidebar state that file-backed backends keep in the session state file.
+fn with_file_preferences(mut mux_state: MuxState, instance_id: &str) -> Result<MuxState> {
+    let state = super::session_state::read(instance_id)?;
+    mux_state.position = state.position.map(|position| match position {
+        SidebarPosition::Left => "left".to_string(),
+        SidebarPosition::Top => "top".to_string(),
+    });
+    mux_state.layout = state.layout;
+    mux_state.filter = state.filter;
+    mux_state.sleeping_panes = Some(
+        state
+            .sleeping_panes
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    mux_state.group_by = state.group_by;
+    mux_state.expanded_groups = Some(state.expanded_groups.join("\t"));
+    Ok(mux_state)
+}
+
 fn query_zellij_state(
     zellij: &ZellijBackend,
     instance_id: &str,
 ) -> Result<(MuxState, Vec<ZellijSidebarTab>)> {
     let observation = zellij.sidebar_observation()?;
     let snapshot = observation.snapshot;
-    let state = super::session_state::read(instance_id)?;
+    let mux_state = MuxState {
+        live_panes: snapshot.live_panes,
+        window_statuses: HashMap::new(),
+        active_windows: snapshot.active_windows,
+        pane_window_ids: snapshot.pane_window_ids,
+        pane_window_indexes: snapshot.pane_window_indexes,
+        active_pane_ids: snapshot.active_pane_ids,
+        window_pane_counts: snapshot.window_pane_counts,
+        ..MuxState::default()
+    };
     Ok((
-        MuxState {
-            live_panes: snapshot.live_panes,
-            window_statuses: HashMap::new(),
-            active_windows: snapshot.active_windows,
-            pane_window_ids: snapshot.pane_window_ids,
-            pane_window_indexes: snapshot.pane_window_indexes,
-            active_pane_ids: snapshot.active_pane_ids,
-            window_pane_counts: snapshot.window_pane_counts,
-            server_boot_id: None,
-            position: state.position.map(|position| match position {
-                SidebarPosition::Left => "left".to_string(),
-                SidebarPosition::Top => "top".to_string(),
-            }),
-            layout: state.layout,
-            filter: state.filter,
-            views_enabled: None,
-            sleeping_panes: Some(
-                state
-                    .sleeping_panes
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            ),
-            group_by: state.group_by,
-            expanded_groups: Some(state.expanded_groups.join("\t")),
-        },
+        with_file_preferences(mux_state, instance_id)?,
         observation.tabs,
     ))
+}
+
+fn query_rex_state(instance_id: &str) -> Result<(MuxState, RexSidebarObservation)> {
+    let observation = RexBackend::new().sidebar_observation()?;
+    let mux_state = MuxState {
+        live_panes: observation.live_panes.clone(),
+        window_statuses: HashMap::new(),
+        active_windows: observation.active_windows.clone(),
+        pane_window_ids: observation.pane_window_ids.clone(),
+        pane_window_indexes: observation.pane_window_indexes.clone(),
+        active_pane_ids: observation.active_pane_ids.clone(),
+        window_pane_counts: observation.window_pane_counts.clone(),
+        server_boot_id: observation.boot_id.clone(),
+        ..MuxState::default()
+    };
+    Ok((with_file_preferences(mux_state, instance_id)?, observation))
+}
+
+/// What a backend whose sidebars the daemon places needs besides `MuxState`.
+enum PlacementObservation {
+    None,
+    Zellij(Vec<ZellijSidebarTab>),
+    Rex(Box<RexSidebarObservation>),
 }
 
 fn query_mux_state(
     mux: &dyn Multiplexer,
     instance_id: &str,
-) -> Result<(MuxState, Option<Vec<ZellijSidebarTab>>)> {
+) -> Result<(MuxState, PlacementObservation)> {
     match mux.name() {
         "tmux" => Ok((
             query_tmux_state(&TmuxBackend::for_socket(instance_id))?,
-            None,
+            PlacementObservation::None,
         )),
         "zellij" => {
             let (state, tabs) =
                 query_zellij_state(&ZellijBackend::for_session(instance_id), instance_id)?;
-            Ok((state, Some(tabs)))
+            Ok((state, PlacementObservation::Zellij(tabs)))
+        }
+        "rex" => {
+            let (state, observation) = query_rex_state(instance_id)?;
+            Ok((state, PlacementObservation::Rex(Box::new(observation))))
         }
         name => anyhow::bail!("sidebar is not supported by the {name} backend"),
     }
@@ -2413,28 +2446,46 @@ pub fn run() -> Result<()> {
 
         if scheduler.observation_due(now) {
             scheduler.finish_observation(now);
-            if mux.name() == "zellij" {
+            // Rex windows are observed and reconciled under one hold of
+            // the layout lock, so a command placing sidebars never races
+            // this pass. A Zellij sidebar holds it while it starts.
+            let mut layout_lock = None;
+            if matches!(mux.name(), "zellij" | "rex") {
                 match super::session_state::try_lock_layout(&instance_id) {
-                    Ok(Some(guard)) => drop(guard),
+                    Ok(Some(guard)) => layout_lock = Some(guard),
                     Ok(None) => continue,
                     Err(error) => {
-                        tracing::warn!(%error, "failed to check Zellij layout lock");
+                        tracing::warn!(%error, "failed to check sidebar layout lock");
                         continue;
                     }
                 }
+                if mux.name() == "zellij" {
+                    layout_lock = None;
+                }
             }
             match query_mux_state(mux.as_ref(), &instance_id) {
-                Ok((tmux_state, zellij_tabs)) => {
-                    if let Some(tabs) = zellij_tabs
-                        && server.client_count() > 0
-                        && let Err(error) =
-                            super::zellij_panes::create_sidebar_in_active_tab_from_snapshot(
-                                &instance_id,
-                                &tabs,
-                            )
-                    {
-                        tracing::warn!(%error, "failed to synchronize Zellij sidebars");
+                Ok((tmux_state, placement)) => {
+                    match placement {
+                        PlacementObservation::Zellij(tabs) if server.client_count() > 0 => {
+                            if let Err(error) =
+                                super::zellij_panes::create_sidebar_in_active_tab_from_snapshot(
+                                    &instance_id,
+                                    &tabs,
+                                )
+                            {
+                                tracing::warn!(%error, "failed to synchronize Zellij sidebars");
+                            }
+                        }
+                        PlacementObservation::Rex(observation) => {
+                            if let Err(error) =
+                                super::rex_panes::reconcile(&instance_id, &observation)
+                            {
+                                tracing::warn!(%error, "failed to reconcile Rex sidebars");
+                            }
+                        }
+                        _ => {}
                     }
+                    drop(layout_lock);
                     if tmux_state.server_boot_id != compacted_boot_id {
                         match store.compact_context(
                             &backend_name,
@@ -2741,7 +2792,14 @@ pub fn run() -> Result<()> {
         if scheduler.maintenance_due(now) {
             scheduler.finish_maintenance(now);
             let client_count = server.client_count();
-            if client_count > 0 {
+            if backend_name == "rex" {
+                // Rex sidebars are placed by this daemon, so it lives as long
+                // as the scope covers anything, sidebars or not.
+                if super::session_state::read(&instance_id).is_ok_and(|state| !state.is_active()) {
+                    tracing::info!("sidebar daemon exiting: sidebar turned off");
+                    break;
+                }
+            } else if client_count > 0 {
                 last_client_seen = now;
             } else if now.duration_since(last_client_seen) > Duration::from_secs(10) {
                 tracing::info!("sidebar daemon exiting: no clients for 10s");
