@@ -2316,6 +2316,19 @@ impl Scheduler {
 }
 
 /// Run the sidebar daemon (headless, no TUI).
+fn wait_for_daemon_lock(instance_id: &str, timeout: Duration) -> Result<Option<std::fs::File>> {
+    let start = Instant::now();
+    loop {
+        if let Some(lock) = super::session_state::try_lock_daemon(instance_id)? {
+            return Ok(Some(lock));
+        }
+        if start.elapsed() >= timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 pub fn run() -> Result<()> {
     let mux = create_backend(detect_backend());
     let instance_id = mux.instance_id();
@@ -2329,6 +2342,11 @@ pub fn run() -> Result<()> {
     let status_icons = config.lock().unwrap().status_icons.clone();
     let config_version = Arc::new(AtomicU64::new(0));
 
+    // A daemon that is still shutting down holds the lock briefly
+    let Some(_daemon_lock) = wait_for_daemon_lock(&instance_id, Duration::from_secs(2))? else {
+        tracing::info!(instance_id = %instance_id, "sidebar daemon already running");
+        return Ok(());
+    };
     tracing::info!(instance_id = %instance_id, "sidebar daemon starting");
 
     let term = Arc::new(AtomicBool::new(false));

@@ -62,6 +62,26 @@ fn layout_lock_file(instance_id: &str) -> Result<File> {
     lock_file(path(instance_id).with_extension("layout.lock"))
 }
 
+/// Serializes daemon startup, so concurrent callers never remove a socket
+/// that a starting daemon has just bound.
+pub(super) fn lock_spawn(instance_id: &str) -> Result<File> {
+    let file = lock_file(path(instance_id).with_extension("spawn.lock"))?;
+    file.lock()
+        .context("failed to lock sidebar daemon startup")?;
+    Ok(file)
+}
+
+/// Held by a running daemon for its whole lifetime. `None` means another
+/// daemon for this instance holds it.
+pub(super) fn try_lock_daemon(instance_id: &str) -> Result<Option<File>> {
+    let file = lock_file(path(instance_id).with_extension("daemon.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error).context("failed to lock sidebar daemon"),
+    }
+}
+
 pub(super) fn lock_layout(instance_id: &str) -> Result<File> {
     let file = layout_lock_file(instance_id)?;
     file.lock()
@@ -150,6 +170,17 @@ mod tests {
         drop(guard);
         assert!(try_lock_layout(&instance).unwrap().is_some());
         fs::remove_file(path(&instance).with_extension("layout.lock")).unwrap();
+    }
+
+    #[test]
+    fn daemon_lock_admits_one_holder() {
+        let instance = format!("sidebar-daemon-test-{:016x}", getrandom::u64().unwrap());
+        let first = try_lock_daemon(&instance).unwrap();
+        assert!(first.is_some());
+        assert!(try_lock_daemon(&instance).unwrap().is_none());
+        drop(first);
+        assert!(try_lock_daemon(&instance).unwrap().is_some());
+        fs::remove_file(path(&instance).with_extension("daemon.lock")).unwrap();
     }
 
     #[test]
