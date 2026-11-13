@@ -30,6 +30,7 @@ mod panes;
 mod runtime;
 mod session_state;
 mod snapshot;
+mod store;
 mod template;
 mod ui;
 pub(crate) mod view;
@@ -48,6 +49,7 @@ use self::panes::{
     create_sidebar_in_window, create_sidebars_in_all_windows, create_sidebars_in_session,
     find_sidebar_in_window, kill_all_sidebars_and_restore_layouts, kill_sidebars_in_session,
 };
+use self::store::SidebarStore;
 
 const SIDEBAR_ROLE_VALUE: &str = "sidebar";
 /// Pane option holding the extent the last layout reflow gave a sidebar.
@@ -283,43 +285,14 @@ fn configured_position(
 
 pub(super) fn read_sidebar_position(config: &crate::config::Config) -> SidebarPosition {
     let mux = create_backend(detect_backend());
-    if mux.name() == "zellij" {
-        if let Ok(state) = session_state::read(&mux.instance_id())
-            && let Some(position) = state.position
-        {
-            return position;
-        }
-    } else if mux.name() == "tmux"
-        && let Ok(output) = Cmd::new("tmux")
-            .args(&["show-option", "-gqv", "@workmux_sidebar_position"])
-            .run_and_capture_stdout()
-    {
-        match output.trim() {
-            "top" => return SidebarPosition::Top,
-            "left" => return SidebarPosition::Left,
-            _ => {}
-        }
-    }
-
-    configured_position(config, None)
+    SidebarStore::for_mux(mux.as_ref())
+        .position()
+        .unwrap_or_else(|| configured_position(config, None))
 }
 
 fn set_sidebar_position(position: SidebarPosition) {
     let mux = create_backend(detect_backend());
-    if mux.name() == "zellij" {
-        let _ = session_state::update(&mux.instance_id(), |state| {
-            state.position = Some(position);
-        });
-        return;
-    }
-
-    let value = match position {
-        SidebarPosition::Left => "left",
-        SidebarPosition::Top => "top",
-    };
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-g", "@workmux_sidebar_position", value])
-        .run();
+    let _ = SidebarStore::for_mux(mux.as_ref()).set_position(position);
 }
 
 fn default_width_for(tw: u16) -> u16 {
@@ -1021,21 +994,8 @@ fn parse_sidebar_filter_mode(raw: &str) -> Result<app::SidebarFilterMode> {
 
 fn read_sidebar_filter_mode() -> app::SidebarFilterMode {
     let mux = create_backend(detect_backend());
-    if mux.name() == "zellij" {
-        if let Ok(state) = session_state::read(&mux.instance_id())
-            && let Some(mode) = state.filter
-        {
-            return parse_sidebar_filter_mode(&mode).unwrap_or_default();
-        }
-    } else if mux.name() == "tmux"
-        && let Ok(output) = Cmd::new("tmux")
-            .args(&["show-option", "-gqv", "@workmux_sidebar_filter"])
-            .run_and_capture_stdout()
-    {
-        let trimmed = output.trim();
-        if !trimmed.is_empty() {
-            return parse_sidebar_filter_mode(trimmed).unwrap_or_default();
-        }
+    if let Some(mode) = SidebarStore::for_mux(mux.as_ref()).filter() {
+        return parse_sidebar_filter_mode(&mode).unwrap_or_default();
     }
 
     if let Ok(store) = crate::state::StateStore::new()
@@ -1093,25 +1053,7 @@ pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
         }
     };
 
-    if mux.name() == "zellij" {
-        session_state::update(&mux.instance_id(), |state| {
-            state.group_by = new_mode.map(|mode| group_by_option_value(mode).to_string());
-        })?;
-    } else {
-        match new_mode {
-            Some(mode) => Cmd::new("tmux")
-                .args(&[
-                    "set-option",
-                    "-g",
-                    "@workmux_sidebar_group_by",
-                    group_by_option_value(mode),
-                ])
-                .run()?,
-            None => Cmd::new("tmux")
-                .args(&["set-option", "-gu", "@workmux_sidebar_group_by"])
-                .run()?,
-        };
-    }
+    SidebarStore::for_mux(mux.as_ref()).set_group_by(new_mode.map(group_by_option_value))?;
 
     let store = crate::state::StateStore::new()?;
     let mut settings = store.load_settings()?;
@@ -1128,21 +1070,8 @@ fn read_sidebar_group_by(
     configured: Option<crate::config::SidebarGroupBy>,
 ) -> Option<crate::config::SidebarGroupBy> {
     let mux = create_backend(detect_backend());
-    if mux.name() == "zellij" {
-        if let Ok(state) = session_state::read(&mux.instance_id())
-            && let Some(mode) = state.group_by
-        {
-            return parse_sidebar_group_by(&mode).unwrap_or(configured);
-        }
-    } else if mux.name() == "tmux"
-        && let Ok(output) = Cmd::new("tmux")
-            .args(&["show-option", "-gqv", "@workmux_sidebar_group_by"])
-            .run_and_capture_stdout()
-    {
-        let trimmed = output.trim();
-        if !trimmed.is_empty() {
-            return parse_sidebar_group_by(trimmed).unwrap_or(configured);
-        }
+    if let Some(mode) = SidebarStore::for_mux(mux.as_ref()).group_by() {
+        return parse_sidebar_group_by(&mode).unwrap_or(configured);
     }
 
     if let Ok(store) = crate::state::StateStore::new()
@@ -1284,20 +1213,7 @@ pub fn set_filter_mode(mode: Option<&str>) -> Result<()> {
         None => read_sidebar_filter_mode().toggle(),
     };
 
-    if mux.name() == "zellij" {
-        session_state::update(&mux.instance_id(), |state| {
-            state.filter = Some(new_mode.as_str().to_string());
-        })?;
-    } else {
-        Cmd::new("tmux")
-            .args(&[
-                "set-option",
-                "-g",
-                "@workmux_sidebar_filter",
-                new_mode.as_str(),
-            ])
-            .run()?;
-    }
+    SidebarStore::for_mux(mux.as_ref()).set_filter(new_mode.as_str())?;
 
     // Persist to settings.json
     let store = crate::state::StateStore::new()?;

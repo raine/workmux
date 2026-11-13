@@ -26,6 +26,7 @@ use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::ui::theme::ThemePalette;
 
 use super::snapshot::{SidebarSnapshot, group_label};
+use super::store::SidebarStore;
 use super::template::parser::{ParseError, Token, TokenId, parse_line};
 
 /// Sidebar layout mode.
@@ -1001,24 +1002,7 @@ impl SidebarApp {
     fn publish_expanded_groups(&mut self) {
         let mut labels: Vec<&str> = self.expanded_groups.iter().map(String::as_str).collect();
         labels.sort_unstable();
-        let value = labels.join("\t");
-        let result = if self.mux.name() == "zellij" {
-            super::session_state::update(&self.mux.instance_id(), |state| {
-                state.expanded_groups = labels.iter().map(|label| (*label).to_string()).collect();
-            })
-            .map(|_| ())
-        } else if value.is_empty() {
-            Cmd::new("tmux")
-                .args(&["set-option", "-gu", "@workmux_sidebar_expanded"])
-                .run()
-                .map(|_| ())
-        } else {
-            Cmd::new("tmux")
-                .args(&["set-option", "-g", "@workmux_sidebar_expanded", &value])
-                .run()
-                .map(|_| ())
-        };
-        if let Err(error) = result {
+        if let Err(error) = SidebarStore::for_mux(self.mux.as_ref()).set_expanded_groups(&labels) {
             warn!(%error, "failed to persist expanded sidebar groups");
         }
         let selected_agent = self.selected_agent_idx();
@@ -1448,20 +1432,7 @@ impl SidebarApp {
             SidebarLayoutMode::Compact => SidebarLayoutMode::Tiles,
             SidebarLayoutMode::Tiles => SidebarLayoutMode::Compact,
         };
-        if self.mux.name() == "zellij" {
-            let _ = super::session_state::update(&self.mux.instance_id(), |state| {
-                state.layout = Some(self.layout_mode.as_str().to_string());
-            });
-        } else {
-            let _ = Cmd::new("tmux")
-                .args(&[
-                    "set-option",
-                    "-g",
-                    "@workmux_sidebar_layout",
-                    self.layout_mode.as_str(),
-                ])
-                .run();
-        }
+        let _ = SidebarStore::for_mux(self.mux.as_ref()).set_layout(self.layout_mode.as_str());
         // Persist to settings.json so it survives tmux restarts
         if let Ok(store) = crate::state::StateStore::new()
             && let Ok(mut settings) = store.load_settings()
@@ -1484,41 +1455,10 @@ impl SidebarApp {
             return;
         };
 
-        let mut current: std::collections::HashSet<String> = if self.mux.name() == "zellij" {
-            super::session_state::read(&self.mux.instance_id())
-                .map(|state| state.sleeping_panes)
-                .unwrap_or_default()
-        } else {
-            Cmd::new("tmux")
-                .args(&["show-option", "-gqv", "@workmux_sleeping_panes"])
-                .run_and_capture_stdout()
-                .ok()
-                .map(|s| s.split_whitespace().map(String::from).collect())
-                .unwrap_or_default()
-        };
-
-        if !current.insert(pane_id.clone()) {
-            current.remove(&pane_id);
-        }
-
         // Update local state for immediate rendering
-        self.sleeping_pane_ids = current.clone();
-
-        if self.mux.name() == "zellij" {
-            let _ = super::session_state::update(&self.mux.instance_id(), |state| {
-                state.sleeping_panes = current;
-            });
-        } else {
-            let panes: String = current.into_iter().collect::<Vec<_>>().join(" ");
-            if panes.is_empty() {
-                let _ = Cmd::new("tmux")
-                    .args(&["set-option", "-gu", "@workmux_sleeping_panes"])
-                    .run();
-            } else {
-                let _ = Cmd::new("tmux")
-                    .args(&["set-option", "-g", "@workmux_sleeping_panes", &panes])
-                    .run();
-            }
+        match SidebarStore::for_mux(self.mux.as_ref()).toggle_sleeping(&pane_id) {
+            Ok(current) => self.sleeping_pane_ids = current,
+            Err(error) => warn!(%error, "failed to persist sleeping sidebar agent"),
         }
 
         // Signal daemon for immediate refresh (re-sort + broadcast)
@@ -1527,23 +1467,9 @@ impl SidebarApp {
 
     pub fn toggle_filter_mode(&mut self) {
         self.filter_mode = self.filter_mode.toggle();
-        let result = if self.mux.name() == "zellij" {
-            super::session_state::update(&self.mux.instance_id(), |state| {
-                state.filter = Some(self.filter_mode.as_str().to_string());
-            })
-            .map(|_| ())
-        } else {
-            Cmd::new("tmux")
-                .args(&[
-                    "set-option",
-                    "-g",
-                    "@workmux_sidebar_filter",
-                    self.filter_mode.as_str(),
-                ])
-                .run()
-                .map(|_| ())
-        };
-        if let Err(error) = result {
+        if let Err(error) =
+            SidebarStore::for_mux(self.mux.as_ref()).set_filter(self.filter_mode.as_str())
+        {
             warn!(%error, "failed to persist sidebar filter mode");
         }
         // Persist to settings.json so it survives tmux restarts
@@ -1567,23 +1493,9 @@ impl SidebarApp {
             Some(_) => None,
             None => self.configured_group_by.or(Some(SidebarGroupBy::Project)),
         };
-        let result = if self.mux.name() == "zellij" {
-            super::session_state::update(&self.mux.instance_id(), |state| {
-                state.group_by = Some(super::group_by_option_value(next).to_string());
-            })
-            .map(|_| ())
-        } else {
-            Cmd::new("tmux")
-                .args(&[
-                    "set-option",
-                    "-g",
-                    "@workmux_sidebar_group_by",
-                    super::group_by_option_value(next),
-                ])
-                .run()
-                .map(|_| ())
-        };
-        if let Err(error) = result {
+        if let Err(error) = SidebarStore::for_mux(self.mux.as_ref())
+            .set_group_by(Some(super::group_by_option_value(next)))
+        {
             warn!(%error, "failed to persist sidebar grouping");
         }
         match crate::state::StateStore::new().and_then(|store| {
