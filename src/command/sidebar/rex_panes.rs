@@ -266,6 +266,8 @@ fn sidebar_ratio(cells: u16, window_cells: u16, position: SidebarPosition) -> f6
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SizeDecision {
+    /// No client shows the window at its current layout yet.
+    Wait,
     Keep,
     /// The blocks changed but the ratio did not, yet: the app may still
     /// rebalance the row.
@@ -290,7 +292,7 @@ fn size_decision(
 ) -> SizeDecision {
     // Without a client the window has no real size: keep what was placed.
     let Some(window_cells) = window_cells else {
-        return SizeDecision::Keep;
+        return SizeDecision::Wait;
     };
     let epsilon = 0.5 / f64::from(window_cells.max(1));
     let same = |a: f64, b: f64| (a - b).abs() < epsilon;
@@ -472,7 +474,8 @@ impl Executor<'_> {
             applied_ratio: ratio,
             applied_window_cells: view.window_cells,
             topology: hasher.finish(),
-            settling: false,
+            // The app may rebalance the new split once it shows the window.
+            settling: true,
             drag_candidate: None,
             stale_sizes: size_stamps(window),
         })
@@ -618,9 +621,20 @@ fn resize_placed(
         target,
         sizing.configured,
     );
+    tracing::debug!(
+        window = %window.window_id,
+        ratio_now,
+        applied_ratio = placement.applied_ratio,
+        window_cells = ?view.window_cells,
+        applied_window_cells = ?placement.applied_window_cells,
+        target,
+        ?decision,
+        "Rex sidebar size"
+    );
     let topology_changed = placement.topology != view.topology;
     placement.topology = view.topology;
     match decision {
+        SizeDecision::Wait => {}
         SizeDecision::Keep => {
             placement.settling = false;
             placement.drag_candidate = None;
@@ -835,12 +849,27 @@ mod tests {
     }
 
     #[test]
-    fn size_unmeasured_window_is_kept() {
+    fn size_unmeasured_window_waits() {
         let mut p = placement("block:s");
         p.applied_window_cells = None;
         assert_eq!(
             size_decision(&p, 1, 0.3, None, 0.125, false),
-            SizeDecision::Keep
+            SizeDecision::Wait
+        );
+    }
+
+    #[test]
+    fn size_rebalance_of_a_new_sidebar_is_not_a_drag() {
+        // The app splits a sidebar placed in the window it shows evenly.
+        let mut p = placement("block:s");
+        p.settling = true;
+        assert_eq!(
+            size_decision(&p, 1, 0.5, None, 0.125, false),
+            SizeDecision::Wait
+        );
+        assert_eq!(
+            size_decision(&p, 1, 0.5, Some(200), 0.125, false),
+            SizeDecision::Enforce(0.125)
         );
     }
 
@@ -1069,7 +1098,7 @@ mod tests {
             let v = window_view(&w, SidebarPosition::Left, "workmux", Some(&p));
             assert_eq!(v.window_cells, None);
             let decision = size_decision(&p, topology(&w), 0.25, v.window_cells, 0.25, false);
-            assert_eq!(decision, SizeDecision::Keep);
+            assert_eq!(decision, SizeDecision::Wait);
 
             // Once a client shows the window, the sidebar's new size counts.
             w.blocks[0].size = shown(50, "t2");
