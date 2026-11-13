@@ -2257,6 +2257,8 @@ const CAPTURE_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a Rex daemon waits for an unreachable server before exiting.
+const REX_SERVER_GRACE: Duration = Duration::from_secs(30);
 const EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
@@ -2441,6 +2443,7 @@ pub fn run() -> Result<()> {
     let mut last_agent_list = String::new();
     let mut last_window_views = HashMap::new();
     let mut last_health_log = Instant::now();
+    let mut last_observed = Instant::now();
     let mut project_config_cache = ProjectConfigCache::default();
     let mut seen_config_version = 0;
     let mut last_config_dirs: HashSet<PathBuf> = HashSet::new();
@@ -2475,6 +2478,7 @@ pub fn run() -> Result<()> {
             }
             match query_mux_state(mux.as_ref(), &instance_id) {
                 Ok((tmux_state, placement)) => {
+                    last_observed = Instant::now();
                     match placement {
                         PlacementObservation::Zellij(tabs) if server.client_count() > 0 => {
                             if let Err(error) =
@@ -2808,6 +2812,12 @@ pub fn run() -> Result<()> {
                 // as the scope covers anything, sidebars or not.
                 if super::session_state::read(&instance_id).is_ok_and(|state| !state.is_active()) {
                     tracing::info!("sidebar daemon exiting: sidebar turned off");
+                    break;
+                }
+                // A server restart keeps the scope, and sidebars Rex brings
+                // back start a new daemon.
+                if now.duration_since(last_observed) > REX_SERVER_GRACE {
+                    tracing::info!("sidebar daemon exiting: Rex server unreachable");
                     break;
                 }
             } else if client_count > 0 {
