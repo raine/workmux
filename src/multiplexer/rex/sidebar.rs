@@ -334,6 +334,20 @@ impl RexBackend {
         }
     }
 
+    /// Focus a block and show its window in the app. Returns false when the
+    /// app refused to switch, which it does with Remote Control off. Unlike
+    /// `switch_to_pane`, it never prints: the sidebar draws over its own
+    /// terminal.
+    pub(crate) fn show_block(&self, block_id: &str) -> Result<bool> {
+        let snapshot = self.snapshot()?;
+        let pane = snapshot.require_pane(block_id)?;
+        let shown = self
+            .select_in_app(&pane.session_id, Some(&pane.window_id))
+            .is_ok();
+        self.focus_block(pane)?;
+        Ok(shown)
+    }
+
     /// The last `lines` lines of a block's screen, from a known session.
     pub(crate) fn capture_block(
         &self,

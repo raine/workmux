@@ -496,7 +496,9 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
     let inner = render_template_error(f, app, inner);
 
     // A named view footer already includes the session filter.
-    let footer = if app.view_name.is_none() && app.filter_mode == SidebarFilterMode::Session {
+    let footer = if let Some(options) = app.active_notice() {
+        Some(notice_line(app, options, inner.width as usize))
+    } else if app.view_name.is_none() && app.filter_mode == SidebarFilterMode::Session {
         Some(filter_footer_line(app))
     } else if app.show_hint() {
         Some(hint_line(app, inner.width as usize))
@@ -573,6 +575,17 @@ fn footer_line(app: &SidebarApp, text: String) -> Line<'static> {
     ))
     .alignment(Alignment::Center)
     .style(Style::default().bg(group_band_bg(&app.palette)))
+}
+
+/// The longest wording of a notice that fits the footer.
+fn notice_line(app: &SidebarApp, options: &[&str], width: usize) -> Line<'static> {
+    let text = options
+        .iter()
+        .find(|option| display_width(option) <= width)
+        .or(options.last())
+        .copied()
+        .unwrap_or_default();
+    footer_line(app, text.to_string())
 }
 
 fn filter_footer_line(app: &SidebarApp) -> Line<'static> {
@@ -2530,6 +2543,28 @@ mod tests {
             .retain(|agent| agent.path.starts_with("/demo/api"));
         app.rebuild_rows();
         assert!(!app.show_hint());
+    }
+
+    #[test]
+    fn a_notice_takes_the_footer_until_it_expires() {
+        let mut app = grouped_tile_app();
+        app.hint_pending = true;
+        app.notice = Some(super::super::app::Notice {
+            options: &["a notice too wide for this sidebar", "short notice"],
+            until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let lines = rendered(&mut app, 24, 12);
+        assert!(
+            lines.last().unwrap().contains("short notice"),
+            "footer was {:?}",
+            lines.last()
+        );
+
+        app.notice.as_mut().unwrap().until = std::time::Instant::now();
+        app.tick();
+        assert!(app.notice.is_none());
+        let lines = rendered(&mut app, 24, 12);
+        assert!(!lines.last().unwrap().contains("notice"));
     }
 
     #[test]

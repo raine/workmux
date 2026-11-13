@@ -297,6 +297,8 @@ pub struct SidebarApp {
     pub show_help: bool,
     /// Whether this sidebar still offers the grouping hint.
     pub hint_pending: bool,
+    /// A message for the footer line, until it expires.
+    pub notice: Option<Notice>,
     /// When true, quit without triggering global sidebar shutdown (last-pane auto-exit).
     pub quit_silent: bool,
     pub quit_reason: Option<String>,
@@ -405,6 +407,7 @@ impl SidebarApp {
             pending_exit: false,
             show_help: false,
             hint_pending: false,
+            notice: None,
             quit_silent: false,
             quit_reason: None,
             palette: ThemePalette::from_config(&Config::default().theme, ThemeMode::Dark),
@@ -506,6 +509,7 @@ impl SidebarApp {
             pending_exit: false,
             show_help: false,
             hint_pending: claim_hint_for_this_version(),
+            notice: None,
             quit_silent: false,
             quit_reason: None,
             palette,
@@ -829,10 +833,43 @@ impl SidebarApp {
 
     pub fn tick(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1) % 10;
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| Instant::now() >= notice.until)
+        {
+            self.notice = None;
+        }
+    }
+
+    /// The footer message to show now, as wordings from longest to shortest.
+    pub fn active_notice(&self) -> Option<&'static [&'static str]> {
+        self.notice
+            .as_ref()
+            .filter(|notice| Instant::now() < notice.until)
+            .map(|notice| notice.options)
+    }
+
+    fn show_notice(&mut self, options: &'static [&'static str]) {
+        self.notice = Some(Notice {
+            options,
+            until: Instant::now() + NOTICE_DURATION,
+        });
     }
 
     /// Conservative refresh interval for state that can produce time-dependent content.
     pub(super) fn refresh_interval(&self) -> Option<Duration> {
+        let notice = self
+            .notice
+            .as_ref()
+            .map(|notice| notice.until.saturating_duration_since(Instant::now()));
+        match (self.content_refresh_interval(), notice) {
+            (Some(content), Some(notice)) => Some(content.min(notice)),
+            (content, notice) => content.or(notice),
+        }
+    }
+
+    fn content_refresh_interval(&self) -> Option<Duration> {
         const ANIMATION_INTERVAL: Duration = Duration::from_millis(250);
         const ELAPSED_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -1370,13 +1407,36 @@ impl SidebarApp {
         });
     }
 
-    fn focus_pane(&self, pane_id: &str) {
+    fn focus_pane(&mut self, pane_id: &str) {
+        if self.mux.name() == "rex" {
+            match crate::multiplexer::rex::RexBackend::new().show_block(pane_id) {
+                Ok(true) => {}
+                // A window beside this sidebar is already on screen
+                Ok(false) if self.agent_window(pane_id) != self.host_window_id() => {
+                    self.show_notice(REMOTE_CONTROL_NOTICE);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(%error, %pane_id, "failed to navigate to sidebar agent");
+                    return;
+                }
+            }
+            super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
+            return;
+        }
         if let Err(error) = self.mux.switch_to_pane(pane_id, None) {
             warn!(%error, %pane_id, "failed to navigate to sidebar agent");
             return;
         }
         // Signal daemon directly to bypass tmux hook round-trip latency.
         super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
+    }
+
+    fn agent_window(&self, pane_id: &str) -> Option<&str> {
+        self.agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+            .map(|agent| agent.window_id.as_str())
     }
 
     fn select_selected_window(&mut self) {
@@ -1669,6 +1729,21 @@ impl SidebarApp {
         query_window_height_for_pane().unwrap_or(0)
     }
 }
+
+/// A footer message and when it goes away.
+pub struct Notice {
+    pub options: &'static [&'static str],
+    pub until: Instant,
+}
+
+const NOTICE_DURATION: Duration = Duration::from_secs(6);
+
+/// Rex only lets the CLI switch the app's window with Remote Control on.
+const REMOTE_CONTROL_NOTICE: &[&str] = &[
+    "Turn on Remote Control in Rex Settings to jump",
+    "Turn on Rex Remote Control to jump",
+    "Rex Remote Control is off",
+];
 
 /// How long the grouping hint stays on offer before retiring itself.
 const HINT_LIFETIME_SECS: u64 = 14 * 24 * 60 * 60;
