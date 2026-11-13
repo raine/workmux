@@ -449,23 +449,42 @@ impl RexBackend {
         args
     }
 
+    /// Ask the Rex app to show a session, and optionally one of its windows.
+    fn select_in_app(&self, session_id: &str, window_id: Option<&str>) -> Result<()> {
+        let client = self.app_client_id()?;
+        let args = Self::select_session_args(session_id, window_id);
+        let mut cmd_args = vec!["-C", client.as_str()];
+        cmd_args.extend(args.iter().map(String::as_str));
+        self.rex_cmd()
+            .args(&cmd_args)
+            .run()
+            .context("Failed to switch the Rex app to the session")
+            .map(|_| ())
+    }
+
+    /// Show `pane`'s window in the Rex app.
+    ///
+    /// The app keeps its own selected window per session, so focusing a
+    /// window on the server doesn't change what the app shows; only a client
+    /// action does. A window in another session gets a hint when the switch
+    /// is refused. In the current session the server-side focus still lands,
+    /// so a refused switch stays quiet.
+    fn show_window(&self, snapshot: &RexSnapshot, pane: &RexPane) {
+        if Self::is_current_session(&pane.session_id) {
+            let _ = self.select_in_app(&pane.session_id, Some(&pane.window_id));
+        } else {
+            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
+            self.show_session(&pane.session_id, label, Some(&pane.window_id));
+        }
+    }
+
     /// Show a session (and optionally one of its windows) in the Rex app.
     ///
     /// Switching the visible session is a client action, which Rex only
     /// accepts from the CLI with Remote Control turned on. Without it the
     /// work is already done, so say where it is instead of failing.
     fn show_session(&self, session_id: &str, label: &str, window_id: Option<&str>) {
-        let shown = self.app_client_id().and_then(|client| {
-            let args = Self::select_session_args(session_id, window_id);
-            let mut cmd_args = vec!["-C", client.as_str()];
-            cmd_args.extend(args.iter().map(String::as_str));
-            self.rex_cmd()
-                .args(&cmd_args)
-                .run()
-                .context("Failed to switch the Rex app to the session")
-                .map(|_| ())
-        });
-        if let Err(error) = shown {
+        if let Err(error) = self.select_in_app(session_id, window_id) {
             eprintln!(
                 "workmux: open the Rex session '{label}' to see it \
                  (switching needs Remote Control on in Rex Settings: {error:#})"
@@ -830,10 +849,7 @@ impl Multiplexer for RexBackend {
     fn select_window_target(&self, target: &WindowTarget) -> Result<()> {
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_target_window(target)?;
-        if !Self::is_current_session(&pane.session_id) {
-            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
-            self.show_session(&pane.session_id, label, Some(&pane.window_id));
-        }
+        self.show_window(&snapshot, pane);
         self.call_api("session.focus_window", pane.window_ref())
             .context("Failed to focus Rex window")?;
         Ok(())
@@ -842,11 +858,18 @@ impl Multiplexer for RexBackend {
     fn shell_select_window_cmd(&self, full_name: &str) -> Result<String> {
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_window(full_name)?;
-        Ok(format!(
+        let focus = format!(
             "{} api call session.focus_window '{}' >/dev/null 2>&1",
             shell_rex(),
             pane.window_ref()
-        ))
+        );
+        // The app only follows a client action, see `show_window`
+        Ok(
+            match self.shell_show_session_cmd(&pane.session_id, Some(&pane.window_id)) {
+                Ok(show) => format!("{focus}; {show}"),
+                Err(_) => focus,
+            },
+        )
     }
 
     fn shell_kill_window_cmd(&self, full_name: &str) -> Result<String> {
@@ -870,10 +893,7 @@ impl Multiplexer for RexBackend {
         let full_name = util::prefixed(prefix, name);
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_window(&full_name)?;
-        if !Self::is_current_session(&pane.session_id) {
-            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
-            self.show_session(&pane.session_id, label, Some(&pane.window_id));
-        }
+        self.show_window(&snapshot, pane);
         self.call_api("session.focus_window", pane.window_ref())
             .context("Failed to focus Rex window")?;
         Ok(())
@@ -951,10 +971,7 @@ impl Multiplexer for RexBackend {
     fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_pane(pane_id)?;
-        if !Self::is_current_session(&pane.session_id) {
-            let label = snapshot.session_label(&pane.session_id).unwrap_or_default();
-            self.show_session(&pane.session_id, label, Some(&pane.window_id));
-        }
+        self.show_window(&snapshot, pane);
         self.focus_block(pane)
     }
 
