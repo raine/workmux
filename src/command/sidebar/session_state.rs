@@ -54,6 +54,10 @@ pub(super) struct Placement {
     /// is a drag.
     #[serde(default)]
     pub drag_candidate: Option<f64>,
+    /// Each block's size stamp when the daemon last changed the window's
+    /// layout. A size still carrying its stamp predates that change.
+    #[serde(default)]
+    pub stale_sizes: BTreeMap<String, String>,
 }
 
 impl SidebarSessionState {

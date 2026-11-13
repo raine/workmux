@@ -41,6 +41,17 @@ impl BlockSize {
     pub(crate) fn is_measured(&self) -> bool {
         !self.desired.is_empty()
     }
+
+    /// When clients last requested a size, as an opaque token. Rex keeps a
+    /// block's size while its window is hidden, so a size is only current
+    /// for the layout if this changed after the layout did.
+    pub(crate) fn stamp(&self) -> String {
+        self.desired
+            .iter()
+            .filter_map(|desired| desired.get("updated_at")?.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// One node of a window's tiled layout. Rects are fractions of the window:

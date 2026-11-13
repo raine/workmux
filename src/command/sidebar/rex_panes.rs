@@ -97,25 +97,45 @@ fn window_extent(block_cells: u16, share: f64) -> Option<u16> {
     (cells >= 1.0 && cells <= f64::from(u16::MAX)).then_some(cells as u16)
 }
 
-/// The window extent along the sidebar's axis, from any block a client
-/// displays.
+/// Each displayed block's size stamp.
+fn size_stamps(window: &RexSidebarWindow) -> BTreeMap<String, String> {
+    window
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let size = block.size.as_ref().filter(|size| size.is_measured())?;
+            Some((block.block_id.clone(), size.stamp()))
+        })
+        .collect()
+}
+
+/// The window extent along the sidebar's axis, from a block a client
+/// displays at the current layout, preferring the sidebar's own block.
+///
+/// A hidden window keeps the sizes it was last shown at, so a block whose
+/// stamp is in `stale` measures a layout that no longer exists.
 fn measured_extent(
     window: &RexSidebarWindow,
     layout: &LayoutNode,
     position: SidebarPosition,
+    stale: Option<&BTreeMap<String, String>>,
 ) -> Option<u16> {
-    window
+    let (sidebars, others): (Vec<_>, Vec<_>) = window
         .blocks
         .iter()
         .filter(|b| !b.floating)
-        .find_map(|block| {
-            let size = block.size.as_ref().filter(|size| size.is_measured())?;
-            let rect = layout.block_rect(&block.block_id)?;
-            match position {
-                SidebarPosition::Left => window_extent(size.columns, rect[2]),
-                SidebarPosition::Top => window_extent(size.rows, rect[3]),
-            }
-        })
+        .partition(|b| b.is_sidebar_labeled());
+    sidebars.into_iter().chain(others).find_map(|block| {
+        let size = block.size.as_ref().filter(|size| size.is_measured())?;
+        if stale.and_then(|stale| stale.get(&block.block_id)) == Some(&size.stamp()) {
+            return None;
+        }
+        let rect = layout.block_rect(&block.block_id)?;
+        match position {
+            SidebarPosition::Left => window_extent(size.columns, rect[2]),
+            SidebarPosition::Top => window_extent(size.rows, rect[3]),
+        }
+    })
 }
 
 fn window_view(
@@ -163,7 +183,9 @@ fn window_view(
         complete,
         topology: topology(window),
         root,
-        window_cells: layout.and_then(|layout| measured_extent(window, layout, position)),
+        window_cells: layout.and_then(|layout| {
+            measured_extent(window, layout, position, placed.map(|p| &p.stale_sizes))
+        }),
     }
 }
 
@@ -272,10 +294,15 @@ fn size_decision(
     };
     let epsilon = 0.5 / f64::from(window_cells.max(1));
     let same = |a: f64, b: f64| (a - b).abs() < epsilon;
-    if placed.applied_window_cells != Some(window_cells) {
+    let moved = !same(ratio_now, placed.applied_ratio);
+    // Rex keeps ratios when the app resizes a window, so a new extent at the
+    // same ratio is a window resize. The extent is measured through blocks
+    // with padding, so it also shifts when the ratio does.
+    if placed.applied_window_cells.is_none()
+        || (!moved && placed.applied_window_cells != Some(window_cells))
+    {
         return SizeDecision::Enforce(target);
     }
-    let moved = !same(ratio_now, placed.applied_ratio);
     if placed.topology != topology {
         return if moved {
             SizeDecision::Enforce(target)
@@ -447,6 +474,7 @@ impl Executor<'_> {
             topology: hasher.finish(),
             settling: false,
             drag_candidate: None,
+            stale_sizes: size_stamps(window),
         })
     }
 
@@ -535,6 +563,7 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
                         topology: view.topology,
                         settling: false,
                         drag_candidate: None,
+                        stale_sizes: BTreeMap::new(),
                     });
                 }
                 Action::Dismiss => {
@@ -606,6 +635,7 @@ fn resize_placed(
                 Ok(()) => {
                     placement.applied_ratio = ratio;
                     placement.applied_window_cells = view.window_cells;
+                    placement.stale_sizes = size_stamps(window);
                 }
                 Err(error) => tracing::warn!(%block_id, %error, "failed to resize Rex sidebar"),
             }
@@ -617,6 +647,7 @@ fn resize_placed(
             tracing::info!(cells, "Rex sidebar resized by the user");
             persist_extent(sizing.position, cells);
             placement.applied_ratio = ratio_now;
+            placement.applied_window_cells = view.window_cells;
             placement.drag_candidate = None;
         }
     }
@@ -709,6 +740,7 @@ mod tests {
             topology: 1,
             settling: false,
             drag_candidate: None,
+            stale_sizes: BTreeMap::new(),
         }
     }
 
@@ -866,6 +898,21 @@ mod tests {
     }
 
     #[test]
+    fn size_drag_is_not_a_window_resize_when_the_extent_shifts() {
+        // Block padding makes the measured extent move with the ratio.
+        let mut p = placement("block:s");
+        assert_eq!(
+            size_decision(&p, 1, 0.2, Some(196), 0.125, false),
+            SizeDecision::Candidate(0.2)
+        );
+        p.drag_candidate = Some(0.2);
+        assert_eq!(
+            size_decision(&p, 1, 0.2, Some(196), 0.125, false),
+            SizeDecision::Persist(39)
+        );
+    }
+
+    #[test]
     fn size_drag_snaps_back_when_the_width_is_configured() {
         let mut p = placement("block:s");
         p.drag_candidate = Some(0.2);
@@ -995,6 +1042,50 @@ mod tests {
             assert_eq!(v.window_cells, Some(200));
             assert_eq!(v.anchor.as_deref(), Some("split:root"));
             assert_eq!(v.content_blocks, ["block:c"]);
+        }
+
+        fn shown(columns: u16, at: &str) -> Option<BlockSize> {
+            Some(BlockSize {
+                columns,
+                rows: 50,
+                desired: vec![serde_json::json!({"client_id": "client:1", "updated_at": at})],
+            })
+        }
+
+        #[test]
+        fn sizes_from_before_a_resize_do_not_measure_the_window() {
+            // A hidden window resized from 25 to 50 columns of 200 keeps
+            // reporting the old sizes against the new layout.
+            let mut sidebar = block("block:s", SIDEBAR_LABEL, Some("workmux"));
+            sidebar.size = shown(25, "t1");
+            let mut content = block("block:c", "shell", Some("zsh"));
+            content.size = shown(175, "t1");
+            let mut w = window(
+                &WRAPPED.replace("0.125", "0.25").replace("0.875", "0.75"),
+                vec![sidebar, content],
+            );
+            let mut p = placement("block:s");
+            p.stale_sizes = size_stamps(&w);
+            let v = window_view(&w, SidebarPosition::Left, "workmux", Some(&p));
+            assert_eq!(v.window_cells, None);
+            let decision = size_decision(&p, topology(&w), 0.25, v.window_cells, 0.25, false);
+            assert_eq!(decision, SizeDecision::Keep);
+
+            // Once a client shows the window, the sidebar's new size counts.
+            w.blocks[0].size = shown(50, "t2");
+            let v = window_view(&w, SidebarPosition::Left, "workmux", Some(&p));
+            assert_eq!(v.window_cells, Some(200));
+        }
+
+        #[test]
+        fn the_sidebar_block_measures_the_window_first() {
+            let mut sidebar = block("block:s", SIDEBAR_LABEL, Some("workmux"));
+            sidebar.size = shown(26, "t1");
+            let mut content = block("block:c", "shell", Some("zsh"));
+            content.size = shown(170, "t1");
+            let w = window(WRAPPED, vec![content, sidebar]);
+            let v = window_view(&w, SidebarPosition::Left, "workmux", None);
+            assert_eq!(v.window_cells, Some(208));
         }
 
         #[test]
