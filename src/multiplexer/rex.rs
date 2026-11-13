@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::cmd::Cmd;
@@ -71,6 +72,30 @@ for _, s in ipairs(rex.call("session.list").sessions or {}) do
 end
 return { sessions = sessions, panes = panes }
 "#;
+
+/// The server from `$REX_SERVER`, passed to every `rex` call with `-S`.
+///
+/// Without `-S`, the CLI silently falls back to the default server when
+/// `$REX_SERVER` is unreachable, so commands meant for one server could act
+/// on another. With `-S`, an unreachable server is an error.
+fn server_endpoint() -> Option<&'static str> {
+    static ENDPOINT: OnceLock<Option<String>> = OnceLock::new();
+    ENDPOINT
+        .get_or_init(|| {
+            std::env::var("REX_SERVER")
+                .ok()
+                .filter(|server| !server.trim().is_empty())
+        })
+        .as_deref()
+}
+
+/// The `rex` invocation for shell scripts, pinned to the server like `rex_cmd`.
+fn shell_rex() -> String {
+    match server_endpoint() {
+        Some(server) => format!("rex -S {}", crate::shell::shell_quote(server)),
+        None => "rex".to_string(),
+    }
+}
 
 /// Whether this process runs in a Rex terminal (`$REX_BLOCK` is set and not empty).
 pub fn in_rex_terminal() -> bool {
@@ -303,7 +328,11 @@ impl RexBackend {
     }
 
     fn rex_cmd(&self) -> Cmd<'static> {
-        Cmd::new("rex")
+        let cmd = Cmd::new("rex");
+        match server_endpoint() {
+            Some(server) => cmd.args(&["-S", server]),
+            None => cmd,
+        }
     }
 
     fn env_session_id() -> Option<String> {
@@ -447,12 +476,16 @@ impl RexBackend {
     fn shell_show_session_cmd(&self, session_id: &str, window_id: Option<&str>) -> Result<String> {
         let client = self.app_client_id()?;
         let args = Self::select_session_args(session_id, window_id).join(" ");
-        Ok(format!("rex -C {client} {args} >/dev/null 2>&1"))
+        Ok(format!(
+            "{} -C {client} {args} >/dev/null 2>&1",
+            shell_rex()
+        ))
     }
 
     fn close_window_shell_cmd(pane: &RexPane) -> String {
         format!(
-            "rex api call session.close_window '{}' >/dev/null 2>&1",
+            "{} api call session.close_window '{}' >/dev/null 2>&1",
+            shell_rex(),
             pane.window_ref()
         )
     }
@@ -586,7 +619,10 @@ impl Multiplexer for RexBackend {
         id: &str,
         _preferred_session: Option<&str>,
     ) -> Result<String> {
-        Ok(format!("rex kill '{id}' >/dev/null 2>&1 || true"))
+        Ok(format!(
+            "{} kill '{id}' >/dev/null 2>&1 || true",
+            shell_rex()
+        ))
     }
 
     fn current_pane_id(&self) -> Option<String> {
@@ -742,8 +778,9 @@ impl Multiplexer for RexBackend {
             return Ok(());
         };
         let script = format!(
-            "sleep {}; rex kill {} >/dev/null 2>&1",
+            "sleep {}; {} kill {} >/dev/null 2>&1",
             delay.as_secs_f64(),
+            shell_rex(),
             session_id
         );
         util::run_detached_sh_c(&script)
@@ -806,7 +843,8 @@ impl Multiplexer for RexBackend {
         let snapshot = self.snapshot()?;
         let pane = snapshot.require_window(full_name)?;
         Ok(format!(
-            "rex api call session.focus_window '{}' >/dev/null 2>&1",
+            "{} api call session.focus_window '{}' >/dev/null 2>&1",
+            shell_rex(),
             pane.window_ref()
         ))
     }
@@ -825,7 +863,7 @@ impl Multiplexer for RexBackend {
 
     fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
         let session_id = self.snapshot()?.require_session_id(full_name)?;
-        Ok(format!("rex kill {session_id} >/dev/null 2>&1"))
+        Ok(format!("{} kill {session_id} >/dev/null 2>&1", shell_rex()))
     }
 
     fn select_window(&self, prefix: &str, name: &str) -> Result<()> {
