@@ -2566,8 +2566,9 @@ pub fn run() -> Result<()> {
         let now = Instant::now();
         if scheduler.capture_due(now) {
             scheduler.finish_capture(now);
-            if let Some((agents, _)) = &cached_inputs {
-                pending_captures = Some(gather_captures(agents, mux.as_ref()));
+            if let Some((agents, mux_state)) = &cached_inputs {
+                pending_captures =
+                    Some(gather_captures(agents, &mux_state.live_panes, mux.as_ref()));
                 publish_pending = true;
             }
         }
@@ -3031,6 +3032,7 @@ fn shows_live_output(agent: &crate::multiplexer::AgentPane) -> bool {
 /// Capture working panes, including interrupted ones, to detect resumed output.
 fn gather_captures(
     agents: &[crate::multiplexer::AgentPane],
+    live_panes: &HashMap<String, LivePaneInfo>,
     mux: &dyn Multiplexer,
 ) -> HashMap<String, String> {
     agents
@@ -3038,8 +3040,11 @@ fn gather_captures(
         .filter(|a| a.status == Some(crate::multiplexer::AgentStatus::Working))
         .filter(|a| shows_live_output(a))
         .filter_map(|a| {
-            mux.capture_pane(&a.pane_id, 5)
-                .map(|content| (a.pane_id.clone(), content))
+            match live_panes.get(&a.pane_id) {
+                Some(info) => mux.capture_pane_at(&a.pane_id, info, 5),
+                None => mux.capture_pane(&a.pane_id, 5),
+            }
+            .map(|content| (a.pane_id.clone(), content))
         })
         .collect()
 }

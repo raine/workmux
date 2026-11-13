@@ -1030,6 +1030,13 @@ impl Multiplexer for RexBackend {
         self.capture_block(&pane.session_id, &pane.block_id, lines)
     }
 
+    fn capture_pane_at(&self, pane_id: &str, info: &LivePaneInfo, lines: u16) -> Option<String> {
+        match info.session_id.as_deref() {
+            Some(session_id) => self.capture_block(session_id, pane_id, lines),
+            None => self.capture_pane(pane_id, lines),
+        }
+    }
+
     // === Text I/O ===
 
     fn send_text_fragment(&self, pane_id: &str, text: &str) -> Result<()> {

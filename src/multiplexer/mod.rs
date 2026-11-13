@@ -531,6 +531,12 @@ pub trait Multiplexer: Send + Sync {
     /// Capture the content of a pane
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String>;
 
+    /// Capture a pane whose live info the caller already observed, which
+    /// spares backends that would otherwise look the pane up first.
+    fn capture_pane_at(&self, pane_id: &str, _info: &LivePaneInfo, lines: u16) -> Option<String> {
+        self.capture_pane(pane_id, lines)
+    }
+
     /// Whether this backend supports preview capture efficiently.
     /// Defaults to true. Override to return false for backends where preview capture
     /// requires expensive operations (process spawning, temp files).
