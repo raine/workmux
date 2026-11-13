@@ -205,6 +205,7 @@ impl PaneHandshake for TmuxHandshake {
 #[cfg(unix)]
 pub struct UnixPipeHandshake {
     pipe_path: PathBuf,
+    reader: std::fs::File,
 }
 
 #[cfg(unix)]
@@ -225,7 +226,26 @@ impl UnixPipeHandshake {
         let mode = Mode::S_IRUSR | Mode::S_IWUSR;
         nix::unistd::mkfifo(&pipe_path, mode).context("Failed to create named pipe")?;
 
-        Ok(Self { pipe_path })
+        // Hold the read end from the start. Opening a FIFO for writing blocks
+        // until it has a reader, and a signal arriving during that wait (such
+        // as SIGCHLD) fails the shell's open with EINTR, so the pane would
+        // start without ever signalling ready.
+        let reader = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&pipe_path)
+        };
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(err) => {
+                let _ = std::fs::remove_file(&pipe_path);
+                return Err(err).context("Failed to open pipe for reading");
+            }
+        };
+
+        Ok(Self { pipe_path, reader })
     }
 }
 
@@ -249,19 +269,11 @@ impl PaneHandshake for UnixPipeHandshake {
     }
 
     fn wait(self: Box<Self>) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
 
         const POLL_INTERVAL_MS: u64 = 50;
 
-        // Open pipe for reading (non-blocking)
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&self.pipe_path)
-            .context("Failed to open pipe for reading")?;
-
-        let fd = file.as_raw_fd();
+        let fd = self.reader.as_raw_fd();
         let start = Instant::now();
         let timeout = Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
 
@@ -309,5 +321,34 @@ impl Drop for UnixPipeHandshake {
     fn drop(&mut self) {
         // Clean up the pipe file if it still exists
         let _ = std::fs::remove_file(&self.pipe_path);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn pipe_handshake_survives_a_signal_while_the_shell_starts() {
+        let handshake = Box::new(UnixPipeHandshake::new().unwrap());
+        let script = handshake.script_content("/usr/bin/true");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .unwrap();
+
+        // A SIGCHLD reaching the pane's sh while it opens the pipe used to fail
+        // the open with EINTR, so the shell started without signalling ready.
+        thread::sleep(Duration::from_millis(200));
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGCHLD,
+        )
+        .unwrap();
+
+        handshake.wait().unwrap();
+        child.wait().unwrap();
     }
 }
