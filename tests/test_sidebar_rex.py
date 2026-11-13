@@ -123,7 +123,9 @@ class RexSidebar:
 
     @staticmethod
     def sidebars(window: dict[str, Any]) -> list[str]:
-        return [b["block_id"] for b in window["blocks"] if b.get("label") == SIDEBAR_LABEL]
+        return [
+            b["block_id"] for b in window["blocks"] if b.get("label") == SIDEBAR_LABEL
+        ]
 
     @staticmethod
     def root_sidebar(window: dict[str, Any]) -> Optional[str]:
@@ -138,9 +140,13 @@ class RexSidebar:
         if not poll_until(predicate, timeout=timeout):
             pytest.fail(f"timed out: {message}\n{json.dumps(self.windows(), indent=1)}")
 
-    def each_window_has_one_sidebar(self, window_ids: Optional[set[str]] = None) -> bool:
+    def each_window_has_one_sidebar(
+        self, window_ids: Optional[set[str]] = None
+    ) -> bool:
         windows = [
-            w for w in self.windows() if window_ids is None or w["window_id"] in window_ids
+            w
+            for w in self.windows()
+            if window_ids is None or w["window_id"] in window_ids
         ]
         return all(
             len(self.sidebars(w)) == 1 and self.root_sidebar(w) is not None
@@ -332,7 +338,9 @@ def test_window_closes_when_its_content_exits(rex_sidebar: RexSidebar):
     s = rex_sidebar
     s.sidebar("on")
     window = s.new_window(s.env.session_id, "/bin/sleep", "6")
-    s.wait_for(lambda: s.root_sidebar(s.window(window)) is not None, message="no sidebar")
+    s.wait_for(
+        lambda: s.root_sidebar(s.window(window)) is not None, message="no sidebar"
+    )
 
     s.wait_for(
         lambda: s.window(window) is None,
@@ -445,7 +453,9 @@ def test_events_place_sidebars_before_the_next_poll(rex_sidebar: RexSidebar):
     # A dropped stream reconnects
     for pid in event_followers(s):
         os.kill(int(pid), signal.SIGKILL)
-    s.wait_for(lambda: len(event_followers(s)) == 1, message="follower did not reconnect")
+    s.wait_for(
+        lambda: len(event_followers(s)) == 1, message="follower did not reconnect"
+    )
 
     s.sidebar("off")
     s.wait_for(lambda: not event_followers(s), message="follower outlived the daemon")
