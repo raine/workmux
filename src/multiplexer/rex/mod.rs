@@ -22,6 +22,8 @@ use super::Multiplexer;
 use super::types::*;
 use super::util;
 
+pub(crate) mod sidebar;
+
 const SHELL_FLAVOR: &str = "com.superlogical.terminal.shell";
 
 /// Lists every session and pane on the server in one `rex do` call.
@@ -30,21 +32,31 @@ const SHELL_FLAVOR: &str = "com.superlogical.terminal.shell";
 /// Attaching subscribes the script's own client to the session's events and
 /// returns the session's view; the subscription ends when the script exits.
 /// Terminal blocks add their foreground process and title.
+///
+/// It also reports each window's tiled layout, every block's label and the
+/// name of the process a terminal started, and the size of sidebar blocks,
+/// which the sidebar daemon uses to place and size sidebars.
 const SNAPSHOT_SCRIPT: &str = r#"
 local terminal = "com.superlogical.terminal"
-local sessions, panes = {}, {}
+local sessions, panes, windows = {}, {}, {}
+local status = rex.call("server.status") or {}
 for _, s in ipairs(rex.call("session.list").sessions or {}) do
   sessions[#sessions + 1] = { session_id = s.session_id, label = s.label or "" }
   local attached = rex.call("session.attach", { session_id = s.session_id })
   local view = type(attached) == "table" and attached.view
   if type(view) == "table" then
     for index, w in ipairs(view.windows or {}) do
+      local window = {
+        session_id = s.session_id, window_id = w.window_id, window_index = index,
+        active = view.active_window_id == w.window_id,
+      }
       for _, layer in ipairs(w.layers or {}) do
+        if layer.kind == "tiled" then window.layout = layer.layout end
         for _, b in ipairs(layer.blocks or {}) do
           local pane = {
             session_id = s.session_id, session = view.label or "",
             window_id = w.window_id, window = w.label or "", window_index = index,
-            block_id = b.block_id, floating = layer.kind ~= "tiled",
+            block_id = b.block_id, floating = layer.kind ~= "tiled", label = b.label,
             active = view.active_window_id == w.window_id and w.focused_block_id == b.block_id,
           }
           if b.creator_name == terminal then
@@ -53,6 +65,7 @@ for _, s in ipairs(rex.call("session.list").sessions or {}) do
             if ok and type(proc) == "table" then
               local fg = proc.foreground or {}
               pane.pid = (proc.child or {}).pid
+              pane.child_name = (proc.child or {}).name
               pane.command = fg.name
               pane.cwd = fg.cwd
               if not pane.cwd then
@@ -63,14 +76,19 @@ for _, s in ipairs(rex.call("session.list").sessions or {}) do
             end
             local ok_title, t = pcall(rex.block.call, terminal, "title", target)
             if ok_title and type(t) == "table" then pane.title = t.title end
+            if b.label == "workmux-sidebar" then
+              local ok_size, size = pcall(rex.block.call, terminal, "size", target)
+              if ok_size and type(size) == "table" then pane.size = size end
+            end
           end
           panes[#panes + 1] = pane
         end
       end
+      windows[#windows + 1] = window
     end
   end
 end
-return { sessions = sessions, panes = panes }
+return { instance_id = status.instance_id, sessions = sessions, panes = panes, windows = windows }
 "#;
 
 /// The server from `$REX_SERVER`, passed to every `rex` call with `-S`.
@@ -130,6 +148,11 @@ struct RexPane {
     command: Option<String>,
     cwd: Option<String>,
     title: Option<String>,
+    label: Option<String>,
+    /// Name of the process the terminal started, as opposed to `command`,
+    /// the one in the foreground.
+    child_name: Option<String>,
+    size: Option<sidebar::BlockSize>,
 }
 
 impl RexPane {
@@ -170,10 +193,14 @@ impl RexPane {
 /// Everything the snapshot script reports.
 #[derive(Debug, Default, Deserialize)]
 struct RexSnapshot {
+    /// The server's instance ID, new each time the server starts.
+    instance_id: Option<String>,
     #[serde(default, deserialize_with = "lua_list")]
     sessions: Vec<RexSession>,
     #[serde(default, deserialize_with = "lua_list")]
     panes: Vec<RexPane>,
+    #[serde(default, deserialize_with = "lua_list")]
+    windows: Vec<sidebar::RexWindowLayout>,
 }
 
 /// A Lua list. Rex prints an empty Lua table as `{}`, not `[]`.
@@ -999,20 +1026,7 @@ impl Multiplexer for RexBackend {
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String> {
         let snapshot = self.snapshot().ok()?;
         let pane = snapshot.pane(pane_id)?;
-        // --trim drops the blank rows under the last line of output
-        let output = self
-            .rex_cmd()
-            .args(&[
-                "capture",
-                "-s",
-                &pane.session_id,
-                "-b",
-                &pane.block_id,
-                "--trim",
-            ])
-            .run_and_capture_stdout()
-            .ok()?;
-        Some(util::tail_lines(&output, lines))
+        self.capture_block(&pane.session_id, &pane.block_id, lines)
     }
 
     // === Text I/O ===
@@ -1176,7 +1190,7 @@ mod tests {
     fn duplicate_session_labels_prefer_the_current_session() {
         let snapshot = RexSnapshot {
             sessions: vec![session("session:1", "work"), session("session:2", "work")],
-            panes: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(
             snapshot
