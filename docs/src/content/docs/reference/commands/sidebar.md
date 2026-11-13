@@ -1,11 +1,12 @@
 ---
 title: "sidebar"
-description: Control a live agent status sidebar in tmux or Zellij
+description: Control a live agent status sidebar in tmux, Zellij or Rex
 ---
 
-Controls a live agent status sidebar on the left or top edge of tmux windows or
-Zellij tabs. On tmux, each sidebar shows active agents across all sessions by
-default. On Zellij, the sidebar is scoped to the current Zellij session.
+Controls a live agent status sidebar on the left or top edge of tmux windows,
+Zellij tabs or Rex windows. On tmux and Rex, each sidebar shows active agents
+across all sessions by default. On Zellij, the sidebar is scoped to the current
+Zellij session.
 
 ```bash
 workmux sidebar                         # Toggle sidebar on/off (all sessions)
@@ -49,8 +50,9 @@ Each agent row displays:
 ## Mouse support
 
 Click an agent row or top-bar chip to jump to its pane, or scroll to navigate
-the list. tmux requires mouse mode (`set -g mouse on`); Zellij needs no extra
-mouse configuration.
+the list. tmux requires mouse mode (`set -g mouse on`); Zellij and Rex need no
+extra mouse configuration. On Rex, jumping to another window needs Remote
+Control.
 
 ## Navigation commands
 
@@ -234,10 +236,14 @@ On Zellij, the daemon polls the current session and adds a sidebar to each tab,
 including new tabs within about two seconds. workmux installs no Zellij hooks.
 See [Zellij sidebar](/guide/zellij/#sidebar).
 
+On Rex, the daemon adds a sidebar to every window in scope as soon as Rex
+reports a new window or session, and removes them when the sidebar is turned
+off. See [Rex sidebar](/guide/rex/#sidebar).
+
 ### Session-scoped mode
 
-By default, the sidebar appears in all tmux sessions. Use `--session` to scope
-it to the current session only, leaving other sessions untouched:
+By default, the sidebar appears in all tmux or Rex sessions. Use `--session` to
+scope it to the current session only, leaving other sessions untouched:
 
 ```bash
 workmux sidebar --session on   # Ensure it is enabled in the current session

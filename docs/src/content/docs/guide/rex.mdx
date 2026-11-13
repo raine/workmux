@@ -37,6 +37,21 @@ Showing a different session in the Rex app is a client action. Rex only accepts 
 
 With Remote Control off, everything else still works. When workmux would switch you to another session, for example after `workmux add` in session mode or when jumping to an agent in another session from the dashboard, it prints the session's name instead, so you can open it yourself.
 
+## Sidebar
+
+The [sidebar](/guide/sidebar/) works on Rex with the same scope as on tmux:
+
+```bash
+workmux sidebar               # Every session on the Rex server
+workmux sidebar --session     # The current session only, or opt it out
+```
+
+Rex has no hooks, so the sidebar daemon places sidebars itself. It adds one to every window in scope, including background windows and windows or sessions created later, as soon as Rex reports the change. Each sidebar wraps the window's whole layout, so your splits keep their proportions, and turning the sidebar off gives the space back without touching them.
+
+- **Closing a sidebar**: close a sidebar block and that window stays without one until you run `workmux sidebar on` again. Quitting a sidebar with `q` turns the sidebar off (only in the current session when it is session-scoped).
+- **Width**: sidebars take their size once the window is on screen. Drag the border to resize; the new width applies to every sidebar, unless `sidebar.width` is set in your config.
+- **Jumping**: clicking an agent in another window or session needs Remote Control, like any session switch. With it off, the sidebar says so on its bottom line and focuses the agent's block without switching windows.
+
 ## How it talks to Rex
 
 workmux drives Rex only through the `rex` CLI. To list panes, it runs one Lua script through `rex do` that returns every session and pane on the server, with each pane's foreground process, working directory and title. That is a single process per refresh, which keeps the dashboard responsive.
@@ -51,7 +66,7 @@ just itest --backend=rex
 
 ## Known limitations
 
-- Switching sessions needs Remote Control (see above)
+- Switching sessions needs Remote Control (see above), including jumps from the sidebar to other windows
 - Tab insertion ordering is not supported (new windows always appear at the end)
 - Some edge cases may not be as thoroughly tested as the tmux backend
 

@@ -639,7 +639,7 @@ alias wm='workmux'
 - [`resurrect`](#workmux-resurrect) - Restore worktree windows after a crash
 - [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`dashboard`](#workmux-dashboard) - Show TUI dashboard of all active agents
-- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux or Zellij
+- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux, Zellij or Rex
 - [`reap-agents`](#workmux-reap-agents) - Exit tracked agent processes older than a threshold
 - [`config edit`](#workmux-config-edit) - Edit the global configuration file
 - [`init`](#workmux-init) - Generate configuration file
@@ -2003,8 +2003,9 @@ bind C-t run-shell "workmux sidebar"
 
 Then press `prefix + Ctrl-t` to toggle the sidebar.
 
-> **Note:** Zellij sidebar support is experimental. See the
-> [Zellij guide](https://workmux.dev/guide/zellij/#sidebar) for its behavior and
+> **Note:** Zellij and Rex sidebar support is experimental. See the
+> [Zellij guide](https://workmux.dev/guide/zellij/#sidebar) and the
+> [Rex guide](https://workmux.dev/guide/rex/#sidebar) for their behavior and
 > limitations.
 
 ---

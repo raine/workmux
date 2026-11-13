@@ -1,6 +1,6 @@
 ---
 title: "Sidebar"
-description: A persistent agent status sidebar for tmux windows and Zellij tabs
+description: A persistent agent status sidebar for tmux windows, Zellij tabs and Rex windows
 ---
 
 import Screenshot from "../../../../components/Screenshot.astro";
@@ -10,8 +10,9 @@ import grouped from "../../../../assets/screenshots/sidebar-grouped.webp";
 import topBar from "../../../../assets/screenshots/sidebar-top-bar.webp";
 
 The sidebar provides an always-visible agent overview pinned to the left or top
-edge of every tmux window or Zellij tab. Unlike the dashboard, which is a
-full-screen TUI you open on demand, the sidebar stays on screen while you work.
+edge of every tmux window, Zellij tab or Rex window. Unlike the dashboard, which
+is a full-screen TUI you open on demand, the sidebar stays on screen while you
+work.
 
 <div style="display: flex; justify-content: center; max-width: 45rem; margin: 1.5rem 0;">
 
@@ -27,8 +28,8 @@ full-screen TUI you open on demand, the sidebar stays on screen while you work.
 ## Setup
 
 :::caution[Prerequisites]
-The sidebar requires [status tracking hooks](/guide/status-tracking/) and either
-tmux or the experimental Zellij backend.
+The sidebar requires [status tracking hooks](/guide/status-tracking/) and tmux,
+or the experimental Zellij or Rex backend.
 :::
 
 Toggle the sidebar with:
@@ -50,7 +51,8 @@ current tmux session only. Run it again to show the sidebar in that session
 again without affecting other sessions.
 
 On the experimental Zellij backend, the sidebar covers every tab in the current
-Zellij session. See [Zellij sidebar](/guide/zellij/#sidebar).
+Zellij session. See [Zellij sidebar](/guide/zellij/#sidebar). The experimental
+Rex backend has the same scope as tmux; see [Rex sidebar](/guide/rex/#sidebar).
 
 Optionally, add a tmux binding for quick access:
 
@@ -290,8 +292,9 @@ every agent it shows.
 ## Mouse support
 
 Click an agent tile or top-bar chip to jump to its pane, or scroll to navigate
-the list. tmux requires `set -g mouse on` in your `~/.tmux.conf`; Zellij needs
-no additional mouse configuration.
+the list. tmux requires `set -g mouse on` in your `~/.tmux.conf`; Zellij and Rex
+need no additional mouse configuration. On Rex, jumping to another window needs
+Remote Control.
 
 ## Keybindings
 
@@ -436,9 +439,17 @@ daemon adds sidebars to them during its two-second poll. Adding or removing the
 sidebar rebuilds each tab's layout while running panes keep running. See
 [Zellij sidebar](/guide/zellij/#sidebar).
 
+### Rex
+
+The experimental Rex backend uses the same daemon and per-window clients over
+every session on the Rex server, or the sessions in scope. Rex has no hooks, so
+the daemon follows Rex's event stream and places, resizes and removes sidebars
+itself, with its two-second poll as a fallback. Each sidebar wraps the window's
+whole layout. See [Rex sidebar](/guide/rex/#sidebar).
+
 ### Resource usage
 
-Because neither backend has a pane that persists across all windows or tabs,
+Because no backend has a pane that persists across all windows or tabs,
 each window or tab runs its own `_sidebar-run` process. Each one uses roughly 15 MB of
 resident memory, and the shared daemon (`_sidebar-daemon`) uses about 16 MB. With
 five agents running, total memory footprint is around 90 MB. CPU usage is near
