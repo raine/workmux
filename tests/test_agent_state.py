@@ -26,12 +26,14 @@ import pytest
 
 from .conftest import (
     MuxEnvironment,
+    RexEnvironment,
     TmuxEnvironment,
     get_window_name,
     get_worktree_path,
     make_env_script,
     poll_until,
     run_workmux_add,
+    run_workmux_command,
     wait_for_window_ready,
     write_workmux_config,
 )
@@ -1288,3 +1290,27 @@ def test_status_update_overwrites_state(
     assert len(state_files) == 1, (
         f"Expected 1 state file after update, got {len(state_files)}"
     )
+
+
+def test_rex_agent_state_survives_server_restart_for_resurrect(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """Agents from a Rex server that stopped stay restorable on the next one."""
+    env = mux_server
+    if not isinstance(env, RexEnvironment):
+        pytest.skip("Rex server lifecycle")
+    start_active_agent(env, workmux_exe_path, mux_repo_path, "feature-rex-restart")
+    state = read_agent_state(list_agent_state_files(env)[0])
+    assert state["boot_id"] == env._api("server.status", {})["instance_id"]
+
+    env.stop_server()
+    env.server_dir.mkdir()
+    env.start_server()
+
+    run_workmux_command(env, workmux_exe_path, mux_repo_path, "list")
+    assert len(list_agent_state_files(env)) == 1, "list pruned the stopped agent"
+    result = run_workmux_command(
+        env, workmux_exe_path, mux_repo_path, "resurrect --dry-run"
+    )
+    assert "feature-rex-restart" in result.stdout
+    assert "restoring" in result.stdout

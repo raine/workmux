@@ -1073,6 +1073,17 @@ impl Multiplexer for RexBackend {
             .ok_or_else(|| anyhow!("REX_SERVER is required to resolve the Rex instance"))
     }
 
+    fn server_boot_id(&self) -> Result<Option<String>> {
+        // The server draws a new instance ID every time it starts, so agents
+        // recorded under another one survive a server restart for resurrect.
+        let status = self.call_api("server.status", json!({}))?;
+        Ok(status
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string))
+    }
+
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
         Ok(self.snapshot()?.pane(pane_id).map(|p| p.live_pane_info().1))
     }
