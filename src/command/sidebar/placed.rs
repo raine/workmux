@@ -13,10 +13,7 @@ use super::app::SidebarFilterMode;
 use super::daemon_ctrl::{ensure_daemon_running, kill_daemon};
 use super::host::{RexHost, SidebarHost};
 use super::navigation::NavigationContext;
-use super::{
-    apply_cli_dimensions, configured_position, read_sidebar_filter_mode, rex_panes, session_state,
-    zellij_panes,
-};
+use super::{apply_cli_dimensions, configured_position, rex_panes, session_state, zellij_panes};
 
 /// Which sessions a scope change reaches.
 #[derive(Clone, Copy)]
@@ -113,10 +110,7 @@ pub(super) fn on_rex(
     apply_cli_dimensions(&mut config, width, height);
     let position = match position {
         Some(position) => position,
-        None if previous.is_active() => previous
-            .prefs
-            .position
-            .unwrap_or_else(|| configured_position(&config, None)),
+        None if previous.is_active() => configured_position(&config, previous.prefs.position),
         None => configured_position(&config, None),
     };
     let observation = rex.backend().sidebar_observation()?;
@@ -244,13 +238,14 @@ pub(super) fn navigation_context(
         .iter()
         .filter_map(|(pane, info)| Some((pane.clone(), host.session_key(info)?.to_string())))
         .collect();
+    // One read, so the filter, agents and view come from the same state.
+    let mut state = session_state::read(&host.instance_id()).unwrap_or_default();
     // An unknown caller session matches no agent.
-    let session_filter = (read_sidebar_filter_mode(host) == SidebarFilterMode::Session)
+    let session_filter = (state.prefs.filter_mode() == SidebarFilterMode::Session)
         .then(|| host.current_session().unwrap_or_default());
-    let store = host.store();
     Ok(NavigationContext {
-        agents: store.ordered_agents(),
-        view: store.window_view(&current_window),
+        agents: std::mem::take(&mut state.ordered_agents),
+        view: state.window_views.remove(&current_window),
         current_pane,
         current_window,
         pane_windows,

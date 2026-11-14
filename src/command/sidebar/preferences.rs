@@ -112,11 +112,6 @@ where
 }
 
 impl Preferences {
-    pub(super) fn position_or(&self, config: &Config) -> SidebarPosition {
-        self.position
-            .unwrap_or_else(|| config.sidebar.position.unwrap_or_default())
-    }
-
     pub(super) fn layout_mode(&self, config: &Config) -> SidebarLayoutMode {
         self.layout
             .or_else(|| {

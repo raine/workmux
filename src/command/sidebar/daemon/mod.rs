@@ -314,7 +314,7 @@ pub fn run() -> Result<()> {
             ) = {
                 let cfg = config.lock().unwrap();
                 (
-                    tmux_state.prefs.position_or(&cfg),
+                    super::configured_position(&cfg, tmux_state.prefs.position),
                     tmux_state.prefs.layout_mode(&cfg),
                     cfg.sidebar.sort.unwrap_or_default(),
                     tmux_state.prefs.grouping.resolve(cfg.sidebar.group_by()),

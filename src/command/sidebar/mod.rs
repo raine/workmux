@@ -66,6 +66,7 @@ const MAX_SANE_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 1;
 const MAX_HEIGHT: u16 = 5;
 
+/// The position in effect: the shared or requested one, else the config's.
 fn configured_position(
     config: &crate::config::Config,
     position: Option<SidebarPosition>,
@@ -77,11 +78,7 @@ pub(super) fn read_sidebar_position(
     host: &SidebarHost,
     config: &crate::config::Config,
 ) -> SidebarPosition {
-    preferences::Preferences {
-        position: host.store().position(),
-        ..Default::default()
-    }
-    .position_or(config)
+    configured_position(config, host.store().position())
 }
 
 fn default_width_for(tw: u16) -> u16 {
