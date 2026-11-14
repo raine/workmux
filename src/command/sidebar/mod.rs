@@ -11,12 +11,10 @@
 //! - `client` - Unix socket client for receiving daemon snapshots
 //! - `daemon` - background process that polls multiplexer state and broadcasts snapshots
 //! - `daemon_ctrl` - daemon lifecycle (spawn, kill, signal, health checks)
-//! - `hooks` - tmux hook installation and removal
-//! - `layout_tree` - tmux layout tree parser, reflow, and sidebar removal
-//! - `panes` - sidebar pane creation, destruction, and shutdown
 //! - `rex_panes` - sidebar placement, sizing, and scope on Rex
 //! - `runtime` - TUI event loop
 //! - `snapshot` - snapshot data types and builder
+//! - `tmux` - tmux hooks, layout reflow, and sidebar panes
 //! - `ui` - ratatui rendering (compact and tile layouts)
 
 mod app;
@@ -25,15 +23,13 @@ mod daemon;
 mod daemon_ctrl;
 #[cfg(target_os = "macos")]
 mod fsevent;
-mod hooks;
-mod layout_tree;
-mod panes;
 mod rex_panes;
 mod runtime;
 mod session_state;
 mod snapshot;
 mod store;
 mod template;
+mod tmux;
 mod ui;
 pub(crate) mod view;
 mod zellij_panes;
@@ -52,6 +48,7 @@ use self::panes::{
     find_sidebar_in_window, kill_all_sidebars_and_restore_layouts, kill_sidebars_in_session,
 };
 use self::store::SidebarStore;
+use self::tmux::{hooks, layout_tree, panes};
 
 const SIDEBAR_ROLE_VALUE: &str = "sidebar";
 /// Pane option holding the extent the last layout reflow gave a sidebar.

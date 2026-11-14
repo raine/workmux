@@ -487,7 +487,7 @@ fn sidebar_layout_size_for_status(
 /// tree lopsided. This function scales the content subtree to fill
 /// the remaining space proportionally, then applies the fixed layout
 /// atomically via `select-layout`.
-pub(super) fn reflow_after_sidebar_add(
+pub(crate) fn reflow_after_sidebar_add(
     window_id: &str,
     sidebar_pane_id: &str,
     position: SidebarPosition,
@@ -619,7 +619,7 @@ pub(super) fn reflow_after_sidebar_add(
         "-p",
         "-t",
         sidebar_pane_id,
-        super::SIDEBAR_APPLIED_SIZE_OPTION,
+        super::super::SIDEBAR_APPLIED_SIZE_OPTION,
         &content_size,
     ];
 
@@ -688,7 +688,7 @@ fn prune_pane(node: LayoutNode, target: u32) -> Option<LayoutNode> {
 /// and scales the remaining content to fill the full window width. This
 /// preserves whatever pane arrangement the user created while the sidebar
 /// was open, unlike the old save/restore approach which used a stale snapshot.
-pub(super) fn layout_after_sidebar_remove(
+pub(crate) fn layout_after_sidebar_remove(
     window_id: &str,
     sidebar_pane_id: &str,
     position: SidebarPosition,

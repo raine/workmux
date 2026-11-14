@@ -17,7 +17,7 @@ const HOOK_NAMES: &[&str] = &[
 ];
 
 /// Install tmux hooks so new windows automatically get a sidebar.
-pub(super) fn install_hooks() -> Result<()> {
+pub(crate) fn install_hooks() -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_str = exe.to_str().ok_or_else(|| anyhow!("exe path not UTF-8"))?;
     let exe_arg = shell_quote(exe_str);
@@ -79,7 +79,7 @@ fn tmux_double_quote(value: &str) -> String {
 }
 
 /// Remove tmux hooks.
-pub(super) fn remove_hooks() {
+pub(crate) fn remove_hooks() {
     for hook in HOOK_NAMES {
         let _ = Cmd::new("tmux").args(&["set-hook", "-gu", hook]).run();
     }

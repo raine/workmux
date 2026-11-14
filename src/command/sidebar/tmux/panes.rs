@@ -6,9 +6,9 @@ use tracing::debug;
 use crate::cmd::Cmd;
 use crate::config::SidebarPosition;
 
-use super::SIDEBAR_ROLE_VALUE;
-use super::app::HostIdentity;
-use super::daemon_ctrl::kill_daemon;
+use super::super::SIDEBAR_ROLE_VALUE;
+use super::super::app::HostIdentity;
+use super::super::daemon_ctrl::kill_daemon;
 use super::hooks::remove_hooks;
 use super::layout_tree::{layout_after_sidebar_remove, reflow_after_sidebar_add};
 
@@ -43,18 +43,18 @@ fn query_window_panes(window_id: &str) -> Result<String> {
 }
 
 /// Find the sidebar pane in a window, if one exists.
-pub(super) fn find_sidebar_pane_in_window(window_id: &str) -> Result<Option<String>> {
+pub(crate) fn find_sidebar_pane_in_window(window_id: &str) -> Result<Option<String>> {
     let output = query_window_panes(window_id)?;
     Ok(parse_window_panes(&output).0.map(str::to_string))
 }
 
 /// Check if a window already has a sidebar pane.
-pub(super) fn find_sidebar_in_window(window_id: &str) -> Result<bool> {
+pub(crate) fn find_sidebar_in_window(window_id: &str) -> Result<bool> {
     Ok(find_sidebar_pane_in_window(window_id)?.is_some())
 }
 
 /// Leave an agent selection for a sidebar process before switching to it.
-pub(super) fn set_pending_selection(sidebar_pane_id: &str, agent_pane_id: &str) -> Result<()> {
+pub(crate) fn set_pending_selection(sidebar_pane_id: &str, agent_pane_id: &str) -> Result<()> {
     Cmd::new("tmux")
         .args(&[
             "set-option",
@@ -68,7 +68,7 @@ pub(super) fn set_pending_selection(sidebar_pane_id: &str, agent_pane_id: &str) 
         .map(|_| ())
 }
 
-pub(super) fn clear_pending_selection(sidebar_pane_id: &str) {
+pub(crate) fn clear_pending_selection(sidebar_pane_id: &str) {
     let _ = Cmd::new("tmux")
         .args(&[
             "set-option",
@@ -81,7 +81,7 @@ pub(super) fn clear_pending_selection(sidebar_pane_id: &str) {
 }
 
 /// Take the selection handed off by another sidebar process.
-pub(super) fn take_pending_selection(sidebar_pane_id: &str) -> Option<String> {
+pub(crate) fn take_pending_selection(sidebar_pane_id: &str) -> Option<String> {
     let selection = Cmd::new("tmux")
         .args(&[
             "show-option",
@@ -99,7 +99,7 @@ pub(super) fn take_pending_selection(sidebar_pane_id: &str) -> Option<String> {
 }
 
 /// Create a sidebar pane in a specific window (idempotent).
-pub(super) fn create_sidebar_in_window(
+pub(crate) fn create_sidebar_in_window(
     window_id: &str,
     position: SidebarPosition,
     size: u16,
@@ -213,8 +213,8 @@ fn list_windows_for_sidebars(
 /// Computes width per-window from `#{window_width}` so each window gets a
 /// sidebar proportional to its own dimensions. Unattached sessions may have
 /// stale geometry, but `reflow()` corrects them on reattach.
-pub(super) fn create_sidebars_in_all_windows(config: &crate::config::Config) -> Result<()> {
-    let position = super::read_sidebar_position(config);
+pub(crate) fn create_sidebars_in_all_windows(config: &crate::config::Config) -> Result<()> {
+    let position = super::super::read_sidebar_position(config);
     let output = list_windows_for_sidebars(SidebarWindowScope::All, position)?;
 
     debug!(position = ?position, "create_sidebars_in_all_windows: creating sidebars");
@@ -222,11 +222,11 @@ pub(super) fn create_sidebars_in_all_windows(config: &crate::config::Config) -> 
 }
 
 /// Create sidebars in all windows of a specific session (by session_id).
-pub(super) fn create_sidebars_in_session(
+pub(crate) fn create_sidebars_in_session(
     session_id: &str,
     config: &crate::config::Config,
 ) -> Result<()> {
-    let position = super::read_sidebar_position(config);
+    let position = super::super::read_sidebar_position(config);
     let output = list_windows_for_sidebars(SidebarWindowScope::Session(session_id), position)?;
 
     debug!(session_id, position = ?position, "create_sidebars_in_session: creating sidebars");
@@ -246,7 +246,7 @@ fn create_sidebars_from_window_output(
         }
         let (window_id, extent_str) = line.split_once(' ').unwrap_or((line, "0"));
         let window_extent: u16 = extent_str.parse().unwrap_or(0);
-        let size = super::effective_size_for(config, position, window_extent);
+        let size = super::super::effective_size_for(config, position, window_extent);
         if let Err(error) = create_sidebar_in_window(window_id, position, size) {
             errors.push(format!("{window_id}: {error}"));
         }
@@ -287,9 +287,9 @@ fn kill_panes_and_apply_layouts(sidebars: &[(String, String)], layouts: &[Option
 
 /// Kill sidebar panes only in a specific session (by session_id).
 /// Handles layout restoration for killed panes.
-pub(super) fn kill_sidebars_in_session(session_id: &str) {
+pub(crate) fn kill_sidebars_in_session(session_id: &str) {
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::read_sidebar_position(&config);
+    let position = super::super::read_sidebar_position(&config);
     let output = Cmd::new("tmux")
         .args(&[
             "list-panes",
@@ -318,7 +318,7 @@ pub(super) fn kill_sidebars_in_session(session_id: &str) {
 }
 
 /// Find all sidebar panes across all windows. Returns (window_id, pane_id) pairs.
-pub(super) fn list_sidebar_panes() -> Vec<(String, String)> {
+pub(crate) fn list_sidebar_panes() -> Vec<(String, String)> {
     let output = Cmd::new("tmux")
         .args(&[
             "list-panes",
@@ -345,9 +345,9 @@ pub(super) fn list_sidebar_panes() -> Vec<(String, String)> {
 /// Computes the target layout from the live tree BEFORE killing panes,
 /// then applies it after. This preserves pane arrangements the user
 /// created while the sidebar was open.
-pub(super) fn kill_all_sidebars_and_restore_layouts() {
+pub(crate) fn kill_all_sidebars_and_restore_layouts() {
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::read_sidebar_position(&config);
+    let position = super::super::read_sidebar_position(&config);
     let sidebars = list_sidebar_panes();
 
     let layouts = compute_sidebar_layouts(&sidebars, position);
@@ -365,13 +365,13 @@ fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
 /// In session-scoped mode, only kills sidebars in our session and removes
 /// our session from the scope set. Full cleanup (daemon, hooks) only happens
 /// when no scoped sessions remain.
-pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
+pub(crate) fn shutdown_all_sidebars(identity: &HostIdentity) {
     let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
     if matches!(mux.name(), "zellij" | "rex") {
         use std::os::unix::process::CommandExt;
         // Under a session scope, quitting leaves the other sessions' sidebars.
         let session_scoped = mux.name() == "rex"
-            && super::session_state::read(&mux.instance_id())
+            && super::super::session_state::read(&mux.instance_id())
                 .is_ok_and(|state| !state.enabled && state.sessions.contains(&identity.session_id));
         // The helper must survive closing this pane so it can restore this tab too.
         let result = std::env::current_exe().and_then(|exe| {
@@ -403,15 +403,15 @@ pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
     }
 
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::read_sidebar_position(&config);
+    let position = super::super::read_sidebar_position(&config);
     let our_pane = identity.pane_id.as_str();
     let our_window = identity.window_id.as_str();
     let our_session_id = identity.session_id.as_str();
 
-    let scope = super::current_scope();
+    let scope = super::super::current_scope();
 
     let sidebars = match &scope {
-        super::SidebarScope::Sessions(ids) => {
+        super::super::SidebarScope::Sessions(ids) => {
             let our_sid = our_session_id;
             let output = Cmd::new("tmux")
                 .args(&[
@@ -439,9 +439,9 @@ pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
             let mut remaining = ids.clone();
             remaining.remove(our_sid);
             if remaining.is_empty() {
-                super::set_scope(&super::SidebarScope::Off);
+                super::super::set_scope(&super::super::SidebarScope::Off);
             } else {
-                super::set_scope(&super::SidebarScope::Sessions(remaining));
+                super::super::set_scope(&super::super::SidebarScope::Sessions(remaining));
             }
 
             sidebars
@@ -471,13 +471,13 @@ pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
     kill_panes_and_apply_layouts(&other_sidebars, &other_layouts);
 
     // Full cleanup only if no scoped sessions remain (or global mode)
-    let remaining_scope = super::current_scope();
-    let full_cleanup = !matches!(remaining_scope, super::SidebarScope::Sessions(_));
+    let remaining_scope = super::super::current_scope();
+    let full_cleanup = !matches!(remaining_scope, super::super::SidebarScope::Sessions(_));
 
     if full_cleanup {
         kill_daemon();
         remove_hooks();
-        super::clear_sidebar_globals();
+        super::super::clear_sidebar_globals();
     }
 
     // Defer our own window's layout reflow until after our pane closes
