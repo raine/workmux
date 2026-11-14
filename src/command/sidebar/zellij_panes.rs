@@ -977,7 +977,7 @@ pub(super) fn create_sidebar_in_active_tab_from_snapshot(
         return Ok(());
     };
     let state = super::session_state::read(instance_id)?;
-    if !state.enabled {
+    if !state.scope.enabled {
         return Ok(());
     }
     let Some(tab) = backend(instance_id)

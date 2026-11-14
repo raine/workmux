@@ -26,7 +26,7 @@ use super::navigation::NavigationContext;
 use super::view::WindowView;
 use super::{
     apply_cli_dimensions, configured_position, read_sidebar_filter_mode, read_sidebar_position,
-    resolve_height_for, resolve_width_for,
+    resolve_extent_for, save_extent, saved_extent,
 };
 
 pub(super) const SIDEBAR_ROLE_VALUE: &str = "sidebar";
@@ -176,84 +176,43 @@ fn set_sidebar_position(tmux: &TmuxHost, position: SidebarPosition) {
 }
 
 /// Read the synced sidebar width from tmux global option, falling back to settings.
-fn read_sidebar_width(tmux: &TmuxHost) -> Option<u16> {
-    if let Some(w) = tmux
-        .option("@workmux_sidebar_width")
-        .and_then(|output| output.parse::<u16>().ok())
-        && w > 0
-    {
-        return Some(w);
-    }
-
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(settings) = store.load_settings()
-    {
-        return settings.sidebar_width;
-    }
-
-    None
-}
-
-fn read_sidebar_height(tmux: &TmuxHost) -> Option<u16> {
-    if let Some(h) = tmux
-        .option("@workmux_sidebar_height")
-        .and_then(|output| output.parse::<u16>().ok())
-        && h > 0
-    {
-        return Some(h);
-    }
-
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(settings) = store.load_settings()
-    {
-        return settings.sidebar_height;
-    }
-
-    None
-}
-
-/// Set the synced sidebar width in tmux global option and persist to settings.
-pub(super) fn set_sidebar_width(tmux: &TmuxHost, width: u16) {
-    let _ = tmux.set_option("@workmux_sidebar_width", Some(&width.to_string()));
-
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(mut settings) = store.load_settings()
-    {
-        settings.sidebar_width = Some(width);
-        let _ = store.save_settings(&settings);
+fn extent_option(position: SidebarPosition) -> &'static str {
+    match position {
+        SidebarPosition::Left => "@workmux_sidebar_width",
+        SidebarPosition::Top => "@workmux_sidebar_height",
     }
 }
 
-pub(super) fn set_sidebar_height(tmux: &TmuxHost, height: u16) {
-    let _ = tmux.set_option("@workmux_sidebar_height", Some(&height.to_string()));
+/// The extent along `position`'s axis every sidebar on this server takes,
+/// once the user resized one.
+fn synced_extent(tmux: &TmuxHost, position: SidebarPosition) -> Option<u16> {
+    tmux.option(extent_option(position))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|cells| *cells > 0)
+        .or_else(|| saved_extent(position))
+}
 
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(mut settings) = store.load_settings()
-    {
-        settings.sidebar_height = Some(height);
-        let _ = store.save_settings(&settings);
+/// Give every sidebar on this server this extent, and persist it.
+pub(super) fn set_synced_extent(tmux: &TmuxHost, position: SidebarPosition, cells: u16) {
+    let _ = tmux.set_option(extent_option(position), Some(&cells.to_string()));
+    if let Err(error) = save_extent(position, cells) {
+        tracing::warn!(%error, "failed to persist sidebar size");
     }
 }
 
-/// Resolve effective sidebar width, checking synced width first.
-pub(super) fn effective_width_for(tmux: &TmuxHost, config: &Config, window_w: u16) -> u16 {
-    resolve_width_for(config, window_w, read_sidebar_width(tmux))
-}
-
-pub(super) fn effective_height_for(tmux: &TmuxHost, config: &Config, window_h: u16) -> u16 {
-    resolve_height_for(config, window_h, read_sidebar_height(tmux))
-}
-
-fn effective_size_for(
+/// The sidebar extent for a window, checking the synced extent first.
+pub(super) fn effective_size_for(
     tmux: &TmuxHost,
     config: &Config,
     position: SidebarPosition,
     window_extent: u16,
 ) -> u16 {
-    match position {
-        SidebarPosition::Left => effective_width_for(tmux, config, window_extent),
-        SidebarPosition::Top => effective_height_for(tmux, config, window_extent),
-    }
+    resolve_extent_for(
+        config,
+        position,
+        window_extent,
+        synced_extent(tmux, position),
+    )
 }
 
 /// A window's extent along the sidebar's axis, or 0 when tmux can't say.
@@ -274,20 +233,14 @@ fn window_extent(tmux: &TmuxHost, window_id: &str, position: SidebarPosition) ->
 pub(super) fn reflow_all_sidebars_except(tmux: &TmuxHost, exclude_window_id: &str) {
     let config = Config::load(None).unwrap_or_default();
     let position = read_sidebar_position(&tmux.host(), &config);
-    let synced = match position {
-        SidebarPosition::Left => read_sidebar_width(tmux),
-        SidebarPosition::Top => read_sidebar_height(tmux),
-    };
+    let synced = synced_extent(tmux, position);
 
     for (window_id, pane_id) in panes::list_sidebar_panes(tmux) {
         if window_id == exclude_window_id {
             continue;
         }
         let extent = window_extent(tmux, &window_id, position);
-        let size = match position {
-            SidebarPosition::Left => resolve_width_for(&config, extent, synced),
-            SidebarPosition::Top => resolve_height_for(&config, extent, synced),
-        };
+        let size = resolve_extent_for(&config, position, extent, synced);
         layout_tree::reflow_after_sidebar_add(tmux, &window_id, &pane_id, position, size);
     }
 }
@@ -301,8 +254,7 @@ pub(super) fn reflow_all(tmux: &TmuxHost, exclude_window: Option<&str>) -> Resul
 
     let config = Config::load(None).unwrap_or_default();
     let position = read_sidebar_position(&tmux.host(), &config);
-    let synced_width = read_sidebar_width(tmux);
-    let synced_height = read_sidebar_height(tmux);
+    let synced = synced_extent(tmux, position);
 
     for (window_id, pane_id) in panes::list_sidebar_panes(tmux) {
         if exclude_window.is_some_and(|ex| ex == window_id) {
@@ -319,10 +271,7 @@ pub(super) fn reflow_all(tmux: &TmuxHost, exclude_window: Option<&str>) -> Resul
             continue;
         }
 
-        let size = match position {
-            SidebarPosition::Left => resolve_width_for(&config, current_extent, synced_width),
-            SidebarPosition::Top => resolve_height_for(&config, current_extent, synced_height),
-        };
+        let size = resolve_extent_for(&config, position, current_extent, synced);
         layout_tree::reflow_after_sidebar_add(tmux, &window_id, &pane_id, position, size);
     }
 

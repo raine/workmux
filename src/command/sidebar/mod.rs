@@ -136,6 +136,41 @@ fn resolve_height_for(config: &crate::config::Config, th: u16, synced_height: Op
     default.clamp(1, max_h)
 }
 
+/// Sidebar extent along `position`'s axis for a window `window_cells` wide
+/// (left) or tall (top).
+fn resolve_extent_for(
+    config: &crate::config::Config,
+    position: SidebarPosition,
+    window_cells: u16,
+    synced: Option<u16>,
+) -> u16 {
+    match position {
+        SidebarPosition::Left => resolve_width_for(config, window_cells, synced),
+        SidebarPosition::Top => resolve_height_for(config, window_cells, synced),
+    }
+}
+
+/// The extent along `position`'s axis the user last gave a sidebar by
+/// resizing it, as settings.json keeps it.
+fn saved_extent(position: SidebarPosition) -> Option<u16> {
+    let settings = crate::state::StateStore::new().ok()?.load_settings().ok()?;
+    match position {
+        SidebarPosition::Left => settings.sidebar_width,
+        SidebarPosition::Top => settings.sidebar_height,
+    }
+    .filter(|cells| *cells > 0)
+}
+
+fn save_extent(position: SidebarPosition, cells: u16) -> Result<()> {
+    let store = crate::state::StateStore::new()?;
+    let mut settings = store.load_settings()?;
+    match position {
+        SidebarPosition::Left => settings.sidebar_width = Some(cells),
+        SidebarPosition::Top => settings.sidebar_height = Some(cells),
+    }
+    store.save_settings(&settings)
+}
+
 /// Reflow sidebar layouts in all windows (called by a hidden command).
 pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
     match SidebarHost::detect() {

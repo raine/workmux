@@ -46,7 +46,7 @@ pub(super) fn on_zellij(
     let width = config.sidebar.width.clone();
     let height = config.sidebar.height.clone();
     session_state::update(instance_id, |state| {
-        state.enabled = true;
+        state.scope.include(None);
         state.prefs.position = Some(position);
         state.width.clone_from(&width);
         state.height.clone_from(&height);
@@ -57,7 +57,7 @@ pub(super) fn on_zellij(
 }
 
 pub(super) fn off_zellij(host: &SidebarHost, instance_id: &str) -> Result<()> {
-    session_state::update(instance_id, |state| state.enabled = false)?;
+    session_state::update(instance_id, |state| state.scope.exclude(None))?;
     kill_daemon(host);
     zellij_panes::kill_all_sidebars(instance_id)
 }
@@ -121,19 +121,7 @@ pub(super) fn on_rex(
     };
     let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
     session_state::update(instance_id, |state| {
-        match &session {
-            None => {
-                state.enabled = true;
-                state.optout_sessions.clear();
-                state.sessions.clear();
-            }
-            Some(session) if state.enabled => {
-                state.optout_sessions.remove(session);
-            }
-            Some(session) => {
-                state.sessions.insert(session.clone());
-            }
-        }
+        state.scope.include(session.as_deref());
         rex_panes::clear_dismissals(state, &observation, session.as_deref());
         state.prefs.position = Some(position);
         if set_width {
@@ -151,18 +139,8 @@ pub(super) fn on_rex(
 
 pub(super) fn off_rex(host: &SidebarHost, instance_id: &str, reach: Reach) -> Result<()> {
     let session = reach_session(reach)?;
-    let state = session_state::update(instance_id, |state| match &session {
-        None => {
-            state.enabled = false;
-            state.sessions.clear();
-            state.optout_sessions.clear();
-        }
-        Some(session) if state.enabled => {
-            state.optout_sessions.insert(session.clone());
-        }
-        Some(session) => {
-            state.sessions.remove(session);
-        }
+    let state = session_state::update(instance_id, |state| {
+        state.scope.exclude(session.as_deref());
     })?;
     rex_panes::sync(instance_id)?;
     if !state.is_active() {
@@ -180,7 +158,7 @@ fn rex_shown(instance_id: &str, reach: Reach) -> Result<bool> {
         Reach::All if std::env::var_os("REX_BLOCK").is_none() => Ok(state.is_active()),
         Reach::All => {
             let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
-            Ok(rex_panes::current_window_has_sidebar(&observation))
+            Ok(rex_panes::current_window_has_sidebar(&observation, &state))
         }
     }
 }
@@ -214,8 +192,9 @@ pub(super) fn sync_rex(host: &SidebarHost, instance_id: &str) -> Result<()> {
 pub(super) fn stop_after_quit(host: &SidebarHost, identity: &HostIdentity) {
     use std::os::unix::process::CommandExt;
     let session_scoped = matches!(host, SidebarHost::Rex { .. })
-        && session_state::read(&host.instance_id())
-            .is_ok_and(|state| !state.enabled && state.sessions.contains(&identity.session_id));
+        && session_state::read(&host.instance_id()).is_ok_and(|state| {
+            !state.scope.enabled && state.scope.sessions.contains(&identity.session_id)
+        });
     // The helper must survive closing this pane so it can restore this tab too.
     let result = std::env::current_exe().and_then(|exe| {
         let mut command = std::process::Command::new(exe);

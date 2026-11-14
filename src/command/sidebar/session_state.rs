@@ -14,7 +14,8 @@ use super::view::WindowView;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct SidebarSessionState {
-    pub enabled: bool,
+    #[serde(flatten)]
+    pub scope: FileScope,
     pub width: Option<SidebarWidth>,
     pub height: Option<SidebarHeight>,
     #[serde(flatten)]
@@ -23,10 +24,6 @@ pub(super) struct SidebarSessionState {
     /// The view each window's sidebar shows, by window ID. Rex and Zellij only.
     pub window_views: BTreeMap<String, WindowView>,
     pub daemon_pid: Option<u32>,
-    /// Session IDs the sidebar covers while `enabled` is off. Rex only.
-    pub sessions: BTreeSet<String>,
-    /// Session IDs left out while `enabled` is on. Rex only.
-    pub optout_sessions: BTreeSet<String>,
     /// Sidebars the daemon placed, by window ID. Rex only.
     pub placements: BTreeMap<String, Placement>,
     /// Windows whose sidebar the user closed. They get no new sidebar until
@@ -45,25 +42,82 @@ pub(super) struct Placement {
     /// The window extent in cells when the ratio was applied, once a client
     /// displays the window.
     pub applied_window_cells: Option<u16>,
-    /// Hash of the window's blocks when the ratio was applied.
-    pub topology: u64,
-    /// The blocks just changed, so the next ratio change may be the app
-    /// rebalancing the row rather than the user dragging the border.
+    /// Fingerprint of the window's block membership when the ratio was
+    /// applied.
+    #[serde(alias = "topology")]
+    pub membership: u64,
+    /// What the daemon makes of ratio changes it did not ask for.
     #[serde(default)]
-    pub settling: bool,
-    /// A ratio seen once that differs from `applied_ratio`. Seen twice, it
-    /// is a drag.
-    #[serde(default)]
-    pub drag_candidate: Option<f64>,
+    pub tracking: Tracking,
     /// Each block's size stamp when the daemon last changed the window's
     /// layout. A size still carrying its stamp predates that change.
     #[serde(default)]
     pub stale_sizes: BTreeMap<String, String>,
 }
 
-impl SidebarSessionState {
+/// What the daemon makes of a root ratio it did not set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Tracking {
+    /// The applied ratio holds: a new ratio may be a drag.
+    #[default]
+    Stable,
+    /// The blocks just changed, so the next ratio change may be the app
+    /// rebalancing the row rather than the user dragging the border.
+    Settling,
+    /// A ratio seen once that differs from the applied one. Seen twice, it
+    /// is a drag.
+    Candidate(f64),
+}
+
+/// Which sessions the sidebar covers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct FileScope {
+    pub enabled: bool,
+    /// Session IDs the sidebar covers while `enabled` is off. Rex only.
+    pub sessions: BTreeSet<String>,
+    /// Session IDs left out while `enabled` is on. Rex only.
+    pub optout_sessions: BTreeSet<String>,
+}
+
+impl FileScope {
+    /// Cover every session, or one more.
+    pub(super) fn include(&mut self, session: Option<&str>) {
+        match session {
+            None => {
+                self.enabled = true;
+                self.sessions.clear();
+                self.optout_sessions.clear();
+            }
+            Some(session) if self.enabled => {
+                self.optout_sessions.remove(session);
+            }
+            Some(session) => {
+                self.sessions.insert(session.to_string());
+            }
+        }
+    }
+
+    /// Cover no session, or one fewer.
+    pub(super) fn exclude(&mut self, session: Option<&str>) {
+        match session {
+            None => {
+                self.enabled = false;
+                self.sessions.clear();
+                self.optout_sessions.clear();
+            }
+            Some(session) if self.enabled => {
+                self.optout_sessions.insert(session.to_string());
+            }
+            Some(session) => {
+                self.sessions.remove(session);
+            }
+        }
+    }
+
     /// Whether the sidebar covers this session.
-    pub(super) fn covers_session(&self, session_id: &str) -> bool {
+    pub(super) fn covers(&self, session_id: &str) -> bool {
         if self.enabled {
             !self.optout_sessions.contains(session_id)
         } else {
@@ -74,6 +128,18 @@ impl SidebarSessionState {
     /// Whether the sidebar covers any session.
     pub(super) fn is_active(&self) -> bool {
         self.enabled || !self.sessions.is_empty()
+    }
+}
+
+impl SidebarSessionState {
+    /// Whether the sidebar covers this session.
+    pub(super) fn covers_session(&self, session_id: &str) -> bool {
+        self.scope.covers(session_id)
+    }
+
+    /// Whether the sidebar covers any session.
+    pub(super) fn is_active(&self) -> bool {
+        self.scope.is_active()
     }
 }
 
@@ -251,12 +317,72 @@ mod tests {
     }
 
     #[test]
+    fn scope_includes_and_excludes_sessions() {
+        let mut scope = FileScope::default();
+        scope.include(Some("s1"));
+        scope.include(Some("s2"));
+        assert!(scope.covers("s1") && scope.covers("s2") && !scope.covers("s3"));
+        scope.exclude(Some("s1"));
+        assert!(!scope.covers("s1") && scope.is_active());
+        scope.exclude(Some("s2"));
+        assert!(!scope.is_active());
+    }
+
+    #[test]
+    fn global_scope_opts_sessions_out_and_back_in() {
+        let mut scope = FileScope::default();
+        scope.include(Some("s1"));
+        scope.include(None);
+        assert!(scope.enabled && scope.sessions.is_empty());
+        assert!(scope.covers("s1") && scope.covers("s2"));
+        scope.exclude(Some("s2"));
+        assert!(!scope.covers("s2") && scope.covers("s3"));
+        scope.include(Some("s2"));
+        assert!(scope.covers("s2"));
+        scope.exclude(Some("s2"));
+        scope.exclude(None);
+        assert_eq!(scope, FileScope::default());
+    }
+
+    #[test]
+    fn scope_keeps_its_file_shape() {
+        let state = SidebarSessionState {
+            scope: FileScope {
+                enabled: true,
+                sessions: BTreeSet::new(),
+                optout_sessions: BTreeSet::from(["s1".to_string()]),
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["optout_sessions"], serde_json::json!(["s1"]));
+        let state: SidebarSessionState = serde_json::from_value(json).unwrap();
+        assert!(!state.covers_session("s1"));
+    }
+
+    #[test]
+    fn placements_written_with_the_old_tracking_fields_still_read() {
+        let placement: Placement = serde_json::from_value(serde_json::json!({
+            "block_id": "b",
+            "applied_ratio": 0.2,
+            "applied_window_cells": 200,
+            "topology": 7,
+            "settling": true,
+            "drag_candidate": null,
+        }))
+        .unwrap();
+        assert_eq!(placement.membership, 7);
+        assert_eq!(placement.tracking, Tracking::Stable);
+    }
+
+    #[test]
     fn unparseable_state_reads_as_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         fs::write(&path, br#"{"enabled": "yes", "position": 3}"#).unwrap();
         let state = read_path(&path).unwrap();
-        assert!(!state.enabled);
+        assert!(!state.scope.enabled);
         assert_eq!(state.prefs.position, None);
     }
 
@@ -272,14 +398,14 @@ mod tests {
         );
 
         update(&instance, |state| {
-            state.enabled = true;
+            state.scope.enabled = true;
             state.prefs.position = Some(SidebarPosition::Top);
             state.ordered_agents = vec!["terminal_7".to_string()];
         })
         .unwrap();
 
         let state = read(&instance).unwrap();
-        assert!(state.enabled);
+        assert!(state.scope.enabled);
         assert_eq!(state.prefs.position, Some(SidebarPosition::Top));
         assert_eq!(state.ordered_agents, vec!["terminal_7"]);
 

@@ -12,8 +12,8 @@ use crate::config::{Config, SidebarPosition};
 use super::super::host::TmuxHost;
 use super::super::width_exceeds_defensive_max;
 use super::{
-    SIDEBAR_APPLIED_SIZE_OPTION, effective_height_for, effective_width_for, reflow,
-    reflow_all_sidebars_except, set_sidebar_height, set_sidebar_width,
+    SIDEBAR_APPLIED_SIZE_OPTION, effective_size_for, reflow, reflow_all_sidebars_except,
+    set_synced_extent,
 };
 
 /// How long a resize must stay still before the sidebar acts on it.
@@ -135,7 +135,7 @@ impl TmuxResize {
                     return;
                 }
                 let actual_width = self.pane_extent("#{pane_width}").unwrap_or(pane_width);
-                let expected = effective_width_for(&tmux, &config, window_w);
+                let expected = effective_size_for(&tmux, &config, position, window_w);
                 if actual_width == expected {
                     return;
                 }
@@ -147,12 +147,12 @@ impl TmuxResize {
                     }
                 } else if width_exceeds_defensive_max(actual_width) {
                     if let Some(wid) = window_id {
-                        set_sidebar_width(&tmux, expected);
+                        set_synced_extent(&tmux, position, expected);
                         self.suppress_once = true;
                         let _ = reflow(&tmux, Some(wid));
                     }
                 } else if config.sidebar.width.is_none() {
-                    set_sidebar_width(&tmux, actual_width);
+                    set_synced_extent(&tmux, position, actual_width);
                     self.record_applied_size(actual_width);
                     if let Some(wid) = window_id {
                         reflow_all_sidebars_except(&tmux, wid);
@@ -174,7 +174,7 @@ impl TmuxResize {
                     return;
                 }
                 let actual_height = self.pane_extent("#{pane_height}").unwrap_or(pane_height);
-                let expected = effective_height_for(&tmux, &config, window_h);
+                let expected = effective_size_for(&tmux, &config, position, window_h);
                 if actual_height == expected {
                     return;
                 }
@@ -183,7 +183,7 @@ impl TmuxResize {
                         let _ = reflow(&tmux, Some(wid));
                     }
                 } else if config.sidebar.height.is_none() {
-                    set_sidebar_height(&tmux, actual_height);
+                    set_synced_extent(&tmux, position, actual_height);
                     self.record_applied_size(actual_height);
                     if let Some(wid) = window_id {
                         reflow_all_sidebars_except(&tmux, wid);

@@ -24,7 +24,7 @@ use crate::multiplexer::rex::sidebar::{
     exec_layout,
 };
 
-use super::session_state::{self, Placement, SidebarSessionState};
+use super::session_state::{self, Placement, SidebarSessionState, Tracking};
 
 /// Columns a left sidebar always leaves for content, and rows for a top one.
 const MIN_CONTENT_COLS: f64 = 10.0;
@@ -67,7 +67,7 @@ struct WindowView {
     /// False when a labeled block's process could not be read, so ownership
     /// is unknown.
     complete: bool,
-    topology: u64,
+    membership: u64,
     /// The root split ratio and the first block after the sidebar, when an
     /// owned sidebar sits at the edge.
     root: Option<(f64, String)>,
@@ -75,12 +75,18 @@ struct WindowView {
     window_cells: Option<u16>,
 }
 
-fn topology(window: &RexSidebarWindow) -> u64 {
-    let mut ids: Vec<&str> = window.blocks.iter().map(|b| b.block_id.as_str()).collect();
+/// Fingerprint of a window's block membership. A placement compares it to
+/// tell a ratio the app changed while rebalancing new blocks from a drag.
+fn membership<'a>(block_ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut ids: Vec<&str> = block_ids.into_iter().collect();
     ids.sort_unstable();
     let mut hasher = DefaultHasher::new();
     ids.hash(&mut hasher);
     hasher.finish()
+}
+
+fn window_membership(window: &RexSidebarWindow) -> u64 {
+    membership(window.blocks.iter().map(|b| b.block_id.as_str()))
 }
 
 fn split_matches(horizontal: bool, position: SidebarPosition) -> bool {
@@ -181,7 +187,7 @@ fn window_view(
         candidates,
         content_blocks,
         complete,
-        topology: topology(window),
+        membership: window_membership(window),
         root,
         window_cells: layout.and_then(|layout| {
             measured_extent(window, layout, position, placed.map(|p| &p.stale_sizes))
@@ -280,18 +286,38 @@ enum SizeDecision {
     Persist(u16),
 }
 
-/// How a placed sidebar's size should change, given the root ratio now and
-/// the ratio its target extent needs.
+/// A placed sidebar's window as one pass sees it.
+#[derive(Debug, Clone)]
+struct Measure {
+    membership: u64,
+    /// The root split ratio now.
+    ratio_now: f64,
+    /// The window extent along the sidebar's axis, once a client displays it.
+    window_cells: Option<u16>,
+    /// Each displayed block's size stamp.
+    size_stamps: BTreeMap<String, String>,
+}
+
+/// What became of a resize a size decision asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Applied {
+    /// The decision asked for no resize.
+    Nothing,
+    Resized,
+    Failed,
+}
+
+/// How a placed sidebar's size should change, given its window now and the
+/// ratio its target extent needs.
 fn size_decision(
     placed: &Placement,
-    topology: u64,
-    ratio_now: f64,
-    window_cells: Option<u16>,
+    measure: &Measure,
     target: f64,
     configured: bool,
 ) -> SizeDecision {
+    let ratio_now = measure.ratio_now;
     // Without a client the window has no real size: keep what was placed.
-    let Some(window_cells) = window_cells else {
+    let Some(window_cells) = measure.window_cells else {
         return SizeDecision::Wait;
     };
     let epsilon = 0.5 / f64::from(window_cells.max(1));
@@ -305,14 +331,14 @@ fn size_decision(
     {
         return SizeDecision::Enforce(target);
     }
-    if placed.topology != topology {
+    if placed.membership != measure.membership {
         return if moved {
             SizeDecision::Enforce(target)
         } else {
             SizeDecision::Settle
         };
     }
-    if placed.settling {
+    if placed.tracking == Tracking::Settling {
         return if moved {
             SizeDecision::Enforce(target)
         } else {
@@ -326,13 +352,51 @@ fn size_decision(
             SizeDecision::Enforce(target)
         };
     }
-    match placed.drag_candidate {
-        Some(seen) if same(seen, ratio_now) && configured => SizeDecision::Enforce(target),
-        Some(seen) if same(seen, ratio_now) => {
+    match placed.tracking {
+        Tracking::Candidate(seen) if same(seen, ratio_now) && configured => {
+            SizeDecision::Enforce(target)
+        }
+        Tracking::Candidate(seen) if same(seen, ratio_now) => {
             SizeDecision::Persist(((ratio_now * f64::from(window_cells)).round() as u16).max(1))
         }
         _ => SizeDecision::Candidate(ratio_now),
     }
+}
+
+/// The placement after acting on a size decision.
+fn next(
+    placed: &Placement,
+    measure: &Measure,
+    decision: SizeDecision,
+    applied: Applied,
+) -> Placement {
+    let mut next = placed.clone();
+    next.membership = measure.membership;
+    match decision {
+        SizeDecision::Wait => {}
+        SizeDecision::Keep => next.tracking = Tracking::Stable,
+        SizeDecision::Settle => next.tracking = Tracking::Settling,
+        SizeDecision::Enforce(ratio) => {
+            if applied == Applied::Resized {
+                next.applied_ratio = ratio;
+                next.applied_window_cells = measure.window_cells;
+                next.stale_sizes.clone_from(&measure.size_stamps);
+            }
+            // New blocks may still rebalance the row after this resize.
+            next.tracking = if placed.membership == measure.membership {
+                Tracking::Stable
+            } else {
+                Tracking::Settling
+            };
+        }
+        SizeDecision::Candidate(ratio) => next.tracking = Tracking::Candidate(ratio),
+        SizeDecision::Persist(_) => {
+            next.applied_ratio = measure.ratio_now;
+            next.applied_window_cells = measure.window_cells;
+            next.tracking = Tracking::Stable;
+        }
+    }
+    next
 }
 
 /// The user's config with the sidebar size stored for this server.
@@ -345,27 +409,6 @@ fn sidebar_config(state: &SidebarSessionState) -> Config {
         config.sidebar.height.clone_from(&state.height);
     }
     config
-}
-
-fn synced_extent(position: SidebarPosition) -> Option<u16> {
-    let settings = crate::state::StateStore::new().ok()?.load_settings().ok()?;
-    match position {
-        SidebarPosition::Left => settings.sidebar_width,
-        SidebarPosition::Top => settings.sidebar_height,
-    }
-    .filter(|cells| *cells > 0)
-}
-
-fn persist_extent(position: SidebarPosition, cells: u16) {
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(mut settings) = store.load_settings()
-    {
-        match position {
-            SidebarPosition::Left => settings.sidebar_width = Some(cells),
-            SidebarPosition::Top => settings.sidebar_height = Some(cells),
-        }
-        let _ = store.save_settings(&settings);
-    }
 }
 
 /// Sizing inputs shared by every window in one pass.
@@ -397,7 +440,7 @@ impl Sizing {
         Self {
             config,
             position,
-            synced: synced_extent(position),
+            synced: super::saved_extent(position),
             configured,
             fallback_cells,
         }
@@ -405,10 +448,7 @@ impl Sizing {
 
     fn target_ratio(&self, window_cells: Option<u16>) -> f64 {
         let window = window_cells.unwrap_or(self.fallback_cells);
-        let cells = match self.position {
-            SidebarPosition::Left => super::resolve_width_for(&self.config, window, self.synced),
-            SidebarPosition::Top => super::resolve_height_for(&self.config, window, self.synced),
-        };
+        let cells = super::resolve_extent_for(&self.config, self.position, window, self.synced);
         sidebar_ratio(cells, window, self.position)
     }
 }
@@ -464,19 +504,15 @@ impl Executor<'_> {
             ratio,
             layout,
         )?;
-        let mut ids: Vec<&str> = window.blocks.iter().map(|b| b.block_id.as_str()).collect();
-        ids.push(&block_id);
-        ids.sort_unstable();
-        let mut hasher = DefaultHasher::new();
-        ids.hash(&mut hasher);
+        let blocks = window.blocks.iter().map(|b| b.block_id.as_str());
+        let membership = membership(blocks.chain([block_id.as_str()]));
         Ok(Placement {
             block_id,
             applied_ratio: ratio,
             applied_window_cells: view.window_cells,
-            topology: hasher.finish(),
+            membership,
             // The app may rebalance the new split once it shows the window.
-            settling: true,
-            drag_candidate: None,
+            tracking: Tracking::Settling,
             stale_sizes: size_stamps(window),
         })
     }
@@ -515,8 +551,7 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
     let position = state.prefs.position.unwrap_or_default();
     let exe = exe_path()?;
     let exe_name = exe_name(&exe);
-    let same_boot = obs.boot_id.is_some() && state.boot_id == obs.boot_id;
-    let (placements, dismissed) = if same_boot {
+    let (placements, dismissed) = if same_boot(&state, obs) {
         (state.placements.clone(), state.dismissed.clone())
     } else {
         Default::default()
@@ -563,9 +598,8 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
                         block_id,
                         applied_ratio: ratio,
                         applied_window_cells: None,
-                        topology: view.topology,
-                        settling: false,
-                        drag_candidate: None,
+                        membership: view.membership,
+                        tracking: Tracking::Stable,
                         stale_sizes: BTreeMap::new(),
                     });
                 }
@@ -584,7 +618,7 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
                 .iter()
                 .any(|c| c.block_id == placement.block_id)
         {
-            resize_placed(&executor, window, view, *ratio_now, &sizing, placement);
+            *placement = resize_placed(&executor, window, view, *ratio_now, &sizing, placement);
         }
         if let Some(placement) = placed.filter(|_| wanted) {
             records
@@ -604,23 +638,29 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
     Ok(())
 }
 
+/// Whether the state's runtime records describe this server run. Rex
+/// reuses block and window IDs after a restart, so records from an earlier
+/// run would claim blocks the daemon never placed.
+fn same_boot(state: &SidebarSessionState, obs: &RexSidebarObservation) -> bool {
+    obs.boot_id.is_some() && state.boot_id == obs.boot_id
+}
+
 fn resize_placed(
     executor: &Executor<'_>,
     window: &RexSidebarWindow,
     view: &WindowView,
     ratio_now: f64,
     sizing: &Sizing,
-    placement: &mut Placement,
-) {
-    let target = sizing.target_ratio(view.window_cells);
-    let decision = size_decision(
-        placement,
-        view.topology,
+    placement: &Placement,
+) -> Placement {
+    let measure = Measure {
+        membership: view.membership,
         ratio_now,
-        view.window_cells,
-        target,
-        sizing.configured,
-    );
+        window_cells: view.window_cells,
+        size_stamps: size_stamps(window),
+    };
+    let target = sizing.target_ratio(view.window_cells);
+    let decision = size_decision(placement, &measure, target, sizing.configured);
     tracing::debug!(
         window = %window.window_id,
         ratio_now,
@@ -631,40 +671,29 @@ fn resize_placed(
         ?decision,
         "Rex sidebar size"
     );
-    let topology_changed = placement.topology != view.topology;
-    placement.topology = view.topology;
-    match decision {
-        SizeDecision::Wait => {}
-        SizeDecision::Keep => {
-            placement.settling = false;
-            placement.drag_candidate = None;
-        }
-        SizeDecision::Settle => {
-            placement.settling = true;
-            placement.drag_candidate = None;
-        }
+    let applied = match decision {
         SizeDecision::Enforce(ratio) => {
-            let block_id = placement.block_id.clone();
-            match executor.resize(window, view, sizing.position, &block_id, ratio) {
-                Ok(()) => {
-                    placement.applied_ratio = ratio;
-                    placement.applied_window_cells = view.window_cells;
-                    placement.stale_sizes = size_stamps(window);
+            let block_id = &placement.block_id;
+            match executor.resize(window, view, sizing.position, block_id, ratio) {
+                Ok(()) => Applied::Resized,
+                Err(error) => {
+                    tracing::warn!(%block_id, %error, "failed to resize Rex sidebar");
+                    Applied::Failed
                 }
-                Err(error) => tracing::warn!(%block_id, %error, "failed to resize Rex sidebar"),
             }
-            placement.settling = topology_changed;
-            placement.drag_candidate = None;
         }
-        SizeDecision::Candidate(ratio) => placement.drag_candidate = Some(ratio),
         SizeDecision::Persist(cells) => {
             tracing::info!(cells, "Rex sidebar resized by the user");
-            persist_extent(sizing.position, cells);
-            placement.applied_ratio = ratio_now;
-            placement.applied_window_cells = view.window_cells;
-            placement.drag_candidate = None;
+            // The border stays where the user put it even when the size
+            // cannot be saved for other sidebars.
+            if let Err(error) = super::save_extent(sizing.position, cells) {
+                tracing::warn!(%error, "failed to save the Rex sidebar size");
+            }
+            Applied::Nothing
         }
-    }
+        _ => Applied::Nothing,
+    };
+    next(placement, &measure, decision, applied)
 }
 
 /// Observe the server and reconcile under the layout lock, waiting for a
@@ -685,13 +714,21 @@ pub(super) fn current_window(obs: &RexSidebarObservation) -> Option<&RexSidebarW
 }
 
 /// Whether the current window shows a workmux sidebar.
-pub(super) fn current_window_has_sidebar(obs: &RexSidebarObservation) -> bool {
+pub(super) fn current_window_has_sidebar(
+    obs: &RexSidebarObservation,
+    state: &SidebarSessionState,
+) -> bool {
     let exe_name = exe_path().map(|exe| exe_name(&exe)).unwrap_or_default();
+    let position = state.prefs.position.unwrap_or_default();
     current_window(obs).is_some_and(|window| {
-        window
-            .blocks
+        let placed = state
+            .placements
+            .get(&window.window_id)
+            .filter(|_| same_boot(state, obs));
+        window_view(window, position, &exe_name, placed)
+            .candidates
             .iter()
-            .any(|b| b.is_sidebar_labeled() && b.child_name.as_deref() == Some(exe_name.as_str()))
+            .any(|c| c.owned)
     })
 }
 
@@ -740,7 +777,7 @@ mod tests {
             candidates,
             content_blocks: vec!["block:content".to_string()],
             complete: true,
-            topology: 1,
+            membership: 1,
             root: None,
             window_cells: None,
         }
@@ -751,11 +788,40 @@ mod tests {
             block_id: block_id.to_string(),
             applied_ratio: 0.125,
             applied_window_cells: Some(200),
-            topology: 1,
-            settling: false,
-            drag_candidate: None,
+            membership: 1,
+            tracking: Tracking::Stable,
             stale_sizes: BTreeMap::new(),
         }
+    }
+
+    fn measure(membership: u64, ratio_now: f64, window_cells: Option<u16>) -> Measure {
+        Measure {
+            membership,
+            ratio_now,
+            window_cells,
+            size_stamps: BTreeMap::new(),
+        }
+    }
+
+    /// Run observations through `size_decision` and `next`, returning each
+    /// decision. Every resize succeeds and moves the border.
+    fn run(
+        placed: &mut Placement,
+        target: f64,
+        configured: bool,
+        observations: &[Measure],
+    ) -> Vec<SizeDecision> {
+        let mut decisions = Vec::new();
+        for measure in observations {
+            let decision = size_decision(placed, measure, target, configured);
+            let applied = match decision {
+                SizeDecision::Enforce(_) => Applied::Resized,
+                _ => Applied::Nothing,
+            };
+            *placed = next(placed, measure, decision, applied);
+            decisions.push(decision);
+        }
+        decisions
     }
 
     fn close(block_id: &str) -> Action {
@@ -853,7 +919,7 @@ mod tests {
         let mut p = placement("block:s");
         p.applied_window_cells = None;
         assert_eq!(
-            size_decision(&p, 1, 0.3, None, 0.125, false),
+            size_decision(&p, &measure(1, 0.3, None), 0.125, false),
             SizeDecision::Wait
         );
     }
@@ -862,13 +928,13 @@ mod tests {
     fn size_rebalance_of_a_new_sidebar_is_not_a_drag() {
         // The app splits a sidebar placed in the window it shows evenly.
         let mut p = placement("block:s");
-        p.settling = true;
+        p.tracking = Tracking::Settling;
         assert_eq!(
-            size_decision(&p, 1, 0.5, None, 0.125, false),
+            size_decision(&p, &measure(1, 0.5, None), 0.125, false),
             SizeDecision::Wait
         );
         assert_eq!(
-            size_decision(&p, 1, 0.5, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.5, Some(200)), 0.125, false),
             SizeDecision::Enforce(0.125)
         );
     }
@@ -878,31 +944,31 @@ mod tests {
         let mut p = placement("block:s");
         p.applied_window_cells = None;
         assert_eq!(
-            size_decision(&p, 1, 0.15, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.15, Some(200)), 0.125, false),
             SizeDecision::Enforce(0.125)
         );
         let p = placement("block:s");
         assert_eq!(
-            size_decision(&p, 1, 0.125, Some(300), 0.1, false),
+            size_decision(&p, &measure(1, 0.125, Some(300)), 0.1, false),
             SizeDecision::Enforce(0.1)
         );
     }
 
     #[test]
-    fn size_topology_change_settles_then_enforces_a_late_balance() {
+    fn size_membership_change_settles_then_enforces_a_late_balance() {
         let p = placement("block:s");
         assert_eq!(
-            size_decision(&p, 2, 0.125, Some(200), 0.125, false),
+            size_decision(&p, &measure(2, 0.125, Some(200)), 0.125, false),
             SizeDecision::Settle
         );
         let mut settling = placement("block:s");
-        settling.settling = true;
+        settling.tracking = Tracking::Settling;
         assert_eq!(
-            size_decision(&settling, 1, 1.0 / 3.0, Some(200), 0.125, false),
+            size_decision(&settling, &measure(1, 1.0 / 3.0, Some(200)), 0.125, false),
             SizeDecision::Enforce(0.125)
         );
         assert_eq!(
-            size_decision(&p, 2, 0.5, Some(200), 0.125, false),
+            size_decision(&p, &measure(2, 0.5, Some(200)), 0.125, false),
             SizeDecision::Enforce(0.125)
         );
     }
@@ -911,17 +977,17 @@ mod tests {
     fn size_drag_persists_on_the_second_sighting() {
         let mut p = placement("block:s");
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.2, Some(200)), 0.125, false),
             SizeDecision::Candidate(0.2)
         );
-        p.drag_candidate = Some(0.2);
+        p.tracking = Tracking::Candidate(0.2);
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.2, Some(200)), 0.125, false),
             SizeDecision::Persist(40)
         );
-        p.drag_candidate = Some(0.18);
+        p.tracking = Tracking::Candidate(0.18);
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.2, Some(200)), 0.125, false),
             SizeDecision::Candidate(0.2)
         );
     }
@@ -931,12 +997,12 @@ mod tests {
         // Block padding makes the measured extent move with the ratio.
         let mut p = placement("block:s");
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(196), 0.125, false),
+            size_decision(&p, &measure(1, 0.2, Some(196)), 0.125, false),
             SizeDecision::Candidate(0.2)
         );
-        p.drag_candidate = Some(0.2);
+        p.tracking = Tracking::Candidate(0.2);
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(196), 0.125, false),
+            size_decision(&p, &measure(1, 0.2, Some(196)), 0.125, false),
             SizeDecision::Persist(39)
         );
     }
@@ -944,9 +1010,9 @@ mod tests {
     #[test]
     fn size_drag_snaps_back_when_the_width_is_configured() {
         let mut p = placement("block:s");
-        p.drag_candidate = Some(0.2);
+        p.tracking = Tracking::Candidate(0.2);
         assert_eq!(
-            size_decision(&p, 1, 0.2, Some(200), 0.125, true),
+            size_decision(&p, &measure(1, 0.2, Some(200)), 0.125, true),
             SizeDecision::Enforce(0.125)
         );
     }
@@ -955,13 +1021,129 @@ mod tests {
     fn size_follows_a_new_target_and_keeps_an_applied_ratio() {
         let p = placement("block:s");
         assert_eq!(
-            size_decision(&p, 1, 0.125, Some(200), 0.2, false),
+            size_decision(&p, &measure(1, 0.125, Some(200)), 0.2, false),
             SizeDecision::Enforce(0.2)
         );
         assert_eq!(
-            size_decision(&p, 1, 0.126, Some(200), 0.125, false),
+            size_decision(&p, &measure(1, 0.126, Some(200)), 0.125, false),
             SizeDecision::Keep
         );
+    }
+
+    #[test]
+    fn sequence_a_new_sidebar_is_rebalanced_then_held() {
+        // Placed before any client showed the window, then the app splits
+        // the row evenly when it shows it.
+        let mut p = placement("block:s");
+        p.applied_window_cells = None;
+        p.tracking = Tracking::Settling;
+        let decisions = run(
+            &mut p,
+            0.125,
+            false,
+            &[
+                measure(1, 0.5, None),
+                measure(1, 0.5, Some(200)),
+                measure(1, 0.125, Some(200)),
+            ],
+        );
+        assert_eq!(
+            decisions,
+            [
+                SizeDecision::Wait,
+                SizeDecision::Enforce(0.125),
+                SizeDecision::Keep
+            ]
+        );
+        assert_eq!(p.tracking, Tracking::Stable);
+        assert_eq!(p.applied_window_cells, Some(200));
+    }
+
+    #[test]
+    fn sequence_a_drag_persists_once_it_holds() {
+        let mut p = placement("block:s");
+        let decisions = run(
+            &mut p,
+            0.125,
+            false,
+            &[
+                measure(1, 0.18, Some(200)),
+                measure(1, 0.2, Some(200)),
+                measure(1, 0.2, Some(200)),
+            ],
+        );
+        assert_eq!(
+            decisions,
+            [
+                SizeDecision::Candidate(0.18),
+                SizeDecision::Candidate(0.2),
+                SizeDecision::Persist(40),
+            ]
+        );
+        assert_eq!((p.applied_ratio, p.tracking), (0.2, Tracking::Stable));
+        // Once persisted, the target is the dragged extent.
+        assert_eq!(
+            run(&mut p, 0.2, false, &[measure(1, 0.2, Some(200))]),
+            [SizeDecision::Keep]
+        );
+    }
+
+    #[test]
+    fn sequence_new_blocks_settle_before_a_late_balance() {
+        let mut p = placement("block:s");
+        let decisions = run(
+            &mut p,
+            0.125,
+            false,
+            &[
+                // A block joins; the ratio holds for now.
+                measure(2, 0.125, Some(200)),
+                // The app rebalances the row: not a drag.
+                measure(2, 1.0 / 3.0, Some(200)),
+                measure(2, 0.125, Some(200)),
+            ],
+        );
+        assert_eq!(
+            decisions,
+            [
+                SizeDecision::Settle,
+                SizeDecision::Enforce(0.125),
+                SizeDecision::Keep
+            ]
+        );
+        assert_eq!(p.membership, 2);
+        assert_eq!(p.tracking, Tracking::Stable);
+    }
+
+    #[test]
+    fn sequence_a_failed_resize_retries() {
+        let mut p = placement("block:s");
+        let m = measure(1, 0.125, Some(300));
+        let decision = size_decision(&p, &m, 0.1, false);
+        assert_eq!(decision, SizeDecision::Enforce(0.1));
+        p = next(&p, &m, decision, Applied::Failed);
+        assert_eq!(p.applied_window_cells, Some(200));
+        assert_eq!(
+            size_decision(&p, &m, 0.1, false),
+            SizeDecision::Enforce(0.1)
+        );
+    }
+
+    #[test]
+    fn enforcing_after_new_blocks_keeps_settling() {
+        let p = placement("block:s");
+        let m = measure(2, 0.5, Some(200));
+        let decision = size_decision(&p, &m, 0.125, false);
+        assert_eq!(decision, SizeDecision::Enforce(0.125));
+        let p = next(&p, &m, decision, Applied::Resized);
+        assert_eq!(p.tracking, Tracking::Settling);
+        assert_eq!(p.membership, 2);
+    }
+
+    #[test]
+    fn membership_ignores_block_order() {
+        assert_eq!(membership(["a", "b"]), membership(["b", "a"]));
+        assert_ne!(membership(["a"]), membership(["a", "b"]));
     }
 
     #[test]
@@ -1097,7 +1279,12 @@ mod tests {
             p.stale_sizes = size_stamps(&w);
             let v = window_view(&w, SidebarPosition::Left, "workmux", Some(&p));
             assert_eq!(v.window_cells, None);
-            let decision = size_decision(&p, topology(&w), 0.25, v.window_cells, 0.25, false);
+            let decision = size_decision(
+                &p,
+                &measure(window_membership(&w), 0.25, v.window_cells),
+                0.25,
+                false,
+            );
             assert_eq!(decision, SizeDecision::Wait);
 
             // Once a client shows the window, the sidebar's new size counts.
@@ -1127,7 +1314,7 @@ mod tests {
                 ],
             );
             let mut p = placement("block:s");
-            p.topology = topology(&w);
+            p.membership = window_membership(&w);
             let v = window_view(&w, SidebarPosition::Left, "workmux", Some(&p));
             assert!(plan(&v, true, Some(&p), false).is_empty());
         }
