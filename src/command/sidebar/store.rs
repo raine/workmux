@@ -72,6 +72,31 @@ impl SidebarStore {
         }
     }
 
+    pub(super) fn views_enabled(&self) -> bool {
+        match self {
+            Self::TmuxOptions => {
+                super::view::is_enabled(tmux_option(super::view::OPTION).as_deref())
+            }
+            Self::File { instance_id } => session_state::read(instance_id)
+                .ok()
+                .and_then(|state| state.views_enabled)
+                .unwrap_or(true),
+        }
+    }
+
+    pub(super) fn set_views_enabled(&self, enabled: bool) -> Result<()> {
+        match self {
+            Self::TmuxOptions => set_tmux_option(
+                super::view::OPTION,
+                Some(if enabled { "on" } else { "off" }),
+            ),
+            Self::File { instance_id } => session_state::update(instance_id, |state| {
+                state.views_enabled = Some(enabled);
+            })
+            .map(|_| ()),
+        }
+    }
+
     pub(super) fn group_by(&self) -> Option<String> {
         match self {
             Self::TmuxOptions => tmux_option("@workmux_sidebar_group_by"),

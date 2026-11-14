@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
 
+use super::view::WindowView;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct SidebarSessionState {
@@ -17,10 +19,14 @@ pub(super) struct SidebarSessionState {
     pub height: Option<SidebarHeight>,
     pub layout: Option<String>,
     pub filter: Option<String>,
+    /// Whether configured views apply. Unset means they do.
+    pub views_enabled: Option<bool>,
     pub sleeping_panes: HashSet<String>,
     pub group_by: Option<String>,
     pub expanded_groups: Vec<String>,
     pub ordered_agents: Vec<String>,
+    /// The view each window's sidebar shows, by window ID. Rex and Zellij only.
+    pub window_views: BTreeMap<String, WindowView>,
     pub daemon_pid: Option<u32>,
     /// Session IDs the sidebar covers while `enabled` is off. Rex only.
     pub sessions: BTreeSet<String>,

@@ -8,8 +8,10 @@ use anyhow::{Result, bail};
 
 use crate::cmd::Cmd;
 use crate::config::SidebarView;
-use crate::multiplexer::{AgentPane, LivePaneInfo};
+use crate::multiplexer::{AgentPane, LivePaneInfo, create_backend, detect_backend};
 use serde::{Deserialize, Serialize};
+
+use super::store::SidebarStore;
 
 pub const OPTION: &str = "@workmux_sidebar_views_enabled";
 pub const SCOPE_OPTION: &str = "@workmux_sidebar_scope";
@@ -48,26 +50,16 @@ pub fn is_enabled(value: Option<&str>) -> bool {
 }
 
 pub fn set_enabled(mode: Option<&str>) -> Result<()> {
-    let enabled = match mode {
-        Some("on") => true,
-        Some("off") => false,
+    let requested = match mode {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
         Some(mode) => bail!("invalid sidebar view mode {mode:?}; expected on or off"),
-        None => {
-            let current = Cmd::new("tmux")
-                .args(&["show-option", "-gqv", OPTION])
-                .run_and_capture_stdout()?;
-            !is_enabled(Some(&current))
-        }
+        None => None,
     };
-    Cmd::new("tmux")
-        .args(&[
-            "set-option",
-            "-g",
-            OPTION,
-            if enabled { "on" } else { "off" },
-        ])
-        .run()?;
-    super::signal_daemon();
+    let mux = create_backend(detect_backend());
+    let store = SidebarStore::for_mux(mux.as_ref());
+    store.set_views_enabled(requested.unwrap_or_else(|| !store.views_enabled()))?;
+    super::signal_daemon_for(mux.as_ref());
     Ok(())
 }
 
@@ -188,10 +180,14 @@ impl ProjectCache {
         windows
             .into_iter()
             .map(|(window, mut window_panes)| {
+                // Rex block IDs are time-ordered, so they sort by age too
                 window_panes.sort_by_key(|(id, _)| {
-                    id.trim_start_matches('%')
-                        .parse::<u64>()
-                        .unwrap_or(u64::MAX)
+                    (
+                        id.trim_start_matches('%')
+                            .parse::<u64>()
+                            .unwrap_or(u64::MAX),
+                        *id,
+                    )
                 });
                 let previous = self.hosts.get(window);
                 let host = agents

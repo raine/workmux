@@ -485,3 +485,40 @@ def test_events_place_sidebars_before_the_next_poll(rex_sidebar: RexSidebar):
 
     s.sidebar("off")
     s.wait_for(lambda: not event_followers(s), message="follower outlived the daemon")
+
+
+def test_views_toggle_from_the_cli_and_the_sidebar(rex_sidebar: RexSidebar):
+    s = rex_sidebar
+    config = s.env.home_path / ".config/workmux/config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "sidebar:\n  git_status: false\n  views:\n"
+        "    - name: Nowhere\n      sessions: [absent]\n"
+        "    - name: Mine\n      other: true\n"
+    )
+    s.sidebar("on")
+    window = s.windows()[0]
+
+    def view_names() -> set[str]:
+        return {view["name"] for view in s.state().get("window_views", {}).values()}
+
+    s.wait_for(lambda: view_names() == {"Mine"}, message="no window view published")
+
+    s.sidebar("view", "off")
+    assert s.state()["views_enabled"] is False
+    s.wait_for(lambda: view_names() == {"All"}, message="views stayed on")
+
+    sidebar = s.sidebar_block(window)
+
+    def footer_shows(view: str) -> bool:
+        return (
+            f"[view: {view}]"
+            in s.env.mux_command(
+                ["capture", "-s", window["session_id"], "-b", sidebar], check=False
+            ).stdout
+        )
+
+    s.wait_for(lambda: footer_shows("All"), message="sidebar does not show All")
+    s.rex("send", "-s", window["session_id"], "-b", sidebar, "V")
+    s.wait_for(lambda: footer_shows("Mine"), message="V did not turn views back on")
+    assert s.state()["views_enabled"] is True

@@ -108,6 +108,10 @@ fn navigate_from_state(mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
         .filter_map(|(pane_id, info)| Some((pane_id.clone(), info.window_id.as_ref()?.clone())))
         .collect();
 
+    if let Some(view) = state.window_views.get(&current_window_id) {
+        panes.retain(|pane| view.pane_ids.contains(pane));
+    }
+
     if read_sidebar_filter_mode() == app::SidebarFilterMode::Session {
         // Rex session labels need not be unique, so Rex compares IDs.
         let current_session = match mux.name() {

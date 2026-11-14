@@ -89,6 +89,9 @@ fn with_file_preferences(mut mux_state: MuxState, instance_id: &str) -> Result<M
     });
     mux_state.layout = state.layout;
     mux_state.filter = state.filter;
+    mux_state.views_enabled = state
+        .views_enabled
+        .map(|enabled| if enabled { "on" } else { "off" }.to_string());
     mux_state.sleeping_panes = Some(
         state
             .sleeping_panes
@@ -2442,6 +2445,7 @@ pub fn run() -> Result<()> {
     let mut last_client_seen = Instant::now();
     let mut last_agent_list = String::new();
     let mut last_window_views = HashMap::new();
+    let mut file_window_views: Option<HashMap<String, super::view::WindowView>> = None;
     let mut last_health_log = Instant::now();
     let mut last_observed = Instant::now();
     let mut project_config_cache = ProjectConfigCache::default();
@@ -2697,6 +2701,14 @@ pub fn run() -> Result<()> {
                             }
                         }
                     }
+                }
+            } else if file_window_views.as_ref() != Some(&output.snapshot.window_views) {
+                let views = output.snapshot.window_views.clone();
+                match super::session_state::update(&instance_id, |state| {
+                    state.window_views = views.into_iter().collect();
+                }) {
+                    Ok(_) => file_window_views = Some(output.snapshot.window_views.clone()),
+                    Err(error) => tracing::warn!(%error, "failed to publish sidebar window views"),
                 }
             }
             last_window_views
