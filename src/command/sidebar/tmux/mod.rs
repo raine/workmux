@@ -46,6 +46,9 @@ const SIDEBAR_GLOBAL_OPTIONS: &[&str] = &[
     "@workmux_sidebar_optout_sessions",
 ];
 
+/// Global option holding the sidebar scope.
+pub(super) const SCOPE_OPTION: &str = "@workmux_sidebar_scope";
+
 /// Window option holding the view a window's sidebar shows.
 pub(super) const VIEW_OPTION: &str = "@workmux_sidebar_scope";
 
@@ -71,7 +74,7 @@ fn parse_scope(raw: &str, enabled: bool) -> SidebarScope {
 
 /// Read the current sidebar scope.
 pub(super) fn current_scope(tmux: &TmuxHost) -> SidebarScope {
-    let raw = tmux.option("@workmux_sidebar_scope").unwrap_or_default();
+    let raw = tmux.option(SCOPE_OPTION).unwrap_or_default();
     let enabled = tmux
         .option("@workmux_sidebar_enabled")
         .is_some_and(|value| value == "1");
@@ -81,11 +84,11 @@ pub(super) fn current_scope(tmux: &TmuxHost) -> SidebarScope {
 /// Set the sidebar scope.
 pub(super) fn set_scope(tmux: &TmuxHost, scope: &SidebarScope) {
     let _ = match scope {
-        SidebarScope::Off => tmux.set_option("@workmux_sidebar_scope", None),
-        SidebarScope::Global => tmux.set_option("@workmux_sidebar_scope", Some("global")),
+        SidebarScope::Off => tmux.set_option(SCOPE_OPTION, None),
+        SidebarScope::Global => tmux.set_option(SCOPE_OPTION, Some("global")),
         SidebarScope::Sessions(ids) => {
             let val: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-            tmux.set_option("@workmux_sidebar_scope", Some(&val.join(" ")))
+            tmux.set_option(SCOPE_OPTION, Some(&val.join(" ")))
         }
     };
 }
@@ -400,6 +403,20 @@ pub(super) fn window_view(tmux: &TmuxHost, window: &str) -> Option<WindowView> {
     serde_json::from_str(&value).ok()
 }
 
+pub(super) fn set_window_view(
+    tmux: &TmuxHost,
+    window: &str,
+    view: Option<&WindowView>,
+) -> Result<()> {
+    match view {
+        Some(view) => {
+            tmux.backend()
+                .set_window_option(window, VIEW_OPTION, &serde_json::to_string(view)?)
+        }
+        None => tmux.backend().unset_window_option(window, VIEW_OPTION),
+    }
+}
+
 fn focused_window(tmux: &TmuxHost) -> Result<String> {
     Ok(tmux
         .cmd()
@@ -659,13 +676,14 @@ pub(super) fn navigate(tmux: &TmuxHost, action: NavAction) -> Result<()> {
         .unwrap_or_default();
     let current_session = current_session.trim();
 
-    let agents_str = tmux.option("@workmux_sidebar_agents").unwrap_or_default();
-    let mut panes: Vec<&str> = agents_str.split_whitespace().collect();
+    let store = tmux.host().store();
+    let agents = store.ordered_agents();
+    let mut panes: Vec<&str> = agents.iter().map(String::as_str).collect();
     if panes.is_empty() {
         bail!("no sidebar agents found (is the sidebar running?)");
     }
 
-    if let Some(view) = window_view(tmux, current_window_id) {
+    if let Some(view) = store.window_view(current_window_id) {
         panes.retain(|pane| view.pane_ids.contains(*pane));
     }
 

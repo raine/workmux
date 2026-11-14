@@ -252,3 +252,25 @@ impl SidebarHost {
         }
     }
 }
+
+impl SidebarHost {
+    /// Take what a daemon observation pass must hold so it never races a
+    /// command placing sidebars. `None` means such a command is running and
+    /// the pass should wait for the next one.
+    ///
+    /// Rex windows are observed and reconciled under one hold of the layout
+    /// lock. A Zellij sidebar holds the lock while it starts, so the daemon
+    /// only waits for it to be free. tmux places sidebars through hooks and
+    /// needs no lock.
+    pub(super) fn observation_lock(&self) -> Result<Option<Option<std::fs::File>>> {
+        match self {
+            Self::Tmux(_) => Ok(Some(None)),
+            Self::Zellij { instance_id } => {
+                Ok(super::session_state::try_lock_layout(instance_id)?.map(|_| None))
+            }
+            Self::Rex { instance_id } => {
+                Ok(super::session_state::try_lock_layout(instance_id)?.map(Some))
+            }
+        }
+    }
+}

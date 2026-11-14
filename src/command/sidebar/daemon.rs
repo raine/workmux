@@ -31,7 +31,9 @@ use crate::multiplexer::{
 use crate::state::StateStore;
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
+use super::host::SidebarHost;
 use super::snapshot::{CheckPathEntry, PrPathEntry, SnapshotInputs, build_snapshot};
+use super::store::PublishedViews;
 
 /// Compute the socket path for a multiplexer instance.
 pub fn socket_path(instance_id: &str) -> PathBuf {
@@ -149,25 +151,21 @@ enum PlacementObservation {
     Rex(Box<RexSidebarObservation>),
 }
 
-fn query_mux_state(
-    mux: &dyn Multiplexer,
-    instance_id: &str,
-) -> Result<(MuxState, PlacementObservation)> {
-    match mux.name() {
-        "tmux" => Ok((
-            query_tmux_state(&TmuxBackend::for_socket(instance_id))?,
+fn query_mux_state(host: &SidebarHost) -> Result<(MuxState, PlacementObservation)> {
+    match host {
+        SidebarHost::Tmux(tmux) => Ok((
+            query_tmux_state(tmux.backend())?,
             PlacementObservation::None,
         )),
-        "zellij" => {
+        SidebarHost::Zellij { instance_id } => {
             let (state, tabs) =
                 query_zellij_state(&ZellijBackend::for_session(instance_id), instance_id)?;
             Ok((state, PlacementObservation::Zellij(tabs)))
         }
-        "rex" => {
+        SidebarHost::Rex { instance_id } => {
             let (state, observation) = query_rex_state(instance_id)?;
             Ok((state, PlacementObservation::Rex(Box::new(observation))))
         }
-        name => anyhow::bail!("sidebar is not supported by the {name} backend"),
     }
 }
 
@@ -2369,8 +2367,9 @@ fn wait_for_daemon_lock(instance_id: &str, timeout: Duration) -> Result<Option<s
 
 pub fn run() -> Result<()> {
     let mux = create_backend(detect_backend());
-    let instance_id = mux.instance_id();
-    let tmux = (mux.name() == "tmux").then(|| TmuxBackend::for_socket(&instance_id));
+    let host = SidebarHost::resolve(mux.as_ref())?;
+    let instance_id = host.instance_id();
+    let sidebar_store = host.store();
     let config = Arc::new(Mutex::new(Config::load(None)?));
     let mut view_projects = super::view::ProjectCache::default();
     // Captured at startup and intentionally not live-reloaded. tmux's
@@ -2400,7 +2399,7 @@ pub fn run() -> Result<()> {
     let server = SocketServer::bind(&sock_path)?;
 
     // Rex has no hooks: its event stream wakes observations early
-    let rex_events = (mux.name() == "rex").then(|| {
+    let rex_events = matches!(host, SidebarHost::Rex { .. }).then(|| {
         let observation_dirty = observation_dirty.clone();
         let wake_tx = wake_tx.clone();
         crate::multiplexer::rex::sidebar::EventFollower::spawn(move || {
@@ -2421,16 +2420,7 @@ pub fn run() -> Result<()> {
     let (pr_cache, check_cache, github_path_tx) =
         spawn_github_worker(term.clone(), publication_dirty.clone(), wake_tx);
 
-    if let Some(tmux) = &tmux {
-        tmux.set_global_option(
-            "@workmux_sidebar_daemon_pid",
-            &std::process::id().to_string(),
-        )?;
-    } else {
-        super::session_state::update(&instance_id, |state| {
-            state.daemon_pid = Some(std::process::id());
-        })?;
-    }
+    sidebar_store.record_daemon_pid()?;
 
     let mut scheduler = Scheduler::new(Instant::now());
     let mut inactivity_tracker = InactivityTracker::new(Duration::from_secs(10));
@@ -2443,9 +2433,8 @@ pub fn run() -> Result<()> {
     let mut pending_captures: Option<HashMap<String, String>> = None;
     let mut publish_pending = false;
     let mut last_client_seen = Instant::now();
-    let mut last_agent_list = String::new();
-    let mut last_window_views = HashMap::new();
-    let mut file_window_views: Option<HashMap<String, super::view::WindowView>> = None;
+    let mut last_agent_list: Vec<String> = Vec::new();
+    let mut published_views = PublishedViews::default();
     let mut last_health_log = Instant::now();
     let mut last_observed = Instant::now();
     let mut project_config_cache = ProjectConfigCache::default();
@@ -2463,24 +2452,17 @@ pub fn run() -> Result<()> {
 
         if scheduler.observation_due(now) {
             scheduler.finish_observation(now);
-            // Rex windows are observed and reconciled under one hold of
-            // the layout lock, so a command placing sidebars never races
-            // this pass. A Zellij sidebar holds it while it starts.
-            let mut layout_lock = None;
-            if matches!(mux.name(), "zellij" | "rex") {
-                match super::session_state::try_lock_layout(&instance_id) {
-                    Ok(Some(guard)) => layout_lock = Some(guard),
-                    Ok(None) => continue,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to check sidebar layout lock");
-                        continue;
-                    }
+            // Held through observe and reconcile, so a command placing
+            // sidebars never races this pass.
+            let layout_lock = match host.observation_lock() {
+                Ok(Some(lock)) => lock,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to check sidebar layout lock");
+                    continue;
                 }
-                if mux.name() == "zellij" {
-                    layout_lock = None;
-                }
-            }
-            match query_mux_state(mux.as_ref(), &instance_id) {
+            };
+            match query_mux_state(&host) {
                 Ok((tmux_state, placement)) => {
                     last_observed = Instant::now();
                     match placement {
@@ -2534,7 +2516,7 @@ pub fn run() -> Result<()> {
                     ) {
                         Ok((agents, stats)) => {
                             let mut agents = agents;
-                            if backend_name == "zellij" {
+                            if matches!(host, SidebarHost::Zellij { .. }) {
                                 include_unregistered_zellij_agents(
                                     &mut agents,
                                     &tmux_state.live_panes,
@@ -2680,39 +2662,11 @@ pub fn run() -> Result<()> {
                     super::view::is_enabled(tmux_state.views_enabled.as_deref()),
                 );
             }
-            if let Some(tmux) = tmux.as_ref() {
-                for window in tmux_state.window_pane_counts.keys() {
-                    let scope = output.snapshot.window_views.get(window).cloned();
-                    if last_window_views.get(window) != Some(&scope) {
-                        let result = match &scope {
-                            Some(scope) => tmux.set_window_option(
-                                window,
-                                super::tmux::VIEW_OPTION,
-                                &serde_json::to_string(scope)?,
-                            ),
-                            None => tmux.unset_window_option(window, super::tmux::VIEW_OPTION),
-                        };
-                        match result {
-                            Ok(()) => {
-                                last_window_views.insert(window.clone(), scope);
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "failed to publish sidebar window view")
-                            }
-                        }
-                    }
-                }
-            } else if file_window_views.as_ref() != Some(&output.snapshot.window_views) {
-                let views = output.snapshot.window_views.clone();
-                match super::session_state::update(&instance_id, |state| {
-                    state.window_views = views.into_iter().collect();
-                }) {
-                    Ok(_) => file_window_views = Some(output.snapshot.window_views.clone()),
-                    Err(error) => tracing::warn!(%error, "failed to publish sidebar window views"),
-                }
-            }
-            last_window_views
-                .retain(|window, _| tmux_state.window_pane_counts.contains_key(window));
+            sidebar_store.set_window_views(
+                &mut published_views,
+                tmux_state.window_pane_counts.keys(),
+                &output.snapshot.window_views,
+            );
             server.broadcast(&output.snapshot);
 
             let stale_threshold = output.snapshot.stale_threshold_secs;
@@ -2772,26 +2726,12 @@ pub fn run() -> Result<()> {
                 .iter()
                 .filter(|agent| super::snapshot::is_jump_target(snapshot, agent))
                 .map(|agent| agent.pane_id.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<Vec<_>>();
             if agent_list != last_agent_list {
-                let result = if let Some(tmux) = &tmux {
-                    if agent_list.is_empty() {
-                        tmux.unset_global_option("@workmux_sidebar_agents")
-                    } else {
-                        tmux.set_global_option("@workmux_sidebar_agents", &agent_list)
-                    }
-                } else {
-                    super::session_state::update(&instance_id, |state| {
-                        state.ordered_agents =
-                            agent_list.split_whitespace().map(String::from).collect();
-                    })
-                    .map(|_| ())
-                };
-                if let Err(error) = result {
+                if let Err(error) = sidebar_store.set_ordered_agents(&agent_list) {
                     tracing::warn!(%error, "failed to publish sidebar agent inventory");
                 }
-                last_agent_list = agent_list;
+                last_agent_list = agent_list.into_iter().map(String::from).collect();
             }
         }
 
@@ -2819,9 +2759,12 @@ pub fn run() -> Result<()> {
         if scheduler.maintenance_due(now) {
             scheduler.finish_maintenance(now);
             let client_count = server.client_count();
-            if backend_name == "rex" {
-                // Rex sidebars are placed by this daemon, so it lives as long
-                // as the scope covers anything, sidebars or not.
+            if matches!(host, SidebarHost::Rex { .. }) {
+                // Rex sidebars are placed by this daemon, and Rex has no hooks
+                // to start a daemon when a window needs one. So unlike the
+                // tmux and Zellij daemons, which exit 10s after their last
+                // client leaves, it runs while the scope covers anything,
+                // sidebars or not.
                 if super::session_state::read(&instance_id).is_ok_and(|state| !state.is_active()) {
                     tracing::info!("sidebar daemon exiting: sidebar turned off");
                     break;
@@ -2859,17 +2802,7 @@ pub fn run() -> Result<()> {
     if let Ok(store) = StateStore::new() {
         store.delete_runtime(&backend_name, &instance_id);
     }
-    if let Some(tmux) = &tmux {
-        let _ = tmux.unset_global_option("@workmux_sidebar_daemon_pid");
-        let _ = tmux.unset_global_option("@workmux_sidebar_agents");
-        let _ = tmux.unset_global_option("@workmux_sleeping_panes");
-        let _ = tmux.unset_global_option("@workmux_sidebar_scope");
-    } else {
-        let _ = super::session_state::update(&instance_id, |state| {
-            state.daemon_pid = None;
-            state.ordered_agents.clear();
-        });
-    }
+    sidebar_store.clear_runtime();
     Ok(())
 }
 

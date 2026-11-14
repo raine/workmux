@@ -61,8 +61,8 @@ const MAX_HEIGHT: u16 = 5;
 
 /// Navigate using the agent order the daemon keeps in the session state file.
 fn navigate_from_state(host: &SidebarHost, mux: &dyn Multiplexer, action: NavAction) -> Result<()> {
-    let state = session_state::read(&host.instance_id())?;
-    let mut panes: Vec<String> = state.ordered_agents;
+    let store = host.store();
+    let mut panes = store.ordered_agents();
     if panes.is_empty() {
         bail!("no sidebar agents found (is the sidebar running?)");
     }
@@ -81,7 +81,7 @@ fn navigate_from_state(host: &SidebarHost, mux: &dyn Multiplexer, action: NavAct
         .filter_map(|(pane_id, info)| Some((pane_id.clone(), info.window_id.as_ref()?.clone())))
         .collect();
 
-    if let Some(view) = state.window_views.get(&current_window_id) {
+    if let Some(view) = store.window_view(&current_window_id) {
         panes.retain(|pane| view.pane_ids.contains(pane));
     }
 
