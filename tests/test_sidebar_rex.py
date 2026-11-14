@@ -53,7 +53,14 @@ class RexSidebar:
     def rex(self, *args: str) -> str:
         return self.env.mux_command(list(args)).stdout
 
-    def api(self, method: str, args: dict[str, Any], session: Optional[str] = None):
+    @property
+    def session(self) -> str:
+        assert self.env.session_id is not None
+        return self.env.session_id
+
+    def api(
+        self, method: str, args: dict[str, Any], session: Optional[str] = None
+    ) -> Any:
         command = ["api", "call"]
         if session is not None:
             command += ["-s", session]
@@ -104,7 +111,11 @@ class RexSidebar:
             view = self.api("session.view", {"session_id": session})
             for window in view.get("windows") or []:
                 tiled = next(
-                    (l for l in window.get("layers") or [] if l["kind"] == "tiled"),
+                    (
+                        layer
+                        for layer in window.get("layers") or []
+                        if layer["kind"] == "tiled"
+                    ),
                     None,
                 )
                 windows.append(
@@ -121,6 +132,11 @@ class RexSidebar:
     def window(self, window_id: str) -> Optional[dict[str, Any]]:
         return next((w for w in self.windows() if w["window_id"] == window_id), None)
 
+    def open_window(self, window_id: str) -> dict[str, Any]:
+        window = self.window(window_id)
+        assert window is not None, f"window {window_id} is gone"
+        return window
+
     @staticmethod
     def sidebars(window: dict[str, Any]) -> list[str]:
         return [
@@ -135,6 +151,12 @@ class RexSidebar:
             return None
         block = split["before"].get("block_id")
         return block if block in RexSidebar.sidebars(window) else None
+
+    @staticmethod
+    def sidebar_block(window: dict[str, Any]) -> str:
+        block = RexSidebar.root_sidebar(window)
+        assert block is not None, f"no sidebar in {window['window_id']}"
+        return block
 
     def wait_for(self, predicate, timeout: float = 10.0, message: str = "") -> None:
         if not poll_until(predicate, timeout=timeout):
@@ -166,6 +188,11 @@ class RexSidebar:
 
     def daemon_pid(self) -> Optional[int]:
         return self.state().get("daemon_pid")
+
+    def running_daemon(self) -> int:
+        pid = self.daemon_pid()
+        assert pid is not None and pid_alive(pid), pid
+        return pid
 
 
 def pid_alive(pid: int) -> bool:
@@ -202,7 +229,7 @@ def rex_sidebar(tmp_path: Path, workmux_exe_path: Path) -> Iterator[RexSidebar]:
 
 def test_on_wraps_every_window_and_keeps_focus(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    session = s.env.session_id
+    session = s.session
     background = s.new_window(session)
     other = s.new_session("other")
     focused = {w["window_id"]: w["focused"] for w in s.windows()}
@@ -223,7 +250,7 @@ def test_sidebar_runs_the_workmux_tui(rex_sidebar: RexSidebar):
     s = rex_sidebar
     s.sidebar("on")
     window = s.windows()[0]
-    sidebar = s.root_sidebar(window)
+    sidebar = s.sidebar_block(window)
 
     def shows_tui() -> bool:
         out = s.env.mux_command(
@@ -249,17 +276,17 @@ def test_sidebar_runs_the_workmux_tui(rex_sidebar: RexSidebar):
 def test_new_windows_and_sessions_get_a_sidebar(rex_sidebar: RexSidebar):
     s = rex_sidebar
     s.sidebar("on")
-    window = s.new_window(s.env.session_id)
+    window = s.new_window(s.session)
     s.new_session("later")
 
     s.wait_for(s.each_window_has_one_sidebar, message="no sidebar in new windows")
     assert len(s.windows()) == 3
-    assert s.root_sidebar(s.window(window))
+    assert s.root_sidebar(s.open_window(window))
 
 
 def test_off_removes_sidebars_and_keeps_content_ratios(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    session = s.env.session_id
+    session = s.session
     s.sidebar("on")
     window = s.windows()[0]
     content = window["layout"]["split"]["after"]["block_id"]
@@ -280,13 +307,12 @@ def test_off_removes_sidebars_and_keeps_content_ratios(rex_sidebar: RexSidebar):
         },
     )
     s.wait_for(s.each_window_has_one_sidebar, message="sidebar moved after a split")
-    daemon = s.daemon_pid()
-    assert daemon and pid_alive(daemon)
+    daemon = s.running_daemon()
 
     s.sidebar("off")
 
     assert s.no_sidebars()
-    layout = s.window(window["window_id"])["layout"]
+    layout = s.open_window(window["window_id"])["layout"]
     assert layout["split"]["direction"] == "vertical"
     assert layout["split"]["ratio"] == pytest.approx(0.3)
     s.wait_for(lambda: not pid_alive(daemon), message="daemon did not exit")
@@ -294,7 +320,7 @@ def test_off_removes_sidebars_and_keeps_content_ratios(rex_sidebar: RexSidebar):
 
 def test_closed_sidebar_stays_closed_until_on(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    s.new_window(s.env.session_id)
+    s.new_window(s.session)
     s.sidebar("on")
     first, second = s.windows()
     s.api(
@@ -304,8 +330,8 @@ def test_closed_sidebar_stays_closed_until_on(rex_sidebar: RexSidebar):
     )
 
     time.sleep(5)
-    assert not s.sidebars(s.window(first["window_id"]))
-    assert s.root_sidebar(s.window(second["window_id"]))
+    assert not s.sidebars(s.open_window(first["window_id"]))
+    assert s.root_sidebar(s.open_window(second["window_id"]))
 
     s.sidebar("on")
     assert s.each_window_has_one_sidebar()
@@ -313,7 +339,7 @@ def test_closed_sidebar_stays_closed_until_on(rex_sidebar: RexSidebar):
 
 def test_session_scope_and_optout(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    main = s.env.session_id
+    main = s.session
     other = s.new_session("other")
 
     s.sidebar("--session", "on", session=main)
@@ -337,9 +363,9 @@ def test_session_scope_and_optout(rex_sidebar: RexSidebar):
 def test_window_closes_when_its_content_exits(rex_sidebar: RexSidebar):
     s = rex_sidebar
     s.sidebar("on")
-    window = s.new_window(s.env.session_id, "/bin/sleep", "6")
+    window = s.new_window(s.session, "/bin/sleep", "6")
     s.wait_for(
-        lambda: s.root_sidebar(s.window(window)) is not None, message="no sidebar"
+        lambda: s.root_sidebar(s.open_window(window)) is not None, message="no sidebar"
     )
 
     s.wait_for(
@@ -351,23 +377,22 @@ def test_window_closes_when_its_content_exits(rex_sidebar: RexSidebar):
 
 def test_restarted_daemon_adopts_sidebars(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    s.new_window(s.env.session_id)
+    s.new_window(s.session)
     s.sidebar("on")
     before = sorted(b for w in s.windows() for b in s.sidebars(w))
-    daemon = s.daemon_pid()
+    daemon = s.running_daemon()
     os.kill(daemon, signal.SIGKILL)
     s.wait_for(lambda: not pid_alive(daemon), message="daemon survived SIGKILL")
 
     s.sidebar("on")
 
     assert sorted(b for w in s.windows() for b in s.sidebars(w)) == before
-    new_daemon = s.daemon_pid()
-    assert new_daemon != daemon and pid_alive(new_daemon)
+    assert s.running_daemon() != daemon
 
 
 def test_concurrent_on_places_one_sidebar_per_window(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    s.new_window(s.env.session_id)
+    s.new_window(s.session)
     s.new_session("other")
     env = dict(s.env.env, WORKMUX_BACKEND="rex")
     runs = [
@@ -381,7 +406,8 @@ def test_concurrent_on_places_one_sidebar_per_window(rex_sidebar: RexSidebar):
         for _ in range(3)
     ]
     for run in runs:
-        assert run.wait(timeout=30) == 0, run.stderr.read()
+        _, stderr = run.communicate(timeout=30)
+        assert run.returncode == 0, stderr
 
     time.sleep(3)
     assert s.each_window_has_one_sidebar()
@@ -407,10 +433,10 @@ def test_concurrent_on_places_one_sidebar_per_window(rex_sidebar: RexSidebar):
 
 def test_quitting_a_sidebar_turns_it_off(rex_sidebar: RexSidebar):
     s = rex_sidebar
-    s.new_window(s.env.session_id)
+    s.new_window(s.session)
     s.sidebar("on")
     window = s.windows()[0]
-    sidebar = s.root_sidebar(window)
+    sidebar = s.sidebar_block(window)
     s.wait_for(
         lambda: "No agents"
         in s.env.mux_command(
@@ -442,10 +468,10 @@ def test_events_place_sidebars_before_the_next_poll(rex_sidebar: RexSidebar):
     s.sidebar("on")
     s.wait_for(lambda: len(event_followers(s)) == 1, message="no event follower")
     for _ in range(3):
-        window = s.new_window(s.env.session_id)
+        window = s.new_window(s.session)
         started = time.monotonic()
         s.wait_for(
-            lambda: s.root_sidebar(s.window(window)) is not None,
+            lambda: s.root_sidebar(s.open_window(window)) is not None,
             message="no sidebar in the new window",
         )
         assert time.monotonic() - started < 1.5
