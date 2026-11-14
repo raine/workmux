@@ -11,7 +11,7 @@ use crate::multiplexer::Multiplexer;
 use super::app::HostIdentity;
 use super::app::SidebarFilterMode;
 use super::daemon_ctrl::{ensure_daemon_running, kill_daemon};
-use super::host::SidebarHost;
+use super::host::{RexHost, SidebarHost};
 use super::navigation::NavigationContext;
 use super::{
     apply_cli_dimensions, configured_position, read_sidebar_filter_mode, rex_panes, session_state,
@@ -97,13 +97,13 @@ fn reach_session(reach: Reach) -> Result<Option<String>> {
 }
 
 pub(super) fn on_rex(
-    host: &SidebarHost,
-    instance_id: &str,
+    rex: &RexHost,
     reach: Reach,
     position: Option<SidebarPosition>,
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
+    let instance_id = rex.instance_id();
     let session = reach_session(reach)?;
     let previous = session_state::read(instance_id)?;
     // A running sidebar keeps its size unless the command names one.
@@ -119,7 +119,7 @@ pub(super) fn on_rex(
             .unwrap_or_else(|| configured_position(&config, None)),
         None => configured_position(&config, None),
     };
-    let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
+    let observation = rex.backend().sidebar_observation()?;
     session_state::update(instance_id, |state| {
         state.scope.include(session.as_deref());
         rex_panes::clear_dismissals(state, &observation, session.as_deref());
@@ -132,56 +132,55 @@ pub(super) fn on_rex(
         }
     })?;
     let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
-    ensure_daemon_running(host)?;
-    rex_panes::sync(instance_id)?;
+    ensure_daemon_running(&rex.host())?;
+    rex_panes::sync(rex)?;
     Ok(())
 }
 
-pub(super) fn off_rex(host: &SidebarHost, instance_id: &str, reach: Reach) -> Result<()> {
+pub(super) fn off_rex(rex: &RexHost, reach: Reach) -> Result<()> {
     let session = reach_session(reach)?;
-    let state = session_state::update(instance_id, |state| {
+    let state = session_state::update(rex.instance_id(), |state| {
         state.scope.exclude(session.as_deref());
     })?;
-    rex_panes::sync(instance_id)?;
+    rex_panes::sync(rex)?;
     if !state.is_active() {
-        kill_daemon(host);
+        kill_daemon(&rex.host());
     }
     Ok(())
 }
 
 /// Whether the sidebar shows where a toggle with this reach looks: the
 /// current window, or the current session's scope.
-fn rex_shown(instance_id: &str, reach: Reach) -> Result<bool> {
-    let state = session_state::read(instance_id)?;
+fn rex_shown(rex: &RexHost, reach: Reach) -> Result<bool> {
+    let state = session_state::read(rex.instance_id())?;
     match reach {
         Reach::CurrentSession => Ok(state.covers_session(&current_rex_session()?)),
         Reach::All if std::env::var_os("REX_BLOCK").is_none() => Ok(state.is_active()),
         Reach::All => {
-            let observation = crate::multiplexer::rex::RexBackend::new().sidebar_observation()?;
+            let observation = rex.backend().sidebar_observation()?;
             Ok(rex_panes::current_window_has_sidebar(&observation, &state))
         }
     }
 }
 
 pub(super) fn toggle_rex(
-    host: &SidebarHost,
-    instance_id: &str,
+    rex: &RexHost,
     reach: Reach,
     position: Option<SidebarPosition>,
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    if rex_shown(instance_id, reach)? {
-        off_rex(host, instance_id, reach)
+    if rex_shown(rex, reach)? {
+        off_rex(rex, reach)
     } else {
-        on_rex(host, instance_id, reach, position, width, height)
+        on_rex(rex, reach, position, width, height)
     }
 }
 
-pub(super) fn sync_rex(host: &SidebarHost, instance_id: &str) -> Result<()> {
-    if session_state::read(instance_id)?.is_active() {
-        let _ = ensure_daemon_running(host);
-        rex_panes::sync(instance_id)?;
+pub(super) fn sync_rex(rex: &RexHost) -> Result<()> {
+    if session_state::read(rex.instance_id())?.is_active() {
+        let _ = ensure_daemon_running(&rex.host());
+        rex_panes::sync(rex)?;
     }
     Ok(())
 }
@@ -191,7 +190,7 @@ pub(super) fn sync_rex(host: &SidebarHost, instance_id: &str) -> Result<()> {
 /// Under a Rex session scope, quitting leaves the other sessions' sidebars.
 pub(super) fn stop_after_quit(host: &SidebarHost, identity: &HostIdentity) {
     use std::os::unix::process::CommandExt;
-    let session_scoped = matches!(host, SidebarHost::Rex { .. })
+    let session_scoped = matches!(host, SidebarHost::Rex(_))
         && session_state::read(&host.instance_id()).is_ok_and(|state| {
             !state.scope.enabled && state.scope.sessions.contains(&identity.session_id)
         });

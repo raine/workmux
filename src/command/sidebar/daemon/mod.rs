@@ -113,7 +113,7 @@ pub fn run() -> Result<()> {
     let server = SocketServer::bind(&sock_path)?;
 
     // Rex has no hooks: its event stream wakes observations early
-    let rex_events = matches!(host, SidebarHost::Rex { .. }).then(|| {
+    let rex_events = matches!(host, SidebarHost::Rex(_)).then(|| {
         let observation_dirty = observation_dirty.clone();
         let wake_tx = wake_tx.clone();
         crate::multiplexer::rex::sidebar::EventFollower::spawn(move || {
@@ -179,8 +179,8 @@ pub fn run() -> Result<()> {
             match query_mux_state(&host) {
                 Ok((tmux_state, placement)) => {
                     last_observed = Instant::now();
-                    match placement {
-                        PlacementObservation::Zellij(tabs) if server.client_count() > 0 => {
+                    match (&host, placement) {
+                        (_, PlacementObservation::Zellij(tabs)) if server.client_count() > 0 => {
                             if let Err(error) =
                                 super::zellij_panes::create_sidebar_in_active_tab_from_snapshot(
                                     &instance_id,
@@ -190,10 +190,8 @@ pub fn run() -> Result<()> {
                                 tracing::warn!(%error, "failed to synchronize Zellij sidebars");
                             }
                         }
-                        PlacementObservation::Rex(observation) => {
-                            if let Err(error) =
-                                super::rex_panes::reconcile(&instance_id, &observation)
-                            {
+                        (SidebarHost::Rex(rex), PlacementObservation::Rex(observation)) => {
+                            if let Err(error) = super::rex_panes::reconcile(rex, &observation) {
                                 tracing::warn!(%error, "failed to reconcile Rex sidebars");
                             }
                         }
@@ -472,7 +470,7 @@ pub fn run() -> Result<()> {
         if scheduler.maintenance_due(now) {
             scheduler.finish_maintenance(now);
             let client_count = server.client_count();
-            if matches!(host, SidebarHost::Rex { .. }) {
+            if matches!(host, SidebarHost::Rex(_)) {
                 // Rex sidebars are placed by this daemon, and Rex has no hooks
                 // to start a daemon when a window needs one. So unlike the
                 // tmux and Zellij daemons, which exit 10s after their last

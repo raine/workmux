@@ -176,7 +176,7 @@ pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
     match SidebarHost::detect() {
         Some(SidebarHost::Tmux(tmux)) => tmux::reflow_all(&tmux, exclude_window),
         // Zellij and Rex have no layout reflow, and no host has no sidebars.
-        Some(SidebarHost::Zellij { .. } | SidebarHost::Rex { .. }) | None => Ok(()),
+        Some(SidebarHost::Zellij { .. } | SidebarHost::Rex(_)) | None => Ok(()),
     }
 }
 
@@ -216,9 +216,7 @@ pub fn on(
         SidebarHost::Zellij { instance_id } => {
             placed::on_zellij(&host, instance_id, position, width, height)
         }
-        SidebarHost::Rex { instance_id } => {
-            placed::on_rex(&host, instance_id, Reach::All, position, width, height)
-        }
+        SidebarHost::Rex(rex) => placed::on_rex(rex, Reach::All, position, width, height),
     }
 }
 
@@ -231,7 +229,7 @@ pub fn off() -> Result<()> {
             Ok(())
         }
         SidebarHost::Zellij { instance_id } => placed::off_zellij(&host, instance_id),
-        SidebarHost::Rex { instance_id } => placed::off_rex(&host, instance_id, Reach::All),
+        SidebarHost::Rex(rex) => placed::off_rex(rex, Reach::All),
     }
 }
 
@@ -247,9 +245,7 @@ pub fn toggle(
         SidebarHost::Zellij { instance_id } => {
             placed::toggle_zellij(&host, instance_id, position, width, height)
         }
-        SidebarHost::Rex { instance_id } => {
-            placed::toggle_rex(&host, instance_id, Reach::All, position, width, height)
-        }
+        SidebarHost::Rex(rex) => placed::toggle_rex(rex, Reach::All, position, width, height),
     }
 }
 
@@ -265,14 +261,9 @@ pub fn on_session(
         SidebarHost::Zellij { instance_id } => {
             placed::on_zellij(&host, instance_id, position, width, height)
         }
-        SidebarHost::Rex { instance_id } => placed::on_rex(
-            &host,
-            instance_id,
-            Reach::CurrentSession,
-            position,
-            width,
-            height,
-        ),
+        SidebarHost::Rex(rex) => {
+            placed::on_rex(rex, Reach::CurrentSession, position, width, height)
+        }
     }
 }
 
@@ -282,9 +273,7 @@ pub fn off_session() -> Result<()> {
     match &host {
         SidebarHost::Tmux(tmux) => tmux::off_session(tmux),
         SidebarHost::Zellij { instance_id } => placed::off_zellij(&host, instance_id),
-        SidebarHost::Rex { instance_id } => {
-            placed::off_rex(&host, instance_id, Reach::CurrentSession)
-        }
+        SidebarHost::Rex(rex) => placed::off_rex(rex, Reach::CurrentSession),
     }
 }
 
@@ -300,14 +289,9 @@ pub fn toggle_session(
         SidebarHost::Zellij { instance_id } => {
             placed::toggle_zellij(&host, instance_id, position, width, height)
         }
-        SidebarHost::Rex { instance_id } => placed::toggle_rex(
-            &host,
-            instance_id,
-            Reach::CurrentSession,
-            position,
-            width,
-            height,
-        ),
+        SidebarHost::Rex(rex) => {
+            placed::toggle_rex(rex, Reach::CurrentSession, position, width, height)
+        }
     }
 }
 
@@ -320,7 +304,7 @@ pub fn sync(window_id: Option<&str>) -> Result<()> {
     match &host {
         SidebarHost::Tmux(tmux) => tmux::sync(tmux, window_id),
         SidebarHost::Zellij { instance_id } => placed::sync_zellij(instance_id),
-        SidebarHost::Rex { instance_id } => placed::sync_rex(&host, instance_id),
+        SidebarHost::Rex(rex) => placed::sync_rex(rex),
     }
 }
 
@@ -329,7 +313,7 @@ pub fn reflow(window_id: Option<&str>) -> Result<()> {
     match SidebarHost::detect() {
         Some(SidebarHost::Tmux(tmux)) => tmux::reflow(&tmux, window_id),
         // Zellij and Rex have no layout reflow, and no host has no sidebars.
-        Some(SidebarHost::Zellij { .. } | SidebarHost::Rex { .. }) | None => Ok(()),
+        Some(SidebarHost::Zellij { .. } | SidebarHost::Rex(_)) | None => Ok(()),
     }
 }
 
@@ -431,16 +415,14 @@ pub fn navigate(action: NavAction) -> Result<()> {
     let (mux, host) = sidebar_mux()?;
     let context = match &host {
         SidebarHost::Tmux(tmux) => tmux::navigation_context(tmux)?,
-        SidebarHost::Zellij { .. } | SidebarHost::Rex { .. } => {
+        SidebarHost::Zellij { .. } | SidebarHost::Rex(_) => {
             placed::navigation_context(&host, mux.as_ref())?
         }
     };
     let target = navigation::select_target(&context, &action)?;
     match &host {
         SidebarHost::Tmux(tmux) => tmux::switch_client(tmux, &target)?,
-        SidebarHost::Zellij { .. } | SidebarHost::Rex { .. } => {
-            mux.switch_to_pane(&target, None)?
-        }
+        SidebarHost::Zellij { .. } | SidebarHost::Rex(_) => mux.switch_to_pane(&target, None)?,
     }
     signal_daemon(&host);
     Ok(())

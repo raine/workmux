@@ -347,7 +347,7 @@ struct RexClientList {
 }
 
 /// Rex backend implementation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RexBackend;
 
 impl RexBackend {

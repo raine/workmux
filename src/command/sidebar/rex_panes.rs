@@ -24,6 +24,7 @@ use crate::multiplexer::rex::sidebar::{
     exec_layout,
 };
 
+use super::host::RexHost;
 use super::session_state::{self, Placement, SidebarSessionState, Tracking};
 
 /// Columns a left sidebar always leaves for content, and rows for a top one.
@@ -546,7 +547,8 @@ impl Executor<'_> {
 }
 
 /// Bring every window in line with the scope. Callers hold the layout lock.
-pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Result<()> {
+pub(super) fn reconcile(rex: &RexHost, obs: &RexSidebarObservation) -> Result<()> {
+    let instance_id = rex.instance_id();
     let state = session_state::read(instance_id)?;
     let position = state.prefs.position.unwrap_or_default();
     let exe = exe_path()?;
@@ -563,9 +565,8 @@ pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Resul
         .map(|w| window_view(w, position, &exe_name, placements.get(&w.window_id)))
         .collect();
     let sizing = Sizing::new(&state, &views);
-    let rex = RexBackend::new();
     let executor = Executor {
-        rex: &rex,
+        rex: rex.backend(),
         instance_id,
         exe,
         live_panes: &obs.live_panes,
@@ -698,10 +699,10 @@ fn resize_placed(
 
 /// Observe the server and reconcile under the layout lock, waiting for a
 /// daemon pass in progress to finish.
-pub(super) fn sync(instance_id: &str) -> Result<RexSidebarObservation> {
-    let _lock = session_state::lock_layout(instance_id)?;
-    let obs = RexBackend::new().sidebar_observation()?;
-    reconcile(instance_id, &obs)?;
+pub(super) fn sync(rex: &RexHost) -> Result<RexSidebarObservation> {
+    let _lock = session_state::lock_layout(rex.instance_id())?;
+    let obs = rex.backend().sidebar_observation()?;
+    reconcile(rex, &obs)?;
     Ok(obs)
 }
 
@@ -749,8 +750,8 @@ pub(super) fn clear_dismissals(
 }
 
 /// Whether the sidebar block is the only tiled block left in its window.
-pub(super) fn sidebar_is_only_pane(window_id: &str, pane_id: &str) -> bool {
-    RexBackend::new().sidebar_observation().is_ok_and(|obs| {
+pub(super) fn sidebar_is_only_pane(rex: &RexHost, window_id: &str, pane_id: &str) -> bool {
+    rex.backend().sidebar_observation().is_ok_and(|obs| {
         obs.windows
             .iter()
             .find(|w| w.window_id == window_id)

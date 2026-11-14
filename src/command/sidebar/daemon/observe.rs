@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use crate::multiplexer::{
     AgentPane, LivePaneInfo, Multiplexer, TmuxBackend,
-    rex::{RexBackend, sidebar::RexSidebarObservation},
+    rex::sidebar::RexSidebarObservation,
     zellij::{ZellijBackend, ZellijSidebarTab},
 };
 
-use super::super::host::SidebarHost;
+use super::super::host::{RexHost, SidebarHost};
 use super::super::preferences::Preferences;
 use super::super::store::tmux_preferences;
 
@@ -72,8 +72,8 @@ fn query_zellij_state(
     Ok((mux_state, observation.tabs))
 }
 
-fn query_rex_state(instance_id: &str) -> Result<(MuxState, RexSidebarObservation)> {
-    let observation = RexBackend::new().sidebar_observation()?;
+fn query_rex_state(rex: &RexHost) -> Result<(MuxState, RexSidebarObservation)> {
+    let observation = rex.backend().sidebar_observation()?;
     let mux_state = MuxState {
         live_panes: observation.live_panes.clone(),
         window_statuses: HashMap::new(),
@@ -83,7 +83,7 @@ fn query_rex_state(instance_id: &str) -> Result<(MuxState, RexSidebarObservation
         active_pane_ids: observation.active_pane_ids.clone(),
         window_pane_counts: observation.window_pane_counts.clone(),
         server_boot_id: observation.boot_id.clone(),
-        prefs: file_preferences(instance_id)?,
+        prefs: file_preferences(rex.instance_id())?,
     };
     Ok((mux_state, observation))
 }
@@ -106,8 +106,8 @@ pub(super) fn query_mux_state(host: &SidebarHost) -> Result<(MuxState, Placement
                 query_zellij_state(&ZellijBackend::for_session(instance_id), instance_id)?;
             Ok((state, PlacementObservation::Zellij(tabs)))
         }
-        SidebarHost::Rex { instance_id } => {
-            let (state, observation) = query_rex_state(instance_id)?;
+        SidebarHost::Rex(rex) => {
+            let (state, observation) = query_rex_state(rex)?;
             Ok((state, PlacementObservation::Rex(Box::new(observation))))
         }
     }

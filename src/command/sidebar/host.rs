@@ -1,12 +1,14 @@
 //! The multiplexer hosting a process's sidebars.
 //!
 //! Backend-specific sidebar behaviour goes through `SidebarHost`. Code that
-//! only works on tmux takes a `TmuxHost`, which only `SidebarHost::resolve`
-//! creates, so shared code paths cannot call it under another backend.
+//! only works on tmux takes a `TmuxHost`, and code that only works on Rex a
+//! `RexHost`. Only `SidebarHost::resolve` creates them, so shared code paths
+//! cannot call either under another backend.
 
 use anyhow::{Result, anyhow};
 
 use crate::cmd::Cmd;
+use crate::multiplexer::rex::RexBackend;
 use crate::multiplexer::{LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend};
 
 use super::app::HostIdentity;
@@ -46,12 +48,35 @@ impl TmuxHost {
     }
 }
 
+/// A Rex server hosting sidebars.
+#[derive(Clone)]
+pub(crate) struct RexHost {
+    instance_id: String,
+    backend: RexBackend,
+}
+
+impl RexHost {
+    /// The backend for this server. Rex instances are named by
+    /// `$REX_SERVER`, which the backend addresses.
+    pub(super) fn backend(&self) -> &RexBackend {
+        &self.backend
+    }
+
+    pub(super) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub(super) fn host(&self) -> SidebarHost {
+        SidebarHost::Rex(self.clone())
+    }
+}
+
 /// The multiplexer hosting this process's sidebars.
 #[derive(Clone)]
 pub(crate) enum SidebarHost {
     Tmux(TmuxHost),
     Zellij { instance_id: String },
-    Rex { instance_id: String },
+    Rex(RexHost),
 }
 
 impl SidebarHost {
@@ -63,9 +88,10 @@ impl SidebarHost {
             "zellij" => Ok(Self::Zellij {
                 instance_id: mux.instance_id(),
             }),
-            "rex" => Ok(Self::Rex {
+            "rex" => Ok(Self::Rex(RexHost {
                 instance_id: mux.instance_id(),
-            }),
+                backend: RexBackend::new(),
+            })),
             name => Err(anyhow!(
                 "Sidebar is supported only by tmux, Zellij and Rex, not {name}"
             )),
@@ -81,7 +107,8 @@ impl SidebarHost {
     pub(super) fn instance_id(&self) -> String {
         match self {
             Self::Tmux(tmux) => tmux.backend().instance_id(),
-            Self::Zellij { instance_id } | Self::Rex { instance_id } => instance_id.clone(),
+            Self::Zellij { instance_id } => instance_id.clone(),
+            Self::Rex(rex) => rex.instance_id.clone(),
         }
     }
 
@@ -95,15 +122,15 @@ impl SidebarHost {
     pub(super) fn tmux(&self) -> Option<&TmuxHost> {
         match self {
             Self::Tmux(tmux) => Some(tmux),
-            Self::Zellij { .. } | Self::Rex { .. } => None,
+            Self::Zellij { .. } | Self::Rex(_) => None,
         }
     }
 
     pub(super) fn store(&self) -> SidebarStore {
         match self {
             Self::Tmux(tmux) => SidebarStore::TmuxOptions(tmux.clone()),
-            Self::Zellij { instance_id } | Self::Rex { instance_id } => SidebarStore::File {
-                instance_id: instance_id.clone(),
+            Self::Zellij { .. } | Self::Rex(_) => SidebarStore::File {
+                instance_id: self.instance_id(),
             },
         }
     }
@@ -123,10 +150,10 @@ impl SidebarHost {
     pub(super) fn identity(&self, mux: &dyn Multiplexer) -> Option<HostIdentity> {
         match self {
             Self::Tmux(tmux) => panes::host_identity(tmux),
-            Self::Zellij { instance_id } | Self::Rex { instance_id } => {
+            Self::Zellij { .. } | Self::Rex(_) => {
                 let pane_id = mux.current_pane_id()?;
                 let info = mux.get_live_pane_info(&pane_id).ok()??;
-                let session_name = info.session.unwrap_or_else(|| instance_id.clone());
+                let session_name = info.session.unwrap_or_else(|| self.instance_id());
                 Some(HostIdentity {
                     session_id: info.session_id.unwrap_or_else(|| session_name.clone()),
                     session_name,
@@ -140,8 +167,8 @@ impl SidebarHost {
     /// Bring an agent pane forward.
     pub(super) fn focus(&self, mux: &dyn Multiplexer, pane_id: &str) -> Result<FocusOutcome> {
         match self {
-            Self::Rex { .. } => {
-                if crate::multiplexer::rex::RexBackend::new().show_block(pane_id)? {
+            Self::Rex(rex) => {
+                if rex.backend().show_block(pane_id)? {
                     Ok(FocusOutcome::Focused)
                 } else {
                     Ok(FocusOutcome::WindowNotSwitched)
@@ -160,7 +187,7 @@ impl SidebarHost {
             Self::Tmux(tmux) => {
                 let _ = tmux.cmd().args(&["display-message", message]).run();
             }
-            Self::Zellij { .. } | Self::Rex { .. } => {}
+            Self::Zellij { .. } | Self::Rex(_) => {}
         }
     }
 
@@ -198,7 +225,7 @@ impl SidebarHost {
     pub(super) fn take_handed_off_selection(&self, identity: &HostIdentity) -> Option<String> {
         match self {
             Self::Tmux(tmux) => panes::take_pending_selection(tmux, &identity.pane_id),
-            Self::Zellij { .. } | Self::Rex { .. } => None,
+            Self::Zellij { .. } | Self::Rex(_) => None,
         }
     }
 
@@ -208,11 +235,9 @@ impl SidebarHost {
         match (self, silent) {
             (Self::Tmux(tmux), true) => panes::close_pane_after_exit(tmux, &identity.pane_id),
             // Zellij and Rex close the pane when its process exits.
-            (Self::Zellij { .. } | Self::Rex { .. }, true) => {}
+            (Self::Zellij { .. } | Self::Rex(_), true) => {}
             (Self::Tmux(tmux), false) => panes::shutdown_all_sidebars(tmux, identity),
-            (Self::Zellij { .. } | Self::Rex { .. }, false) => {
-                placed::stop_after_quit(self, identity)
-            }
+            (Self::Zellij { .. } | Self::Rex(_), false) => placed::stop_after_quit(self, identity),
         }
     }
 
@@ -223,14 +248,14 @@ impl SidebarHost {
             Self::Zellij { instance_id } => {
                 zellij_panes::sidebar_is_only_pane(instance_id, window_id, pane_id)
             }
-            Self::Rex { .. } => rex_panes::sidebar_is_only_pane(window_id, pane_id),
+            Self::Rex(rex) => rex_panes::sidebar_is_only_pane(rex, window_id, pane_id),
         }
     }
 
     /// Prepare the command that starts this host's sidebar daemon.
     pub(super) fn daemon_command(&self, command: &mut std::process::Command) {
         match self {
-            Self::Rex { .. } => {
+            Self::Rex(_) => {
                 use std::os::unix::process::CommandExt;
                 // The daemon serves the whole server, not the block that
                 // started it: it must outlive that block's terminal and act
@@ -268,8 +293,8 @@ impl SidebarHost {
             Self::Zellij { instance_id } => {
                 Ok(super::session_state::try_lock_layout(instance_id)?.map(|_| None))
             }
-            Self::Rex { instance_id } => {
-                Ok(super::session_state::try_lock_layout(instance_id)?.map(Some))
+            Self::Rex(rex) => {
+                Ok(super::session_state::try_lock_layout(rex.instance_id())?.map(Some))
             }
         }
     }
@@ -280,7 +305,7 @@ impl SidebarHost {
     /// compares. Rex session labels need not be unique, so Rex compares IDs.
     pub(super) fn session_key<'a>(&self, info: &'a LivePaneInfo) -> Option<&'a str> {
         match self {
-            Self::Rex { .. } => info.session_id.as_deref(),
+            Self::Rex(_) => info.session_id.as_deref(),
             Self::Tmux(_) | Self::Zellij { .. } => info.session.as_deref(),
         }
     }
@@ -299,7 +324,7 @@ impl SidebarHost {
                 Some(session.trim().to_string())
             }
             Self::Zellij { instance_id } => Some(instance_id.clone()),
-            Self::Rex { .. } => std::env::var("REX_SESSION").ok(),
+            Self::Rex(_) => std::env::var("REX_SESSION").ok(),
         }
     }
 }
