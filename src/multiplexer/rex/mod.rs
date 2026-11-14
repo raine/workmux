@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::cmd::Cmd;
@@ -106,6 +107,16 @@ fn server_endpoint() -> Option<&'static str> {
                 .filter(|server| !server.trim().is_empty())
         })
         .as_deref()
+}
+
+static AUTOSTART: AtomicBool = AtomicBool::new(true);
+
+/// Stop this process's `rex` calls from starting a missing server.
+///
+/// The CLI starts a local server when none answers, so a background process
+/// polling Rex would bring back a server the user stopped.
+pub fn disable_autostart() {
+    AUTOSTART.store(false, Ordering::Relaxed);
 }
 
 /// The `rex` invocation for shell scripts, pinned to the server like `rex_cmd`.
@@ -356,10 +367,14 @@ impl RexBackend {
     }
 
     fn rex_cmd(&self) -> Cmd<'static> {
-        let cmd = Cmd::new("rex");
-        match server_endpoint() {
-            Some(server) => cmd.args(&["-S", server]),
-            None => cmd,
+        let mut cmd = Cmd::new("rex");
+        if let Some(server) = server_endpoint() {
+            cmd = cmd.args(&["-S", server]);
+        }
+        if AUTOSTART.load(Ordering::Relaxed) {
+            cmd
+        } else {
+            cmd.arg("--autostart=false")
         }
     }
 

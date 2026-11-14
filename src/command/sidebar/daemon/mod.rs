@@ -112,6 +112,11 @@ pub fn run() -> Result<()> {
     let _ = std::fs::remove_file(&sock_path);
     let server = SocketServer::bind(&sock_path)?;
 
+    // The daemon exits once its server is gone, so it must not start one
+    if matches!(host, SidebarHost::Rex(_)) {
+        crate::multiplexer::rex::disable_autostart();
+    }
+
     // Rex has no hooks: its event stream wakes observations early
     let rex_events = matches!(host, SidebarHost::Rex(_)).then(|| {
         let observation_dirty = observation_dirty.clone();
