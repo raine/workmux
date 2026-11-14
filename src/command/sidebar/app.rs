@@ -491,8 +491,9 @@ impl SidebarApp {
 
         // Seed last_window_width so the first resize event after startup grace
         // can be compared against a baseline (fixes first-resize-dropped bug).
-        let initial_window_width = query_window_width_for_pane();
-        let initial_window_height = query_window_height_for_pane();
+        let reflows = !reflow_free(mux.as_ref());
+        let initial_window_width = reflows.then(query_window_width_for_pane).flatten();
+        let initial_window_height = reflows.then(query_window_height_for_pane).flatten();
 
         Ok(Self {
             mux,
@@ -1392,16 +1393,19 @@ impl SidebarApp {
 
     /// Open a window relaying a remote agent that no local pane relays.
     fn open_detached(&self, remote: crate::multiplexer::RemoteAgent) {
+        let tmux = self.mux.name() == "tmux";
         // `workmux open` contacts the node; the sidebar keeps drawing.
         std::thread::spawn(move || {
             if let Err(err) = crate::remote::agents::open_window(&remote) {
                 tracing::warn!(handle = remote.handle, "sidebar open: {err:#}");
-                let _ = Cmd::new("tmux")
-                    .args(&[
-                        "display-message",
-                        &format!("workmux: open {}: {err:#}", remote.handle),
-                    ])
-                    .run();
+                if tmux {
+                    let _ = Cmd::new("tmux")
+                        .args(&[
+                            "display-message",
+                            &format!("workmux: open {}: {err:#}", remote.handle),
+                        ])
+                        .run();
+                }
             }
             super::daemon_ctrl::signal_daemon();
         });
@@ -1575,6 +1579,9 @@ impl SidebarApp {
 
     /// Record a resize event for debounced manual pane resize processing.
     pub fn on_resize_event(&mut self, cols: u16, rows: u16) {
+        if reflow_free(self.mux.as_ref()) {
+            return;
+        }
         if self.suppress_resize_once {
             self.suppress_resize_once = false;
             self.pending_resize_cols = None;
@@ -1614,9 +1621,7 @@ impl SidebarApp {
     /// Process any pending resize after the debounce period has elapsed.
     /// Skips detection during startup grace period.
     pub fn process_pending_resize(&mut self, startup: &Instant, startup_grace: Duration) {
-        // Zellij keeps a manually resized sidebar as is, and the Rex daemon
-        // sizes sidebars itself, so there is nothing to reflow or persist.
-        if matches!(self.mux.name(), "zellij" | "rex") {
+        if reflow_free(self.mux.as_ref()) {
             self.pending_resize_cols = None;
             self.pending_resize_rows = None;
             self.resize_deadline = None;
@@ -1902,6 +1907,12 @@ fn parse_templates(strings: &TemplateStrings) -> (ParsedTemplates, Option<Templa
         },
         first_error,
     )
+}
+
+/// Zellij keeps a manually resized sidebar as is, and the Rex daemon sizes
+/// sidebars itself, so their sidebars have nothing to reflow or persist.
+fn reflow_free(mux: &dyn Multiplexer) -> bool {
+    matches!(mux.name(), "zellij" | "rex")
 }
 
 fn query_tmux_format_for_current_pane(format: &str) -> Option<String> {
