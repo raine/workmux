@@ -142,8 +142,7 @@ pub(super) fn try_lock_daemon(instance_id: &str) -> Result<Option<File>> {
 
 pub(super) fn lock_layout(instance_id: &str) -> Result<File> {
     let file = layout_lock_file(instance_id)?;
-    file.lock()
-        .context("failed to lock Zellij sidebar layout")?;
+    file.lock().context("failed to lock sidebar layout")?;
     Ok(file)
 }
 
@@ -152,9 +151,7 @@ pub(super) fn try_lock_layout(instance_id: &str) -> Result<Option<File>> {
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(error)) => {
-            Err(error).context("failed to lock Zellij sidebar layout")
-        }
+        Err(TryLockError::Error(error)) => Err(error).context("failed to lock sidebar layout"),
     }
 }
 
@@ -166,11 +163,15 @@ fn lock_state(instance_id: &str) -> Result<File> {
     Ok(file)
 }
 
+/// Read the state file. A file this version cannot parse reads as the
+/// default state, so a format change resets the sidebar instead of stopping
+/// every command and daemon pass that reads it.
 fn read_path(path: &Path) -> Result<SidebarSessionState> {
     match fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).context("failed to parse sidebar session state")
-        }
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            tracing::warn!(%error, path = %path.display(), "ignoring unreadable sidebar state");
+            SidebarSessionState::default()
+        })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(SidebarSessionState::default())
         }
@@ -251,6 +252,16 @@ mod tests {
         drop(first);
         assert!(eventually(|| try_lock_daemon(&instance).unwrap()).is_some());
         fs::remove_file(path(&instance).with_extension("daemon.lock")).unwrap();
+    }
+
+    #[test]
+    fn unparseable_state_reads_as_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, br#"{"enabled": "yes", "position": 3}"#).unwrap();
+        let state = read_path(&path).unwrap();
+        assert!(!state.enabled);
+        assert_eq!(state.position, None);
     }
 
     #[test]
