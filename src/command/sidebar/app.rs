@@ -25,6 +25,7 @@ use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::ui::theme::ThemePalette;
 
 use super::host::{FocusOutcome, SidebarHost};
+use super::preferences::GroupingOverride;
 use super::snapshot::{SidebarSnapshot, group_label};
 use super::template::parser::{ParseError, Token, TokenId, parse_line};
 use super::tmux::resize::TmuxResize;
@@ -1455,7 +1456,7 @@ impl SidebarApp {
             SidebarLayoutMode::Compact => SidebarLayoutMode::Tiles,
             SidebarLayoutMode::Tiles => SidebarLayoutMode::Compact,
         };
-        let _ = self.host.store().set_layout(self.layout_mode.as_str());
+        let _ = self.host.store().set_layout(self.layout_mode);
         // Persist to settings.json so it survives tmux restarts
         if let Ok(store) = crate::state::StateStore::new()
             && let Ok(mut settings) = store.load_settings()
@@ -1490,7 +1491,7 @@ impl SidebarApp {
 
     pub fn toggle_filter_mode(&mut self) {
         self.filter_mode = self.filter_mode.toggle();
-        if let Err(error) = self.host.store().set_filter(self.filter_mode.as_str()) {
+        if let Err(error) = self.host.store().set_filter(self.filter_mode) {
             warn!(%error, "failed to persist sidebar filter mode");
         }
         // Persist to settings.json so it survives tmux restarts
@@ -1517,7 +1518,7 @@ impl SidebarApp {
         if let Err(error) = self
             .host
             .store()
-            .set_group_by(Some(super::group_by_option_value(next)))
+            .set_grouping(GroupingOverride::from_group_by(next))
         {
             warn!(%error, "failed to persist sidebar grouping");
         }

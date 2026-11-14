@@ -17,6 +17,7 @@
 //! - `host` - the multiplexer hosting the sidebars, and its behaviour
 //! - `navigation` - agent navigation shared by every host
 //! - `placed` - entry points on Zellij and Rex, where workmux places sidebars
+//! - `preferences` - preferences every sidebar on a server shares
 //! - `rex_panes` - sidebar placement, sizing, and scope on Rex
 //! - `runtime` - TUI event loop
 //! - `snapshot` - snapshot data types and builder
@@ -34,6 +35,7 @@ mod fsevent;
 mod host;
 mod navigation;
 mod placed;
+mod preferences;
 mod rex_panes;
 mod runtime;
 mod session_state;
@@ -56,6 +58,7 @@ pub use self::navigation::NavAction;
 use self::daemon_ctrl::signal_daemon;
 use self::host::SidebarHost;
 use self::placed::Reach;
+use self::preferences::GroupingOverride;
 
 const MIN_WIDTH: u16 = 25;
 const MAX_WIDTH: u16 = 50;
@@ -74,9 +77,11 @@ pub(super) fn read_sidebar_position(
     host: &SidebarHost,
     config: &crate::config::Config,
 ) -> SidebarPosition {
-    host.store()
-        .position()
-        .unwrap_or_else(|| configured_position(config, None))
+    preferences::Preferences {
+        position: host.store().position(),
+        ..Default::default()
+    }
+    .position_or(config)
 }
 
 fn default_width_for(tw: u16) -> u16 {
@@ -325,18 +330,7 @@ fn parse_sidebar_filter_mode(raw: &str) -> Result<app::SidebarFilterMode> {
 }
 
 fn read_sidebar_filter_mode(host: &SidebarHost) -> app::SidebarFilterMode {
-    if let Some(mode) = host.store().filter() {
-        return parse_sidebar_filter_mode(&mode).unwrap_or_default();
-    }
-
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(settings) = store.load_settings()
-        && let Some(ref mode) = settings.sidebar_filter
-    {
-        return parse_sidebar_filter_mode(mode).unwrap_or_default();
-    }
-
-    app::SidebarFilterMode::default()
+    preferences::filter_mode(host.store().filter())
 }
 
 /// Grouping accepted by the runtime override. `none` is the ungrouped list the
@@ -372,48 +366,27 @@ pub fn set_group_by(mode: Option<&str>, clear: bool) -> Result<()> {
         .map(|cfg| cfg.sidebar.group_by())
         .unwrap_or_default();
 
-    let new_mode = if clear {
-        None
+    let grouping = if clear {
+        GroupingOverride::Unset
     } else {
-        match mode {
-            Some(m) => Some(parse_sidebar_group_by(m)?),
-            None => Some(match read_sidebar_group_by(&host, configured) {
+        GroupingOverride::from_group_by(match mode {
+            Some(m) => parse_sidebar_group_by(m)?,
+            None => match host.store().grouping().resolve(configured) {
                 Some(_) => None,
                 None => configured.or(Some(crate::config::SidebarGroupBy::Project)),
-            }),
-        }
+            },
+        })
     };
 
-    host.store()
-        .set_group_by(new_mode.map(group_by_option_value))?;
+    host.store().set_grouping(grouping)?;
 
     let store = crate::state::StateStore::new()?;
     let mut settings = store.load_settings()?;
-    settings.sidebar_group_by = new_mode.map(|mode| group_by_option_value(mode).to_string());
+    settings.sidebar_group_by = grouping.value().map(String::from);
     store.save_settings(&settings)?;
 
     signal_daemon(&host);
     Ok(())
-}
-
-/// Grouping currently in effect: the backend override, else the persisted one,
-/// else what the config asks for.
-fn read_sidebar_group_by(
-    host: &SidebarHost,
-    configured: Option<crate::config::SidebarGroupBy>,
-) -> Option<crate::config::SidebarGroupBy> {
-    if let Some(mode) = host.store().group_by() {
-        return parse_sidebar_group_by(&mode).unwrap_or(configured);
-    }
-
-    if let Ok(store) = crate::state::StateStore::new()
-        && let Ok(settings) = store.load_settings()
-        && let Some(ref mode) = settings.sidebar_group_by
-    {
-        return parse_sidebar_group_by(mode).unwrap_or(configured);
-    }
-
-    configured
 }
 
 /// Navigate to an agent in the daemon's ordered agent list. Respects the
@@ -446,7 +419,7 @@ pub fn set_filter_mode(mode: Option<&str>) -> Result<()> {
         None => read_sidebar_filter_mode(&host).toggle(),
     };
 
-    host.store().set_filter(new_mode.as_str())?;
+    host.store().set_filter(new_mode)?;
 
     // Persist to settings.json
     let store = crate::state::StateStore::new()?;

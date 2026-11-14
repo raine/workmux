@@ -987,7 +987,7 @@ pub(super) fn create_sidebar_in_active_tab_from_snapshot(
     else {
         return Ok(());
     };
-    let position = state.position.unwrap_or_default();
+    let position = state.prefs.position.unwrap_or_default();
     let config = sidebar_config(state)?;
     create_sidebar_in_tab(instance_id, &tab, position, &config)
 }

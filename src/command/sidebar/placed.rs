@@ -36,14 +36,18 @@ pub(super) fn on_zellij(
     apply_cli_dimensions(&mut config, width, height);
     let position = configured_position(&config, position);
     let previous = session_state::read(instance_id).unwrap_or_default();
-    if previous.position.is_some_and(|current| current != position) {
+    if previous
+        .prefs
+        .position
+        .is_some_and(|current| current != position)
+    {
         zellij_panes::kill_all_sidebars(instance_id)?;
     }
     let width = config.sidebar.width.clone();
     let height = config.sidebar.height.clone();
     session_state::update(instance_id, |state| {
         state.enabled = true;
-        state.position = Some(position);
+        state.prefs.position = Some(position);
         state.width.clone_from(&width);
         state.height.clone_from(&height);
     })?;
@@ -110,6 +114,7 @@ pub(super) fn on_rex(
     let position = match position {
         Some(position) => position,
         None if previous.is_active() => previous
+            .prefs
             .position
             .unwrap_or_else(|| configured_position(&config, None)),
         None => configured_position(&config, None),
@@ -130,7 +135,7 @@ pub(super) fn on_rex(
             }
         }
         rex_panes::clear_dismissals(state, &observation, session.as_deref());
-        state.position = Some(position);
+        state.prefs.position = Some(position);
         if set_width {
             state.width.clone_from(&config.sidebar.width);
         }

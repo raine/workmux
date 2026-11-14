@@ -1,29 +1,24 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
+use crate::config::{SidebarHeight, SidebarWidth};
 
+use super::preferences::Preferences;
 use super::view::WindowView;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct SidebarSessionState {
     pub enabled: bool,
-    pub position: Option<SidebarPosition>,
     pub width: Option<SidebarWidth>,
     pub height: Option<SidebarHeight>,
-    pub layout: Option<String>,
-    pub filter: Option<String>,
-    /// Whether configured views apply. Unset means they do.
-    pub views_enabled: Option<bool>,
-    pub sleeping_panes: HashSet<String>,
-    pub group_by: Option<String>,
-    pub expanded_groups: Vec<String>,
+    #[serde(flatten)]
+    pub prefs: Preferences,
     pub ordered_agents: Vec<String>,
     /// The view each window's sidebar shows, by window ID. Rex and Zellij only.
     pub window_views: BTreeMap<String, WindowView>,
@@ -213,6 +208,7 @@ pub(super) fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SidebarPosition;
 
     #[test]
     fn paths_are_stable_and_separate_by_instance() {
@@ -261,7 +257,7 @@ mod tests {
         fs::write(&path, br#"{"enabled": "yes", "position": 3}"#).unwrap();
         let state = read_path(&path).unwrap();
         assert!(!state.enabled);
-        assert_eq!(state.position, None);
+        assert_eq!(state.prefs.position, None);
     }
 
     #[test]
@@ -277,14 +273,14 @@ mod tests {
 
         update(&instance, |state| {
             state.enabled = true;
-            state.position = Some(SidebarPosition::Top);
+            state.prefs.position = Some(SidebarPosition::Top);
             state.ordered_agents = vec!["terminal_7".to_string()];
         })
         .unwrap();
 
         let state = read(&instance).unwrap();
         assert!(state.enabled);
-        assert_eq!(state.position, Some(SidebarPosition::Top));
+        assert_eq!(state.prefs.position, Some(SidebarPosition::Top));
         assert_eq!(state.ordered_agents, vec!["terminal_7"]);
 
         let _ = fs::remove_file(path(&instance));

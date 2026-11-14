@@ -32,8 +32,9 @@ use crate::state::StateStore;
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
 use super::host::SidebarHost;
+use super::preferences::Preferences;
 use super::snapshot::{CheckPathEntry, PrPathEntry, SnapshotInputs, build_snapshot};
-use super::store::PublishedViews;
+use super::store::{PublishedViews, tmux_preferences};
 
 /// Compute the socket path for a multiplexer instance.
 pub fn socket_path(instance_id: &str) -> PathBuf {
@@ -51,18 +52,13 @@ struct MuxState {
     active_pane_ids: HashSet<String>,
     window_pane_counts: HashMap<String, usize>,
     server_boot_id: Option<String>,
-    position: Option<String>,
-    layout: Option<String>,
-    filter: Option<String>,
-    views_enabled: Option<String>,
-    sleeping_panes: Option<String>,
-    group_by: Option<String>,
-    expanded_groups: Option<String>,
+    prefs: Preferences,
 }
 
 /// Query all sidebar-relevant tmux state in a single server observation.
 fn query_tmux_state(tmux: &TmuxBackend) -> Result<MuxState> {
     let snapshot = tmux.sidebar_snapshot()?;
+    let prefs = tmux_preferences(&snapshot);
     Ok(MuxState {
         live_panes: snapshot.live_panes,
         window_statuses: snapshot.window_statuses,
@@ -71,39 +67,14 @@ fn query_tmux_state(tmux: &TmuxBackend) -> Result<MuxState> {
         pane_window_indexes: snapshot.pane_window_indexes,
         active_pane_ids: snapshot.active_pane_ids,
         window_pane_counts: snapshot.window_pane_counts,
+        prefs,
         server_boot_id: snapshot.server_boot_id,
-        position: snapshot.position,
-        layout: snapshot.layout,
-        filter: snapshot.filter,
-        views_enabled: snapshot.views_enabled,
-        sleeping_panes: snapshot.sleeping_panes,
-        group_by: snapshot.group_by,
-        expanded_groups: snapshot.expanded_groups,
     })
 }
 
-/// Sidebar state that file-backed backends keep in the session state file.
-fn with_file_preferences(mut mux_state: MuxState, instance_id: &str) -> Result<MuxState> {
-    let state = super::session_state::read(instance_id)?;
-    mux_state.position = state.position.map(|position| match position {
-        SidebarPosition::Left => "left".to_string(),
-        SidebarPosition::Top => "top".to_string(),
-    });
-    mux_state.layout = state.layout;
-    mux_state.filter = state.filter;
-    mux_state.views_enabled = state
-        .views_enabled
-        .map(|enabled| if enabled { "on" } else { "off" }.to_string());
-    mux_state.sleeping_panes = Some(
-        state
-            .sleeping_panes
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    mux_state.group_by = state.group_by;
-    mux_state.expanded_groups = Some(state.expanded_groups.join("\t"));
-    Ok(mux_state)
+/// Preferences that Zellij and Rex keep in the session state file.
+fn file_preferences(instance_id: &str) -> Result<Preferences> {
+    Ok(super::session_state::read(instance_id)?.prefs)
 }
 
 fn query_zellij_state(
@@ -120,12 +91,10 @@ fn query_zellij_state(
         pane_window_indexes: snapshot.pane_window_indexes,
         active_pane_ids: snapshot.active_pane_ids,
         window_pane_counts: snapshot.window_pane_counts,
+        prefs: file_preferences(instance_id)?,
         ..MuxState::default()
     };
-    Ok((
-        with_file_preferences(mux_state, instance_id)?,
-        observation.tabs,
-    ))
+    Ok((mux_state, observation.tabs))
 }
 
 fn query_rex_state(instance_id: &str) -> Result<(MuxState, RexSidebarObservation)> {
@@ -139,9 +108,9 @@ fn query_rex_state(instance_id: &str) -> Result<(MuxState, RexSidebarObservation
         active_pane_ids: observation.active_pane_ids.clone(),
         window_pane_counts: observation.window_pane_counts.clone(),
         server_boot_id: observation.boot_id.clone(),
-        ..MuxState::default()
+        prefs: file_preferences(instance_id)?,
     };
-    Ok((with_file_preferences(mux_state, instance_id)?, observation))
+    Ok((mux_state, observation))
 }
 
 /// What a backend whose sidebars the daemon places needs besides `MuxState`.
@@ -413,106 +382,6 @@ impl SocketServer {
         let mut state = self.state.lock().unwrap();
         state.clients.retain(stream_is_connected);
         state.clients.len()
-    }
-}
-
-/// Read the sidebar layout mode from tmux global, falling back to settings.json, then config.
-fn read_sidebar_layout_mode(
-    config: &Config,
-    tmux_value: Option<&str>,
-) -> Option<SidebarLayoutMode> {
-    match tmux_value.map(str::trim) {
-        Some("tiles") => return Some(SidebarLayoutMode::Tiles),
-        Some("compact") => return Some(SidebarLayoutMode::Compact),
-        _ => {}
-    }
-
-    // Fall back to persisted setting (user toggled layout in a previous tmux session)
-    if let Ok(store) = StateStore::new()
-        && let Ok(settings) = store.load_settings()
-    {
-        match settings.sidebar_layout.as_deref() {
-            Some("tiles") => return Some(SidebarLayoutMode::Tiles),
-            Some("compact") => return Some(SidebarLayoutMode::Compact),
-            _ => {}
-        }
-    }
-
-    // Fall back to config file
-    match config.sidebar.layout.as_deref() {
-        Some("tiles") => return Some(SidebarLayoutMode::Tiles),
-        Some("compact") => return Some(SidebarLayoutMode::Compact),
-        _ => {}
-    }
-
-    None
-}
-
-/// Read the sidebar filter mode from tmux global, falling back to settings.json.
-fn read_sidebar_filter_mode(tmux_value: Option<&str>) -> SidebarFilterMode {
-    if let Some(value) = tmux_value {
-        return SidebarFilterMode::from_str(value);
-    }
-
-    // Fall back to persisted setting
-    if let Ok(store) = StateStore::new()
-        && let Ok(settings) = store.load_settings()
-        && let Some(ref mode) = settings.sidebar_filter
-    {
-        return SidebarFilterMode::from_str(mode);
-    }
-
-    SidebarFilterMode::default()
-}
-
-/// Read the sidebar grouping from the tmux global override, falling back to
-/// settings.json and then to the configured grouping. The override is what the
-/// `t` key and `workmux sidebar group` write, so every client agrees.
-fn read_sidebar_group_by(
-    cfg: &Config,
-    tmux_value: Option<&str>,
-) -> Option<crate::config::SidebarGroupBy> {
-    if let Some(value) = tmux_value {
-        return super::parse_sidebar_group_by(value).unwrap_or(cfg.sidebar.group_by());
-    }
-
-    if let Ok(store) = StateStore::new()
-        && let Ok(settings) = store.load_settings()
-        && let Some(ref mode) = settings.sidebar_group_by
-    {
-        return super::parse_sidebar_group_by(mode).unwrap_or(cfg.sidebar.group_by());
-    }
-
-    cfg.sidebar.group_by()
-}
-
-/// Group labels the user expanded, from the tmux global option. Labels are
-/// tab separated because a project or session name can contain spaces.
-fn read_expanded_groups(tmux_value: Option<&str>) -> Vec<String> {
-    tmux_value
-        .map(|value| {
-            value
-                .split('\t')
-                .map(str::trim)
-                .filter(|label| !label.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Read pane IDs manually marked as sleeping from the tmux global option.
-fn read_sleeping_panes(tmux_value: Option<&str>) -> HashSet<String> {
-    tmux_value
-        .map(|value| value.split_whitespace().map(String::from).collect())
-        .unwrap_or_default()
-}
-
-fn read_sidebar_position(config: &Config, tmux_value: Option<&str>) -> SidebarPosition {
-    match tmux_value.map(str::trim) {
-        Some("top") => SidebarPosition::Top,
-        Some("left") => SidebarPosition::Left,
-        _ => config.sidebar.position.unwrap_or_default(),
     }
 }
 
@@ -2602,11 +2471,10 @@ pub fn run() -> Result<()> {
             ) = {
                 let cfg = config.lock().unwrap();
                 (
-                    read_sidebar_position(&cfg, tmux_state.position.as_deref()),
-                    read_sidebar_layout_mode(&cfg, tmux_state.layout.as_deref())
-                        .unwrap_or_default(),
+                    tmux_state.prefs.position_or(&cfg),
+                    tmux_state.prefs.layout_mode(&cfg),
                     cfg.sidebar.sort.unwrap_or_default(),
-                    read_sidebar_group_by(&cfg, tmux_state.group_by.as_deref()),
+                    tmux_state.prefs.grouping.resolve(cfg.sidebar.group_by()),
                     cfg.sidebar.collapse_stale(),
                     cfg.stale_after_secs(),
                     cfg.sidebar.git_status(),
@@ -2629,16 +2497,16 @@ pub fn run() -> Result<()> {
                     now_ts,
                     position,
                     layout_mode,
-                    filter_mode: read_sidebar_filter_mode(tmux_state.filter.as_deref()),
+                    filter_mode: tmux_state.prefs.filter_mode(),
                     sort,
                     group_by,
                     collapse_stale,
                     stale_threshold_secs,
-                    expanded_groups: read_expanded_groups(tmux_state.expanded_groups.as_deref()),
+                    expanded_groups: tmux_state.prefs.expanded_groups.clone(),
                     git_statuses: snapshot_status_cache(git_status_enabled, &git_cache),
                     pr_statuses: snapshot_status_cache(git_status_enabled, &pr_cache),
                     check_statuses: snapshot_status_cache(git_status_enabled, &check_cache),
-                    sleeping_pane_ids: read_sleeping_panes(tmux_state.sleeping_panes.as_deref()),
+                    sleeping_pane_ids: tmux_state.prefs.sleeping_panes.clone(),
                 },
                 &mut inactivity_tracker,
                 &last_interrupted,
@@ -2659,7 +2527,7 @@ pub fn run() -> Result<()> {
                     &output.snapshot.agents,
                     &tmux_state.live_panes,
                     &tmux_state.active_pane_ids,
-                    super::view::is_enabled(tmux_state.views_enabled.as_deref()),
+                    tmux_state.prefs.views_enabled(),
                 );
             }
             sidebar_store.set_window_views(
@@ -5112,13 +4980,7 @@ mod tests {
                         active_pane_ids: HashSet::new(),
                         window_pane_counts: HashMap::new(),
                         server_boot_id: None,
-                        position: None,
-                        layout: None,
-                        filter: None,
-                        views_enabled: None,
-                        sleeping_panes: None,
-                        group_by: None,
-                        expanded_groups: None,
+                        prefs: Preferences::default(),
                     },
                     captured_panes: captures,
                     sort: crate::config::SidebarSort::default(),

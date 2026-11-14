@@ -381,7 +381,7 @@ struct Sizing {
 impl Sizing {
     fn new(state: &SidebarSessionState, views: &[WindowView]) -> Self {
         let config = sidebar_config(state);
-        let position = state.position.unwrap_or_default();
+        let position = state.prefs.position.unwrap_or_default();
         let configured = match position {
             SidebarPosition::Left => config.sidebar.width.is_some(),
             SidebarPosition::Top => config.sidebar.height.is_some(),
@@ -512,7 +512,7 @@ impl Executor<'_> {
 /// Bring every window in line with the scope. Callers hold the layout lock.
 pub(super) fn reconcile(instance_id: &str, obs: &RexSidebarObservation) -> Result<()> {
     let state = session_state::read(instance_id)?;
-    let position = state.position.unwrap_or_default();
+    let position = state.prefs.position.unwrap_or_default();
     let exe = exe_path()?;
     let exe_name = exe_name(&exe);
     let same_boot = obs.boot_id.is_some() && state.boot_id == obs.boot_id;

@@ -19,7 +19,7 @@ use crate::multiplexer::{AgentStatus, LivePaneSnapshot, Multiplexer, RemoteRef};
 
 pub use store::StateStore;
 pub(crate) use store::{AgentStateCache, AgentStateSource, ResurrectionAgentState};
-pub use types::{AgentState, LastDoneCycleState, PaneKey, RuntimeState};
+pub use types::{AgentState, GlobalSettings, LastDoneCycleState, PaneKey, RuntimeState};
 
 /// How a state write changes the agent's latest user prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
