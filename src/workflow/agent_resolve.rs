@@ -7,7 +7,7 @@ use crate::git;
 use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::remote::cache::WorkspaceRecord;
 use crate::state::StateStore;
-use crate::util::canon_or_self;
+use crate::util::{canon_or_self, owning_worktree};
 
 /// Parsed agent target selector.
 enum AgentSelector {
@@ -81,7 +81,15 @@ pub fn resolve_worktree_agents_from_snapshot(
             let local_result = if in_git_repo {
                 match git::find_worktree(&local_name) {
                     Ok((worktree_path, _branch)) => {
-                        Some(Ok(resolve_local_agents(agent_panes, &worktree_path)))
+                        let worktrees: Vec<_> = git::list_worktrees()?
+                            .iter()
+                            .map(|(path, _)| canon_or_self(path))
+                            .collect();
+                        Some(Ok(resolve_local_agents(
+                            agent_panes,
+                            &worktree_path,
+                            &worktrees,
+                        )))
                     }
                     Err(e) if e.downcast_ref::<git::WorktreeNotFound>().is_some() => None,
                     Err(e) => Some(Err(e)),
@@ -103,14 +111,10 @@ pub fn resolve_worktree_agents_from_snapshot(
 fn resolve_local_agents(
     agent_panes: &[AgentPane],
     worktree_path: &Path,
+    canonical_worktrees: &[PathBuf],
 ) -> (PathBuf, Vec<AgentPane>) {
-    let canon_wt_path = canon_or_self(worktree_path);
-    let matching: Vec<AgentPane> = agent_panes
-        .iter()
-        .filter(|a| {
-            let canon_agent_path = canon_or_self(&a.path);
-            canon_agent_path == canon_wt_path || canon_agent_path.starts_with(&canon_wt_path)
-        })
+    let matching = match_agents_to_worktree(agent_panes, worktree_path, canonical_worktrees)
+        .into_iter()
         .cloned()
         .collect();
     (worktree_path.to_path_buf(), matching)
@@ -325,13 +329,17 @@ pub fn resolve_agent_target(name: &str, mux: &dyn Multiplexer) -> Result<AgentTa
 pub fn match_agents_to_worktree<'a>(
     agents: &'a [AgentPane],
     worktree_path: &Path,
+    canonical_worktrees: &[PathBuf],
 ) -> Vec<&'a AgentPane> {
     let canon_wt = canon_or_self(worktree_path);
     agents
         .iter()
         .filter(|a| {
             let canon_agent = canon_or_self(&a.path);
-            canon_agent == canon_wt || canon_agent.starts_with(&canon_wt)
+            owning_worktree(
+                &canon_agent,
+                canonical_worktrees.iter().map(|path| path.as_path()),
+            ) == Some(canon_wt.as_path())
         })
         .collect()
 }
@@ -361,6 +369,36 @@ mod tests {
         let cwd = root.join("src");
         std::fs::create_dir(&cwd).unwrap();
         agent_at(&cwd, "%1")
+    }
+
+    #[test]
+    fn local_agents_exclude_nested_worktrees() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("quiver");
+        let nested = repo.join("worktrees/feature");
+        let child = linked_worktree(&repo, &nested);
+        let main = agent_at(&repo.join("src"), "%0");
+        std::fs::create_dir(repo.join("src")).unwrap();
+        let panes = [main.clone(), child.clone()];
+        let roots = [canon_or_self(&repo), canon_or_self(&nested)];
+        assert_eq!(resolve_local_agents(&panes, &repo, &roots).1, vec![main]);
+        assert_eq!(resolve_local_agents(&panes, &nested, &roots).1, vec![child]);
+    }
+
+    #[test]
+    fn matched_agents_exclude_nested_worktrees() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("quiver");
+        let nested = repo.join("worktrees/feature");
+        let child = linked_worktree(&repo, &nested);
+        let main = agent_at(&repo, "%0");
+        let panes = [main.clone(), child.clone()];
+        let roots = [canon_or_self(&repo), canon_or_self(&nested)];
+        assert_eq!(match_agents_to_worktree(&panes, &repo, &roots), vec![&main]);
+        assert_eq!(
+            match_agents_to_worktree(&panes, &nested, &roots),
+            vec![&child]
+        );
     }
 
     #[test]

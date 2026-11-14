@@ -97,6 +97,17 @@ pub fn canon_or_self(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Return the most specific canonical worktree path containing `path`.
+pub fn owning_worktree<'a>(
+    path: &Path,
+    worktrees: impl IntoIterator<Item = &'a Path>,
+) -> Option<&'a Path> {
+    worktrees
+        .into_iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
 /// Lexically normalize a path by resolving `.` and `..` components without
 /// touching the filesystem.  Unlike `canonicalize()` this works even when the
 /// target path does not exist yet.
@@ -306,6 +317,41 @@ pub fn format_elapsed_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owning_worktree_uses_the_deepest_component_match() {
+        use std::path::Path;
+        let roots = [
+            Path::new("/repo/worktrees/feature/nested"),
+            Path::new("/repo"),
+            Path::new("/repo/worktrees/feature"),
+            Path::new("/sibling"),
+        ];
+        for (path, expected) in [
+            ("/repo", Some("/repo")),
+            ("/repo/src", Some("/repo")),
+            (
+                "/repo/worktrees/feature/src",
+                Some("/repo/worktrees/feature"),
+            ),
+            (
+                "/repo/worktrees/feature/nested/src",
+                Some("/repo/worktrees/feature/nested"),
+            ),
+            ("/repo/worktrees/feature-other", Some("/repo")),
+            ("/sibling/src", Some("/sibling")),
+            ("/repo-other", None),
+        ] {
+            assert_eq!(
+                super::owning_worktree(Path::new(path), roots),
+                expected.map(Path::new)
+            );
+            assert_eq!(
+                super::owning_worktree(Path::new(path), roots.into_iter().rev()),
+                expected.map(Path::new)
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

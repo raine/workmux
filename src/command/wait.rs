@@ -67,6 +67,22 @@ pub fn run(
             None => worktree_paths.push((name.clone(), resolve_worktree_path(name, mux.as_ref())?)),
         }
     }
+    let mut canonical_worktrees = Vec::new();
+    for (_, path) in &worktree_paths {
+        if path.exists() && git::get_repo_root_if_present_in(Some(path))?.is_some() {
+            canonical_worktrees.extend(
+                git::list_worktrees_in(Some(path))?
+                    .iter()
+                    .map(|(root, _)| util::canon_or_self(root)),
+            );
+        } else {
+            // Keep polling missing registered paths and agents outside Git.
+            canonical_worktrees.push(util::canon_or_self(path));
+        }
+    }
+    canonical_worktrees.sort();
+    canonical_worktrees.dedup();
+
     let config = if remote_targets.is_empty() {
         Config::default()
     } else {
@@ -160,7 +176,8 @@ pub fn run(
                 continue;
             }
 
-            let matching = workflow::match_agents_to_worktree(&agent_panes, wt_path);
+            let matching =
+                workflow::match_agents_to_worktree(&agent_panes, wt_path, &canonical_worktrees);
 
             if !matching.is_empty() {
                 seen_agent.insert(name.clone());

@@ -11,7 +11,7 @@ use crate::multiplexer::Multiplexer;
 use crate::state::PaneKey;
 use crate::state::store::RecoveryAgentChoice;
 use crate::state::{AgentState, AgentStateSource, ResurrectionAgentState, StateStore};
-use crate::util::canon_or_self;
+use crate::util::{canon_or_self, owning_worktree};
 
 #[derive(Debug)]
 pub enum ResurrectAction {
@@ -127,9 +127,10 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
 
         // Find matching worktree using descendant path matching
         // (agent workdir may be a subdirectory of the worktree root)
+        let owner = owning_worktree(&canon_agent, wt_map.iter().map(|(path, _)| path.as_path()));
         let matched = wt_map
             .iter()
-            .find(|(canon_wt, _)| canon_agent == *canon_wt || canon_agent.starts_with(canon_wt));
+            .find(|(path, _)| Some(path.as_path()) == owner);
 
         match matched {
             Some((_canon_wt, handle)) if !git::get_worktree_attachment(handle).manages_mux() => {

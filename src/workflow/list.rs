@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, util};
 use crate::state::StateStore;
-use crate::util::canon_or_self;
+use crate::util::{canon_or_self, owning_worktree};
 use crate::{config, git, github, spinner};
 
 use super::types::{AgentStatusSummary, WorktreeInfo};
@@ -81,6 +81,12 @@ pub fn list_in(
     }
 
     let repo_key = git::get_repository_key_in(repo)?;
+
+    // Ownership must include worktrees hidden by the display filter.
+    let canonical_worktrees: Vec<_> = worktrees_data
+        .iter()
+        .map(|(path, _)| canon_or_self(path))
+        .collect();
 
     // Apply filter early before expensive operations
     let worktrees_data = filter_worktrees(worktrees_data, filter);
@@ -223,8 +229,10 @@ pub fn list_in(
             let matching_statuses: Vec<_> = agent_panes_canon
                 .iter()
                 .filter(|(canon_agent_path, _)| {
-                    *canon_agent_path == canon_wt_path
-                        || canon_agent_path.starts_with(&canon_wt_path)
+                    owning_worktree(
+                        canon_agent_path,
+                        canonical_worktrees.iter().map(|path| path.as_path()),
+                    ) == Some(canon_wt_path.as_path())
                 })
                 .filter_map(|(_, status)| *status)
                 .collect();
