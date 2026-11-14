@@ -7,7 +7,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::cmd::Cmd;
-use crate::multiplexer::{Multiplexer, TmuxBackend, create_backend, detect_backend};
+use crate::multiplexer::{LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend};
 
 use super::app::HostIdentity;
 use super::store::SidebarStore;
@@ -271,6 +271,35 @@ impl SidebarHost {
             Self::Rex { instance_id } => {
                 Ok(super::session_state::try_lock_layout(instance_id)?.map(Some))
             }
+        }
+    }
+}
+
+impl SidebarHost {
+    /// The session a pane belongs to, in the form the session filter
+    /// compares. Rex session labels need not be unique, so Rex compares IDs.
+    pub(super) fn session_key<'a>(&self, info: &'a LivePaneInfo) -> Option<&'a str> {
+        match self {
+            Self::Rex { .. } => info.session_id.as_deref(),
+            Self::Tmux(_) | Self::Zellij { .. } => info.session.as_deref(),
+        }
+    }
+
+    /// The caller's session, in `session_key` form. A Zellij server is one
+    /// session.
+    pub(super) fn current_session(&self) -> Option<String> {
+        match self {
+            Self::Tmux(tmux) => {
+                let target = super::tmux::current_window(tmux).ok()?;
+                let session = tmux
+                    .cmd()
+                    .args(&["display-message", "-p", "-t", &target, "#{session_name}"])
+                    .run_and_capture_stdout()
+                    .ok()?;
+                Some(session.trim().to_string())
+            }
+            Self::Zellij { instance_id } => Some(instance_id.clone()),
+            Self::Rex { .. } => std::env::var("REX_SESSION").ok(),
         }
     }
 }

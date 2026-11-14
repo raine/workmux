@@ -10,7 +10,7 @@ pub(super) mod resize;
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 
 use crate::config::{Config, SidebarHeight, SidebarPosition, SidebarWidth};
 
@@ -20,13 +20,13 @@ use self::panes::{
     find_sidebar_in_window, kill_all_sidebars_and_restore_layouts, kill_sidebars_in_session,
 };
 use super::app::SidebarFilterMode;
-use super::daemon_ctrl::{ensure_daemon_running, kill_daemon, signal_daemon};
+use super::daemon_ctrl::{ensure_daemon_running, kill_daemon};
 use super::host::TmuxHost;
+use super::navigation::NavigationContext;
 use super::view::WindowView;
 use super::{
-    NavAction, apply_cli_dimensions, compute_nav_target, configured_position,
-    navigation_anchor_pane, read_sidebar_filter_mode, read_sidebar_position, resolve_height_for,
-    resolve_width_for,
+    apply_cli_dimensions, configured_position, read_sidebar_filter_mode, read_sidebar_position,
+    resolve_height_for, resolve_width_for,
 };
 
 pub(super) const SIDEBAR_ROLE_VALUE: &str = "sidebar";
@@ -621,28 +621,26 @@ pub(super) fn reflow(tmux: &TmuxHost, window_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Navigate to an agent in the order the daemon publishes to tmux.
-/// Respects the sidebar filter mode: when set to "session", only navigates
-/// among agents in the current tmux session.
-pub(super) fn navigate(tmux: &TmuxHost, action: NavAction) -> Result<()> {
-    // Resolve the caller's window even if another client is focused elsewhere.
-    let current_window_id = current_window(tmux)?;
-    let current_window_id = current_window_id.as_str();
+/// What navigation needs from tmux: the caller's pane and window (even if
+/// another client is focused elsewhere) and every pane's window and session.
+pub(super) fn navigation_context(tmux: &TmuxHost) -> Result<NavigationContext> {
+    let current_window = current_window(tmux)?;
     let caller_pane = std::env::var("TMUX_PANE").ok();
-    let current_pane_id = tmux
+    let current_pane = tmux
         .cmd()
         .args(&[
             "display-message",
             "-p",
             "-t",
-            caller_pane.as_deref().unwrap_or(current_window_id),
+            caller_pane.as_deref().unwrap_or(&current_window),
             "#{pane_id}",
         ])
         .run_and_capture_stdout()
-        .unwrap_or_default();
-    let current_pane_id = current_pane_id.trim();
-    let mut pane_window_ids = HashMap::new();
-    let mut pane_session_ids = HashMap::new();
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let mut pane_windows = HashMap::new();
+    let mut pane_sessions = HashMap::new();
     let listing = tmux
         .cmd()
         .args(&[
@@ -660,63 +658,29 @@ pub(super) fn navigate(tmux: &TmuxHost, action: NavAction) -> Result<()> {
         else {
             continue;
         };
-        pane_window_ids.insert(pane.to_string(), window.to_string());
-        pane_session_ids.insert(pane.to_string(), session.to_string());
-    }
-    let current_session = tmux
-        .cmd()
-        .args(&[
-            "display-message",
-            "-p",
-            "-t",
-            current_window_id,
-            "#{session_name}",
-        ])
-        .run_and_capture_stdout()
-        .unwrap_or_default();
-    let current_session = current_session.trim();
-
-    let store = tmux.host().store();
-    let agents = store.ordered_agents();
-    let mut panes: Vec<&str> = agents.iter().map(String::as_str).collect();
-    if panes.is_empty() {
-        bail!("no sidebar agents found (is the sidebar running?)");
+        pane_windows.insert(pane.to_string(), window.to_string());
+        pane_sessions.insert(pane.to_string(), session.to_string());
     }
 
-    if let Some(view) = store.window_view(current_window_id) {
-        panes.retain(|pane| view.pane_ids.contains(*pane));
-    }
+    let host = tmux.host();
+    // An unknown caller session matches no agent.
+    let session_filter = (read_sidebar_filter_mode(&host) == SidebarFilterMode::Session)
+        .then(|| host.current_session().unwrap_or_default());
+    let store = host.store();
+    Ok(NavigationContext {
+        agents: store.ordered_agents(),
+        view: store.window_view(&current_window),
+        current_pane,
+        current_window,
+        pane_windows,
+        pane_sessions,
+        session_filter,
+    })
+}
 
-    if read_sidebar_filter_mode(&tmux.host()) == SidebarFilterMode::Session {
-        panes.retain(|pane_id| {
-            pane_session_ids
-                .get(*pane_id)
-                .is_some_and(|session| session == current_session)
-        });
-    }
-
-    if panes.is_empty() {
-        bail!("no matching agents found");
-    }
-
-    let current_anchor =
-        navigation_anchor_pane(&panes, current_pane_id, current_window_id, &pane_window_ids);
-    let current_idx =
-        current_anchor.and_then(|pane_id| panes.iter().position(|&pid| pid == pane_id));
-
-    let len = panes.len();
-    let target_idx = match &action {
-        NavAction::Jump(n) => compute_nav_target(&action, current_idx, len)
-            .ok_or_else(|| anyhow!("agent {} out of range (1-{})", n, len))?,
-        _ => compute_nav_target(&action, current_idx, len)
-            .expect("len > 0 guarantees a result for Next/Prev"),
-    };
-
-    tmux.cmd()
-        .args(&["switch-client", "-t", panes[target_idx]])
-        .run()?;
-
-    signal_daemon(&tmux.host());
+/// Switch the caller's client to a pane, across sessions.
+pub(super) fn switch_client(tmux: &TmuxHost, pane_id: &str) -> Result<()> {
+    tmux.cmd().args(&["switch-client", "-t", pane_id]).run()?;
     Ok(())
 }
 

@@ -332,7 +332,8 @@ the window's matching rules still apply.
 
 The filter also applies to agent navigation hotkeys (`next`/`prev`/`jump`), so
 `Alt+j`/`Alt+k` cycle through the current session when the session filter is
-active.
+active. Navigation skips agents whose session it can't determine, such as
+one whose pane has closed.
 
 You can also toggle the filter from the command line:
 

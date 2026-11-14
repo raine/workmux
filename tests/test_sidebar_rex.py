@@ -360,6 +360,27 @@ def test_session_scope_and_optout(rex_sidebar: RexSidebar):
     assert s.each_window_has_one_sidebar()
 
 
+def test_session_filter_jump_skips_agents_without_a_live_pane(
+    rex_sidebar: RexSidebar,
+):
+    s = rex_sidebar
+    main = s.session
+    other = s.new_session("other")
+    blocks = {w["session_id"]: w["blocks"][0]["block_id"] for w in s.windows()}
+
+    s.sidebar("filter", "session", session=main)
+    # No daemon runs, so the published agent order stays as written.
+    state = s.state()
+    state["ordered_agents"] = ["gone-block", blocks[other], blocks[main]]
+    s.state_file().write_text(json.dumps(state))
+
+    jumped = s.workmux("sidebar", "jump", "1", session=main, check=False)
+    assert jumped.returncode == 0, jumped.stderr
+    out_of_range = s.workmux("sidebar", "jump", "2", session=main, check=False)
+    assert out_of_range.returncode != 0
+    assert "out of range (1-1)" in out_of_range.stderr
+
+
 def test_window_closes_when_its_content_exits(rex_sidebar: RexSidebar):
     s = rex_sidebar
     s.sidebar("on")

@@ -1,14 +1,22 @@
 //! Sidebar entry points on backends where workmux places sidebars itself
 //! instead of through multiplexer hooks: Zellij and Rex.
 
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 
 use crate::config::{Config, SidebarHeight, SidebarPosition, SidebarWidth};
+use crate::multiplexer::Multiplexer;
 
 use super::app::HostIdentity;
+use super::app::SidebarFilterMode;
 use super::daemon_ctrl::{ensure_daemon_running, kill_daemon};
 use super::host::SidebarHost;
-use super::{apply_cli_dimensions, configured_position, rex_panes, session_state, zellij_panes};
+use super::navigation::NavigationContext;
+use super::{
+    apply_cli_dimensions, configured_position, read_sidebar_filter_mode, rex_panes, session_state,
+    zellij_panes,
+};
 
 /// Which sessions a scope change reaches.
 #[derive(Clone, Copy)]
@@ -229,4 +237,41 @@ pub(super) fn stop_after_quit(host: &SidebarHost, identity: &HostIdentity) {
         ),
         Err(error) => tracing::warn!(%error, "failed to stop sidebars"),
     }
+}
+
+/// What navigation needs from a Zellij or Rex server.
+pub(super) fn navigation_context(
+    host: &SidebarHost,
+    mux: &dyn Multiplexer,
+) -> Result<NavigationContext> {
+    let live = mux.get_all_live_pane_info()?;
+    let current_pane = mux
+        .active_pane_id()
+        .or_else(|| mux.current_pane_id())
+        .unwrap_or_default();
+    let current_window = live
+        .get(&current_pane)
+        .and_then(|info| info.window_id.clone())
+        .unwrap_or_default();
+    let pane_windows: HashMap<String, String> = live
+        .iter()
+        .filter_map(|(pane, info)| Some((pane.clone(), info.window_id.clone()?)))
+        .collect();
+    let pane_sessions: HashMap<String, String> = live
+        .iter()
+        .filter_map(|(pane, info)| Some((pane.clone(), host.session_key(info)?.to_string())))
+        .collect();
+    // An unknown caller session matches no agent.
+    let session_filter = (read_sidebar_filter_mode(host) == SidebarFilterMode::Session)
+        .then(|| host.current_session().unwrap_or_default());
+    let store = host.store();
+    Ok(NavigationContext {
+        agents: store.ordered_agents(),
+        view: store.window_view(&current_window),
+        current_pane,
+        current_window,
+        pane_windows,
+        pane_sessions,
+        session_filter,
+    })
 }
