@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::actions::Action;
+use crate::config::InputExitKey;
 
 /// Context for key handling - determines which keymap is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,10 +19,10 @@ pub enum Context {
 }
 
 /// Map a key event to an action for the given context.
-pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
+pub fn action_for_key(ctx: Context, key: KeyEvent, exit_key: InputExitKey) -> Option<Action> {
     match ctx {
         Context::DashboardNormal => dashboard_normal_key(key),
-        Context::DashboardInput => dashboard_input_key(key),
+        Context::DashboardInput => dashboard_input_key(key, exit_key),
         Context::DashboardFilter => dashboard_filter_key(key),
         Context::WorktreeNormal => worktree_normal_key(key),
         Context::WorktreeFilter => dashboard_filter_key(key),
@@ -34,7 +35,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
 fn dashboard_normal_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('?') => Some(Action::ShowHelp),
-        KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+        KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Next),
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -66,6 +67,9 @@ fn dashboard_normal_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('o') => Some(Action::OpenPr),
         KeyCode::Char('O') => Some(Action::OpenPrChecks),
         KeyCode::Char('b') => Some(Action::ShowBaseBranchPicker),
+        // Act only while the remote servers footer tip is on screen.
+        KeyCode::Char('g') => Some(Action::OpenRemoteGuide),
+        KeyCode::Char('x') => Some(Action::DismissRemoteTip),
         KeyCode::Char('X') => Some(Action::KillSelected),
         KeyCode::Char('r') => Some(Action::RemoveSelectedWorktree),
         KeyCode::Char('R') => Some(Action::StartSweep),
@@ -89,7 +93,7 @@ fn dashboard_filter_key(key: KeyEvent) -> Option<Action> {
 fn worktree_normal_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('?') => Some(Action::ShowHelp),
-        KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+        KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         KeyCode::Tab => Some(Action::SwitchTab),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::WorktreeNext),
@@ -120,9 +124,16 @@ fn worktree_normal_key(key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn dashboard_input_key(key: KeyEvent) -> Option<Action> {
+fn dashboard_input_key(key: KeyEvent, exit_key: InputExitKey) -> Option<Action> {
+    let (code, modifiers) = match exit_key {
+        InputExitKey::Escape => (KeyCode::Esc, KeyModifiers::NONE),
+        InputExitKey::Ctrl(letter) => (KeyCode::Char(letter), KeyModifiers::CONTROL),
+    };
+    if key.code == code && key.modifiers == modifiers {
+        return Some(Action::ExitInputMode);
+    }
     match key.code {
-        KeyCode::Esc => Some(Action::ExitInputMode),
+        KeyCode::Esc => Some(Action::SendKey("Escape".to_string())),
         KeyCode::Enter => Some(Action::SendKey("Enter".to_string())),
         KeyCode::Backspace => Some(Action::SendKey("BSpace".to_string())),
         KeyCode::Tab => Some(Action::SendKey("Tab".to_string())),
@@ -195,11 +206,11 @@ fn comment_key(key: KeyEvent) -> Option<Action> {
 }
 
 /// Get help rows for a context: (key, description) pairs.
-pub fn help_rows(ctx: Context) -> Vec<(&'static str, &'static str)> {
-    match ctx {
+pub fn help_rows(ctx: Context, exit_key: InputExitKey) -> Vec<(String, &'static str)> {
+    let rows = match ctx {
         Context::DashboardNormal => vec![
             ("?", "Show help"),
-            ("q/Esc", "Quit"),
+            ("q", "Quit"),
             ("j/k/C-n/C-p", "Navigate up/down"),
             ("Enter", "Jump to agent"),
             ("Tab", "Switch view"),
@@ -233,7 +244,7 @@ pub fn help_rows(ctx: Context) -> Vec<(&'static str, &'static str)> {
         ],
         Context::WorktreeNormal => vec![
             ("?", "Show help"),
-            ("q/Esc", "Quit"),
+            ("q", "Quit"),
             ("j/k/C-n/C-p", "Navigate up/down"),
             ("Enter", "Jump to worktree"),
             ("Tab", "Switch to agents"),
@@ -281,7 +292,17 @@ pub fn help_rows(ctx: Context) -> Vec<(&'static str, &'static str)> {
             ("Enter", "Send comment"),
             ("<type>", "Input text"),
         ],
-    }
+    };
+    rows.into_iter()
+        .map(|(key, description)| {
+            let key = if ctx == Context::DashboardInput && key == "Esc" {
+                exit_key.to_string()
+            } else {
+                key.to_string()
+            };
+            (key, description)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -289,15 +310,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_tip_keys_belong_to_the_agents_view() {
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(
+            dashboard_normal_key(key('g')),
+            Some(Action::OpenRemoteGuide)
+        );
+        assert_eq!(
+            dashboard_normal_key(key('x')),
+            Some(Action::DismissRemoteTip)
+        );
+        assert_eq!(dashboard_normal_key(key('X')), Some(Action::KillSelected));
+        assert_eq!(worktree_normal_key(key('g')), None);
+        assert_eq!(worktree_normal_key(key('x')), None);
+    }
+
+    #[test]
+    fn configured_exit_key_is_consumed_and_escape_is_forwarded() {
+        let exit_key = InputExitKey::Ctrl('q');
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+                Action::ExitInputMode,
+            ),
+            (
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+                Action::SendKey("q".into()),
+            ),
+            (
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                Action::SendKey("q".into()),
+            ),
+            (
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Action::SendKey("Escape".into()),
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                Action::SendKey("Enter".into()),
+            ),
+        ] {
+            assert_eq!(
+                action_for_key(
+                    Context::DashboardInput,
+                    KeyEvent::new(code, modifiers),
+                    exit_key
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            action_for_key(
+                Context::DashboardFilter,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                exit_key
+            ),
+            Some(Action::ClearFilter),
+        );
+    }
+
+    #[test]
+    fn input_help_shows_configured_exit_key() {
+        assert_eq!(
+            help_rows(Context::DashboardInput, InputExitKey::Ctrl('q'))[0],
+            ("Ctrl+q".into(), "Exit input mode")
+        );
+    }
+
+    #[test]
     fn test_each_context_has_help_rows() {
-        assert!(!help_rows(Context::DashboardNormal).is_empty());
-        assert!(!help_rows(Context::DashboardInput).is_empty());
-        assert!(!help_rows(Context::DashboardFilter).is_empty());
-        assert!(!help_rows(Context::WorktreeNormal).is_empty());
-        assert!(!help_rows(Context::WorktreeFilter).is_empty());
-        assert!(!help_rows(Context::DiffNormal).is_empty());
-        assert!(!help_rows(Context::Patch).is_empty());
-        assert!(!help_rows(Context::Comment).is_empty());
+        assert!(!help_rows(Context::DashboardNormal, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::DashboardInput, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::DashboardFilter, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::WorktreeNormal, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::WorktreeFilter, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::DiffNormal, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::Patch, InputExitKey::default()).is_empty());
+        assert!(!help_rows(Context::Comment, InputExitKey::default()).is_empty());
     }
 
     #[test]
@@ -312,8 +406,8 @@ mod tests {
             Context::Patch,
             Context::Comment,
         ] {
-            let rows = help_rows(ctx);
-            let keys: Vec<_> = rows.iter().map(|(k, _)| *k).collect();
+            let rows = help_rows(ctx, InputExitKey::default());
+            let keys: Vec<_> = rows.iter().map(|(k, _)| k.as_str()).collect();
             let mut seen = std::collections::HashSet::new();
             for key in &keys {
                 assert!(
@@ -327,21 +421,39 @@ mod tests {
     #[test]
     fn test_dashboard_quit_keys() {
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
 
-        assert_eq!(
-            action_for_key(Context::DashboardNormal, q),
-            Some(Action::Quit)
-        );
-        assert_eq!(
-            action_for_key(Context::DashboardNormal, esc),
-            Some(Action::Quit)
-        );
-        assert_eq!(
-            action_for_key(Context::DashboardNormal, ctrl_c),
-            Some(Action::Quit)
-        );
+        for ctx in [Context::DashboardNormal, Context::WorktreeNormal] {
+            for key in [q, ctrl_c] {
+                assert_eq!(
+                    action_for_key(ctx, key, InputExitKey::default()),
+                    Some(Action::Quit),
+                    "{ctx:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_escape_dismisses_modes_without_quitting() {
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        for (ctx, expected) in [
+            (Context::DashboardNormal, None),
+            (Context::WorktreeNormal, None),
+            (Context::DashboardInput, Some(Action::ExitInputMode)),
+            (Context::DashboardFilter, Some(Action::ClearFilter)),
+            (Context::WorktreeFilter, Some(Action::ClearFilter)),
+            (Context::DiffNormal, Some(Action::CloseDiff)),
+            (Context::Patch, Some(Action::ExitPatchMode)),
+            (Context::Comment, Some(Action::CancelComment)),
+        ] {
+            assert_eq!(
+                action_for_key(ctx, esc, InputExitKey::default()),
+                expected,
+                "{ctx:?}"
+            );
+        }
     }
 
     #[test]
@@ -350,11 +462,11 @@ mod tests {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
 
         assert_eq!(
-            action_for_key(Context::DiffNormal, q),
+            action_for_key(Context::DiffNormal, q, InputExitKey::default()),
             Some(Action::CloseDiff)
         );
         assert_eq!(
-            action_for_key(Context::DiffNormal, esc),
+            action_for_key(Context::DiffNormal, esc, InputExitKey::default()),
             Some(Action::CloseDiff)
         );
     }
@@ -363,7 +475,7 @@ mod tests {
     fn test_patch_stage_key() {
         let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(
-            action_for_key(Context::Patch, y),
+            action_for_key(Context::Patch, y, InputExitKey::default()),
             Some(Action::StageAndNext)
         );
     }
@@ -372,7 +484,7 @@ mod tests {
     fn test_scope_filter_key() {
         let shift_f = KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
         assert_eq!(
-            action_for_key(Context::DashboardNormal, shift_f),
+            action_for_key(Context::DashboardNormal, shift_f, InputExitKey::default()),
             Some(Action::ToggleScopeFilter)
         );
     }

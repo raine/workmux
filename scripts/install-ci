@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly binary_name="workmux"
+readonly archive_name="workmux-darwin-arm64.tar.gz"
+readonly workflow_file="install.yml"
+
+tmp_dir=""
+staged_binary=""
+
+cleanup() {
+    if [[ -n "$tmp_dir" ]]; then
+        rm -rf "$tmp_dir"
+    fi
+    if [[ -n "$staged_binary" ]]; then
+        rm -f "$staged_binary"
+    fi
+}
+
+fail() {
+    printf 'Error: %s\n' "$1" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+find_run_id() {
+    local repo=$1
+    local request_id=$2
+    local run_id=""
+
+    for _ in {1..30}; do
+        run_id=$(gh run list \
+            --repo "$repo" \
+            --workflow "$workflow_file" \
+            --event workflow_dispatch \
+            --limit 20 \
+            --json databaseId,displayTitle \
+            --jq ".[] | select(.displayTitle == \"Install build $request_id\") | .databaseId" \
+            | head -n 1)
+        if [[ -n "$run_id" ]]; then
+            printf '%s\n' "$run_id"
+            return 0
+        fi
+        sleep 2
+    done
+
+    return 1
+}
+
+verify_checksum() {
+    local directory=$1
+    local checksum_name="${archive_name%.tar.gz}.sha256"
+
+    if command -v shasum >/dev/null 2>&1; then
+        (cd "$directory" && shasum -a 256 -c "$checksum_name" >/dev/null)
+    elif command -v sha256sum >/dev/null 2>&1; then
+        (cd "$directory" && sha256sum -c "$checksum_name" >/dev/null)
+    else
+        fail "shasum or sha256sum is required"
+    fi
+}
+
+main() {
+    local script_dir
+    local repo_root
+    local branch
+    local commit_sha
+    local repo
+    local request_id
+    local dispatch_output
+    local run_url
+    local run_id
+    local recorded_sha
+    local extracted_dir
+    local install_root
+    local install_dir
+    local target_binary
+
+    require_command gh
+    require_command git
+    require_command tar
+
+    [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] \
+        || fail "CI installation supports Apple silicon macOS"
+
+    script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    repo_root=$(git -C "$script_dir" rev-parse --show-toplevel)
+
+    if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
+        fail "working tree must be clean so CI builds the exact local state"
+    fi
+
+    branch=$(git -C "$repo_root" symbolic-ref --quiet --short HEAD) \
+        || fail "HEAD must be attached to a branch"
+    commit_sha=$(git -C "$repo_root" rev-parse HEAD)
+    [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || fail "failed to resolve the current commit"
+
+    repo=$(cd "$repo_root" && gh repo view --json nameWithOwner --jq .nameWithOwner)
+    [[ -n "$repo" ]] || fail "failed to resolve the GitHub repository"
+
+    printf 'Pushing %s at %.12s to origin...\n' "$branch" "$commit_sha"
+    git -C "$repo_root" push --no-verify origin "HEAD:refs/heads/$branch"
+
+    request_id="${commit_sha}-$$-$(date +%s)"
+    printf 'Building %s at %.12s on GitHub...\n' "$binary_name" "$commit_sha"
+    dispatch_output=$(gh workflow run "$workflow_file" \
+        --repo "$repo" \
+        --ref main \
+        --raw-field "commit_sha=$commit_sha" \
+        --raw-field "request_id=$request_id")
+    run_url=$(printf '%s\n' "$dispatch_output" \
+        | grep -Eo 'https://[^[:space:]]+/actions/runs/[0-9]+' \
+        | tail -n 1 || true)
+
+    if [[ -n "$run_url" ]]; then
+        run_id=${run_url##*/}
+    else
+        run_id=$(find_run_id "$repo" "$request_id") \
+            || fail "could not identify the dispatched workflow run"
+        run_url="https://github.com/$repo/actions/runs/$run_id"
+    fi
+
+    printf '%s\n' "$run_url"
+    gh run watch "$run_id" --repo "$repo" --exit-status --compact --interval 10
+
+    tmp_dir=$(mktemp -d)
+    trap cleanup EXIT
+    gh run download "$run_id" \
+        --repo "$repo" \
+        --name install-binary \
+        --dir "$tmp_dir"
+
+    recorded_sha=$(<"$tmp_dir/commit-sha")
+    [[ "$recorded_sha" == "$commit_sha" ]] \
+        || fail "artifact commit $recorded_sha does not match requested commit $commit_sha"
+
+    verify_checksum "$tmp_dir"
+    printf 'Checksum verified.\n'
+
+    extracted_dir="$tmp_dir/extracted"
+    mkdir "$extracted_dir"
+    tar -xzf "$tmp_dir/$archive_name" -C "$extracted_dir"
+    [[ -x "$extracted_dir/$binary_name" ]] || fail "artifact does not contain $binary_name"
+
+    install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}
+    install_dir="$install_root/bin"
+    target_binary="$install_dir/$binary_name"
+    staged_binary="$install_dir/.${binary_name}.install-ci.$$"
+    mkdir -p "$install_dir"
+    install -m 0755 "$extracted_dir/$binary_name" "$staged_binary"
+    mv -f "$staged_binary" "$target_binary"
+    staged_binary=""
+
+    "$target_binary" --version
+    printf 'Installed %s from %.12s to %s.\n' "$binary_name" "$commit_sha" "$target_binary"
+}
+
+main "$@"

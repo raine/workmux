@@ -6,6 +6,8 @@ use crate::multiplexer::Multiplexer;
 use crate::{config, git};
 use tracing::debug;
 
+const AUTO_BASE_BRANCH: &str = "auto";
+
 /// Shared context for workflow operations
 ///
 /// This struct centralizes pre-flight checks and holds essential data
@@ -26,7 +28,68 @@ pub struct WorkflowContext {
     pub config_source_dir: PathBuf,
 }
 
+fn resolve_main_branch(config: &config::Config, repo_path: &Path) -> Result<String> {
+    if let Some(ref branch) = config.main_branch {
+        Ok(branch.clone())
+    } else {
+        git::get_default_branch_in(Some(repo_path)).context("Failed to determine the main branch")
+    }
+}
+
+pub fn resolve_configured_base_branch(
+    config: &config::Config,
+    repo_path: &Path,
+) -> Result<Option<String>> {
+    let Some(base) = config
+        .base_branch
+        .as_deref()
+        .filter(|base| !base.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if base == AUTO_BASE_BRANCH {
+        resolve_main_branch(config, repo_path).map(Some)
+    } else {
+        Ok(Some(base.to_string()))
+    }
+}
+
+fn paths_identify_same_worktree(path: &Path, main_worktree_root: &Path) -> bool {
+    match (path.canonicalize(), main_worktree_root.canonicalize()) {
+        (Ok(canonical_path), Ok(canonical_main)) => canonical_path == canonical_main,
+        _ => path == main_worktree_root,
+    }
+}
+
 impl WorkflowContext {
+    /// Directory new worktrees of this repository go in: `worktree_dir`, or
+    /// `<project>__worktrees` beside the main worktree.
+    pub fn worktree_base_dir(&self) -> Result<PathBuf> {
+        if let Some(ref worktree_dir) = self.config.worktree_dir {
+            let project_name = if worktree_dir.contains(crate::util::PROJECT_PLACEHOLDER) {
+                git::config_project_name_in(Some(&self.execution_dir))?
+            } else {
+                String::new()
+            };
+            return crate::util::expand_worktree_dir(
+                worktree_dir,
+                &self.main_worktree_root,
+                &project_name,
+            );
+        }
+        let project_name = self
+            .main_worktree_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Could not determine project name"))?;
+        Ok(self
+            .main_worktree_root
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine parent directory"))?
+            .join(format!("{}__worktrees", project_name)))
+    }
+
     /// Create a new workflow context
     ///
     /// Performs the git repository check and gathers all commonly needed data.
@@ -65,12 +128,7 @@ impl WorkflowContext {
         let git_common_dir = git::get_git_common_dir_in(Some(&execution_dir))
             .context("Could not find the git common directory")?;
 
-        let main_branch = if let Some(ref branch) = config.main_branch {
-            branch.clone()
-        } else {
-            git::get_default_branch_in(Some(&execution_dir))
-                .context("Failed to determine the main branch")?
-        };
+        let main_branch = resolve_main_branch(&config, &execution_dir)?;
 
         let prefix = config.window_prefix().to_string();
 
@@ -102,6 +160,11 @@ impl WorkflowContext {
             config_rel_dir,
             config_source_dir,
         })
+    }
+
+    /// Return whether a path identifies the main worktree.
+    pub fn is_main_worktree(&self, path: &Path) -> bool {
+        paths_identify_same_worktree(path, &self.main_worktree_root)
     }
 
     /// Ensure the terminal multiplexer is running, returning an error if not
@@ -141,5 +204,42 @@ impl WorkflowContext {
                 self.main_worktree_root.display()
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paths_identify_same_worktree;
+    use tempfile::tempdir;
+
+    #[test]
+    fn main_worktree_path_comparison_handles_existing_and_missing_paths() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+
+        assert!(paths_identify_same_worktree(&main, &main));
+        assert!(!paths_identify_same_worktree(&sibling, &main));
+
+        let missing = temp.path().join("missing");
+        assert!(paths_identify_same_worktree(&missing, &missing));
+        assert!(!paths_identify_same_worktree(
+            &temp.path().join("other-missing"),
+            &missing
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn main_worktree_path_comparison_resolves_symlinks() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&main).unwrap();
+        std::os::unix::fs::symlink(&main, &alias).unwrap();
+
+        assert!(paths_identify_same_worktree(&alias, &main));
     }
 }

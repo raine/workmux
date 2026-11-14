@@ -1,7 +1,7 @@
 {
   "name": "workmux-status",
   "description": "Display Claude agent status in tmux window names via workmux",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "raine"
   },
@@ -9,6 +9,17 @@
   "license": "MIT",
   "keywords": ["tmux", "workmux", "status", "agent"],
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "workmux register-agent"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

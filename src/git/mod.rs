@@ -4,7 +4,9 @@ mod config_lock;
 mod merge;
 mod remote;
 mod repo;
+mod security;
 mod status;
+mod status_cache;
 mod types;
 mod worktree;
 
@@ -14,6 +16,8 @@ pub use config_lock::*;
 pub use merge::*;
 pub use remote::*;
 pub use repo::*;
+pub use security::*;
 pub use status::*;
+pub use status_cache::GitStatusCache;
 pub use types::*;
 pub use worktree::*;

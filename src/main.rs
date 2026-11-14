@@ -1,13 +1,18 @@
 mod agent_display;
+mod agent_error;
 mod agent_identity;
 mod agent_setup;
+mod agent_staleness;
 mod claude;
 mod cli;
 mod cmd;
 mod command;
 mod config;
+mod creation_time;
+mod frozen_config;
 mod git;
 mod github;
+mod gitlab;
 mod llm;
 mod logger;
 mod markdown;
@@ -15,6 +20,7 @@ mod multiplexer;
 mod naming;
 mod nerdfont;
 mod prompt;
+mod remote;
 mod sandbox;
 mod shell;
 mod skills;
@@ -36,8 +42,10 @@ use tracing::{error, info};
 fn main() -> Result<()> {
     logger::init()?;
     let context = LogContext::current();
+    let args = std::env::args().collect::<Vec<_>>();
+    let deferred_cleanup_worker = args.get(1).is_some_and(|arg| arg == "_deferred-cleanup");
     info!(
-        args = ?std::env::args().collect::<Vec<_>>(),
+        args = ?args,
         cwd = ?context.cwd,
         tmux_pane = ?context.tmux_pane,
         "workmux start"
@@ -53,7 +61,13 @@ fn main() -> Result<()> {
             Ok(result)
         }
         Err(err) => {
-            error!(error = ?err, "workmux failed");
+            if !deferred_cleanup_worker {
+                error!(error = ?err, "workmux failed");
+            }
+            if let Some(kind) = agent_error::kind_of(&err) {
+                eprintln!("Error: {}: {err:#}", kind.name());
+                std::process::exit(kind.exit_code());
+            }
             Err(err)
         }
     }

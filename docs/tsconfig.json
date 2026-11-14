@@ -1,17 +1,3 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "jsx": "preserve",
-    "noEmit": true,
-    "types": ["node"],
-    "skipLibCheck": true
-  },
-  "include": [
-    ".vitepress/**/*.ts",
-    ".vitepress/**/*.vue",
-    ".vitepress/**/*.d.ts"
-  ]
+  "extends": "astro/tsconfigs/strict"
 }

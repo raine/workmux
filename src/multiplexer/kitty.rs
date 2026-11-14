@@ -24,9 +24,7 @@ use super::util;
 #[derive(Debug, Deserialize)]
 struct KittyProcess {
     pid: u32,
-    #[allow(dead_code)]
-    cwd: String,
-    cmdline: Vec<String>,
+    cmdline: Option<Vec<String>>,
 }
 
 /// Kitty window (= workmux pane) from `kitten @ ls`
@@ -103,6 +101,16 @@ impl KittyBackend {
         Cmd::new("kitten").arg("@")
     }
 
+    fn paste_text_args(pane_id: &str, content: &str) -> Vec<String> {
+        vec![
+            "send-text".into(),
+            "--match".into(),
+            format!("id:{pane_id}"),
+            "--bracketed-paste=enable".into(),
+            content.into(),
+        ]
+    }
+
     /// Query all windows/tabs/panes as flat list.
     fn list_panes(&self) -> Result<Vec<FlatPane>> {
         let output = self
@@ -111,8 +119,12 @@ impl KittyBackend {
             .run_and_capture_stdout()
             .context("Failed to list kitty panes")?;
 
+        Self::parse_panes(&output)
+    }
+
+    fn parse_panes(output: &str) -> Result<Vec<FlatPane>> {
         let os_windows: Vec<KittyOsWindow> =
-            serde_json::from_str(&output).context("Failed to parse kitty ls output")?;
+            serde_json::from_str(output).context("Failed to parse kitty ls output")?;
 
         let mut panes = Vec::new();
         for os_win in os_windows {
@@ -127,7 +139,7 @@ impl KittyBackend {
                     // agent on the next check.
                     let fg = win.foreground_processes.iter().min_by_key(|p| p.pid);
                     let foreground_command = fg.and_then(|p| {
-                        p.cmdline.first().map(|c| {
+                        p.cmdline.as_ref()?.first().map(|c| {
                             Path::new(c)
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
@@ -222,6 +234,52 @@ impl KittyBackend {
         Ok(())
     }
 
+    fn split_pane_args(
+        target_pane_id: &str,
+        direction: SplitDirection,
+        cwd: &Path,
+        percentage: Option<u8>,
+        command: Option<&str>,
+    ) -> Result<Vec<String>> {
+        // kitty's naming refers to the split line orientation, opposite of tmux:
+        //   hsplit = horizontal divider = top/bottom panes
+        //   vsplit = vertical divider   = left/right panes
+        let location_arg = match direction {
+            SplitDirection::Horizontal => "vsplit",
+            SplitDirection::Vertical => "hsplit",
+            SplitDirection::Stacked => {
+                return Err(anyhow!(
+                    "split: stacked is only supported by the Zellij backend"
+                ));
+            }
+        };
+
+        let target = format!("id:{}", target_pane_id);
+        let mut args = vec![
+            "launch".to_string(),
+            "--location".to_string(),
+            location_arg.to_string(),
+            "--match".to_string(),
+            target.clone(),
+            "--next-to".to_string(),
+            target,
+            "--cwd".to_string(),
+            cwd.to_string_lossy().into_owned(),
+        ];
+
+        if let Some(percentage) = percentage {
+            args.push("--bias".to_string());
+            args.push(percentage.to_string());
+        }
+
+        // Pass command as separate argv tokens for kitten @ launch
+        if let Some(command) = command {
+            args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
+        }
+
+        Ok(args)
+    }
+
     /// Internal split pane implementation.
     fn split_pane_internal(
         &self,
@@ -229,36 +287,11 @@ impl KittyBackend {
         direction: SplitDirection,
         cwd: &Path,
         _size: Option<u16>,
-        _percentage: Option<u8>,
+        percentage: Option<u8>,
         command: Option<&str>,
     ) -> Result<String> {
-        // kitty's naming refers to the split line orientation, opposite of tmux:
-        //   hsplit = horizontal divider = top/bottom panes
-        //   vsplit = vertical divider   = left/right panes
-        let location_arg = match direction {
-            SplitDirection::Horizontal => "vsplit",
-            SplitDirection::Vertical => "hsplit",
-        };
-
-        let cwd_str = cwd.to_string_lossy();
-        let match_arg = format!("id:{}", target_pane_id);
-
-        let mut args = vec![
-            "launch",
-            "--location",
-            location_arg,
-            "--match",
-            &match_arg,
-            "--cwd",
-            &*cwd_str,
-        ];
-
-        // Pass command as separate argv tokens for kitten @ launch
-        if let Some(cmd) = command {
-            args.push("sh");
-            args.push("-c");
-            args.push(cmd);
-        }
+        let args = Self::split_pane_args(target_pane_id, direction, cwd, percentage, command)?;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let output = self
             .kitten_cmd()
@@ -589,14 +622,9 @@ impl Multiplexer for KittyBackend {
 
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()> {
         // Use bracketed paste mode
+        let args = Self::paste_text_args(pane_id, content);
         self.kitten_cmd()
-            .args(&[
-                "send-text",
-                "--match",
-                &format!("id:{}", pane_id),
-                "--bracketed-paste",
-                content,
-            ])
+            .args(&args.iter().map(String::as_str).collect::<Vec<_>>())
             .run()
             .context("Failed to paste content to pane")?;
 
@@ -677,6 +705,13 @@ impl Multiplexer for KittyBackend {
         std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| "default".to_string())
     }
 
+    fn resolve_instance_id(&self) -> Result<String> {
+        std::env::var("KITTY_LISTEN_ON")
+            .ok()
+            .filter(|instance| !instance.trim().is_empty())
+            .ok_or_else(|| anyhow!("KITTY_LISTEN_ON is required to resolve the Kitty instance"))
+    }
+
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
         // Parse pane ID, returning None if it's not a valid number
         let pane_id_num: u64 = match pane_id.parse() {
@@ -724,8 +759,119 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paste_text_args_set_mode_and_preserve_content() {
+        for content in ["first line\nsecond line", "single-line Codex prompt"] {
+            assert_eq!(
+                KittyBackend::paste_text_args("42", content),
+                [
+                    "send-text",
+                    "--match",
+                    "id:42",
+                    "--bracketed-paste=enable",
+                    content,
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn test_kitty_backend_name() {
         let backend = KittyBackend::new();
         assert_eq!(backend.name(), "kitty");
+    }
+
+    #[test]
+    fn parse_panes_accepts_null_foreground_process_metadata() {
+        let output = r#"[{
+            "id": 1,
+            "is_focused": true,
+            "tabs": [{
+                "id": 2,
+                "title": "workmux:test",
+                "is_active": true,
+                "is_focused": true,
+                "windows": [{
+                    "id": 42,
+                    "title": "shell",
+                    "cwd": "/tmp/worktree",
+                    "pid": 100,
+                    "is_focused": true,
+                    "is_active": true,
+                    "foreground_processes": [{
+                        "pid": 123,
+                        "cwd": null,
+                        "cmdline": null
+                    }]
+                }]
+            }]
+        }]"#;
+
+        let panes = KittyBackend::parse_panes(output).unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].foreground_pid, Some(123));
+        assert_eq!(panes[0].foreground_command, None);
+
+        let snapshot = KittyBackend::live_pane_snapshot(panes.into_iter().next().unwrap());
+        assert_eq!(snapshot.pid, Some(123));
+        assert_eq!(snapshot.current_command.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn split_pane_args_target_pane_and_apply_percentage_bias() {
+        let args = KittyBackend::split_pane_args(
+            "42",
+            SplitDirection::Horizontal,
+            Path::new("/tmp/worktree"),
+            Some(67),
+            Some("printf 'hello world'"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "launch",
+                "--location",
+                "vsplit",
+                "--match",
+                "id:42",
+                "--next-to",
+                "id:42",
+                "--cwd",
+                "/tmp/worktree",
+                "--bias",
+                "67",
+                "sh",
+                "-c",
+                "printf 'hello world'",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_pane_args_omit_bias_and_command_when_unspecified() {
+        let args = KittyBackend::split_pane_args(
+            "7",
+            SplitDirection::Vertical,
+            Path::new("/workspace"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "launch",
+                "--location",
+                "hsplit",
+                "--match",
+                "id:7",
+                "--next-to",
+                "id:7",
+                "--cwd",
+                "/workspace",
+            ]
+        );
     }
 }

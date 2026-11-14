@@ -166,14 +166,18 @@ mod tests {
             window_name: "window".to_string(),
             pane_id: pane_id.to_string(),
             window_id: String::new(),
+            window_index: None,
             path: PathBuf::from("/repo/worktree"),
             pane_title: None,
             status: None,
             status_ts,
+            activity_ts: None,
             updated_ts,
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            prompt: None,
+            remote: None,
         }
     }
 

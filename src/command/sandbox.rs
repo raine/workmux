@@ -66,6 +66,12 @@ pub enum SandboxCommand {
         /// Root of the worktree for mounting (defaults to worktree path)
         #[arg(long)]
         worktree_root: Option<PathBuf>,
+        /// Run for a remote node rooted here (set by `workmux node`)
+        #[arg(long, hide = true, requires = "node_workspace")]
+        node_root: Option<PathBuf>,
+        /// Workspace id on that node
+        #[arg(long, hide = true, requires = "node_root")]
+        node_workspace: Option<String>,
         /// Command and arguments to run inside the sandbox
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -123,6 +129,7 @@ fn resolve_agent(config: &Config) -> &'static str {
 
 fn run_agent(command: Vec<String>) -> Result<()> {
     let config = Config::load(None)?;
+    sandbox::notice::show_once();
 
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
@@ -142,7 +149,7 @@ fn run_agent(command: Vec<String>) -> Result<()> {
         command
     };
 
-    let exit_code = super::sandbox_run::run(cwd, Some(worktree_root), agent_command)?;
+    let exit_code = super::sandbox_run::run(cwd, Some(worktree_root), agent_command, None)?;
     std::process::exit(exit_code);
 }
 
@@ -154,10 +161,13 @@ pub fn run(args: SandboxArgs) -> Result<()> {
         SandboxCommand::Run {
             worktree,
             worktree_root,
+            node_root,
+            node_workspace,
             command,
         } => {
             debug!(worktree = %worktree.display(), ?worktree_root, ?command, "sandbox run");
-            let exit_code = super::sandbox_run::run(worktree, worktree_root, command)?;
+            let node = node_root.zip(node_workspace);
+            let exit_code = super::sandbox_run::run(worktree, worktree_root, command, node)?;
             std::process::exit(exit_code);
         }
         SandboxCommand::InstallDev {
@@ -924,6 +934,7 @@ fn run_shell(exec: bool, command: Vec<String>) -> Result<()> {
     use crate::config::SandboxBackend;
 
     let config = Config::load(None)?;
+    sandbox::notice::show_once();
 
     match config.sandbox.backend() {
         SandboxBackend::Container => run_shell_container(exec, command, &config),
@@ -1001,7 +1012,8 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
         // Start proxy if network deny mode is active
         let proxy = if network_deny {
             let allowed = config.sandbox.network.allowed_domain_rules();
-            let proxy = NetworkProxy::bind(&allowed)?;
+            let max_connections = config.sandbox.network.max_connections();
+            let proxy = NetworkProxy::bind(&allowed, max_connections)?;
             let proxy_port = proxy.port();
             let proxy_token = proxy.token().to_string();
             let handle = proxy.spawn();
@@ -1012,7 +1024,7 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
 
         // Build env vars (owned, then borrowed -- same pattern as sandbox_run)
         let rpc_host = config.sandbox.resolved_rpc_host();
-        let mut owned_envs: Vec<(String, String)> = Vec::new();
+        let mut owned_envs = super::sandbox_run::git_user_config_envs(&worktree_root);
 
         if let Some((proxy_port, ref proxy_token, _)) = proxy {
             owned_envs.extend(crate::sandbox::proxy_env_vars(
@@ -1026,6 +1038,8 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        let runtime = config.sandbox.runtime();
+        sandbox::validate_git_metadata_boundary(runtime)?;
 
         let mut docker_args = sandbox::build_docker_run_args(
             &shell_cmd,
@@ -1042,7 +1056,6 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
         docker_args.insert(1, "--name".to_string());
         docker_args.insert(2, format!("wm-shell-{}", std::process::id()));
 
-        let runtime = config.sandbox.runtime();
         let runtime_bin = runtime.binary_name();
         let runtime_display = runtime.display_name();
         let redacted_args: Vec<_> = docker_args
@@ -1088,11 +1101,17 @@ fn run_shell_lima(exec: bool, command: Vec<String>, config: &Config) -> Result<(
 
     debug!(vm = %vm_name, cmd = %shell_cmd, "starting Lima shell");
 
-    let status = Command::new("limactl")
+    let mut command = Command::new("limactl");
+    command
         .arg("shell")
         .args(["--workdir", &cwd.to_string_lossy()])
         .arg(&vm_name)
         .arg("--")
+        .arg("env");
+    for (key, value) in super::sandbox_run::git_user_config_envs(&cwd) {
+        command.arg(format!("{key}={value}"));
+    }
+    let status = command
         .args(["bash", "-c", &shell_cmd])
         .status()
         .context("Failed to execute limactl shell")?;

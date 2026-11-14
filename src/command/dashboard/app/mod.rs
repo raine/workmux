@@ -11,8 +11,9 @@ mod worktrees;
 pub use types::*;
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -20,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::git::{self, GitStatus};
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::state::StateStore;
 use crate::workflow::types::WorktreeInfo;
@@ -36,6 +37,8 @@ use super::sort::{SortMode, WorktreeSortMode};
 
 /// App state for the TUI
 pub struct App {
+    /// Terminal area used to route mouse coordinates against the rendered frame.
+    pub terminal_area: Rect,
     /// The multiplexer backend
     pub mux: Arc<dyn Multiplexer>,
     pub agents: Vec<AgentPane>,
@@ -47,6 +50,8 @@ pub struct App {
     /// The directory from which the dashboard was launched (used to indicate the active worktree).
     pub current_worktree: Option<PathBuf>,
     pub stale_threshold_secs: u64,
+    /// Pane IDs manually marked as sleeping in the current tmux server.
+    pub sleeping_pane_ids: HashSet<String>,
     pub config: Config,
     pub should_quit: bool,
     pub should_jump: bool,
@@ -57,6 +62,12 @@ pub struct App {
     pub preview: Option<String>,
     /// Track which pane_id the preview was captured from (to detect selection changes)
     preview_pane_id: Option<String>,
+    /// Last capture of each remote agent no local pane relays, fetched from
+    /// its node in the background.
+    remote_previews: HashMap<String, String>,
+    /// When the last remote preview fetch started, and whether it is still
+    /// running.
+    remote_preview_fetch: Option<(std::time::Instant, bool)>,
     /// Input mode: keystrokes are sent directly to the selected agent's pane
     pub input_mode: bool,
     /// Manual scroll offset for the preview (None = auto-scroll to bottom)
@@ -71,8 +82,10 @@ pub struct App {
     last_git_fetch: std::time::Instant,
     /// Flag to track if a git fetch is in progress (prevents thread pile-up)
     pub is_git_fetching: Arc<AtomicBool>,
-    /// PR info indexed by repo root, then branch name
+    /// PR info indexed by canonical common Git directory, then branch name
     pr_statuses: HashMap<PathBuf, HashMap<String, PrSummary>>,
+    /// GitHub check info indexed by canonical common Git directory, then branch name
+    check_statuses: HashMap<PathBuf, HashMap<String, CheckSummary>>,
     /// Last PR fetch time
     last_pr_fetch: std::time::Instant,
     /// Flag to prevent concurrent PR fetches
@@ -81,6 +94,8 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
     /// Cache of repo roots for agent paths
     repo_roots: HashMap<PathBuf, PathBuf>,
+    /// Common Git directory keys for agent paths, separate from checkout roots.
+    repo_keys: HashMap<PathBuf, PathBuf>,
     /// Frame counter for spinner animation (increments each tick)
     pub spinner_frame: u8,
     /// Whether to hide stale agents from the list
@@ -127,6 +142,7 @@ pub struct App {
     pub worktree_sort_mode: WorktreeSortMode,
     /// Pending worktree removal (shown in confirmation modal)
     pub pending_remove: Option<RemovePlan>,
+    pub removals: WorktreeRemovals,
     /// Pending bulk sweep state (shown in sweep modal)
     pub pending_sweep: Option<SweepState>,
     /// Pending project picker state (shown in project picker modal)
@@ -151,10 +167,19 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
     /// Whether to show the "New: workmux sidebar" tip in the tab header
     pub show_sidebar_tip: bool,
+    /// Whether the agents footer may show the remote servers tip; it is
+    /// drawn only when the footer has room for it.
+    pub show_remote_tip: bool,
+    /// Whether this session has counted a drawn remote servers tip.
+    remote_tip_counted: bool,
     /// Pane IDs of agents detected as interrupted by the sidebar daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pending command palette state (shown in command palette modal)
     pub pending_command_palette: Option<CommandPaletteState>,
+    /// Context actions opened for an agent or worktree row.
+    pub pending_row_context: Option<RowContextMenu>,
+    /// Last selected row click used to recognize double-click activation.
+    pub last_mouse_row_click: Option<MouseRowClick>,
 }
 
 impl App {
@@ -189,26 +214,40 @@ impl App {
         let scheme = config.theme.scheme;
         let palette = ThemePalette::from_config(&config.theme, theme_mode);
         let config_path = crate::config::global_config_path();
-        let sort_mode = SortMode::load();
+        // Sort mode: persisted preference > config.yaml default > priority
+        let sort_mode = SortMode::load_with_default(
+            config
+                .dashboard
+                .sort_mode
+                .as_deref()
+                .map(SortMode::parse)
+                .unwrap_or_default(),
+        );
         let scope_mode = if cli_session_filter {
             ScopeMode::Session
         } else {
             ScopeMode::load()
         };
-        let launch_session = mux.current_session();
+        let launch_session = mux.client_session();
         let git_statuses = git::load_status_cache();
         let pr_statuses = crate::github::load_pr_cache();
+        let check_statuses = crate::github::load_check_cache();
         let hide_stale = load_hide_stale();
         let last_pane_id = load_last_pane_id();
+        // One feature tip at a time: the remote tip waits for the sidebar tip.
+        let show_sidebar_tip = crate::tips::should_show_sidebar_tip();
+        let show_remote_tip = !show_sidebar_tip && should_show_remote_tip(mux.as_ref(), &config);
 
         let mut app = Self {
+            terminal_area: Rect::default(),
             mux,
             agents: Vec::new(),
             all_agents: Vec::new(),
             table_state: TableState::default(),
             selected_pane_id: None,
             current_worktree,
-            stale_threshold_secs: 60 * 60, // 60 minutes
+            stale_threshold_secs: config.stale_after_secs(),
+            sleeping_pane_ids: HashSet::new(),
             config,
             should_quit: false,
             should_jump: false,
@@ -216,6 +255,8 @@ impl App {
             view_mode: ViewMode::default(),
             preview: None,
             preview_pane_id: None,
+            remote_previews: HashMap::new(),
+            remote_preview_fetch: None,
             input_mode: false,
             preview_scroll: None,
             preview_line_count: 0,
@@ -225,11 +266,13 @@ impl App {
             last_git_fetch: std::time::Instant::now() - Duration::from_secs(60),
             is_git_fetching: Arc::new(AtomicBool::new(false)),
             pr_statuses,
+            check_statuses,
             // Set to past to trigger immediate fetch on first refresh
             last_pr_fetch: std::time::Instant::now() - PR_FETCH_INTERVAL,
             is_pr_fetching: Arc::new(AtomicBool::new(false)),
             event_tx,
             repo_roots: HashMap::new(),
+            repo_keys: HashMap::new(),
             spinner_frame: 0,
             hide_stale,
             show_help: false,
@@ -253,6 +296,7 @@ impl App {
             worktree_filter_active: false,
             worktree_sort_mode: WorktreeSortMode::load(),
             pending_remove: None,
+            removals: WorktreeRemovals::default(),
             pending_sweep: None,
             pending_project_picker: None,
             pending_base_picker: None,
@@ -264,9 +308,13 @@ impl App {
             worktree_preview: None,
             worktree_preview_path: None,
             status_message: None,
-            show_sidebar_tip: crate::tips::should_show_sidebar_tip(),
+            show_sidebar_tip,
+            show_remote_tip,
+            remote_tip_counted: false,
             interrupted_pane_ids: std::collections::HashSet::new(),
             pending_command_palette: None,
+            pending_row_context: None,
+            last_mouse_row_click: None,
             sweep_progress: None,
         };
 
@@ -288,9 +336,16 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
+        self.sleeping_pane_ids = load_sleeping_pane_ids(self.mux.as_ref());
+
         // Load agents from StateStore with reconciliation against live pane state
+        let now_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.all_agents = StateStore::new()
-            .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
+            .and_then(|store| store.load_all_reconciled_agents(self.mux.as_ref()))
+            .map(|agents| crate::remote::agents::for_views(&self.config, agents, now_ts))
             .unwrap_or_default();
 
         // Load interrupted pane IDs from daemon runtime state
@@ -310,11 +365,21 @@ impl App {
             }
         }
 
-        // Cache repo roots for ALL agents before filtering (project picker needs all projects)
+        // Cache repo roots for ALL agents before filtering (project picker needs all projects).
+        // A remote agent's path is not a local checkout.
+        for agent in &self.all_agents {
+            if let Some(remote) = &agent.remote {
+                self.repo_roots
+                    .insert(agent.path.clone(), remote.project_root.clone());
+            }
+        }
         let paths_to_resolve: Vec<PathBuf> = self
             .all_agents
             .iter()
-            .filter(|a| !self.repo_roots.contains_key(&a.path))
+            .filter(|a| a.remote.is_none())
+            .filter(|a| {
+                !self.repo_roots.contains_key(&a.path) || !self.repo_keys.contains_key(&a.path)
+            })
             .map(|a| a.path.clone())
             .collect();
 
@@ -325,7 +390,8 @@ impl App {
                 .map(|path| {
                     std::thread::spawn(move || {
                         let root = git::get_repo_root_for(&path).ok();
-                        (path, root)
+                        let key = git::get_repository_key_in(Some(&path)).ok();
+                        (path, root, key)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -333,19 +399,19 @@ impl App {
                 .filter_map(|handle| handle.join().ok())
                 .collect();
 
-            for (path, root) in results {
+            for (path, root, key) in results {
                 if let Some(r) = root {
-                    self.repo_roots.insert(path, r);
+                    self.repo_roots.insert(path.clone(), r);
+                }
+                if let Some(key) = key {
+                    self.repo_keys.insert(path, key);
                 }
             }
         }
 
         // Apply session scope filter after caching repo roots
-        if self.scope_mode == ScopeMode::Session
-            && let Some(ref session) = self.launch_session
-        {
-            self.all_agents.retain(|a| a.session == *session);
-        }
+        self.scope_mode
+            .retain_agents(&mut self.all_agents, self.launch_session.as_deref());
 
         // Trigger background git status fetch every 5 seconds
         if self.last_git_fetch.elapsed() >= Duration::from_secs(5) {
@@ -410,4 +476,26 @@ impl App {
             }
         }
     }
+}
+
+/// Remote agents run in tmux windows on the local machine, so the tip only
+/// shows in a local tmux dashboard.
+fn should_show_remote_tip(mux: &dyn Multiplexer, config: &Config) -> bool {
+    mux.name() == "tmux"
+        && !crate::remote::node::operation::in_session()
+        && !crate::sandbox::guest::is_sandbox_guest()
+        && crate::tips::remote_tip_due(!config.remotes.is_empty())
+}
+
+fn load_sleeping_pane_ids(mux: &dyn Multiplexer) -> HashSet<String> {
+    if mux.name() != "tmux" {
+        return HashSet::new();
+    }
+
+    crate::multiplexer::TmuxBackend::for_socket(&mux.instance_id())
+        .global_option("@workmux_sleeping_panes")
+        .ok()
+        .flatten()
+        .map(|value| value.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
 }

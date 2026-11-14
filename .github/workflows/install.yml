@@ -1,0 +1,62 @@
+name: Install build
+run-name: Install build ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Commit to build
+        required: true
+        type: string
+      request_id:
+        description: Unique installation request
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BIN_NAME: workmux
+  TARGET: aarch64-apple-darwin
+  ARCHIVE_NAME: workmux-darwin-arm64.tar.gz
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Validate commit
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "commit_sha must be a full Git commit SHA" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.commit_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install-${{ env.TARGET }}
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          mkdir package
+          tar -C "target/$TARGET/release" -czf "package/$ARCHIVE_NAME" "$BIN_NAME"
+          (cd package && shasum -a 256 "$ARCHIVE_NAME" > "${ARCHIVE_NAME%.tar.gz}.sha256")
+          printf '%s\n' "$COMMIT_SHA" > package/commit-sha
+      - name: Smoke test
+        run: |
+          "target/$TARGET/release/$BIN_NAME" --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: install-binary
+          path: package/
+          retention-days: 1

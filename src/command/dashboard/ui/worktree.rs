@@ -8,12 +8,16 @@ use ratatui::{
     widgets::{Block, Cell, Paragraph, Row, Table},
 };
 
+use crate::config::WorktreeColumn;
+
 use super::super::agent;
 use super::super::app::App;
 use super::format;
 use super::format::{
-    AgentStatusFormat, format_agent_status_summary, format_git_status, format_pr_status, truncate,
+    AgentStatusFormat, ResourceHeaderCell, format_agent_status_summary, format_git_status,
+    format_pr_status, truncate,
 };
+use super::theme::ThemePalette;
 
 /// Render the worktree table in the given area.
 pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -25,21 +29,15 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let show_check_counts = app.config.dashboard.show_check_counts();
 
-    // Only show PR column when at least one worktree has a PR
-    let show_pr_column = app.worktrees.iter().any(|w| w.pr_info.is_some());
+    let worktree_max_width = worktree_width_budget(area.width);
 
-    let header = format::resource_table_header(
-        format::ResourceHeaderState {
-            palette: &app.palette,
-            spinner_frame: app.spinner_frame,
-            git_fetching: app
-                .is_git_fetching
-                .load(std::sync::atomic::Ordering::Relaxed),
-            pr_fetching: app.is_pr_fetching(),
-        },
-        show_pr_column,
-        &["Mux", "Age", "Agent"],
-    );
+    // Show the GitHub column when at least one worktree has a PR or checks.
+    let show_pr_column = app.worktrees.iter().any(|worktree| {
+        worktree.pr_info.is_some() || app.get_checks_for_worktree(worktree).is_some()
+    });
+
+    let columns = visible_columns(&app.config.dashboard.worktree_columns(), show_pr_column);
+    let show_pr_column = columns.contains(&WorktreeColumn::Pr);
 
     // Pre-compute row data
     let row_data: Vec<_> = app
@@ -64,22 +62,39 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 wt.handle.clone()
             };
-            let worktree_display = truncate(&worktree_display, 25);
+            let worktree_display = if app.removals.contains(&wt.path) {
+                let frames = super::super::spinner::SPINNER_FRAMES;
+                let spinner = frames[app.spinner_frame as usize % frames.len()];
+                format!(
+                    "{spinner} Deleting {}",
+                    truncate(&worktree_display, worktree_max_width.saturating_sub(11))
+                )
+            } else {
+                truncate(&worktree_display, worktree_max_width)
+            };
 
             // Git status
             let git_status = app.git_statuses.get(&wt.path);
             let git_spans = format_git_status(git_status, app.spinner_frame, &app.palette);
 
+            let pr_title = wt
+                .pr_info
+                .as_ref()
+                .map(|pr| pr.title.clone())
+                .unwrap_or_default();
+            let pr_issues = format::format_pr_issues(wt.pr_info.as_ref());
+
             // PR status (only computed if column is shown)
             let pr_spans = if show_pr_column {
-                Some(format_pr_status(
+                format_pr_status(
                     wt.pr_info.as_ref(),
+                    app.get_checks_for_worktree(wt),
                     show_check_counts,
                     app.spinner_frame,
                     &app.palette,
-                ))
+                )
             } else {
-                None
+                Vec::new()
             };
 
             // Agent status summary
@@ -109,32 +124,145 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
                 .created_at
                 .map(|ts| agent::format_age(now.saturating_sub(ts)));
 
-            (
+            WorktreeRowData {
                 jump_key,
                 project,
                 worktree_display,
-                wt.is_main,
+                is_main: wt.is_main,
                 is_current,
                 git_spans,
                 pr_spans,
-                agent_spans,
-                wt.has_mux_window,
-                age,
-            )
+                pr_title,
+                pr_issues,
+                agent_line: format::spans_to_line(agent_spans),
+                has_mux_window: wt.has_mux_window,
+                age: age.unwrap_or_default(),
+            }
         })
         .collect();
 
-    // Calculate dynamic column widths
-    let project_names: Vec<String> = row_data.iter().map(|r| r.1.clone()).collect();
+    let table = build_worktree_table(
+        &columns,
+        row_data,
+        worktree_max_width,
+        format::ResourceHeaderState {
+            palette: &app.palette,
+            spinner_frame: app.spinner_frame,
+            git_fetching: app
+                .is_git_fetching
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pr_fetching: app.is_pr_fetching(),
+        },
+    );
+    f.render_stateful_widget(table, area, &mut app.worktree_table_state);
+}
+
+struct WorktreeRowData {
+    jump_key: String,
+    project: String,
+    worktree_display: String,
+    is_main: bool,
+    is_current: bool,
+    git_spans: Vec<(String, Style)>,
+    pr_spans: Vec<(String, Style)>,
+    pr_title: String,
+    pr_issues: String,
+    agent_line: Line<'static>,
+    has_mux_window: bool,
+    age: String,
+}
+
+/// Hide PR until GitHub status is available, unless it is the only configured
+/// column and hiding it would blank the table.
+fn visible_columns(configured: &[WorktreeColumn], show_pr_column: bool) -> Vec<WorktreeColumn> {
+    let visible: Vec<_> = configured
+        .iter()
+        .copied()
+        .filter(|column| *column != WorktreeColumn::Pr || show_pr_column)
+        .collect();
+    if visible.is_empty() {
+        configured.to_vec()
+    } else {
+        visible
+    }
+}
+
+fn worktree_cell(
+    column: WorktreeColumn,
+    row: &WorktreeRowData,
+    palette: &ThemePalette,
+) -> Cell<'static> {
+    match column {
+        WorktreeColumn::Number => {
+            Cell::from(row.jump_key.clone()).style(Style::default().fg(palette.keycap))
+        }
+        WorktreeColumn::Project => Cell::from(row.project.clone()),
+        WorktreeColumn::Worktree => Cell::from(row.worktree_display.clone())
+            .style(format::make_row_style(row.is_current, row.is_main, palette)),
+        WorktreeColumn::Git => Cell::from(format::spans_to_line(row.git_spans.clone())),
+        WorktreeColumn::Pr => Cell::from(format::spans_to_line(row.pr_spans.clone())),
+        WorktreeColumn::PrTitle => Cell::from(row.pr_title.clone()),
+        WorktreeColumn::PrIssues => Cell::from(row.pr_issues.clone()),
+        WorktreeColumn::Mux => {
+            if row.has_mux_window {
+                Cell::from("\u{25cf}").style(Style::default().fg(palette.success))
+            } else {
+                Cell::from("-").style(Style::default().fg(palette.dimmed))
+            }
+        }
+        WorktreeColumn::Age => {
+            Cell::from(row.age.clone()).style(Style::default().fg(palette.dimmed))
+        }
+        WorktreeColumn::Agent => Cell::from(row.agent_line.clone()),
+    }
+}
+
+/// Upper bound for the `worktree` cell.
+///
+/// The cell can carry both the handle and the branch, which a fixed cap cut off
+/// even in a very wide terminal. Half the table leaves room for every other
+/// column; the lower bound keeps narrow panes rendering as they always have,
+/// and the upper one stops a single long branch from crowding the rest out.
+fn worktree_width_budget(area_width: u16) -> usize {
+    (area_width as usize / 2).clamp(25, 80)
+}
+
+/// Derive headers, cells and constraints from the same visible column order.
+fn build_worktree_table(
+    columns: &[WorktreeColumn],
+    row_data: Vec<WorktreeRowData>,
+    worktree_max_width: usize,
+    header_state: format::ResourceHeaderState<'_>,
+) -> Table<'static> {
+    let palette = header_state.palette;
+    let header_cells: Vec<_> = columns
+        .iter()
+        .map(|column| match column {
+            WorktreeColumn::Number => ResourceHeaderCell::Plain("#"),
+            WorktreeColumn::Project => ResourceHeaderCell::Plain("Project"),
+            WorktreeColumn::Worktree => ResourceHeaderCell::Plain("Worktree"),
+            WorktreeColumn::Git => ResourceHeaderCell::Git,
+            WorktreeColumn::Pr => ResourceHeaderCell::Pr,
+            WorktreeColumn::PrTitle => ResourceHeaderCell::Plain("PR Title"),
+            WorktreeColumn::PrIssues => ResourceHeaderCell::Plain("PR Issues"),
+            WorktreeColumn::Mux => ResourceHeaderCell::Plain("Mux"),
+            WorktreeColumn::Age => ResourceHeaderCell::Plain("Age"),
+            WorktreeColumn::Agent => ResourceHeaderCell::Plain("Agent"),
+        })
+        .collect();
+
+    let project_names: Vec<String> = row_data.iter().map(|r| r.project.clone()).collect();
     let max_project_width = format::calc_column_width(&project_names, 5, 20, 2);
-
-    let worktree_names: Vec<String> = row_data.iter().map(|r| r.2.clone()).collect();
-    let max_worktree_width = format::calc_column_width(&worktree_names, 8, 25, 1);
-
+    let worktree_names: Vec<String> = row_data
+        .iter()
+        .map(|r| r.worktree_display.clone())
+        .collect();
+    let max_worktree_width = format::calc_column_width(&worktree_names, 8, worktree_max_width, 1);
     let max_git_width = row_data
         .iter()
-        .map(|(_, _, _, _, _, git, _, _, _, _)| {
-            git.iter()
+        .map(|row| {
+            row.git_spans
+                .iter()
                 .map(|(text, _)| text.chars().count())
                 .sum::<usize>()
         })
@@ -142,101 +270,77 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(4)
         .clamp(4, 30)
         + 1;
+    let max_pr_width = row_data
+        .iter()
+        .map(|row| &row.pr_spans)
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 16)
+        + 1;
+    let pr_titles: Vec<String> = row_data.iter().map(|row| row.pr_title.clone()).collect();
+    let max_pr_title_width = format::calc_column_width(&pr_titles, 8, 60, 1);
+    let pr_issues: Vec<String> = row_data.iter().map(|row| row.pr_issues.clone()).collect();
+    let max_pr_issues_width = format::calc_column_width(&pr_issues, 9, 40, 1);
+    let max_agent_width = row_data
+        .iter()
+        .map(|row| row.agent_line.width())
+        .max()
+        .unwrap_or(0)
+        .clamp(5, u16::MAX as usize) as u16;
 
-    let max_pr_width = if show_pr_column {
-        row_data
-            .iter()
-            .filter_map(|(_, _, _, _, _, _, pr, _, _, _)| pr.as_ref())
-            .map(|spans| {
-                spans
-                    .iter()
-                    .map(|(text, _)| text.chars().count())
-                    .sum::<usize>()
-            })
-            .max()
-            .unwrap_or(4)
-            .clamp(4, 16)
-            + 1
-    } else {
-        0
-    };
-
-    let rows: Vec<Row> = row_data
-        .into_iter()
-        .map(
-            |(
-                jump_key,
-                project,
-                worktree_display,
-                is_main,
-                is_current,
-                git_spans,
-                pr_spans,
-                agent_spans,
-                has_mux_window,
-                age,
-            )| {
-                let worktree_style = format::make_row_style(is_current, is_main, &app.palette);
-                let git_line = format::spans_to_line(git_spans);
-
-                let mux_cell = if has_mux_window {
-                    Cell::from("\u{25cf}").style(Style::default().fg(app.palette.success))
-                } else {
-                    Cell::from("-").style(Style::default().fg(app.palette.dimmed))
-                };
-
-                let agent_line = format::spans_to_line(agent_spans);
-
-                let age_cell = Cell::from(age.unwrap_or_default())
-                    .style(Style::default().fg(app.palette.dimmed));
-
-                let mut cells = vec![
-                    Cell::from(jump_key).style(Style::default().fg(app.palette.keycap)),
-                    Cell::from(project),
-                    Cell::from(worktree_display).style(worktree_style),
-                    Cell::from(git_line),
-                ];
-
-                if let Some(pr_spans) = pr_spans {
-                    let pr_line = format::spans_to_line(pr_spans);
-                    cells.push(Cell::from(pr_line));
-                }
-
-                cells.extend([mux_cell, age_cell]);
-                cells.push(Cell::from(agent_line));
-
-                let row = Row::new(cells);
-                if is_current {
-                    row.style(Style::default().bg(app.palette.current_row_bg))
-                } else {
-                    row
-                }
-            },
-        )
+    let last_column = columns.len().saturating_sub(1);
+    let constraints: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| match column {
+            WorktreeColumn::Number => Constraint::Length(2),
+            WorktreeColumn::Project => Constraint::Length(max_project_width),
+            WorktreeColumn::Worktree => Constraint::Length(max_worktree_width),
+            WorktreeColumn::Git => Constraint::Length(max_git_width as u16),
+            WorktreeColumn::Pr => Constraint::Length(max_pr_width as u16),
+            WorktreeColumn::PrTitle if index == last_column => Constraint::Fill(1),
+            WorktreeColumn::PrTitle => Constraint::Length(max_pr_title_width),
+            WorktreeColumn::PrIssues if index == last_column => Constraint::Fill(1),
+            WorktreeColumn::PrIssues => Constraint::Length(max_pr_issues_width),
+            WorktreeColumn::Mux => Constraint::Length(4),
+            WorktreeColumn::Age => Constraint::Length(4),
+            // Fill only at the end, so columns after Agent stay contiguous.
+            WorktreeColumn::Agent if index == last_column => Constraint::Fill(1),
+            WorktreeColumn::Agent => Constraint::Length(max_agent_width),
+        })
         .collect();
 
-    let mut constraints = vec![
-        Constraint::Length(2),                    // #
-        Constraint::Length(max_project_width),    // Project
-        Constraint::Length(max_worktree_width),   // Worktree (+ branch when different)
-        Constraint::Length(max_git_width as u16), // Git
-    ];
-    if show_pr_column {
-        constraints.push(Constraint::Length(max_pr_width as u16));
-    }
-    constraints.extend([
-        Constraint::Length(4), // Mux
-        Constraint::Length(4), // Age
-    ]);
-    constraints.push(Constraint::Fill(1)); // Agent
+    let rows: Vec<_> = row_data
+        .into_iter()
+        .map(|data| {
+            let cells: Vec<_> = columns
+                .iter()
+                .map(|column| worktree_cell(*column, &data, palette))
+                .collect();
+            let row = Row::new(cells);
+            if data.is_current {
+                row.style(Style::default().bg(palette.current_row_bg))
+            } else {
+                row
+            }
+        })
+        .collect();
 
-    let table = Table::new(rows, constraints)
-        .header(header)
+    let highlight_symbol = Text::from(Line::from(Span::styled(
+        "▌ ",
+        Style::default().fg(palette.info),
+    )));
+    Table::new(rows, constraints)
+        .header(format::resource_table_header(header_state, &header_cells))
         .block(Block::default())
-        .row_highlight_style(Style::default().bg(app.palette.highlight_row_bg))
-        .highlight_symbol("> ");
-
-    f.render_stateful_widget(table, area, &mut app.worktree_table_state);
+        .row_highlight_style(Style::default().bg(palette.highlight_row_bg))
+        .highlight_symbol(highlight_symbol)
 }
 
 /// Render the worktree preview: info panel (left) + styled git log (right).
@@ -521,4 +625,199 @@ fn render_git_log(
 
     let paragraph = Paragraph::new(text).block(block);
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DEFAULT_WORKTREE_COLUMNS, ThemeConfig, ThemeMode};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, widgets::TableState};
+
+    fn palette() -> ThemePalette {
+        ThemePalette::from_config(&ThemeConfig::default(), ThemeMode::Dark)
+    }
+
+    fn row() -> WorktreeRowData {
+        WorktreeRowData {
+            jump_key: "1".into(),
+            project: "proj".into(),
+            worktree_display: "wt".into(),
+            is_main: false,
+            is_current: false,
+            git_spans: vec![("+1".into(), Style::default())],
+            pr_spans: vec![("#7".into(), Style::default())],
+            pr_title: "fix the dashboard".into(),
+            pr_issues: "#308 #270".into(),
+            agent_line: Line::from("working"),
+            has_mux_window: true,
+            age: "2h".into(),
+        }
+    }
+
+    fn render(
+        columns: &[WorktreeColumn],
+        rows: Vec<WorktreeRowData>,
+        width: u16,
+        selected: Option<usize>,
+    ) -> Buffer {
+        let palette = palette();
+        let table = build_worktree_table(
+            columns,
+            rows,
+            worktree_width_budget(width),
+            format::ResourceHeaderState {
+                palette: &palette,
+                spinner_frame: 0,
+                git_fetching: false,
+                pr_fetching: false,
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
+        let mut state = TableState::default().with_selected(selected);
+        terminal
+            .draw(|f| f.render_stateful_widget(table, f.area(), &mut state))
+            .unwrap();
+        assert_eq!(state.selected(), selected);
+        terminal.backend().buffer().clone()
+    }
+
+    fn line(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn worktree_table_preserves_default_layout() {
+        let buffer = render(&DEFAULT_WORKTREE_COLUMNS, vec![row()], 80, None);
+        assert_eq!(
+            line(&buffer, 0),
+            "#  Project Worktree  Git   PR    Mux  Age  Agent"
+        );
+        assert_eq!(
+            line(&buffer, 1),
+            "1  proj    wt        +1    #7    ●    2h   working"
+        );
+    }
+
+    #[test]
+    fn worktree_table_reorders_headers_and_cells() {
+        use WorktreeColumn::*;
+        let buffer = render(
+            &[Agent, Age, Mux, Pr, Git, Worktree, Project, Number],
+            vec![row()],
+            80,
+            None,
+        );
+        assert_eq!(
+            line(&buffer, 0),
+            "Agent   Age  Mux  PR    Git   Worktree  Project #"
+        );
+        assert_eq!(
+            line(&buffer, 1),
+            "working 2h   ●    #7    +1    wt        proj    1"
+        );
+    }
+
+    #[test]
+    fn worktree_table_omits_unlisted_columns_at_narrow_width() {
+        use WorktreeColumn::*;
+        let buffer = render(&[Worktree, Agent], vec![row()], 24, None);
+        assert_eq!(line(&buffer, 0), "Worktree  Agent");
+        assert_eq!(line(&buffer, 1), "wt        working");
+    }
+
+    #[test]
+    fn worktree_table_renders_opt_in_pr_metadata_without_pr_status() {
+        use WorktreeColumn::*;
+        let buffer = render(&[PrTitle, PrIssues], vec![row()], 60, None);
+        assert_eq!(line(&buffer, 0), "PR Title           PR Issues");
+        assert_eq!(line(&buffer, 1), "fix the dashboard  #308 #270");
+    }
+
+    #[test]
+    fn agent_width_uses_display_cells_and_fits_header() {
+        use WorktreeColumn::*;
+        for (agent, expected) in [("", "Agent Mux"), ("作業中です", "Agent      Mux")] {
+            let mut data = row();
+            data.agent_line = Line::from(agent);
+            let buffer = render(&[Agent, Mux], vec![data], 40, None);
+            assert_eq!(line(&buffer, 0), expected);
+        }
+    }
+
+    #[test]
+    fn trailing_agent_fills_after_pr_is_hidden() {
+        use WorktreeColumn::*;
+        let columns = visible_columns(&[Agent, Pr], false);
+        assert_eq!(columns, [Agent]);
+        let mut data = row();
+        data.agent_line = Line::from("working").right_aligned();
+        let buffer = render(&columns, vec![data], 20, None);
+        assert_eq!(line(&buffer, 1), "             working");
+    }
+
+    #[test]
+    fn pr_visibility_preserves_order_and_pr_only_fallback() {
+        use WorktreeColumn::*;
+        assert_eq!(
+            visible_columns(&[Agent, Pr, Worktree], false),
+            [Agent, Worktree]
+        );
+        assert_eq!(
+            visible_columns(&[Agent, Pr, Worktree], true),
+            [Agent, Pr, Worktree]
+        );
+        assert_eq!(visible_columns(&[Pr], false), [Pr]);
+        let mut data = row();
+        data.pr_spans = format_pr_status(None, None, false, 0, &palette());
+        let buffer = render(&visible_columns(&[Pr], false), vec![data], 20, None);
+        assert_eq!(line(&buffer, 0), "PR");
+        assert_eq!(line(&buffer, 1), "-");
+    }
+
+    #[test]
+    fn reordered_table_preserves_row_styles_and_selection() {
+        use WorktreeColumn::*;
+        let mut current = row();
+        current.is_current = true;
+        let mut main = row();
+        main.is_main = true;
+        main.has_mux_window = false;
+        let palette = palette();
+        let buffer = render(&[Mux, Worktree], vec![current, main], 30, Some(1));
+        assert_eq!(buffer[(7, 1)].fg, palette.current_worktree_fg);
+        assert_eq!(buffer[(7, 1)].bg, palette.current_row_bg);
+        assert_eq!(buffer[(7, 2)].fg, palette.dimmed);
+        assert_eq!(buffer[(7, 2)].bg, palette.highlight_row_bg);
+        assert_eq!(buffer[(2, 1)].fg, palette.success);
+        assert_eq!(buffer[(2, 2)].fg, palette.dimmed);
+        assert_eq!(buffer[(0, 2)].symbol(), "▌");
+    }
+
+    #[test]
+    fn worktree_width_budget_scales_with_the_pane() {
+        // Narrow panes keep the historical fixed width.
+        assert_eq!(worktree_width_budget(40), 25);
+        assert_eq!(worktree_width_budget(50), 25);
+        // Wider panes get proportionally more, up to a ceiling.
+        assert_eq!(worktree_width_budget(120), 60);
+        assert_eq!(worktree_width_budget(200), 80);
+        assert_eq!(worktree_width_budget(400), 80);
+    }
+
+    #[test]
+    fn worktree_column_uses_the_extra_width_in_a_wide_pane() {
+        let long = "feat/some-rather-long-branch-name";
+        let mut r = row();
+        r.worktree_display = long.into();
+        let buffer = render(&[WorktreeColumn::Worktree], vec![r], 120, None);
+        assert!(
+            line(&buffer, 1).contains(long),
+            "long worktree label should survive in a wide pane, got {:?}",
+            line(&buffer, 1)
+        );
+    }
 }

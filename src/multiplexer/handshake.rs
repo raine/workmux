@@ -123,6 +123,9 @@ fn poll_until_stable_pane(
 /// 4. Clean up the channel
 pub struct TmuxHandshake {
     channel: String,
+    /// Server socket (`-S`); `None` means the server tmux finds by default.
+    /// The pane side always signals the server it runs in, through `$TMUX`.
+    socket: Option<String>,
 }
 
 impl TmuxHandshake {
@@ -130,21 +133,37 @@ impl TmuxHandshake {
     ///
     /// The channel must be locked before spawning the pane to ensure we don't
     /// miss the signal even if the shell starts instantly.
-    pub fn new() -> Result<Self> {
+    pub fn new(socket: Option<&str>) -> Result<Self> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let pid = std::process::id();
         let channel = format!("wm_ready_{}_{}", pid, nanos);
+        let handshake = Self {
+            channel,
+            socket: socket.map(str::to_string),
+        };
 
         // Lock the channel (ensures we don't miss the signal)
-        Cmd::new("tmux")
-            .args(&["wait-for", "-L", &channel])
+        handshake
+            .tmux()
+            .args(&["wait-for", "-L", &handshake.channel])
             .run()
             .context("Failed to initialize wait channel")?;
 
-        Ok(Self { channel })
+        Ok(handshake)
+    }
+
+    fn socket_args(&self) -> Vec<&str> {
+        match self.socket.as_deref() {
+            Some(socket) => vec!["-S", socket],
+            None => Vec::new(),
+        }
+    }
+
+    fn tmux(&self) -> Cmd<'_> {
+        Cmd::new("tmux").args(&self.socket_args())
     }
 
     /// Wait until the pane has rendered non-empty, stable content.
@@ -152,11 +171,13 @@ impl TmuxHandshake {
     /// The initial wait-for signal is emitted before the shell is exec'd. Polling
     /// the pane afterwards keeps input out of the PTY while interactive shell
     /// initialization (including async prompt setup) is still in progress.
-    fn wait_for_stable_pane(pane_id: &str) {
+    fn wait_for_stable_pane(socket: Option<&str>, pane_id: &str) {
         let timeout = Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
         let poll_interval = Duration::from_millis(PANE_READY_POLL_INTERVAL_MS);
         let readiness = poll_until_stable_pane(timeout, poll_interval, || {
+            let socket_args = socket.map_or_else(Vec::new, |socket| vec!["-S", socket]);
             Cmd::new("tmux")
+                .args(&socket_args)
                 .args(&["capture-pane", "-p", "-t", pane_id])
                 .run_and_capture_stdout()
                 .inspect_err(|error| {
@@ -218,6 +239,7 @@ impl PaneHandshake for TmuxHandshake {
         debug!(channel = %self.channel, "tmux:handshake start");
 
         let mut child = std::process::Command::new("tmux")
+            .args(self.socket_args())
             .args(["wait-for", "-L", &self.channel])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -232,7 +254,7 @@ impl PaneHandshake for TmuxHandshake {
                 Ok(Some(status)) => {
                     if status.success() {
                         // Cleanup: unlock the channel we just re-locked
-                        Cmd::new("tmux")
+                        self.tmux()
                             .args(&["wait-for", "-U", &self.channel])
                             .run()
                             .context("Failed to cleanup wait channel")?;
@@ -240,9 +262,7 @@ impl PaneHandshake for TmuxHandshake {
                         return Ok(());
                     } else {
                         // Attempt cleanup even on failure
-                        let _ = Cmd::new("tmux")
-                            .args(&["wait-for", "-U", &self.channel])
-                            .run();
+                        let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
                         warn!(channel = %self.channel, status = ?status.code(), "tmux:handshake failed (wait-for error)");
                         return Err(anyhow!(
                             "Pane handshake failed - tmux wait-for returned error"
@@ -255,9 +275,7 @@ impl PaneHandshake for TmuxHandshake {
                         let _ = child.wait(); // Ensure process is reaped
 
                         // Attempt cleanup
-                        let _ = Cmd::new("tmux")
-                            .args(&["wait-for", "-U", &self.channel])
-                            .run();
+                        let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
 
                         warn!(
                             channel = %self.channel,
@@ -279,9 +297,7 @@ impl PaneHandshake for TmuxHandshake {
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = Cmd::new("tmux")
-                        .args(&["wait-for", "-U", &self.channel])
-                        .run();
+                    let _ = self.tmux().args(&["wait-for", "-U", &self.channel]).run();
                     warn!(channel = %self.channel, error = %e, "tmux:handshake error");
                     return Err(anyhow!("Error waiting for pane handshake: {}", e));
                 }
@@ -290,8 +306,9 @@ impl PaneHandshake for TmuxHandshake {
     }
 
     fn wait_for_shell(self: Box<Self>, pane_id: &str) -> Result<()> {
+        let socket = self.socket.clone();
         self.wait()?;
-        Self::wait_for_stable_pane(pane_id);
+        Self::wait_for_stable_pane(socket.as_deref(), pane_id);
         Ok(())
     }
 }
@@ -303,6 +320,7 @@ impl PaneHandshake for TmuxHandshake {
 #[cfg(unix)]
 pub struct UnixPipeHandshake {
     pipe_path: PathBuf,
+    reader: std::fs::File,
 }
 
 #[cfg(unix)]
@@ -323,7 +341,26 @@ impl UnixPipeHandshake {
         let mode = Mode::S_IRUSR | Mode::S_IWUSR;
         nix::unistd::mkfifo(&pipe_path, mode).context("Failed to create named pipe")?;
 
-        Ok(Self { pipe_path })
+        // Hold the read end from the start. Opening a FIFO for writing blocks
+        // until it has a reader, and a signal arriving during that wait (such
+        // as SIGCHLD) fails the shell's open with EINTR, so the pane would
+        // start without ever signalling ready.
+        let reader = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&pipe_path)
+        };
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(err) => {
+                let _ = std::fs::remove_file(&pipe_path);
+                return Err(err).context("Failed to open pipe for reading");
+            }
+        };
+
+        Ok(Self { pipe_path, reader })
     }
 }
 
@@ -347,19 +384,11 @@ impl PaneHandshake for UnixPipeHandshake {
     }
 
     fn wait(self: Box<Self>) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
 
         const POLL_INTERVAL_MS: u64 = 50;
 
-        // Open pipe for reading (non-blocking)
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&self.pipe_path)
-            .context("Failed to open pipe for reading")?;
-
-        let fd = file.as_raw_fd();
+        let fd = self.reader.as_raw_fd();
         let start = Instant::now();
         let timeout = Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
 
@@ -411,7 +440,7 @@ impl Drop for UnixPipeHandshake {
 }
 
 #[cfg(test)]
-mod tests {
+mod pane_readiness_tests {
     use super::{PaneContentStability, PaneReadiness, poll_until_stable_pane};
     use anyhow::anyhow;
     use std::collections::VecDeque;
@@ -468,5 +497,34 @@ mod tests {
                 last_error: Some("pane exited".to_string()),
             }
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn pipe_handshake_survives_a_signal_while_the_shell_starts() {
+        let handshake = Box::new(UnixPipeHandshake::new().unwrap());
+        let script = handshake.script_content("/usr/bin/true");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .spawn()
+            .unwrap();
+
+        // A SIGCHLD reaching the pane's sh while it opens the pipe used to fail
+        // the open with EINTR, so the shell started without signalling ready.
+        thread::sleep(Duration::from_millis(200));
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGCHLD,
+        )
+        .unwrap();
+
+        handshake.wait().unwrap();
+        child.wait().unwrap();
     }
 }

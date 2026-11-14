@@ -1,9 +1,9 @@
 ---
 name: workmux
-description: Reference for the workmux CLI that manages git worktrees and
-  tmux windows as isolated development environments. Use when the user
-  mentions workmux, worktrees, or parallel agent workflows.
-disable-model-invocation: true
+description: Manage terminal agents, git worktrees, and tmux sessions with
+  workmux. Use when the user asks to open or start an agent in a project,
+  check running agents or their progress in a tmux session, or work with
+  workmux, worktrees, or parallel agent workflows.
 ---
 
 # workmux
@@ -16,6 +16,54 @@ terminal state, and AI agent.
 "/workmux add ..."), you are a dispatcher.** Write prompt files and run
 commands. Do NOT explore, read, or research the codebase first. Use
 context you already have. The worktree agent does all the work.
+
+## Opening agents in projects
+
+When the user asks to open or start a new agent in `<project>`, treat the
+project name as a tmux session name. Resolve the project's directory, reuse
+that tmux session if it exists, and create it if it does not. Start the agent
+in a new window in that session, with the project directory as its working
+directory. Use the agent requested by the user or the configured default.
+This means a terminal agent in tmux, not a new chat in the assistant app.
+
+For an existing session:
+
+```bash
+tmux new-window -d -P -F '#{window_id}' -t <project> -n <name> \
+  -c <project-path> <agent>
+```
+
+If the session does not exist, create it with the agent in its first window:
+
+```bash
+tmux new-session -d -P -F '#{window_id}' -s <project> -n <name> \
+  -c <project-path> <agent>
+```
+
+Use tmux session metadata to resolve existing project paths, for example
+`tmux list-sessions -F '#{session_name}\t#{session_path}'`. Avoid directory
+listings when that metadata already supplies the path. Create windows with
+`tmux new-window -d -P -F '#{window_id}' ...` to return the new window ID;
+use that ID for subsequent operations instead of listing windows again.
+When switching is requested, batch the client lookup and switch into one
+tool call. Switch only when requested. Avoid redundant verification calls
+when the command's successful result already confirms the operation.
+
+When a separate worktree would clearly benefit the task, use `workmux add`
+from the target repository instead. Pass `--parent-session <project>` to
+place the agent in the intended tmux session. Use the configured default
+agent, or pass `-a <agent>` when the user requests a specific agent. Workmux
+creates the parent session if needed. Otherwise, use the existing project
+checkout.
+
+## Checking agent status
+
+Reuse known sessions, paths, and handles. If handles are unknown, inspect
+the session's coordinator or dashboard first.
+
+Batch `workmux status` and `workmux capture <handle> -n 50` for relevant
+agents in one tool call. Skip idle shells and unrelated projects. Report
+task, progress, blockers, and completion evidence; stop when clear.
 
 ## Key Concepts
 
@@ -40,6 +88,11 @@ Creates a git worktree, runs file operations and hooks, creates a tmux
 window with configured pane layout, and switches to it.
 
 Key flags:
+- `--pr <number|url>`: checkout a GitHub pull request by number or full URL into
+  a new worktree. The local branch defaults to the PR head branch name. Pass
+  `<branch-name>` to override it, for example
+  `workmux add --pr https://github.com/owner/repo/pull/123 custom-name`. Requires
+  authenticated `gh`.
 - `-b, --background`: create without switching to it
 - `-p <text>`: inline prompt for AI agent panes
 - `-P <file>`: prompt from file
@@ -48,12 +101,31 @@ Key flags:
 - `-a <agent>`: override the agent (can specify multiple for multi-worktree)
 - `-w, --with-changes`: move uncommitted changes to the new worktree
 - `--base <branch>`: branch from a specific base
-- `--name <name>`: override the handle name
+- `--name <name>`: override the worktree handle
+- `--target-name <name>`: override the workmux-managed tmux window or session name
+- `--parent-session <session>`: put a window-mode target in this tmux session,
+  creating the parent session when it does not exist
 - `-o, --open-if-exists`: open existing worktree if it exists (idempotent)
 - `-W, --wait`: block until the tmux window is closed
 - `-n, --count <N>`: create N worktree instances
 - `--foreach <matrix>`: create worktrees from variable matrix
 - `--no-hooks, --no-file-ops, --no-pane-cmds`: skip setup steps
+
+### Create without a multiplexer
+
+```bash
+workmux add <branch-name> --headless --json
+```
+
+Runs file operations and post-create hooks without creating a window or
+starting an agent. No running multiplexer is required. `--json` requires
+`--headless` and returns one JSON receipt with the handle, worktree path,
+and effective working directory; hook output goes to stderr.
+
+Use an explicit local branch name. Supports `--base`, `--name`, `--no-hooks`,
+and `--no-file-ops`, but not PR checkout, prompts, `--background`, or other
+mux/agent options. Worktrees persist until removed: clean up with
+`workmux remove <handle>` or attach a window later with `workmux open <handle>`.
 
 ### List worktrees
 
@@ -127,11 +199,33 @@ workmux send agent-a "fix the tests"    # short message
 workmux send agent-a "/merge"           # send a skill command
 workmux send agent-a -f followup.md     # from file
 workmux send myproject:docs "update the API section"  # cross-project
+workmux send %42 "fix the tests"        # by pane ID (worktrees with several agents)
+workmux send --wait agent-a "fix it"    # confirm delivery, wait for done/waiting
+workmux send --wait --until working agent-a "fix it"  # delivery confirmation only
+workmux send --wait --timeout 600 agent-a -f task.md  # give up after 10 min
 
 # Run shell commands in an agent's worktree
 workmux run agent-a -- pytest tests/    # wait and stream output
 workmux run agent-a -b -- npm run build # run in background
 ```
+
+`send` refuses an agent waiting on a dialog (Enter would answer it) and a
+worktree with several agents; target one of those by the pane ID that
+`workmux status --json` shows. Failures print a stable error name and exit with
+its code:
+
+| Error                  | Exit | Meaning                                                |
+| ---------------------- | ---- | ------------------------------------------------------ |
+| `agent_waiting`        | 3    | Agent is waiting on a dialog; nothing sent             |
+| `ambiguous_target`     | 4    | Target matches several agents; pane IDs listed         |
+| `agent_not_found`      | 5    | No live agent for the target                           |
+| `send_stalled`         | 6    | `--wait`: idle agent showed no activity within 5s      |
+| `agent_gone`           | 7    | `--wait`: agent exited before its turn settled         |
+| `agent_status_unknown` | 8    | `--wait` on an agent with no reported status; not sent |
+| `timeout`              | 124  | `--wait --timeout` expired                             |
+
+After a `send`, `workmux wait` counts only the agent sent to and only states of
+the turn the send started.
 
 ### Other commands
 
@@ -209,31 +303,24 @@ For full lifecycle orchestration (spawn, monitor, merge), use
 
 ### Cross-project worktree creation
 
-`workmux add` creates worktrees in the current git repo and adds the
-window to the current tmux session. To create a worktree in a different
-project, run `workmux add` inside that project's tmux session.
-
-Discover project paths from existing sessions:
-
-```bash
-tmux list-sessions -F '#{session_name} #{session_path}'
-```
-
-Then create the worktree in the target session:
+`workmux add` creates a worktree in the current working repository. Set the
+command's working directory to the target project and pass `--parent-session`
+to place the managed window directly in a specific tmux session. The working
+directory and tmux session are independent. Background and agent tool
+invocations can omit `$TMUX_PANE`, so coordinated dispatch should always pass
+`--parent-session` when placement matters. Workmux creates the parent session
+when it does not exist, so do not bootstrap it with `tmux new-window` or
+`tmux new-session`.
 
 ```bash
-# If the session exists:
-tmux new-window -t <session> -c <project-path> \
-  "workmux add <branch> -b -P <prompt-file>; exit"
-
-# If the session does not exist, create it first:
-tmux new-session -d -s <session> -c <project-path> && \
-tmux new-window -t <session> -c <project-path> \
-  "workmux add <branch> -b -P <prompt-file>; exit"
+# Run with the command working directory set to <project-path>
+workmux add <branch> -b -P <prompt-file> --parent-session <session>
 ```
 
-The temporary window closes when `workmux add` finishes; the worktree
-window that workmux creates stays in the session.
+Use `--target-name <name>` only when the managed tmux target needs a name that
+differs from the worktree-derived default. Run `workmux` commands from the
+target repository so it creates the worktree from the correct Git repository
+and base branch.
 
 Do NOT research before dispatching. Use context you already have, but
 do not explore or read code just to write the prompt. Worktree agents

@@ -65,6 +65,12 @@ fn skills_dir_with_env(
             Some(base.join("skills"))
         }
         Agent::OpenCode => Some(home.join(".config/opencode/skills")),
+        Agent::Grok => {
+            let base = get_env("GROK_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".grok"));
+            Some(base.join("skills"))
+        }
         Agent::Pi => {
             let pi_dir = get_env("PI_CODING_AGENT_DIR")
                 .map(PathBuf::from)
@@ -74,7 +80,7 @@ fn skills_dir_with_env(
         Agent::Omp => {
             Some(crate::agent_setup::omp::omp_agent_dir_with_env(home, get_env).join("skills"))
         }
-        Agent::Codex | Agent::Copilot | Agent::Gemini => None,
+        Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Gemini => None,
     }
 }
 

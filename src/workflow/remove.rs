@@ -1,31 +1,17 @@
 use anyhow::{Result, anyhow};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::git;
 use crate::sandbox;
 use tracing::{debug, info};
 
-use super::cleanup::{self, get_worktree_mode};
+use super::cleanup;
 use super::context::WorkflowContext;
 use super::types::RemoveResult;
 
 pub fn fallback_worktree_path(handle: &str, context: &WorkflowContext) -> Result<Option<PathBuf>> {
-    let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
-        crate::util::expand_worktree_dir(worktree_dir, &context.main_worktree_root)?
-    } else {
-        let project_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Could not determine project name"))?;
-        context
-            .main_worktree_root
-            .parent()
-            .ok_or_else(|| anyhow!("Could not determine parent directory"))?
-            .join(format!("{}__worktrees", project_name))
-    };
-
-    let path = base_dir.join(handle);
+    let path = context.worktree_base_dir()?.join(handle);
     let Some(admin_dir) = git::linked_worktree_admin_dir(&path) else {
         return Ok(None);
     };
@@ -40,11 +26,32 @@ pub fn remove(
     keep_branch: bool,
     context: &WorkflowContext,
 ) -> Result<RemoveResult> {
+    remove_with_hook_output(handle, force, keep_branch, context, true)
+}
+
+/// Remove a worktree while keeping hook output away from the terminal.
+pub fn remove_quiet(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+    context: &WorkflowContext,
+) -> Result<RemoveResult> {
+    remove_with_hook_output(handle, force, keep_branch, context, false)
+}
+
+fn remove_with_hook_output(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+    context: &WorkflowContext,
+    show_hook_output: bool,
+) -> Result<RemoveResult> {
     info!(handle = handle, force, keep_branch, "remove:start");
 
     // Get worktree path and branch - this also validates that the worktree exists
     // Smart resolution: try handle first, then branch name
-    let (worktree_path, branch_name) = match git::find_worktree(handle) {
+    let workdir = Some(context.execution_dir.as_path());
+    let (worktree_path, branch_name) = match git::find_worktree_in(handle, workdir) {
         Ok(worktree) => worktree,
         Err(e) => {
             if let Some(path) = fallback_worktree_path(handle, context)? {
@@ -73,27 +80,13 @@ pub fn remove(
 
     debug!(handle = actual_handle, branch = branch_name, path = %worktree_path.display(), "remove:worktree resolved");
 
-    // Capture mode BEFORE cleanup (cleanup removes the metadata)
-    let mode = get_worktree_mode(actual_handle);
+    // Capture metadata before cleanup removes it.
+    let mode = git::get_worktree_mode_opt_in(actual_handle, workdir)
+        .unwrap_or(crate::config::MuxMode::Window);
+    let attachment = git::get_worktree_attachment_in(actual_handle, workdir);
 
     // Safety Check: Prevent deleting the main worktree itself, regardless of branch.
-    let is_main_worktree = match (
-        worktree_path.canonicalize(),
-        context.main_worktree_root.canonicalize(),
-    ) {
-        (Ok(canon_wt_path), Ok(canon_main_path)) => {
-            // Best case: both paths exist and can be resolved. This is the most reliable check.
-            canon_wt_path == canon_main_path
-        }
-        _ => {
-            // Fallback: If canonicalization fails on either path (e.g., directory was
-            // manually removed, broken symlink), compare the raw paths provided by git.
-            // This is a critical safety net.
-            worktree_path == context.main_worktree_root
-        }
-    };
-
-    if is_main_worktree {
+    if context.is_main_worktree(&worktree_path) {
         return Err(anyhow!(
             "Cannot remove branch '{}' because it is checked out in the main worktree at '{}'. \
             Switch the main worktree to a different branch first, or create a linked worktree for '{}'.",
@@ -111,8 +104,17 @@ pub fn remove(
         ));
     }
 
+    let checked_out_branch = if branch_name.is_empty() {
+        None
+    } else {
+        git::worktree_branch_in(&worktree_path, &context.execution_dir)?
+    };
+    // Detached HEAD has no branch to delete, including when a branch named
+    // "(detached)" exists elsewhere in the repository.
+    let keep_branch = keep_branch || checked_out_branch.is_none();
+
     // Safety Check: Prevent deleting the main branch by name (secondary check)
-    if branch_name == context.main_branch {
+    if checked_out_branch.as_deref() == Some(context.main_branch.as_str()) {
         return Err(anyhow!(
             "Cannot delete the main branch ('{}')",
             context.main_branch
@@ -144,22 +146,121 @@ pub fn remove(
         &branch_name,
         actual_handle,
         &worktree_path,
-        force,
-        keep_branch,
-        false, // no_hooks: run hooks normally for user-initiated remove
+        cleanup::CleanupOptions {
+            force,
+            keep_branch,
+            no_hooks: false,
+            show_hook_output,
+        },
     )?;
 
-    // Navigate to the main branch window/session and close the source
-    cleanup::navigate_to_target_and_close(
-        context.mux.as_ref(),
-        &context.prefix,
-        &context.main_branch,
-        actual_handle,
-        &cleanup_result,
-        mode,
-    )?;
+    if attachment.manages_mux() {
+        cleanup::navigate_to_target_and_close(
+            context.mux.as_ref(),
+            &context.prefix,
+            &context.main_branch,
+            actual_handle,
+            &cleanup_result,
+            mode,
+            context.config.default_session(),
+        )?;
+    }
+
+    let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
+    if cleanup_scheduled && show_hook_output {
+        if checked_out_branch.is_none() {
+            println!("✓ Scheduled removal of worktree '{}'", actual_handle);
+        } else if keep_branch {
+            println!(
+                "✓ Scheduled removal of worktree '{}' (branch '{}' will be kept)",
+                actual_handle, branch_name
+            );
+        } else {
+            println!(
+                "✓ Scheduled removal of worktree '{}' and branch '{}'",
+                actual_handle, branch_name
+            );
+        }
+        io::stdout().flush()?;
+    }
 
     Ok(RemoveResult {
-        branch_removed: branch_name.to_string(),
+        branch_removed: checked_out_branch,
+        cleanup_scheduled,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::multiplexer::{BackendType, create_backend};
+    use crate::test_support;
+
+    #[test]
+    fn remove_uses_context_repository_not_process_cwd() {
+        const TEST_NAME: &str =
+            "workflow::remove::tests::remove_uses_context_repository_not_process_cwd";
+        if !test_support::is_isolated_child(TEST_NAME) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo_a = temp.path().join("repo-a");
+            let repo_b = temp.path().join("repo-b");
+            let worktree_a = temp.path().join("repo-a__worktrees/shared");
+            let worktree_b = temp.path().join("repo-b__worktrees/shared");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::create_dir_all(&repo_b).unwrap();
+            std::fs::create_dir_all(worktree_a.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(worktree_b.parent().unwrap()).unwrap();
+            test_support::init_repo(&repo_a);
+            test_support::init_repo(&repo_b);
+
+            for (repo, worktree) in [(&repo_a, &worktree_a), (&repo_b, &worktree_b)] {
+                test_support::run_git(
+                    repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "shared",
+                        worktree.to_str().unwrap(),
+                    ],
+                );
+                git::set_worktree_attachment_in(
+                    "shared",
+                    git::WorktreeAttachment::Headless,
+                    Some(repo),
+                )
+                .unwrap();
+            }
+
+            test_support::run_isolated_test(
+                TEST_NAME,
+                &repo_a,
+                &[
+                    ("WM_TEST_TEMP", temp.path()),
+                    ("XDG_STATE_HOME", temp.path()),
+                ],
+            );
+            return;
+        }
+
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        let repo_a = temp.join("repo-a");
+        let repo_b = temp.join("repo-b");
+        let ctx = WorkflowContext::new_in(
+            &repo_b,
+            Config::default(),
+            create_backend(BackendType::Tmux),
+            None,
+        )
+        .unwrap();
+
+        remove("shared", true, false, &ctx).unwrap();
+
+        assert!(temp.join("repo-a__worktrees/shared").exists());
+        assert!(!temp.join("repo-b__worktrees/shared").exists());
+        assert!(git::branch_exists_in("shared", Some(&repo_a)).unwrap());
+        assert!(!git::branch_exists_in("shared", Some(&repo_b)).unwrap());
+    }
 }

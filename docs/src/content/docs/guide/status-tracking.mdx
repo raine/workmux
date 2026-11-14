@@ -1,0 +1,325 @@
+---
+title: "Status tracking"
+description: Display agent status in multiplexer tabs for at-a-glance visibility
+---
+
+import Screenshot from "../../../components/Screenshot.astro";
+import screenshot from "../../../assets/screenshots/status.webp";
+
+Workmux can display the status of the agent in tmux window names and Zellij tab
+titles, giving you at-a-glance visibility into what the agent in each window is
+doing.
+
+<div style="display: flex; justify-content: center; max-width: 45rem; margin: 1.5rem 0;">
+
+<Screenshot
+  src={screenshot}
+  alt="tmux status showing agent icons"
+  framed={false}
+/>
+
+</div>
+
+## Agent support
+
+| Agent                   | Status                                                                      |
+| ----------------------- | --------------------------------------------------------------------------- |
+| Claude Code             | ✅ Supported                                                                |
+| OpenCode                | ✅ Supported                                                                |
+| Codex                   | ✅ Supported                                                                |
+| Copilot CLI             | ✅ Supported\*                                                              |
+| Pi                      | ✅ Supported\*                                                              |
+| Oh My Pi                | ✅ Supported                                                                |
+| Gemini CLI              | ✅ Supported                                                                |
+| Grok                    | ✅ Supported                                                                |
+| Antigravity CLI (`agy`) | ✅ Supported\*                                                              |
+| Kiro                    | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
+| Mistral Vibe            | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
+
+**Notes:**
+
+- **Copilot CLI**: 💬 waiting state requires Copilot CLI 1.0.18 or later
+- **Pi**: No 💬 waiting state
+- **Codex**: Registration occurs when the first turn begins because its session hook is turn-bound
+- **Antigravity CLI (`agy`)**: No 💬 waiting state; registration occurs when agent execution begins
+- **Kiro**: Hooks support is messy: requires a custom agent since the default can't be edited
+
+## Status icons
+
+- 🤖 = agent is working
+- 💬 = agent is waiting for user input
+- ✅ = agent finished (auto-clears on window focus in tmux)
+
+## Automated setup
+
+Run `workmux setup` to automatically detect your agent CLIs and install status tracking hooks:
+
+```bash
+workmux setup
+```
+
+This detects Claude Code, Codex, Copilot CLI, Gemini CLI, Grok, Antigravity CLI, OpenCode, Pi, and Oh My Pi by checking for their executable or configuration directories, then offers to install the appropriate hooks. Agent-specific configuration directory overrides are respected. Workmux also offers updates when an installed integration differs from its bundled version.
+
+Workmux automatically modifies your tmux `window-status-format` to display the status icons. This happens once per session and only affects the current tmux session (not your global config).
+
+## Claude Code setup
+
+If you prefer manual setup, install the workmux status plugin:
+
+```bash
+claude plugin marketplace add raine/workmux
+claude plugin install workmux-status
+```
+
+Alternatively, you can manually add the hooks to `~/.claude/settings.json`. See [.claude-plugin/plugin.json](https://github.com/raine/workmux/blob/main/.claude-plugin/plugin.json) for the hook configuration.
+
+## Pi setup
+
+If you prefer manual setup, copy the workmux status extension to your global pi extensions directory:
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+curl -o ~/.pi/agent/extensions/workmux-status.ts \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/pi/extensions/workmux-status.ts
+```
+
+Restart pi for the extension to take effect.
+
+### Pi subagents
+
+With a [pi-suba](https://github.com/raine/pi-suba) release that publishes activity
+snapshots, the parent stays working while either the parent or any delegated child
+is active. Waiting children do not count as active. When both the parent and all
+children are inactive, workmux reports done for a completed parent turn or clears
+the status for an aborted parent turn. Resuming a child marks the parent working
+again, even without a new parent turn.
+
+The extensions communicate through `pi.events`: pi-suba publishes
+`suba:activity` with `{ activeCount: number }`, and workmux requests an initial
+snapshot with `suba:activity:request`. Workmux does not read child session files or
+poll child processes.
+
+Aborted turns clear the working indicator without showing a completion checkmark
+once Pi has settled and no tracked children remain active. Without an activity
+publisher, only the parent determines status. A new parent turn reports working
+again.
+
+## Oh My Pi setup
+
+If you prefer manual setup, copy the workmux status extension to your global OMP extensions directory:
+
+```bash
+mkdir -p ~/.omp/agent/extensions
+curl -o ~/.omp/agent/extensions/workmux-status.ts \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/omp/extensions/workmux-status.ts
+```
+
+Restart omp for the extension to take effect.
+
+## OpenCode setup
+
+OpenCode V2 status tracking requires the terminal UI; headless `opencode run` is not tracked.
+
+For manual setup:
+
+```bash
+mkdir -p ~/.config/opencode/plugins/workmux-status
+for file in index.ts tui.ts status.ts; do
+  curl -fsSL -o "$HOME/.config/opencode/plugins/workmux-status/$file" \
+    "https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/v2/workmux-status/$file"
+done
+```
+
+When switching versions manually, back up any local edits and remove the other version's workmux plugin: `plugins/workmux-status.ts` (or `plugin/workmux-status.ts`) for V1, `plugins/workmux-status/` for V2.
+
+Restart OpenCode for the plugin to take effect.
+
+## Codex setup
+
+If you prefer manual setup, first ensure hooks are enabled in your Codex config:
+
+```toml
+# ${CODEX_HOME:-$HOME/.codex}/config.toml
+[features]
+hooks = true
+```
+
+Then download the hooks configuration:
+
+```bash
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$codex_home"
+curl -o "$codex_home/hooks.json" \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/codex/hooks/workmux-status.json
+```
+
+If you already have a `hooks.json` in your Codex home, merge the hook entries from the downloaded file into your existing configuration.
+
+Codex permission prompts use the 💬 waiting state.
+
+## Gemini CLI setup
+
+If you prefer manual setup, download the hooks configuration and merge it into your Gemini settings:
+
+```bash
+gemini_dir="${GEMINI_CLI_HOME:-$HOME}/.gemini"
+curl -s https://raw.githubusercontent.com/raine/workmux/main/resources/gemini/settings.json \
+  | jq -s '.[0] * .[1]' "$gemini_dir/settings.json" - > /tmp/gemini-settings.json \
+  && mv /tmp/gemini-settings.json "$gemini_dir/settings.json"
+```
+
+If you don't have an existing Gemini settings file, you can download the hooks configuration directly:
+
+```bash
+gemini_dir="${GEMINI_CLI_HOME:-$HOME}/.gemini"
+mkdir -p "$gemini_dir"
+curl -o "$gemini_dir/settings.json" \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/gemini/settings.json
+```
+
+## Grok setup
+
+`workmux setup` installs Grok lifecycle hooks under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset. Start a new Grok session after setup so it discovers the hook.
+
+For manual setup, download the hooks configuration:
+
+```bash
+grok_home="${GROK_HOME:-$HOME/.grok}"
+mkdir -p "$grok_home/hooks"
+curl -o "$grok_home/hooks/workmux-status.json" \
+  https://raw.githubusercontent.com/raine/workmux/main/.grok/hooks/workmux-status.json
+```
+
+`UserPromptSubmit` and `PostToolUse` mark the pane working, `Notification` marks it waiting, and `Stop` or `SessionEnd` marks it done. Grok permission prompts do not all emit `Notification`, so some prompts may remain marked as working while waiting for input.
+
+## Antigravity CLI (`agy`) setup
+
+`workmux setup` installs Antigravity lifecycle hooks in `~/.gemini/config/hooks.json`. The first `PreInvocation` handler registers the pane when agent execution begins, the second marks it working, and the terminal `Stop` event marks it done.
+
+Antigravity loads hook configuration when a session starts, so restart existing `agy` sessions after setup.
+
+For manual setup, merge this named hook group into `~/.gemini/config/hooks.json`:
+
+```json
+{
+  "workmux-status": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "workmux register-agent >/dev/null 2>&1 || true; printf '{}\\n'"
+      },
+      {
+        "type": "command",
+        "command": "workmux set-window-status working >/dev/null 2>&1 || true; printf '{}\\n'"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "workmux set-window-status done >/dev/null 2>&1 || true; printf '{}\\n'"
+      }
+    ]
+  }
+}
+```
+
+## Copilot CLI setup
+
+Copilot CLI 0.0.422 or later supports personal hooks. If you prefer manual setup, install the workmux hook under `$COPILOT_HOME/hooks/`, or `~/.copilot/hooks/` when `COPILOT_HOME` is unset:
+
+```bash
+copilot_home="${COPILOT_HOME:-$HOME/.copilot}"
+mkdir -p "$copilot_home/hooks"
+curl -o "$copilot_home/hooks/workmux-status.json" \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
+```
+
+Copilot loads personal hooks in every repository. If the repository contains a `.github/hooks/workmux-status` installation, remove that directory to avoid running both copies of the hook.
+
+The `notification` hook marks the pane waiting when Copilot shows a permission
+prompt or asks a question. `postToolUse` and `postToolUseFailure` restore working
+when the tool finishes, and `userPromptSubmitted` marks a new prompt working.
+Copilot CLI 1.0.18 or later is required for the waiting state.
+
+Run `workmux setup` to update older workmux hooks, then start a new Copilot session
+to load the changes.
+
+## Customization
+
+You can customize the icons in your config:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_icons:
+  working: "🔄"
+  waiting: "⏸️"
+  done: "✔️"
+```
+
+Tmux style codes are supported for colored icons, and work in both the tmux status bar and the dashboard:
+
+```yaml
+status_icons:
+  done: "#[fg=#a6e3a1]󰄴#[fg=default]"
+```
+
+Zellij displays the visible icon text in its tab title and ignores tmux style
+codes. Zellij does not auto-clear waiting or done icons on tab focus; the next
+status update replaces them.
+
+If you prefer to manage the tmux format yourself, disable auto-modification and add the status variable to your `~/.tmux.conf`:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_format: false
+```
+
+```bash
+# ~/.tmux.conf
+set -g window-status-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+set -g window-status-current-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+```
+
+## Interrupted agent detection
+
+When an agent is in "working" status but its pane output hasn't changed for 10 seconds, workmux automatically detects it as interrupted. This typically happens when a user presses Ctrl+C to stop an agent.
+
+The detection runs in the sidebar daemon. If the agent resumes producing output, the interrupted indicator clears automatically. The dashboard reads the detection results from a shared runtime file, so both views stay in sync.
+
+## Jump to completed or waiting agents
+
+Use `workmux last-done` to quickly switch to the agent that most recently finished its task or is waiting for user input. Repeated invocations cycle through all completed and waiting agents in reverse chronological order (most recent first).
+
+Add a tmux keybinding for quick access:
+
+```bash
+# ~/.tmux.conf
+bind l run-shell "workmux last-done"
+```
+
+Then press `prefix + l` to jump to the last completed or waiting agent, press again to cycle to the next oldest, and so on. This is useful when you have multiple agents running and want to quickly attend to agents that need your attention.
+
+## Toggle between agents
+
+Use `workmux last-agent` to toggle between your current agent and the last one you visited. This works like vim's `Ctrl+^` or tmux's `last-window` - it remembers which agent you came from and switches back to it. Pressing it again returns you to where you were.
+
+This is available both as a CLI command and as the `Tab` key in the [dashboard](/guide/dashboard/).
+
+Add a tmux keybinding for quick access:
+
+```bash
+# ~/.tmux.conf
+bind Tab run-shell "workmux last-agent"
+```
+
+Then press `prefix + Tab` to toggle between your two most recent agents.
+
+## Disabling status hooks for nested agents
+
+If you launch another agent from inside an agent, that nested agent may run its own configured workmux status hooks and report activity from the same pane. Set `WORKMUX_DISABLE_SET_WINDOW_STATUS=1` on the nested command to make `workmux set-window-status` exit successfully without updating tmux or agent state:
+
+```bash
+WORKMUX_DISABLE_SET_WINDOW_STATUS=1 codex
+```
+
+Use this when you want only the parent agent pane to drive the workmux status indicator.

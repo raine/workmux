@@ -7,6 +7,20 @@ use crate::config::MuxMode;
 use super::WorktreeNotFound;
 use super::branch::unset_branch_upstream_in;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorktreeAttachment {
+    Headless,
+    Multiplexer,
+    Legacy,
+    Unknown,
+}
+
+impl WorktreeAttachment {
+    pub fn manages_mux(self) -> bool {
+        matches!(self, Self::Multiplexer | Self::Legacy)
+    }
+}
+
 /// Check if a worktree already exists for a branch
 #[allow(dead_code)]
 pub fn worktree_exists(branch_name: &str) -> Result<bool> {
@@ -139,6 +153,72 @@ pub fn migrate_worktree_meta(old_handle: &str, new_handle: &str) -> Result<()> {
     Ok(())
 }
 
+/// Locate a linked-worktree registration for an exact registered path.
+pub fn linked_worktree_registration_in(
+    worktree_path: &Path,
+    git_common_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let registered = list_worktrees_in(Some(git_common_dir))?
+        .into_iter()
+        .any(|(path, _)| path == worktree_path);
+    if !registered {
+        return Ok(None);
+    }
+
+    let registrations_dir = git_common_dir.join("worktrees");
+    let registrations_dir = registrations_dir
+        .canonicalize()
+        .context("Failed to resolve linked-worktree registrations directory")?;
+    let expected_gitdir = worktree_path.join(".git");
+    let mut matching = Vec::new();
+    for entry in std::fs::read_dir(&registrations_dir)
+        .context("Failed to inspect linked-worktree registrations")?
+    {
+        let entry = entry.context("Failed to inspect linked-worktree registration")?;
+        let metadata = entry
+            .file_type()
+            .context("Failed to inspect linked-worktree registration type")?;
+        if !metadata.is_dir() || metadata.is_symlink() {
+            continue;
+        }
+        let admin_dir = entry
+            .path()
+            .canonicalize()
+            .context("Failed to resolve linked-worktree registration")?;
+        if admin_dir.parent() != Some(registrations_dir.as_path()) {
+            continue;
+        }
+        let backlink = match std::fs::read_to_string(admin_dir.join("gitdir")) {
+            Ok(backlink) => PathBuf::from(backlink.trim()),
+            Err(_) => continue,
+        };
+        if backlink == expected_gitdir {
+            matching.push(admin_dir);
+        }
+    }
+
+    match matching.len() {
+        1 => Ok(matching.pop()),
+        0 => Err(anyhow!(
+            "Registered worktree '{}' has no matching admin directory",
+            worktree_path.display()
+        )),
+        _ => Err(anyhow!(
+            "Registered worktree '{}' has multiple admin directories",
+            worktree_path.display()
+        )),
+    }
+}
+
+pub fn worktree_registration_exists_in(
+    worktree_path: &Path,
+    git_common_dir: &Path,
+) -> Result<bool> {
+    Ok(list_worktrees_in(Some(git_common_dir))?
+        .into_iter()
+        .any(|(path, _)| path == worktree_path))
+}
+
 /// Prune stale worktree metadata.
 pub fn prune_worktrees_in(git_common_dir: &Path) -> Result<()> {
     Cmd::new("git")
@@ -151,10 +231,32 @@ pub fn prune_worktrees_in(git_common_dir: &Path) -> Result<()> {
 
 /// Parse the output of `git worktree list --porcelain`
 pub(super) fn parse_worktree_list_porcelain(output: &str) -> Result<Vec<(PathBuf, String)>> {
+    Ok(parse_worktree_branches(output)
+        .into_iter()
+        .map(|(path, branch)| (path, branch.unwrap_or_else(|| "(detached)".to_string())))
+        .collect())
+}
+
+/// Resolve the checked-out branch without conflating detached HEAD with a branch name.
+/// Registration is used so this also works when the worktree directory is absent.
+pub fn worktree_branch_in(worktree_path: &Path, workdir: &Path) -> Result<Option<String>> {
+    let output = Cmd::new("git")
+        .workdir(workdir)
+        .args(&["worktree", "list", "--porcelain"])
+        .run_and_capture_stdout()?;
+    parse_worktree_branches(&output)
+        .into_iter()
+        .find(|(path, _)| path == worktree_path)
+        .map(|(_, branch)| branch)
+        .ok_or_else(|| anyhow!("Worktree '{}' is not registered", worktree_path.display()))
+}
+
+fn parse_worktree_branches(output: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut worktrees = Vec::new();
     for block in output.trim().split("\n\n") {
         let mut path: Option<PathBuf> = None;
         let mut branch: Option<String> = None;
+        let mut detached = false;
 
         for line in block.lines() {
             if let Some(p) = line.strip_prefix("worktree ") {
@@ -162,15 +264,17 @@ pub(super) fn parse_worktree_list_porcelain(output: &str) -> Result<Vec<(PathBuf
             } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
                 branch = Some(b.to_string());
             } else if line.trim() == "detached" {
-                branch = Some("(detached)".to_string());
+                detached = true;
             }
         }
 
-        if let (Some(p), Some(b)) = (path, branch) {
-            worktrees.push((p, b));
+        if let Some(path) = path
+            && (branch.is_some() || detached)
+        {
+            worktrees.push((path, branch));
         }
     }
-    Ok(worktrees)
+    worktrees
 }
 
 /// Get the path to a worktree for a given branch
@@ -228,6 +332,30 @@ pub fn list_worktrees() -> Result<Vec<(PathBuf, String)>> {
 
 /// List all worktrees with their branches, optionally in a specific workdir
 pub fn list_worktrees_in(workdir: Option<&Path>) -> Result<Vec<(PathBuf, String)>> {
+    Ok(list_worktrees_with_main_in(workdir)?.worktrees)
+}
+
+/// Worktree rows and the primary entry, including a bare repository anchor.
+pub struct WorktreeListing {
+    pub main_path: PathBuf,
+    pub worktrees: Vec<(PathBuf, String)>,
+}
+
+fn parse_worktree_listing(output: &str) -> Result<WorktreeListing> {
+    let main_path = output
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("No main repository entry in worktree list"))?;
+    Ok(WorktreeListing {
+        main_path,
+        worktrees: parse_worktree_list_porcelain(output)?,
+    })
+}
+
+/// List worktrees without losing the identity of the primary porcelain entry.
+pub fn list_worktrees_with_main_in(workdir: Option<&Path>) -> Result<WorktreeListing> {
     let cmd = Cmd::new("git").args(&["worktree", "list", "--porcelain"]);
     let cmd = match workdir {
         Some(path) => cmd.workdir(path),
@@ -236,7 +364,7 @@ pub fn list_worktrees_in(workdir: Option<&Path>) -> Result<Vec<(PathBuf, String)
     let list = cmd
         .run_and_capture_stdout()
         .context("Failed to list worktrees")?;
-    parse_worktree_list_porcelain(&list)
+    parse_worktree_listing(&list)
 }
 
 /// Store per-worktree metadata in git config.
@@ -279,6 +407,54 @@ pub fn get_worktree_meta_in(handle: &str, key: &str, workdir: Option<&Path>) -> 
         None => cmd,
     };
     cmd.run_and_capture_stdout().ok().filter(|s| !s.is_empty())
+}
+
+pub fn get_worktree_attachment(handle: &str) -> WorktreeAttachment {
+    get_worktree_attachment_in(handle, None)
+}
+
+pub fn get_worktree_attachment_in(handle: &str, workdir: Option<&Path>) -> WorktreeAttachment {
+    match get_worktree_meta_in(handle, "attachment", workdir).as_deref() {
+        Some("headless") => WorktreeAttachment::Headless,
+        Some("multiplexer") => WorktreeAttachment::Multiplexer,
+        Some(_) => WorktreeAttachment::Unknown,
+        None => WorktreeAttachment::Legacy,
+    }
+}
+
+pub fn set_worktree_attachment_in(
+    handle: &str,
+    attachment: WorktreeAttachment,
+    workdir: Option<&Path>,
+) -> Result<()> {
+    let value = match attachment {
+        WorktreeAttachment::Headless => "headless",
+        WorktreeAttachment::Multiplexer => "multiplexer",
+        WorktreeAttachment::Legacy | WorktreeAttachment::Unknown => {
+            return Err(anyhow!("Only explicit attachment state can be persisted"));
+        }
+    };
+    set_worktree_meta_in(handle, "attachment", value, workdir)
+}
+
+pub fn get_worktree_window_token(handle: &str) -> Option<String> {
+    get_worktree_meta_in(handle, "window-token", None)
+}
+
+pub fn get_worktree_window_token_in(handle: &str, workdir: Option<&Path>) -> Option<String> {
+    get_worktree_meta_in(handle, "window-token", workdir)
+}
+
+pub fn ensure_worktree_window_token_in(handle: &str, workdir: Option<&Path>) -> Result<String> {
+    if let Some(token) = get_worktree_window_token_in(handle, workdir) {
+        return Ok(token);
+    }
+
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("Failed to generate worktree window token")?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    set_worktree_meta_in(handle, "window-token", &token, workdir)?;
+    Ok(token)
 }
 
 pub fn get_worktree_target_window(handle: &str) -> Option<String> {
@@ -394,18 +570,54 @@ pub fn get_all_worktree_modes_in(
     modes
 }
 
-/// Remove all metadata for a worktree handle.
-pub fn remove_worktree_meta(handle: &str) -> Result<()> {
-    // Use --remove-section to remove all keys under the handle's section
-    let _ = Cmd::new("git")
-        .args(&[
+/// Remove worktree metadata using an explicitly identified repository.
+pub fn remove_worktree_meta_at(handle: &str, git_common_dir: &Path) -> Result<()> {
+    let section = format!("workmux.worktree.{handle}");
+    let key_pattern = format!(r"^{}\.", regex::escape(&section));
+    let mut probe = super::unattended_git(Some(git_common_dir))?;
+    let probe_output = probe
+        .args([
             "config",
             "--local",
-            "--remove-section",
-            &format!("workmux.worktree.{}", handle),
+            "--name-only",
+            "--get-regexp",
+            &key_pattern,
         ])
-        .run();
+        .output()
+        .context("Failed to inspect Workmux metadata")?;
+    if !probe_output.status.success() {
+        if probe_output.status.code() == Some(1) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "Failed to inspect Workmux metadata: {}",
+            String::from_utf8_lossy(&probe_output.stderr).trim()
+        ));
+    }
+
+    let mut remove = super::unattended_git(Some(git_common_dir))?;
+    let remove_output = remove
+        .args(["config", "--local", "--remove-section", &section])
+        .output()
+        .context("Failed to remove Workmux metadata")?;
+    if !remove_output.status.success() {
+        return Err(anyhow!(
+            "Failed to remove Workmux metadata: {}",
+            String::from_utf8_lossy(&remove_output.stderr).trim()
+        ));
+    }
     Ok(())
+}
+
+/// Main repository name and path used by agent selectors and status JSON.
+pub fn project_identity(path: &Path) -> (Option<String>, Option<PathBuf>) {
+    let Ok(root) = get_main_worktree_root_in(Some(path)) else {
+        return (None, None);
+    };
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    (name, Some(root))
 }
 
 /// Get the main worktree root directory (not a linked worktree)
@@ -418,6 +630,52 @@ pub fn get_main_worktree_root() -> Result<PathBuf> {
 
 /// Get the main worktree root directory from a specific workdir
 pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
+    main_worktree_info_in(workdir).map(|(path, _)| path)
+}
+
+/// Resolve the configuration `{project}` name without changing repository paths.
+pub fn config_project_name_in(workdir: Option<&Path>) -> Result<String> {
+    let (root, bare) = main_worktree_info_in(workdir)?;
+    let directory = if bare {
+        // Porcelain reports a bare `.git` directory as its parent. Naming must
+        // inspect the actual directory so the parent's name is used verbatim.
+        super::get_git_common_dir_in(workdir)?
+    } else {
+        root
+    };
+    config_project_name(&directory, bare)
+}
+
+fn config_project_name(directory: &Path, bare: bool) -> Result<String> {
+    let name = directory
+        .file_name()
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not determine project name from path: {}",
+                directory.display()
+            )
+        })?
+        .to_string_lossy();
+    if bare && name.starts_with('.') {
+        return directory
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Could not determine project name from parent of: {}",
+                    directory.display()
+                )
+            });
+    }
+    Ok(if bare {
+        name.strip_suffix(".git").unwrap_or(&name).to_string()
+    } else {
+        name.into_owned()
+    })
+}
+
+fn main_worktree_info_in(workdir: Option<&Path>) -> Result<(PathBuf, bool)> {
     let cmd = Cmd::new("git").args(&["worktree", "list", "--porcelain"]);
     let cmd = match workdir {
         Some(path) => cmd.workdir(path),
@@ -447,7 +705,7 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
         // If this is a bare repo, return its path immediately.
         // Git commands like `git worktree prune` work correctly from bare repo directories.
         if is_bare && let Some(p) = path {
-            return Ok(p);
+            return Ok((p, true));
         }
     }
 
@@ -457,13 +715,13 @@ pub fn get_main_worktree_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 
     for (path, _) in &worktrees {
         if path.exists() {
-            return Ok(path.clone());
+            return Ok((path.clone(), false));
         }
     }
 
     // Fallback: return the first worktree even if it doesn't exist
     if let Some((path, _)) = worktrees.first() {
-        Ok(path.clone())
+        Ok((path.clone(), false))
     } else {
         Err(anyhow!("No main worktree found"))
     }
@@ -475,6 +733,74 @@ mod tests {
     use crate::test_support;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn config_project_names_preserve_regular_names_and_normalize_bare_names() {
+        for (path, bare, expected) in [
+            ("/repos/northwind", false, "northwind"),
+            ("/repos/.northwind", false, ".northwind"),
+            ("/repos/northwind.git", false, "northwind.git"),
+            ("/repos/northwind", true, "northwind"),
+            ("/repos/northwind/.bare", true, "northwind"),
+            ("/repos/northwind/.anything", true, "northwind"),
+            ("/repos/northwind/.git", true, "northwind"),
+            ("/repos/northwind.git", true, "northwind"),
+            ("/repos/northwind.git.git", true, "northwind.git"),
+            ("/repos/northwind.git/.git", true, "northwind.git"),
+            ("/repos/.northwind/.git", true, ".northwind"),
+        ] {
+            assert_eq!(
+                config_project_name(Path::new(path), bare).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
+        assert!(config_project_name(Path::new("/"), false).is_err());
+        assert!(config_project_name(Path::new("/.bare"), true).is_err());
+    }
+
+    #[test]
+    fn listing_preserves_bare_anchor_when_first_linked_worktree_changes() {
+        for first in ["branch-1", "branch-2"] {
+            let output = format!(
+                "worktree /project\nbare\n\nworktree /project/worktrees/{first}\nHEAD abc\nbranch refs/heads/{first}\n\nworktree /project/worktrees/dev\nHEAD abc\nbranch refs/heads/dev\n"
+            );
+            let listing = parse_worktree_listing(&output).unwrap();
+            assert_eq!(listing.main_path, PathBuf::from("/project"));
+            assert_eq!(listing.worktrees.len(), 2);
+            assert!(
+                listing
+                    .worktrees
+                    .iter()
+                    .all(|(path, _)| *path != listing.main_path)
+            );
+        }
+    }
+
+    #[test]
+    fn worktree_branches_distinguish_detached_head_from_named_branch() {
+        let branches = parse_worktree_branches(
+            "worktree /detached\nHEAD abc\ndetached\n\nworktree /named\nHEAD abc\nbranch refs/heads/(detached)\n",
+        );
+        assert_eq!(
+            branches,
+            vec![
+                (PathBuf::from("/detached"), None),
+                (PathBuf::from("/named"), Some("(detached)".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn listing_preserves_primary_checkout_even_if_its_path_is_missing() {
+        let listing = parse_worktree_listing(
+            "worktree /missing-primary\nHEAD abc\nbranch refs/heads/feature\n\nworktree /linked\nHEAD abc\nbranch refs/heads/main\n\nworktree /detached\nHEAD abc\ndetached\n",
+        ).unwrap();
+        assert_eq!(listing.main_path, PathBuf::from("/missing-primary"));
+        assert_eq!(listing.worktrees[0].1, "feature");
+        assert_eq!(listing.worktrees[1].1, "main");
+        assert_eq!(listing.worktrees[2].1, "(detached)");
+    }
 
     #[test]
     fn create_worktree_in_uses_explicit_repo_not_process_cwd() {

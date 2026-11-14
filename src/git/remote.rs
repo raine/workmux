@@ -172,6 +172,22 @@ fn find_remote_for_repo_in(
     Ok(None)
 }
 
+/// Resolve the remote name that would be used for a fork without changing git config.
+pub fn resolve_fork_remote_name(fork_owner: &str) -> Result<String> {
+    let origin_url = get_remote_url("origin")?;
+    let origin_parsed = parse_git_remote_url(&origin_url)
+        .with_context(|| format!("Failed to parse origin URL: {}", origin_url))?;
+    if fork_owner.eq_ignore_ascii_case(origin_parsed.owner) {
+        return Ok("origin".to_string());
+    }
+    let identity = RepoIdentity {
+        host: origin_parsed.host.to_string(),
+        owner: fork_owner.to_string(),
+        repo: origin_parsed.repo.to_string(),
+    };
+    Ok(find_remote_for_repo_in(&identity, None)?.unwrap_or_else(|| format!("fork-{}", fork_owner)))
+}
+
 /// Ensure a remote exists for a specific fork owner.
 /// Returns the name of the remote (e.g., "origin" or "fork-username").
 /// If the remote needs to be created, it constructs the URL based on the origin URL's scheme.

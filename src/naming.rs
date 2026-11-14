@@ -43,6 +43,23 @@ pub fn derive_target_name(name: &str) -> Result<String> {
     Ok(handle)
 }
 
+pub fn validate_parent_session(name: &str) -> Result<String> {
+    if name.is_empty() {
+        bail!("Parent session cannot be empty");
+    }
+    if name.contains(':') {
+        bail!("Parent session cannot contain ':'");
+    }
+    if name.starts_with('$') || name.starts_with('=') {
+        bail!("Parent session cannot start with '$' or '='");
+    }
+    if name.chars().any(char::is_control) {
+        bail!("Parent session cannot contain control characters");
+    }
+
+    Ok(name.to_string())
+}
+
 /// Validates that a handle is safe for filesystem and tmux use.
 fn validate_handle(handle: &str) -> Result<()> {
     if handle.is_empty() {
@@ -211,6 +228,29 @@ mod tests {
     fn derive_handle_empty_explicit_name_fails() {
         let result = derive_handle("branch", Some(""), &default_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_parent_session_preserves_valid_name() {
+        let result = validate_parent_session("WalkingMate").unwrap();
+        assert_eq!(result, "WalkingMate");
+    }
+
+    #[test]
+    fn validate_parent_session_rejects_empty_name() {
+        assert!(validate_parent_session("").is_err());
+    }
+
+    #[test]
+    fn validate_parent_session_rejects_tmux_target_syntax() {
+        for name in ["parent:window", "$1", "=parent"] {
+            assert!(validate_parent_session(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn validate_parent_session_rejects_control_characters() {
+        assert!(validate_parent_session("parent\nsession").is_err());
     }
 
     #[test]

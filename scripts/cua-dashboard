@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The shared sandbox image is Ubuntu 22.04 (glibc 2.35), and a binary only runs
+# on a glibc at least as new as the one it was built against, so build on an
+# older Debian release.
+rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-bullseye}"
+# Keep build output per image so objects built against another glibc are not
+# reused.
+build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/workmux/arm64-${rust_image//[^A-Za-z0-9._-]/_}}"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/cua-dashboard <session>
+
+Build the current working tree for ARM64 Linux, deploy it to a running CuaBot
+session, create a disposable Git worktree fixture, and open the workmux dashboard
+in Kitty.
+USAGE
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'missing required command: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+materialize_worktree() {
+  local destination="$1"
+  git -C "$repo_root" archive HEAD | tar -x -C "$destination"
+
+  while IFS= read -r -d '' path; do
+    rm -rf "${destination:?}/$path"
+  done < <(git -C "$repo_root" diff HEAD --name-only --diff-filter=D -z)
+
+  while IFS= read -r -d '' path; do
+    if [[ -f "$repo_root/$path" ]]; then
+      mkdir -p "$destination/$(dirname "$path")"
+      cp -p "$repo_root/$path" "$destination/$path"
+    fi
+  done < <(
+    {
+      git -C "$repo_root" diff HEAD --name-only --diff-filter=ACMRTUXB -z
+      git -C "$repo_root" ls-files --others --exclude-standard -z
+    }
+  )
+}
+
+if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ "$#" -ne 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+session="$1"
+if [[ ! "$session" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "invalid session name: $session" >&2
+  exit 1
+fi
+
+require_command cua-sandbox
+require_command docker
+require_command git
+require_command tar
+
+container="$(cua-sandbox container "$session")"
+if [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)" != "running" ]]; then
+  echo "sandbox container is not running: $container" >&2
+  echo "Start it in another terminal with: cua-sandbox start $session" >&2
+  exit 1
+fi
+if ! docker exec -u user "$container" sh -lc 'command -v tmux' >/dev/null 2>&1; then
+  echo "tmux is missing from the shared sandbox image." >&2
+  echo "Rebuild it with: cua-sandbox setup" >&2
+  exit 1
+fi
+
+source_dir="$(mktemp -d)"
+trap 'rm -rf "$source_dir"' EXIT
+materialize_worktree "$source_dir"
+mkdir -p "$build_root/target" "$build_root/cargo-registry" "$build_root/cargo-git"
+
+docker run --rm \
+  --platform linux/arm64 \
+  -v "$source_dir:/src" \
+  -v "$build_root/target:/src/target" \
+  -v "$build_root/cargo-registry:/usr/local/cargo/registry" \
+  -v "$build_root/cargo-git:/usr/local/cargo/git" \
+  -w /src \
+  "$rust_image" \
+  cargo build --locked
+
+remote_dir="/home/user/workmux-run"
+fixture_dir="/home/user/workmux-cua-fixture"
+feature_dir="/home/user/workmux-cua-feature"
+tmux_session="workmux-cua"
+docker cp "$build_root/target/debug/workmux" "$container:/tmp/workmux-built"
+docker exec -u user \
+  -e REMOTE_DIR="$remote_dir" \
+  -e FIXTURE_DIR="$fixture_dir" \
+  -e FEATURE_DIR="$feature_dir" \
+  -e TMUX_SESSION="$tmux_session" \
+  "$container" sh -lc '
+    set -eu
+    mkdir -p "$REMOTE_DIR/state" "$REMOTE_DIR/config/workmux"
+    printf "nerdfont: true\n" > "$REMOTE_DIR/config/workmux/config.yaml"
+    cp /tmp/workmux-built "$REMOTE_DIR/workmux"
+    chmod 755 "$REMOTE_DIR/workmux"
+    rm -rf "$FIXTURE_DIR" "$FEATURE_DIR"
+    mkdir -p "$FIXTURE_DIR"
+    cd "$FIXTURE_DIR"
+    git init --initial-branch=main
+    git config user.name "Cua Sandbox"
+    git config user.email "cua-sandbox@example.invalid"
+    printf "# Cua workmux fixture\n" > README.md
+    git add README.md
+    git commit -m "initialize fixture"
+    git worktree add -b feature/cua "$FEATURE_DIR"
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    tmux new-session -d -s "$TMUX_SESSION" -n dashboard -c "$FIXTURE_DIR" \
+      "XDG_CONFIG_HOME=$REMOTE_DIR/config XDG_STATE_HOME=$REMOTE_DIR/state $REMOTE_DIR/workmux dashboard --tab worktrees"
+    tmux set-option -t "$TMUX_SESSION" status off
+    tmux set-option -t "$TMUX_SESSION" set-titles off
+  '
+docker exec -u root "$container" rm -f /tmp/workmux-built
+
+docker exec -d -u user -e DISPLAY=:100 "$container" \
+  kitty \
+  --title 'Workmux Dashboard' \
+  --override 'font_family=JetBrainsMono Nerd Font Mono' \
+  --override font_size=11 \
+  --override background='#0b0f14' \
+  --override foreground='#d8dee9' \
+  --override cursor='#88c0d0' \
+  --override selection_background='#434c5e' \
+  --override remember_window_size=no \
+  --override initial_window_width=1200 \
+  --override initial_window_height=650 \
+  sh -lc "exec tmux attach-session -t '$tmux_session'"
+
+echo "Opened workmux dashboard in session: $session"

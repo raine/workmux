@@ -22,6 +22,11 @@ pub trait AgentProfile: Send + Sync {
         false
     }
 
+    /// Whether prompts should be delivered as bracketed paste.
+    fn uses_bracketed_paste_for_input(&self) -> bool {
+        false
+    }
+
     /// Whether this agent needs auto-status when launched with a prompt file.
     ///
     /// Agents with hooks that would normally set status need auto-status as a
@@ -38,6 +43,22 @@ pub trait AgentProfile: Send + Sync {
     /// like `--dangerously-skip-permissions` for agents that do.
     fn skip_permissions_flag(&self) -> Option<&'static str> {
         None
+    }
+
+    /// CLI flags every launch of this agent in a workmux pane needs.
+    fn launch_flags(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Other CLI flags every sandboxed launch of this agent needs.
+    fn sandbox_flags(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Other spellings the agent accepts for `flag`, so a command that
+    /// already sets it under one of them doesn't get it twice.
+    fn flag_aliases(&self, _flag: &str) -> &'static [&'static str] {
+        &[]
     }
 
     /// Format the prompt injection argument for this agent.
@@ -98,7 +119,7 @@ impl AgentProfile for ClaudeProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("claude --model haiku -p")
+        Some("claude --model haiku --no-session-persistence -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -127,6 +148,54 @@ impl AgentProfile for GeminiProfile {
 
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--resume")
+    }
+}
+
+pub struct CopilotProfile;
+
+impl AgentProfile for CopilotProfile {
+    fn name(&self) -> &'static str {
+        "copilot"
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("--interactive=\"$(cat {})\"", prompt_path)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
+pub struct AntigravityProfile;
+
+impl AgentProfile for AntigravityProfile {
+    fn name(&self) -> &'static str {
+        "agy"
+    }
+
+    fn needs_auto_status(&self) -> bool {
+        true
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--dangerously-skip-permissions")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("-i \"$(cat {})\"", prompt_path)
+    }
+
+    fn auto_name_command(&self) -> Option<&'static str> {
+        Some(r#"sh -c 'agy -p "$(cat)"'"#)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
     }
 }
 
@@ -161,12 +230,40 @@ impl AgentProfile for CodexProfile {
         "codex"
     }
 
+    fn uses_bracketed_paste_for_input(&self) -> bool {
+        true
+    }
+
     fn skip_permissions_flag(&self) -> Option<&'static str> {
         Some("--yolo")
     }
 
+    /// `--no-daemon`: codex's shared background server runs every session's
+    /// hooks with the environment of the process that started the server,
+    /// so status hooks would report to that pane, or fail where its `PATH`
+    /// lacks workmux. In a sandbox, the server would also be out of reach
+    /// or installed into the host's codex home.
+    fn launch_flags(&self) -> &'static [&'static str] {
+        &["--no-daemon"]
+    }
+
+    /// `--dangerously-bypass-hook-trust`: hooks run inside the sandbox like
+    /// any command the agent runs under `--yolo`, so reviewing them guards
+    /// nothing, and nobody is there to answer the review that would
+    /// otherwise hold back the status hooks.
+    fn sandbox_flags(&self) -> &'static [&'static str] {
+        &["--dangerously-bypass-hook-trust"]
+    }
+
+    fn flag_aliases(&self, flag: &str) -> &'static [&'static str] {
+        match flag {
+            "--yolo" => &["--dangerously-bypass-approvals-and-sandbox"],
+            _ => &[],
+        }
+    }
+
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some(r#"codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini"#)
+        Some(r#"codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna"#)
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -218,6 +315,30 @@ impl AgentProfile for VibeProfile {
     }
 }
 
+pub struct GrokProfile;
+
+impl AgentProfile for GrokProfile {
+    fn name(&self) -> &'static str {
+        "grok"
+    }
+
+    fn needs_auto_status(&self) -> bool {
+        true
+    }
+
+    fn skip_permissions_flag(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
+
+    fn prompt_argument(&self, prompt_path: &str) -> String {
+        format!("\"$(cat {})\"", prompt_path)
+    }
+
+    fn continue_flag(&self) -> Option<&'static str> {
+        Some("--continue")
+    }
+}
+
 pub struct PiProfile;
 
 impl AgentProfile for PiProfile {
@@ -234,7 +355,7 @@ impl AgentProfile for PiProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("pi -p")
+        Some("pi --no-session -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -258,7 +379,7 @@ impl AgentProfile for OmpProfile {
     }
 
     fn auto_name_command(&self) -> Option<&'static str> {
-        Some("omp -p")
+        Some("omp --no-session -p")
     }
 
     fn continue_flag(&self) -> Option<&'static str> {
@@ -279,12 +400,15 @@ impl AgentProfile for DefaultProfile {
 static PROFILES: &[&dyn AgentProfile] = &[
     &ClaudeProfile,
     &GeminiProfile,
+    &CopilotProfile,
+    &AntigravityProfile,
     &OpenCodeProfile,
     &CodexProfile,
     &PiProfile,
     &OmpProfile,
     &KiroProfile,
     &VibeProfile,
+    &GrokProfile,
 ];
 
 /// Check if a command matches a known agent profile.
@@ -458,10 +582,25 @@ impl AgentCommand {
         parts.join(" ")
     }
 
-    pub fn prepend_args_fragment(&mut self, fragment: &str) {
-        if let Some(mut args) = shlex::split(fragment) {
-            args.extend(std::mem::take(&mut self.args));
-            self.args = args;
+    /// Prepend `fragment` unless the options (the arguments before any
+    /// `--`) already contain it, or one of `aliases`. Agents reject a flag
+    /// given twice.
+    pub fn prepend_missing_args_fragment(&mut self, fragment: &str, aliases: &[&str]) {
+        let Some(mut tokens) = shlex::split(fragment) else {
+            return;
+        };
+        let options = match self.args.iter().position(|arg| arg == "--") {
+            Some(end) => &self.args[..end],
+            None => &self.args[..],
+        };
+        let present = (!tokens.is_empty()
+            && options
+                .windows(tokens.len())
+                .any(|window| window == tokens.as_slice()))
+            || options.iter().any(|arg| aliases.contains(&arg.as_str()));
+        if !present {
+            tokens.extend(std::mem::take(&mut self.args));
+            self.args = tokens;
         }
     }
 
@@ -499,6 +638,31 @@ pub struct SelectedAgent {
 impl SelectedAgent {
     pub fn kind(&self) -> &'static str {
         self.profile.name()
+    }
+
+    /// Add the flags every launch in a workmux pane needs, skipping any the
+    /// command already sets.
+    pub fn add_launch_flags(&mut self) {
+        self.prepend_missing(self.profile.launch_flags().iter().copied());
+    }
+
+    /// Add the skip-permissions flag and the other flags a sandboxed launch
+    /// needs, skipping any the command already sets.
+    pub fn add_sandbox_flags(&mut self) {
+        let profile = self.profile;
+        self.prepend_missing(
+            profile
+                .skip_permissions_flag()
+                .into_iter()
+                .chain(profile.sandbox_flags().iter().copied()),
+        );
+    }
+
+    fn prepend_missing<'a>(&mut self, flags: impl DoubleEndedIterator<Item = &'a str>) {
+        for flag in flags.rev() {
+            self.command
+                .prepend_missing_args_fragment(flag, self.profile.flag_aliases(flag));
+        }
     }
 
     pub fn shell_command(&self) -> String {
@@ -600,7 +764,10 @@ mod tests {
             profile.skip_permissions_flag(),
             Some("--dangerously-skip-permissions")
         );
-        assert_eq!(profile.auto_name_command(), Some("claude --model haiku -p"));
+        assert_eq!(
+            profile.auto_name_command(),
+            Some("claude --model haiku --no-session-persistence -p")
+        );
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
@@ -623,6 +790,42 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_profile() {
+        let profile = CopilotProfile;
+        assert_eq!(profile.name(), "copilot");
+        assert!(!profile.needs_bang_delay());
+        assert!(!profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "--interactive=\"$(cat PROMPT.md)\""
+        );
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
+        assert_eq!(profile.auto_name_command(), None);
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
+    fn test_antigravity_profile() {
+        let profile = AntigravityProfile;
+        assert_eq!(profile.name(), "agy");
+        assert!(!profile.needs_bang_delay());
+        assert!(profile.needs_auto_status());
+        assert_eq!(
+            profile.prompt_argument("PROMPT.md"),
+            "-i \"$(cat PROMPT.md)\""
+        );
+        assert_eq!(
+            profile.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
+        assert_eq!(
+            profile.auto_name_command(),
+            Some(r#"sh -c 'agy -p "$(cat)"'"#)
+        );
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
     fn test_opencode_profile() {
         let profile = OpenCodeProfile;
         assert_eq!(profile.name(), "opencode");
@@ -636,11 +839,86 @@ mod tests {
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
+    fn launched(profile: &'static dyn AgentProfile, command: &str, sandbox: bool) -> String {
+        let mut agent = SelectedAgent {
+            command: AgentCommand::parse(command).unwrap(),
+            profile,
+        };
+        agent.add_launch_flags();
+        if sandbox {
+            agent.add_sandbox_flags();
+        }
+        agent.shell_command()
+    }
+
+    fn sandboxed(profile: &'static dyn AgentProfile, command: &str) -> String {
+        launched(profile, command, true)
+    }
+
+    #[test]
+    fn launch_flags_apply_without_a_sandbox() {
+        assert_eq!(launched(&CodexProfile, "codex", false), "codex --no-daemon");
+        assert_eq!(
+            launched(&CodexProfile, "codex -m o3 --no-daemon", false),
+            "codex -m o3 --no-daemon"
+        );
+        assert_eq!(launched(&ClaudeProfile, "claude", false), "claude");
+    }
+
+    #[test]
+    fn sandbox_flags_are_added_once() {
+        let flags = "--dangerously-bypass-hook-trust --no-daemon";
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex"),
+            format!("codex --yolo {flags}")
+        );
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex --no-daemon -m o3"),
+            "codex --yolo --dangerously-bypass-hook-trust --no-daemon -m o3"
+        );
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex --yolo"),
+            format!("codex {flags} --yolo")
+        );
+        assert_eq!(
+            sandboxed(
+                &CodexProfile,
+                "codex --dangerously-bypass-approvals-and-sandbox"
+            ),
+            format!("codex {flags} --dangerously-bypass-approvals-and-sandbox")
+        );
+        assert_eq!(
+            sandboxed(&ClaudeProfile, "claude --dangerously-skip-permissions"),
+            "claude --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn sandbox_flags_ignore_arguments_after_the_terminator() {
+        assert_eq!(
+            sandboxed(&CodexProfile, "codex -- --no-daemon"),
+            "codex --yolo --dangerously-bypass-hook-trust --no-daemon -- --no-daemon"
+        );
+    }
+
+    #[test]
+    fn multi_token_sandbox_flags_match_as_a_whole() {
+        assert_eq!(
+            sandboxed(&VibeProfile, "vibe --agent myagent"),
+            "vibe --agent auto-approve --agent myagent"
+        );
+        assert_eq!(
+            sandboxed(&VibeProfile, "vibe --model x --agent auto-approve"),
+            "vibe --model x --agent auto-approve"
+        );
+    }
+
     #[test]
     fn test_codex_profile() {
         let profile = CodexProfile;
         assert_eq!(profile.name(), "codex");
         assert!(!profile.needs_bang_delay());
+        assert!(profile.uses_bracketed_paste_for_input());
         assert!(!profile.needs_auto_status());
         assert_eq!(
             profile.prompt_argument("PROMPT.md"),
@@ -649,7 +927,7 @@ mod tests {
         assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
         assert_eq!(
             profile.auto_name_command(),
-            Some(r#"codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini"#)
+            Some(r#"codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna"#)
         );
         assert_eq!(profile.continue_flag(), Some("resume --last"));
     }
@@ -686,6 +964,18 @@ mod tests {
     }
 
     #[test]
+    fn test_grok_profile() {
+        let profile = GrokProfile;
+        assert_eq!(profile.name(), "grok");
+        assert!(!profile.needs_bang_delay());
+        assert!(profile.needs_auto_status());
+        assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
+        assert_eq!(profile.skip_permissions_flag(), Some("--yolo"));
+        assert_eq!(profile.auto_name_command(), None);
+        assert_eq!(profile.continue_flag(), Some("--continue"));
+    }
+
+    #[test]
     fn test_pi_profile() {
         let profile = PiProfile;
         assert_eq!(profile.name(), "pi");
@@ -693,7 +983,7 @@ mod tests {
         assert!(profile.needs_auto_status());
         assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
         assert_eq!(profile.skip_permissions_flag(), None);
-        assert_eq!(profile.auto_name_command(), Some("pi -p"));
+        assert_eq!(profile.auto_name_command(), Some("pi --no-session -p"));
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
@@ -705,7 +995,7 @@ mod tests {
         assert!(profile.needs_auto_status());
         assert_eq!(profile.prompt_argument("PROMPT.md"), "\"$(cat PROMPT.md)\"");
         assert_eq!(profile.skip_permissions_flag(), None);
-        assert_eq!(profile.auto_name_command(), Some("omp -p"));
+        assert_eq!(profile.auto_name_command(), Some("omp --no-session -p"));
         assert_eq!(profile.continue_flag(), Some("--continue"));
     }
 
@@ -747,6 +1037,18 @@ mod tests {
     fn test_resolve_profile_gemini() {
         let profile = resolve_profile(Some("gemini"));
         assert_eq!(profile.name(), "gemini");
+    }
+
+    #[test]
+    fn test_resolve_profile_copilot() {
+        let profile = resolve_profile(Some("copilot --yolo"));
+        assert_eq!(profile.name(), "copilot");
+    }
+
+    #[test]
+    fn test_resolve_profile_agy() {
+        let profile = resolve_profile(Some("agy"));
+        assert_eq!(profile.name(), "agy");
     }
 
     #[test]
@@ -803,6 +1105,7 @@ mod tests {
     fn test_is_known_agent_bare_names() {
         assert!(is_known_agent("claude"));
         assert!(is_known_agent("gemini"));
+        assert!(is_known_agent("agy"));
         assert!(is_known_agent("codex"));
         assert!(is_known_agent("opencode"));
         assert!(is_known_agent("pi"));
@@ -816,6 +1119,7 @@ mod tests {
         assert!(is_known_agent("claude --dangerously-skip-permissions"));
         assert!(is_known_agent("codex --yolo"));
         assert!(is_known_agent("gemini -i foo"));
+        assert!(is_known_agent("agy --continue"));
     }
 
     #[test]
@@ -899,6 +1203,7 @@ mod tests {
         assert!(is_known_agent("env -u FOO claude"));
         assert!(is_known_agent("env FOO=bar codex --yolo"));
         assert!(is_known_agent("FOO=bar gemini -i foo"));
+        assert!(is_known_agent("env FOO=bar agy -i foo"));
         assert!(is_known_agent("env FOO=bar omp --continue"));
     }
 

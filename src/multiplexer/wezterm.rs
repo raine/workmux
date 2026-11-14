@@ -85,6 +85,11 @@ impl WezTermBackend {
         Self
     }
 
+    fn send_key_args<'a>(pane_id: &'a str, key: &'a str) -> [&'a str; 6] {
+        let text = if key == "Escape" { "\x1b" } else { key };
+        ["cli", "send-text", "--pane-id", pane_id, "--no-paste", text]
+    }
+
     /// Create a wezterm CLI command.
     /// Uses inherited WEZTERM_UNIX_SOCKET from environment.
     fn wezterm_cmd(&self) -> Cmd<'static> {
@@ -209,6 +214,11 @@ impl WezTermBackend {
         let direction_arg = match direction {
             SplitDirection::Horizontal => "--horizontal",
             SplitDirection::Vertical => "--top-level",
+            SplitDirection::Stacked => {
+                return Err(anyhow!(
+                    "split: stacked is only supported by the Zellij backend"
+                ));
+            }
         };
 
         let cwd_str = cwd.to_string_lossy();
@@ -624,7 +634,7 @@ impl Multiplexer for WezTermBackend {
 
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
         self.wezterm_cmd()
-            .args(&["cli", "send-text", "--pane-id", pane_id, "--no-paste", key])
+            .args(&Self::send_key_args(pane_id, key))
             .run()
             .context("Failed to send key to pane")?;
         Ok(())
@@ -670,9 +680,17 @@ impl Multiplexer for WezTermBackend {
 
     fn instance_id(&self) -> String {
         // Use the unix socket path as instance ID so all workspaces on the same
-        // WezTerm server share one instance — matching tmux behavior where all
-        // sessions on the same server are visible in the dashboard.
+        // WezTerm server share one instance, matching tmux server scope.
         std::env::var("WEZTERM_UNIX_SOCKET").unwrap_or_else(|_| "default".to_string())
+    }
+
+    fn resolve_instance_id(&self) -> Result<String> {
+        std::env::var("WEZTERM_UNIX_SOCKET")
+            .ok()
+            .filter(|instance| !instance.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("WEZTERM_UNIX_SOCKET is required to resolve the WezTerm instance")
+            })
     }
 
     fn active_pane_id(&self) -> Option<String> {
@@ -759,6 +777,15 @@ fn send_pane_switch_signal(workspace: &str, tab_title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_key_is_sent_as_a_control_byte() {
+        assert_eq!(
+            WezTermBackend::send_key_args("42", "Escape"),
+            ["cli", "send-text", "--pane-id", "42", "--no-paste", "\x1b"]
+        );
+        assert_eq!(WezTermBackend::send_key_args("42", "q")[5], "q");
+    }
 
     #[test]
     fn test_cwd_path_parsing() {

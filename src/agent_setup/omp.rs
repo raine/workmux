@@ -9,11 +9,11 @@ use anyhow::Result;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
 use crate::agent_setup::extension_file;
 
 /// The OMP extension source, embedded at compile time.
-const EXTENSION_SOURCE: &str = include_str!("../../.omp/extensions/workmux-status.ts");
+const EXTENSION_SOURCE: &str = include_str!("../../resources/omp/extensions/workmux-status.ts");
 
 fn omp_agent_dir() -> Option<PathBuf> {
     let home = home::home_dir()?;
@@ -39,8 +39,12 @@ pub(crate) fn omp_agent_dir_with_env(
     }
 }
 
-fn extension_path() -> Option<PathBuf> {
-    omp_agent_dir().map(|d| d.join("extensions/workmux-status.ts"))
+pub(crate) fn extension_path() -> Option<PathBuf> {
+    omp_agent_dir().map(|d| extension_path_in(&d))
+}
+
+fn extension_path_in(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("extensions/workmux-status.ts")
 }
 
 /// Detect if OMP is present via filesystem.
@@ -54,15 +58,36 @@ pub fn detect() -> Option<&'static str> {
 
 /// Check if workmux extension is installed for OMP.
 pub fn check() -> Result<StatusCheck> {
-    extension_file::check_installed(extension_path().as_deref())
+    extension_file::check_installed(extension_path().as_deref(), EXTENSION_SOURCE)
+}
+
+/// [`check`] for the OMP agent directory `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    extension_file::check_installed(Some(&extension_path_in(dir)), EXTENSION_SOURCE)
+}
+
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = extension_path().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: extension_file::normalize_documentation_link(&std::fs::read_to_string(&path)?),
+        bundled: extension_file::normalize_documentation_link(EXTENSION_SOURCE),
+    }))
 }
 
 /// Install workmux extension for OMP.
 /// Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path =
-        extension_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir =
+        omp_agent_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
+/// [`install`] into the OMP agent directory `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = extension_path_in(dir);
     extension_file::install_extension_file(
         &path,
         EXTENSION_SOURCE,
@@ -103,12 +128,43 @@ mod tests {
         assert!(EXTENSION_SOURCE.contains("lastStatus"));
         assert!(EXTENSION_SOURCE.contains("statusQueue"));
         assert!(EXTENSION_SOURCE.contains("status === lastStatus"));
-        assert!(EXTENSION_SOURCE.contains("pi.on(\"message_end\""));
-        assert!(EXTENSION_SOURCE.contains("\"role\" in event.message"));
-        assert!(EXTENSION_SOURCE.contains("event.message.role === \"assistant\""));
+        assert!(!EXTENSION_SOURCE.contains("pi.on(\"message_end\""));
         assert!(EXTENSION_SOURCE.contains("pi.on(\"tool_call\""));
         assert!(EXTENSION_SOURCE.contains("event.toolName === \"ask\""));
         assert!(EXTENSION_SOURCE.contains("setStatus(\"waiting\")"));
+    }
+
+    #[test]
+    fn test_extension_registers_agent_before_agent_events() {
+        let registration = EXTENSION_SOURCE
+            .find("pi.on(\"session_start\"")
+            .expect("session_start handler");
+        let agent_start = EXTENSION_SOURCE
+            .find("pi.on(\"agent_start\"")
+            .expect("agent_start handler");
+
+        assert!(registration < agent_start);
+        assert!(
+            EXTENSION_SOURCE
+                .contains("await pi.exec(\"workmux\", [\"register-agent\"]).catch(() => {});")
+        );
+    }
+
+    #[test]
+    fn test_extension_without_registration_needs_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("workmux-status.ts");
+        let previous_source = EXTENSION_SOURCE
+            .replace(
+                "  pi.on(\"session_start\", async () => {\n    pendingPrompt = undefined;\n    await pi.exec(\"workmux\", [\"register-agent\"]).catch(() => {});\n  });\n\n",
+                "",
+            );
+        std::fs::write(&path, previous_source).unwrap();
+
+        assert!(matches!(
+            extension_file::check_installed(Some(&path), EXTENSION_SOURCE).unwrap(),
+            StatusCheck::UpdateAvailable
+        ));
     }
 
     #[test]

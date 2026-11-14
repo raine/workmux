@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -8,6 +8,15 @@ const STALE_ATOMIC_TEMP_AGE: Duration = Duration::from_secs(60);
 
 /// Write content through a same-directory temporary file and atomically replace the target.
 pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomic_with_durability(path, content, false)
+}
+
+/// Atomically replace a target and make the replacement durable before returning.
+pub(crate) fn write_atomic_durable(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomic_with_durability(path, content, true)
+}
+
+fn write_atomic_with_durability(path: &Path, content: &[u8], durable: bool) -> Result<()> {
     cleanup_stale_atomic_temps(path)?;
 
     let parent = path
@@ -24,9 +33,19 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         .with_context(|| format!("Failed to write temp file for {}", path.display()))?;
     tmp.flush()
         .with_context(|| format!("Failed to flush temp file for {}", path.display()))?;
+    if durable {
+        tmp.as_file()
+            .sync_all()
+            .with_context(|| format!("Failed to sync temp file for {}", path.display()))?;
+    }
     tmp.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to rename temp file for {}", path.display()))?;
+    if durable {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("Failed to sync directory for {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -122,23 +141,41 @@ fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Placeholder replaced with the project directory name in config templates.
+pub const PROJECT_PLACEHOLDER: &str = "{project}";
+
+/// Replace `{project}` with the resolved configuration project name.
+pub fn expand_project_placeholder(template: &str, project_name: &str) -> String {
+    template.replace(PROJECT_PLACEHOLDER, project_name)
+}
+
 /// Expand a `worktree_dir` template against a project root.
 ///
 /// Supported syntax:
 /// - Leading `~` or `~/...` expands to the user's home directory.
-/// - `{project}` is replaced with `project_root.file_name()`.
+/// - `{project}` is replaced with the independently resolved project name.
 ///
 /// Any other `{...}` token is rejected as an unknown placeholder.
 /// Relative results are joined to `project_root` and lexically normalized.
 /// Absolute results are returned verbatim (no normalization), matching
 /// the prior behavior of `workmux add` for absolute `worktree_dir` values.
-pub fn expand_worktree_dir(template: &str, project_root: &Path) -> Result<PathBuf> {
-    expand_worktree_dir_with_home(template, project_root, home::home_dir().as_deref())
+pub fn expand_worktree_dir(
+    template: &str,
+    project_root: &Path,
+    project_name: &str,
+) -> Result<PathBuf> {
+    expand_worktree_dir_with_home(
+        template,
+        project_root,
+        project_name,
+        home::home_dir().as_deref(),
+    )
 }
 
 pub(crate) fn expand_worktree_dir_with_home(
     template: &str,
     project_root: &Path,
+    project_name: &str,
     home: Option<&Path>,
 ) -> Result<PathBuf> {
     let mut cursor = 0usize;
@@ -149,7 +186,7 @@ pub(crate) fn expand_worktree_dir_with_home(
             .ok_or_else(|| anyhow!("worktree_dir: unterminated '{{' in template '{}'", template))?;
         let close = open + rel_close;
         let token = &template[open..=close];
-        if token != "{project}" {
+        if token != PROJECT_PLACEHOLDER {
             return Err(anyhow!(
                 "worktree_dir: unknown placeholder '{}' in '{}' (only '{{project}}' is supported)",
                 token,
@@ -160,17 +197,7 @@ pub(crate) fn expand_worktree_dir_with_home(
     }
 
     let tilde_expanded = expand_tilde_with_home(template, home);
-    let project_name = project_root
-        .file_name()
-        .ok_or_else(|| {
-            anyhow!(
-                "Could not determine project name from path: {}",
-                project_root.display()
-            )
-        })?
-        .to_string_lossy();
-    let as_str = tilde_expanded.to_string_lossy();
-    let with_project = as_str.replace("{project}", &project_name);
+    let with_project = expand_project_placeholder(&tilde_expanded.to_string_lossy(), project_name);
     let path = Path::new(&with_project);
 
     if path.is_absolute() {
@@ -178,6 +205,42 @@ pub(crate) fn expand_worktree_dir_with_home(
     } else {
         Ok(normalize_path(&project_root.join(path)))
     }
+}
+
+/// Terminal cell width of a string.
+pub(crate) fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
+        .sum()
+}
+
+/// Shorten a string to at most `max_width` terminal cells, ending in `…` when
+/// anything was cut.
+pub(crate) fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_string();
+    }
+
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        if width + char_width + 1 > max_width {
+            break;
+        }
+        out.push(c);
+        width += char_width;
+    }
+    let trimmed = out.trim_end();
+    let mut result = trimmed.to_string();
+    result.push('\u{2026}');
+    result
 }
 
 /// Format an age in seconds as a compact relative string (e.g., "2h", "3d", "1w", "2mo").
@@ -263,6 +326,17 @@ mod tests {
     }
 
     #[test]
+    fn write_atomic_durable_replaces_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        write_atomic_durable(&path, b"first").unwrap();
+        write_atomic_durable(&path, b"second").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "second");
+    }
+
+    #[test]
     fn write_atomic_does_not_remove_fresh_temp() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -276,39 +350,67 @@ mod tests {
     }
 
     #[test]
+    fn expand_project_placeholder_replaces_every_occurrence() {
+        let expanded = expand_project_placeholder("{project}-{project} ", "myproj");
+        assert_eq!(expanded, "myproj-myproj ");
+    }
+
+    #[test]
+    fn expand_project_placeholder_leaves_plain_template_untouched() {
+        let expanded = expand_project_placeholder("wm-", "myproj");
+        assert_eq!(expanded, "wm-");
+    }
+
+    #[test]
+    fn expand_worktree_dir_keeps_base_separate_from_name() {
+        let root = Path::new("/repos/northwind/.bare");
+        assert_eq!(
+            expand_worktree_dir_with_home("../out/{project}", root, "northwind", None).unwrap(),
+            PathBuf::from("/repos/northwind/out/northwind")
+        );
+        assert_eq!(
+            expand_worktree_dir_with_home("../", root, "northwind", None).unwrap(),
+            PathBuf::from("/repos/northwind")
+        );
+    }
+
+    #[test]
     fn expand_worktree_dir_tilde_and_project() {
         let home = PathBuf::from("/home/alice");
         let project = PathBuf::from("/Users/alice/code/myproj");
         let expanded =
-            expand_worktree_dir_with_home("~/.workmux/{project}", &project, Some(&home)).unwrap();
+            expand_worktree_dir_with_home("~/.workmux/{project}", &project, "myproj", Some(&home))
+                .unwrap();
         assert_eq!(expanded, PathBuf::from("/home/alice/.workmux/myproj"));
     }
 
     #[test]
     fn expand_worktree_dir_relative_with_project() {
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home("{project}-wts", &project, None).unwrap();
+        let expanded =
+            expand_worktree_dir_with_home("{project}-wts", &project, "foo", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/x/y/foo/foo-wts"));
     }
 
     #[test]
     fn expand_worktree_dir_absolute_with_project() {
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home("/tmp/wts-{project}", &project, None).unwrap();
+        let expanded =
+            expand_worktree_dir_with_home("/tmp/wts-{project}", &project, "foo", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/tmp/wts-foo"));
     }
 
     #[test]
     fn expand_worktree_dir_relative_no_placeholder() {
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home(".worktrees", &project, None).unwrap();
+        let expanded = expand_worktree_dir_with_home(".worktrees", &project, "foo", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/x/y/foo/.worktrees"));
     }
 
     #[test]
     fn expand_worktree_dir_absolute_no_placeholder_preserved() {
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home("/abs/path", &project, None).unwrap();
+        let expanded = expand_worktree_dir_with_home("/abs/path", &project, "foo", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/abs/path"));
     }
 
@@ -317,7 +419,8 @@ mod tests {
         // Absolute templates must be returned verbatim, matching prior
         // create.rs behavior. No lexical normalization.
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home("/tmp/foo/../bar", &project, None).unwrap();
+        let expanded =
+            expand_worktree_dir_with_home("/tmp/foo/../bar", &project, "foo", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/tmp/foo/../bar"));
     }
 
@@ -325,15 +428,15 @@ mod tests {
     fn expand_worktree_dir_tilde_only() {
         let home = PathBuf::from("/home/alice");
         let project = PathBuf::from("/x/y/foo");
-        let expanded = expand_worktree_dir_with_home("~", &project, Some(&home)).unwrap();
+        let expanded = expand_worktree_dir_with_home("~", &project, "foo", Some(&home)).unwrap();
         assert_eq!(expanded, PathBuf::from("/home/alice"));
     }
 
     #[test]
     fn expand_worktree_dir_unknown_placeholder_errors() {
         let project = PathBuf::from("/x/y/foo");
-        let err =
-            expand_worktree_dir_with_home("~/.workmux/{unknown}", &project, None).unwrap_err();
+        let err = expand_worktree_dir_with_home("~/.workmux/{unknown}", &project, "foo", None)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("{unknown}"), "error should name token: {msg}");
     }
@@ -341,7 +444,8 @@ mod tests {
     #[test]
     fn expand_worktree_dir_unterminated_brace_errors() {
         let project = PathBuf::from("/x/y/foo");
-        let err = expand_worktree_dir_with_home("/tmp/{project", &project, None).unwrap_err();
+        let err =
+            expand_worktree_dir_with_home("/tmp/{project", &project, "foo", None).unwrap_err();
         assert!(err.to_string().contains("unterminated"));
     }
 
@@ -350,7 +454,8 @@ mod tests {
         // Project name containing `{` must not trigger unknown-placeholder
         // detection because validation runs on the raw template.
         let project = PathBuf::from("/x/y/repo-{core}");
-        let expanded = expand_worktree_dir_with_home("/tmp/{project}", &project, None).unwrap();
+        let expanded =
+            expand_worktree_dir_with_home("/tmp/{project}", &project, "repo-{core}", None).unwrap();
         assert_eq!(expanded, PathBuf::from("/tmp/repo-{core}"));
     }
 

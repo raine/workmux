@@ -4,5 +4,12 @@
   "proseWrap": "preserve",
   "printWidth": 80,
   "sortPackageJson": false,
-  "ignorePatterns": ["node_modules", ".vitepress/cache", ".vitepress/dist"]
+  "ignorePatterns": [
+    "node_modules",
+    ".astro",
+    "dist",
+    "public/**/*.mp4",
+    "public/**/*.png",
+    "src/assets/**/*.webp"
+  ]
 }

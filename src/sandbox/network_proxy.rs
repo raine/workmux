@@ -10,27 +10,27 @@
 //! unapproved destinations even if it ignores the proxy env vars.
 
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::config::AllowedDomainRule;
 use crate::sandbox::constant_time::constant_time_eq;
 use crate::sandbox::rpc::generate_token;
 
-/// Maximum concurrent proxy connections. Matches RPC server cap.
-const MAX_CONNECTIONS: usize = 16;
-
 /// Maximum size of the CONNECT request (line + headers).
 /// Prevents memory exhaustion from oversized requests.
 const MAX_REQUEST_SIZE: usize = 8 * 1024;
 
-/// Timeout for reading the initial CONNECT request (prevents slowloris).
+/// Deadline for reading the initial CONNECT request.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Time allowed for an overloaded client to receive the proxy error.
+const REJECT_LINGER_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Timeout for connecting to the upstream target.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,18 +44,84 @@ pub struct NetworkProxy {
     port: u16,
     token: String,
     allowed_domains: Vec<AllowedDomainRule>,
+    max_connections: usize,
 }
 
 /// Handle to a running proxy server thread.
 pub struct ProxyHandle {
     _handle: thread::JoinHandle<()>,
+    _limit: Arc<ConnectionLimit>,
+}
+
+struct ConnectionLimit {
+    active: AtomicUsize,
+    max: usize,
+}
+
+struct ConnectionPermit {
+    limit: Arc<ConnectionLimit>,
+}
+
+impl ConnectionLimit {
+    fn new(max: usize) -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            max,
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Result<ConnectionPermit, usize> {
+        let mut active = self.active.load(Ordering::Relaxed);
+        loop {
+            if active >= self.max {
+                return Err(active);
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(ConnectionPermit {
+                        limit: Arc::clone(self),
+                    });
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.limit.active.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl NetworkProxy {
     /// Bind to a random port on all interfaces (same as RPC server).
-    pub fn bind(allowed_domains: &[AllowedDomainRule]) -> Result<Self> {
-        let listener =
-            TcpListener::bind("0.0.0.0:0").context("Failed to bind network proxy listener")?;
+    pub fn bind(allowed_domains: &[AllowedDomainRule], max_connections: usize) -> Result<Self> {
+        Self::bind_to(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            allowed_domains,
+            max_connections,
+        )
+    }
+
+    /// Listen on an ephemeral port of `ip` only.
+    pub fn bind_to(
+        ip: std::net::IpAddr,
+        allowed_domains: &[AllowedDomainRule],
+        max_connections: usize,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind((ip, 0))
+            .with_context(|| format!("Failed to bind network proxy listener on {ip}"))?;
         let port = listener.local_addr()?.port();
         let token = generate_token();
         debug!(port, "network proxy bound");
@@ -64,6 +130,7 @@ impl NetworkProxy {
             port,
             token,
             allowed_domains: allowed_domains.to_vec(),
+            max_connections,
         })
     }
 
@@ -83,26 +150,27 @@ impl NetworkProxy {
             token: self.token,
             allowed_domains: self.allowed_domains,
         });
-        let active = Arc::new(AtomicUsize::new(0));
+        let limit = ConnectionLimit::new(self.max_connections);
+        let accept_limit = Arc::clone(&limit);
 
         let handle = thread::spawn(move || {
             for stream in self.listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        let current = active.load(Ordering::Relaxed);
-                        if current >= MAX_CONNECTIONS {
-                            warn!(current, "proxy connection limit reached, dropping");
-                            drop(stream);
-                            continue;
-                        }
-                        active.fetch_add(1, Ordering::Relaxed);
+                        let permit = match accept_limit.try_acquire() {
+                            Ok(permit) => permit,
+                            Err(current) => {
+                                warn!(current, "proxy connection limit reached, rejecting");
+                                reject_over_capacity(stream);
+                                continue;
+                            }
+                        };
                         let ctx = Arc::clone(&ctx);
-                        let active = Arc::clone(&active);
                         thread::spawn(move || {
+                            let _permit = permit;
                             if let Err(e) = handle_proxy_connection(stream, &ctx) {
                                 debug!(error = %e, "proxy connection ended");
                             }
-                            active.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
                     Err(e) => {
@@ -113,7 +181,17 @@ impl NetworkProxy {
             }
         });
 
-        ProxyHandle { _handle: handle }
+        ProxyHandle {
+            _handle: handle,
+            _limit: limit,
+        }
+    }
+}
+
+impl ProxyHandle {
+    #[cfg(test)]
+    fn active_connections(&self) -> usize {
+        self._limit.active()
     }
 }
 
@@ -215,43 +293,130 @@ fn allowed_target_addrs(addrs: &[SocketAddr], allow_private_ips: bool) -> Vec<&S
         .collect()
 }
 
+fn read_bounded_request_line(
+    reader: &mut BufReader<TcpStream>,
+    output: &mut String,
+    total_read: &mut usize,
+    deadline: Instant,
+) -> io::Result<usize> {
+    let start_len = output.len();
+
+    loop {
+        if *total_read >= MAX_REQUEST_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy request exceeds size limit",
+            ));
+        }
+
+        let remaining_time = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "proxy request timed out"))?;
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining_time.max(Duration::from_millis(1))))?;
+
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(output.len() - start_len);
+        }
+
+        let line_end = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if *total_read + line_end > MAX_REQUEST_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy request exceeds size limit",
+            ));
+        }
+
+        let text = std::str::from_utf8(&available[..line_end]).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "proxy request is not UTF-8")
+        })?;
+        let has_newline = text.ends_with('\n');
+        output.push_str(text);
+        reader.consume(line_end);
+        *total_read += line_end;
+
+        if has_newline {
+            return Ok(output.len() - start_len);
+        }
+    }
+}
+
+fn write_request_read_error(writer: &mut impl Write, error: io::Error) -> Result<()> {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
+            write_error(writer, 408, "Proxy request timed out")
+        }
+        io::ErrorKind::InvalidData => write_error(writer, 400, "Request too large or invalid"),
+        _ => Err(error.into()),
+    }
+}
+
+fn reject_over_capacity(mut stream: TcpStream) {
+    let _ = stream.set_write_timeout(Some(REJECT_LINGER_TIMEOUT));
+    let _ = write_error(
+        &mut stream,
+        503,
+        "workmux network proxy connection limit reached",
+    );
+    let _ = stream.shutdown(Shutdown::Write);
+
+    let _ = stream.set_read_timeout(Some(REJECT_LINGER_TIMEOUT));
+    let mut drained = 0usize;
+    let mut buffer = [0u8; 1024];
+    while drained < MAX_REQUEST_SIZE {
+        let remaining = MAX_REQUEST_SIZE - drained;
+        let read_size = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..read_size]) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => drained += count,
+        }
+    }
+}
+
 /// Parse and handle a single proxy connection.
 fn handle_proxy_connection(stream: TcpStream, ctx: &ProxyContext) -> Result<()> {
     let peer = stream.peer_addr().ok();
     debug!(?peer, "proxy connection accepted");
 
-    // Set auth timeout to prevent slowloris
-    stream.set_read_timeout(Some(AUTH_TIMEOUT))?;
+    let deadline = Instant::now() + AUTH_TIMEOUT;
+    let mut reader = BufReader::new(stream.try_clone().context("Failed to clone proxy stream")?);
+    let mut writer = &stream;
 
-    let mut reader = BufReader::new(&stream);
-    let mut writer = stream.try_clone().context("Failed to clone proxy stream")?;
-
-    // Read all headers (bounded)
     let mut total_read = 0usize;
     let mut request_line = String::new();
     let mut proxy_auth: Option<String> = None;
 
-    // Read request line
-    let n = reader.read_line(&mut request_line)?;
+    let n = match read_bounded_request_line(
+        &mut reader,
+        &mut request_line,
+        &mut total_read,
+        deadline,
+    ) {
+        Ok(n) => n,
+        Err(error) => {
+            write_request_read_error(&mut writer, error)?;
+            return Ok(());
+        }
+    };
     debug!(
         ?peer,
         request_line = request_line.trim(),
         bytes = n,
         "proxy request line"
     );
-    total_read += n;
-    if total_read > MAX_REQUEST_SIZE {
-        write_error(&mut writer, 400, "Request too large")?;
-        return Ok(());
-    }
 
-    // Read headers until empty line
     loop {
         let mut header_line = String::new();
-        let n = reader.read_line(&mut header_line)?;
-        total_read += n;
-        if total_read > MAX_REQUEST_SIZE {
-            write_error(&mut writer, 400, "Request too large")?;
+        if let Err(error) =
+            read_bounded_request_line(&mut reader, &mut header_line, &mut total_read, deadline)
+        {
+            write_request_read_error(&mut writer, error)?;
             return Ok(());
         }
 
@@ -346,7 +511,7 @@ fn handle_proxy_connection(stream: TcpStream, ctx: &ProxyContext) -> Result<()> 
 
     // Connect to first allowed IP (TOCTOU-safe: use validated SocketAddr directly)
     let target_addr = *allowed_addrs[0];
-    let target_stream = match TcpStream::connect_timeout(&target_addr, CONNECT_TIMEOUT) {
+    let mut target_stream = match TcpStream::connect_timeout(&target_addr, CONNECT_TIMEOUT) {
         Ok(s) => s,
         Err(e) => {
             debug!(hostname, addr = %target_addr, error = %e, "connect failed");
@@ -365,14 +530,14 @@ fn handle_proxy_connection(stream: TcpStream, ctx: &ProxyContext) -> Result<()> 
     // (e.g. a TLS ClientHello pipelined in the same TCP segment as the CONNECT).
     let buffered = reader.buffer();
     if !buffered.is_empty() {
-        let mut target_ref = &target_stream;
-        target_ref
+        target_stream
             .write_all(buffered)
             .context("Failed to forward buffered data to target")?;
     }
+    drop(reader);
 
     // Bidirectional tunnel
-    tunnel(reader.into_inner(), &target_stream)?;
+    tunnel(stream, target_stream)?;
 
     Ok(())
 }
@@ -397,13 +562,22 @@ fn parse_host_port(target: &str) -> Result<(&str, u16)> {
 }
 
 /// Write an HTTP error response.
-fn write_error(writer: &mut impl Write, code: u16, reason: &str) -> Result<()> {
+fn write_error(writer: &mut impl Write, code: u16, message: &str) -> Result<()> {
+    let status = match code {
+        400 => "Bad Request",
+        403 => "Forbidden",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
-        reason,
-        reason.len(),
-        reason,
+        status,
+        message.len(),
+        message,
     );
     writer.write_all(response.as_bytes())?;
     writer.flush()?;
@@ -440,26 +614,18 @@ fn base64_encode(input: &str) -> String {
 }
 
 /// Bidirectional byte tunnel between two TCP streams.
-fn tunnel(client: &TcpStream, target: &TcpStream) -> Result<()> {
-    let mut client_read = client.try_clone()?;
-    let mut target_write = target.try_clone()?;
+fn tunnel(mut client: TcpStream, mut target: TcpStream) -> Result<()> {
     let mut target_read = target.try_clone()?;
     let mut client_write = client.try_clone()?;
 
-    // client -> target
-    let t1 = thread::spawn(move || {
-        let _ = std::io::copy(&mut client_read, &mut target_write);
-        let _ = target_write.shutdown(std::net::Shutdown::Write);
-    });
-
-    // target -> client
-    let t2 = thread::spawn(move || {
+    let target_to_client = thread::spawn(move || {
         let _ = std::io::copy(&mut target_read, &mut client_write);
-        let _ = client_write.shutdown(std::net::Shutdown::Write);
+        let _ = client_write.shutdown(Shutdown::Write);
     });
 
-    t1.join().ok();
-    t2.join().ok();
+    let _ = std::io::copy(&mut client, &mut target);
+    let _ = target.shutdown(Shutdown::Write);
+    target_to_client.join().ok();
     Ok(())
 }
 
@@ -485,7 +651,14 @@ mod tests {
     }
 
     fn spawn_test_proxy(rules: &[AllowedDomainRule]) -> SpawnedProxy {
-        let proxy = NetworkProxy::bind(rules).unwrap();
+        spawn_test_proxy_with_limit(rules, 128)
+    }
+
+    fn spawn_test_proxy_with_limit(
+        rules: &[AllowedDomainRule],
+        max_connections: usize,
+    ) -> SpawnedProxy {
+        let proxy = NetworkProxy::bind(rules, max_connections).unwrap();
         let port = proxy.port();
         let token = proxy.token().to_string();
         let handle = proxy.spawn();
@@ -719,14 +892,156 @@ mod tests {
 
     #[test]
     fn proxy_binds_to_random_port() {
-        let proxy = NetworkProxy::bind(&[rule("example.com", false)]).unwrap();
+        let proxy = NetworkProxy::bind(&[rule("example.com", false)], 128).unwrap();
         assert!(proxy.port() > 0);
     }
 
     #[test]
     fn proxy_token_is_nonempty() {
-        let proxy = NetworkProxy::bind(&[]).unwrap();
+        let proxy = NetworkProxy::bind(&[], 128).unwrap();
         assert!(!proxy.token().is_empty());
+    }
+
+    fn wait_for_active_connections(proxy: &SpawnedProxy, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while proxy._handle.active_connections() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} active proxy connections"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn proxy_returns_503_at_connection_limit() {
+        let proxy = spawn_test_proxy_with_limit(&[], 1);
+        let holder = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        wait_for_active_connections(&proxy, 1);
+
+        let mut overloaded = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        overloaded
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\nTLS")
+            .unwrap();
+        overloaded
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut response = String::new();
+        overloaded.read_to_string(&mut response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(response.contains("Connection: close\r\n"));
+        assert!(response.ends_with("workmux network proxy connection limit reached"));
+
+        drop(holder);
+        wait_for_active_connections(&proxy, 0);
+    }
+
+    #[test]
+    fn proxy_admits_connection_after_slot_is_released() {
+        let proxy = spawn_test_proxy_with_limit(&[], 1);
+        let holder = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        wait_for_active_connections(&proxy, 1);
+        drop(holder);
+        wait_for_active_connections(&proxy, 0);
+
+        let response =
+            proxy_request_status_line(proxy.port, "CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+        assert!(response.contains("407"));
+    }
+
+    #[test]
+    fn connection_limit_rejects_zero_capacity() {
+        let limit = ConnectionLimit::new(0);
+        assert!(matches!(limit.try_acquire(), Err(0)));
+        assert_eq!(limit.active(), 0);
+    }
+
+    #[test]
+    fn connection_limit_is_preserved_under_contention() {
+        let limit = ConnectionLimit::new(4);
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let limit = Arc::clone(&limit);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let permit = limit.try_acquire().ok();
+                    barrier.wait();
+                    permit
+                })
+            })
+            .collect();
+        let permits: Vec<_> = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(permits.len(), 4);
+        assert_eq!(limit.active(), 4);
+        drop(permits);
+        assert_eq!(limit.active(), 0);
+        assert!(limit.try_acquire().is_ok());
+    }
+
+    #[test]
+    fn connection_permit_is_released_after_panic() {
+        let limit = ConnectionLimit::new(1);
+        let permit = limit.try_acquire().unwrap();
+        let handle = thread::spawn(move || {
+            let _permit = permit;
+            panic!("test panic");
+        });
+        assert!(handle.join().is_err());
+        assert_eq!(limit.active(), 0);
+        assert!(limit.try_acquire().is_ok());
+    }
+
+    #[test]
+    fn oversized_unterminated_request_line_is_rejected() {
+        let proxy = spawn_test_proxy(&[]);
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        stream.write_all(&vec![b'x'; MAX_REQUEST_SIZE + 1]).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        let mut response = String::new();
+        BufReader::new(&stream).read_line(&mut response).unwrap();
+        assert!(response.contains("400"));
+    }
+
+    #[test]
+    fn request_deadline_stops_dribbling_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            for _ in 0..10 {
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut output = String::new();
+        let mut total_read = 0;
+
+        let error = read_bounded_request_line(
+            &mut reader,
+            &mut output,
+            &mut total_read,
+            Instant::now() + Duration::from_millis(30),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ));
+        client.join().unwrap();
     }
 
     #[test]

@@ -18,9 +18,131 @@ from ..conftest import (
     get_worktree_path,
     run_workmux_add,
     run_workmux_command,
+    write_global_workmux_config,
     write_workmux_config,
 )
 from .conftest import add_branch_and_get_worktree
+
+
+class TestDryRun:
+    """Tests for previewing worktree creation."""
+
+    def test_add_dry_run_reports_plan_without_side_effects(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "feature/dry-run"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+        hook_file = mux_repo_path / "dry-run-hook"
+        source_file = mux_repo_path / ".env"
+        source_file.write_text("SECRET=test\n")
+        shared_file = mux_repo_path / "shared.txt"
+        shared_file.write_text("shared\n")
+        write_workmux_config(
+            mux_repo_path,
+            files={"copy": [".env"], "symlink": ["shared.txt"]},
+            post_create=[f"touch {hook_file}"],
+            base_branch="main",
+        )
+        windows_before = env.list_window_ids()
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --dry-run",
+        )
+
+        assert f"Worktree: {worktree_path}" in result.stdout
+        assert f"Branch:   {branch_name}" in result.stdout
+        assert "Base:     main" in result.stdout
+        assert "Target:   wm-feature-dry-run (window)" in result.stdout
+        assert ".env -> .env (copy)" in result.stdout
+        assert "shared.txt -> shared.txt (symlink)" in result.stdout
+        assert f"touch {hook_file}" in result.stdout
+        assert not worktree_path.exists()
+        assert not hook_file.exists()
+        assert env.list_window_ids() == windows_before
+        branches = env.run_command(["git", "branch", "--list", branch_name])
+        assert branches.stdout.strip() == ""
+
+    def test_auto_name_dry_run_preserves_slashes(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "fix/issue-123"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": "sh -c 'printf \"fix/issue-123\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Fix issue 123" --dry-run',
+        )
+
+        assert f"Branch:   {branch_name}" in result.stdout
+        assert f"Worktree: {worktree_path}" in result.stdout
+        assert not worktree_path.exists()
+
+    def test_auto_name_rejects_repeated_prose_output(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        generated_name = (
+            "this-output-contains-far-too-many-words-to-be-a-concise-branch-name"
+        )
+        worktree_path = get_worktree_path(mux_repo_path, generated_name)
+        windows_before = env.list_window_ids()
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": f"sh -c 'printf \"{generated_name}\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Investigate related issues" --dry-run',
+            expect_fail=True,
+        )
+
+        assert "after 2 attempts" in result.stderr
+        assert not worktree_path.exists()
+        assert env.list_window_ids() == windows_before
+
+    def test_auto_name_treats_remote_prefix_as_local_branch(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "origin/topic"
+        env.run_command(["git", "remote", "add", "origin", "."], cwd=mux_repo_path)
+        env.run_command(
+            ["git", "update-ref", "refs/remotes/origin/topic", "HEAD"],
+            cwd=mux_repo_path,
+        )
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": "sh -c 'printf \"origin/topic\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Add topic" --dry-run',
+        )
+
+        assert f"Branch:   {branch_name}" in result.stdout
 
 
 class TestWorktreeCreation:
@@ -111,6 +233,114 @@ class TestWorktreeCreation:
         assert windows[-1] == inserted, (
             f"{inserted} should be rightmost. Windows: {windows}"
         )
+
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_uses_sole_session(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-sole-session"
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        assert_window_exists(env, get_window_name(branch_name))
+
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_uses_unique_cwd_session(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-cwd-session"
+        unrelated_dir = mux_repo_path.parent / "unrelated-session"
+        unrelated_dir.mkdir(exist_ok=True)
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        env.tmux(["new-session", "-d", "-s", "other", "-c", str(unrelated_dir)])
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        test_windows = env.tmux(
+            ["list-windows", "-t", "test", "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) in test_windows
+        other_windows = env.tmux(
+            ["list-windows", "-t", "other", "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) not in other_windows
+
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_rejects_ambiguous_sessions(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-ambiguous-session"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        env.tmux(["new-session", "-d", "-s", "other", "-c", str(mux_repo_path)])
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+            expect_fail=True,
+        )
+
+        assert "TMUX_PANE is unset or does not identify a live pane" in result.stderr
+        assert "2 sessions exist" in result.stderr
+        assert "--parent-session <name>" in result.stderr
+        assert not worktree_path.exists()
+
+    @pytest.mark.tmux_only
+    def test_parent_session_overrides_missing_tmux_pane(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-explicit-session"
+        parent_session = "other"
+
+        write_workmux_config(mux_repo_path)
+        env.tmux(["new-session", "-d", "-s", parent_session])
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background --parent-session {parent_session}",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        windows = env.tmux(
+            ["list-windows", "-t", parent_session, "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) in windows
 
     def test_add_from_inside_worktree_creates_sibling_worktree(
         self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
@@ -501,7 +731,7 @@ class TestExistingBranch:
             workmux_exe_path,
             mux_repo_path,
             f"add {branch_name} -o",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         assert_session_exists(env, session_name)
@@ -534,7 +764,7 @@ class TestExistingBranch:
             workmux_exe_path,
             mux_repo_path,
             f"add {branch_name} -o --mode session",
-            expect_fail=True,
+            expect_fail=env.session_switch_fails,
         )
 
         assert_session_exists(env, session_name)

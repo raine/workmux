@@ -266,6 +266,36 @@ class TestHooksEnvironment:
         expected = worktrees_dir / "test-branch" / "backend"
         assert config_dir.resolve() == expected.resolve()
 
+    def test_wm_project_root_env_var(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        repo_path: Path,
+        tmp_path: Path,
+    ):
+        """WM_PROJECT_ROOT points to the main worktree for nested configs."""
+        env = mux_server
+        output_file = tmp_path / "wm_project_root.txt"
+
+        backend = repo_path / "backend"
+        backend.mkdir()
+        (backend / ".workmux.yaml").write_text(
+            f"agent: claude\npost_create:\n  - 'echo $WM_PROJECT_ROOT > {output_file}'\n"
+        )
+
+        run_cmd(["git", "add", "."], cwd=repo_path, env=env)
+        run_cmd(
+            ["git", "commit", "-m", "add backend with hook"], cwd=repo_path, env=env
+        )
+
+        run_workmux_command(
+            env, workmux_exe_path, repo_path, "add test-branch", working_dir=backend
+        )
+
+        wait_for_file_with_content(output_file)
+        project_root = Path(output_file.read_text().strip())
+        assert project_root.resolve() == repo_path.resolve()
+
     def test_hook_cwd_is_nested_directory(
         self,
         mux_server: MuxEnvironment,

@@ -41,6 +41,29 @@ class TestPreRemoveHooksRemove:
         assert marker_file.exists(), "pre_remove hook should have created marker file"
         assert not worktree_path.exists(), "Worktree should be removed after hook runs"
 
+    def test_global_placeholder_is_dropped_without_global_hook(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        repo_path: Path,
+    ):
+        """Project hooks should run when no global pre_remove hook exists."""
+        env = mux_server
+        branch_name = "feature-missing-global-pre-remove"
+        marker_file = env.tmp_path / "project_pre_remove_ran.txt"
+
+        write_workmux_config(
+            repo_path,
+            pre_remove=["<global>", f"touch {marker_file}"],
+        )
+
+        run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+        worktree_path = get_worktree_path(repo_path, branch_name)
+        run_workmux_remove(env, workmux_exe_path, repo_path, branch_name, force=True)
+
+        assert marker_file.exists(), "project pre_remove hook should have run"
+        assert not worktree_path.exists(), "Worktree should be removed after hooks run"
+
     def test_pre_remove_hook_receives_wm_handle(
         self,
         mux_server: MuxEnvironment,

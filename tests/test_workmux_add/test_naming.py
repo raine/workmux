@@ -7,6 +7,7 @@ from ..conftest import (
     MuxEnvironment,
     TmuxEnvironment,
     assert_session_exists,
+    assert_session_not_exists,
     assert_window_exists,
     run_workmux_add,
     run_workmux_command,
@@ -165,7 +166,7 @@ class TestTargetNameOptions:
         assert worktree_path.is_dir()
         assert_window_exists(env, expected_window)
 
-    def test_add_parent_session_routes_window_mode_window(
+    def test_add_parent_session_preserves_exact_existing_session(
         self,
         mux_server: TmuxEnvironment,
         workmux_exe_path: Path,
@@ -173,22 +174,35 @@ class TestTargetNameOptions:
     ):
         env = mux_server
         branch_name = "feature/custom-parent-session"
-        session_name = "prs"
-        window_name = f"{DEFAULT_WINDOW_PREFIX}review-window"
+        handle = slugify(branch_name)
+        session_name = "WalkingMate"
+        target_name = "Review Window"
+        window_name = f"{DEFAULT_WINDOW_PREFIX}{slugify(target_name)}"
 
         write_workmux_config(mux_repo_path)
+        env.new_session(session_name)
         run_workmux_command(
             env,
             workmux_exe_path,
             mux_repo_path,
-            f"add {branch_name} --parent-session {session_name} --target-name review-window --background",
+            f"add {branch_name} --parent-session {session_name} --target-name '{target_name}' --background",
         )
 
         assert_session_exists(env, session_name)
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
+        assert_session_not_exists(env, session_name.lower())
+        assert window_name in env.list_windows_in_session(session_name)
+
+        metadata = env.run_command(
+            [
+                "git",
+                "config",
+                "--local",
+                "--get",
+                f"workmux.worktree.{handle}.window-session",
+            ],
+            cwd=mux_repo_path,
         )
-        assert window_name in [w for w in result.stdout.strip().split("\n") if w]
+        assert metadata.stdout.strip() == session_name
 
     def test_add_target_name_collision_fails_before_git_state(
         self,
@@ -226,7 +240,7 @@ class TestTargetNameOptions:
         mux_repo_path: Path,
     ):
         env = mux_server
-        session_name = "prs"
+        session_name = "ReviewParents"
 
         write_workmux_config(mux_repo_path)
         run_workmux_command(
@@ -242,10 +256,9 @@ class TestTargetNameOptions:
             f"add feature/parent-session-b --parent-session {session_name} --background",
         )
 
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-        )
-        windows = [w for w in result.stdout.strip().split("\n") if w]
+        assert_session_exists(env, session_name)
+        assert_session_not_exists(env, session_name.lower())
+        windows = env.list_windows_in_session(session_name)
         assert f"{DEFAULT_WINDOW_PREFIX}feature-parent-session-a" in windows
         assert f"{DEFAULT_WINDOW_PREFIX}feature-parent-session-b" in windows
 
@@ -268,10 +281,7 @@ class TestTargetNameOptions:
             f"add {branch_name} --parent-session {session_name} --background",
         )
 
-        result = env.tmux(
-            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
-        )
-        assert window_name in [w for w in result.stdout.strip().split("\n") if w]
+        assert window_name in env.list_windows_in_session(session_name)
 
         list_result = run_workmux_command(env, workmux_exe_path, mux_repo_path, "list")
         row = next(

@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Cell, Paragraph, Row, Table},
 };
 
-use super::super::app::App;
+use super::super::app::{App, RowContextKind};
 use super::super::keymap::{Context, help_rows};
 use super::popup::{centered_rect, popup_block, render_popup};
 use super::theme::ThemePalette;
@@ -149,7 +149,7 @@ pub fn render_confirm_remove(f: &mut Frame, app: &App) {
 pub fn render_help(f: &mut Frame, app: &App) {
     let ctx = get_help_context(app);
     let title = context_title(ctx);
-    let keybindings = help_rows(ctx);
+    let keybindings = help_rows(ctx, app.config.dashboard.input_exit_key());
 
     // Calculate dimensions based on content
     let row_count = keybindings.len() as u16;
@@ -532,6 +532,43 @@ pub fn render_project_picker(f: &mut Frame, app: &App) {
     let block = popup_block(Some("Switch Project"), palette);
     let paragraph = Paragraph::new(Text::from(lines)).block(block);
 
+    render_popup(f, area, paragraph);
+}
+
+/// Render row actions at the pointer position.
+pub fn render_row_context(f: &mut Frame, app: &App) {
+    let Some(menu) = &app.pending_row_context else {
+        return;
+    };
+    let area = menu.area(f.area());
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let lines = menu
+        .commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let selected = index == menu.cursor;
+            let label_style = if selected {
+                Style::default().fg(app.palette.accent)
+            } else {
+                Style::default().fg(app.palette.text)
+            };
+            let prefix = if selected { "> " } else { "  " };
+            let used = 2 + command.label.len() + command.key_hint.len();
+            let padding = inner_width.saturating_sub(used);
+            Line::from(vec![
+                Span::styled(prefix, label_style),
+                Span::styled(command.label, label_style),
+                Span::raw(" ".repeat(padding)),
+                Span::styled(command.key_hint, Style::default().fg(app.palette.dimmed)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let title = match menu.kind {
+        RowContextKind::Agent => "Agent actions",
+        RowContextKind::Worktree => "Worktree actions",
+    };
+    let paragraph = Paragraph::new(Text::from(lines)).block(popup_block(Some(title), &app.palette));
     render_popup(f, area, paragraph);
 }
 

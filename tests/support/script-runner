@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Commands symlink here and keep a non-executable .script payload alongside them.
+# The kernel supplies the invoked symlink path as $0, including PATH lookups.
+# Exec preserves PID, signals, terminal, environment and standard streams.
+set -euo pipefail
+
+payload="$0.script"
+if ! IFS= read -r shebang < "$payload" || [[ $shebang != '#!'* ]]; then
+    printf 'test script runner: missing shebang in %s\n' "$payload" >&2
+    exit 126
+fi
+# A shebang has an interpreter and at most one optional argument. Do not eval it.
+read -r interpreter argument <<< "${shebang#\#!}"
+if [[ -z $interpreter ]]; then
+    printf 'test script runner: missing interpreter in %s\n' "$payload" >&2
+    exit 126
+fi
+if [[ -n $argument ]]; then
+    exec "$interpreter" "$argument" "$payload" "$@"
+else
+    exec "$interpreter" "$payload" "$@"
+fi

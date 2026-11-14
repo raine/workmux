@@ -1,17 +1,21 @@
 use crate::config::MuxMode;
 use crate::multiplexer::handle::mode_label;
-use crate::multiplexer::{create_backend, detect_backend};
+use crate::multiplexer::{BackendType, MuxHandle, create_backend, detect_backend};
 use crate::prompt::{Prompt, PromptDocument, foreach_from_frontmatter};
+use crate::remote::{Placement, RemoteSpec};
 use crate::spinner;
 use crate::template::{
     TemplateEnv, WorktreeSpec, create_template_env, generate_worktree_specs, parse_foreach_matrix,
     render_prompt_body, validate_template_variables,
 };
 use crate::workflow::SetupOptions;
-use crate::workflow::pr::detect_remote_branch;
+use crate::workflow::pr::{
+    CheckoutRef, Forge, PrReference, detect_remote_branch, detect_remote_branch_dry_run,
+};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt, parse_prompt_with_frontmatter};
 use crate::{config, git, workflow};
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
@@ -19,6 +23,7 @@ use std::io::{IsTerminal, Read};
 use std::os::fd::AsRawFd;
 
 // Re-export the arg types that are used by the CLI
+use super::args::PlacementArgs;
 pub use super::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
 
 /// Variable name exposed to templates for stdin input lines
@@ -26,6 +31,36 @@ const STDIN_INPUT_VAR: &str = "input";
 
 /// Maximum stdin size to read (10MB) to prevent OOM from infinite streams
 const STDIN_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Validate plain agent executables on the host. Shell expressions and relative
+/// paths depend on the pane shell and worktree environment.
+fn validate_agent_executable(config: &config::Config) -> Result<()> {
+    if config.sandbox.is_enabled() {
+        return Ok(());
+    }
+    let Some(command) = config.agent.as_deref() else {
+        return Ok(());
+    };
+    if command.is_empty() {
+        bail!("Agent command must not be empty");
+    }
+    if !command
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.+/".contains(c))
+        || (command.contains('/') && !std::path::Path::new(command).is_absolute())
+    {
+        return Ok(());
+    }
+    let found =
+        config::resolve_executable_path(command).is_some_and(|path| which::which(path).is_ok());
+    if !found {
+        bail!(
+            "Agent executable '{}' not found or not executable. Check --agent or your agent configuration.",
+            command
+        );
+    }
+    Ok(())
+}
 
 /// Generate a branch name from prompt text using LLM with spinner feedback.
 ///
@@ -123,10 +158,10 @@ fn stdin_has_data(_stdin: &std::io::Stdin) -> Result<bool> {
 
 /// Check preconditions for the add command (git repo and multiplexer session).
 /// Returns Ok(()) if all preconditions are met, or an error listing all failures.
-fn check_preconditions() -> Result<()> {
+fn check_preconditions(headless: bool) -> Result<()> {
     let is_git = git::is_git_repo()?;
     let mux = create_backend(detect_backend());
-    let is_mux_running = mux.is_running()?;
+    let is_mux_running = headless || mux.is_running()?;
 
     if is_git && is_mux_running {
         return Ok(());
@@ -180,10 +215,190 @@ fn resolve_layout(config: &mut config::Config, layout_name: &str) -> Result<()> 
     Ok(())
 }
 
+#[derive(Serialize)]
+struct HeadlessReceipt<'a> {
+    schema_version: u32,
+    handle: &'a str,
+    branch: &'a str,
+    worktree_path: &'a std::path::Path,
+    working_directory: &'a std::path::Path,
+    base_branch: Option<&'a str>,
+    post_create_hooks_run: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_headless(
+    branch_name: Option<&str>,
+    pr: Option<PrReference>,
+    auto_name: bool,
+    base: Option<&str>,
+    name: Option<&str>,
+    target_name: Option<&str>,
+    parent_session: Option<&str>,
+    prompt: &PromptArgs,
+    setup: &SetupFlags,
+    rescue: &RescueArgs,
+    multi: &MultiArgs,
+    layout: Option<&str>,
+    fork: Option<&str>,
+    wait: bool,
+    dry_run: bool,
+    mode_override: Option<MuxMode>,
+    json: bool,
+    config_override: Option<&std::path::Path>,
+) -> Result<()> {
+    if crate::sandbox::guest::is_sandbox_guest() {
+        bail!("--headless is not supported from inside a sandbox");
+    }
+    if pr.is_some() {
+        bail!("--pr cannot be used with --headless");
+    }
+    if auto_name {
+        bail!("--auto-name cannot be used with --headless");
+    }
+    if target_name.is_some() || parent_session.is_some() || mode_override.is_some() {
+        bail!("Multiplexer target options cannot be used with --headless");
+    }
+    if prompt.has_any() || prompt.prompt_file_only {
+        bail!("Prompt options cannot be used with --headless");
+    }
+    if setup.no_pane_cmds || setup.background || setup.open_if_exists || setup.sandbox {
+        bail!(
+            "Pane, background, open-existing, and sandbox options cannot be used with --headless"
+        );
+    }
+    if rescue.with_changes || rescue.patch || rescue.include_untracked {
+        bail!("Change rescue options cannot be used with --headless");
+    }
+    if !multi.agent.is_empty()
+        || multi.count.is_some()
+        || multi.foreach.is_some()
+        || multi.max_concurrent.is_some()
+    {
+        bail!("Multi-worktree options cannot be used with --headless");
+    }
+    if layout.is_some() || fork.is_some() || wait || dry_run {
+        bail!("Layout, fork, wait, and dry-run options cannot be used with --headless");
+    }
+
+    check_preconditions(true)?;
+    let branch_name = branch_name.context("A branch name is required with --headless")?;
+    let (config, config_location) = config::Config::load_with_location(None, config_override)?;
+    let mux = create_backend(detect_backend());
+    let context = workflow::WorkflowContext::new(config, mux, config_location)?;
+    if let Some((candidate_remote, _)) = branch_name.split_once('/')
+        && git::remote_exists_in(candidate_remote, Some(&context.execution_dir))?
+    {
+        bail!(
+            "--headless treats branch names as local and does not resolve remote branch '{}'; pass a local branch name",
+            branch_name
+        );
+    }
+    let handle = crate::naming::derive_handle(branch_name, name, &context.config)?;
+    let configured_base = if base.is_none() {
+        workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
+    } else {
+        None
+    };
+    let resolved_base = base.or(configured_base.as_deref());
+    let options = SetupOptions::new(!setup.no_hooks, !setup.no_file_ops, false);
+
+    if !json {
+        super::announce_hooks(
+            &context.config,
+            Some(&options),
+            super::HookPhase::PostCreate,
+        );
+    }
+
+    let result = workflow::create_headless(
+        &context,
+        workflow::CreateArgs {
+            branch_name,
+            handle: &handle,
+            base_branch: resolved_base,
+            remote_branch: None,
+            checkout_ref: None,
+            prompt: None,
+            options,
+            mode_override: None,
+            agent: None,
+            is_explicit_name: name.is_some(),
+            prompt_file_only: false,
+            fork_source: None,
+        },
+        json,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to provision headless worktree for branch '{}'",
+            branch_name
+        )
+    })?;
+
+    if json {
+        let receipt = HeadlessReceipt {
+            schema_version: 1,
+            handle: &result.resolved_handle,
+            branch: &result.branch_name,
+            worktree_path: &result.worktree_path,
+            working_directory: &result.working_directory,
+            base_branch: result.base_branch.as_deref(),
+            post_create_hooks_run: result.post_create_hooks_run,
+        };
+        println!("{}", serde_json::to_string(&receipt)?);
+    } else {
+        println!(
+            "✓ Successfully provisioned headless worktree for '{}'\n  Worktree: {}\n  Working directory: {}",
+            result.branch_name,
+            result.worktree_path.display(),
+            result.working_directory.display()
+        );
+    }
+    Ok(())
+}
+
+/// The remote a new agent goes to, if any, decided before anything is
+/// created.
+///
+/// Inside a sandbox guest, placement is decided by the host that serves the
+/// RPC request, so the guest's own config is never consulted.
+pub fn check_placement(
+    config: &config::Config,
+    placement: &PlacementArgs,
+) -> Result<Option<RemoteSpec>> {
+    if crate::sandbox::guest::is_sandbox_guest() {
+        if placement.is_set() {
+            bail!("--remote and --local are not supported from inside a sandbox");
+        }
+        return Ok(None);
+    }
+    match crate::remote::resolve_placement(config, placement.remote_flag(), placement.local)? {
+        Placement::Local => Ok(None),
+        Placement::Remote(name) => Ok(Some(RemoteSpec::resolve(config, &name)?)),
+    }
+}
+
+/// Refuse options a remote agent cannot honour.
+fn check_remote_options(spec: &RemoteSpec, options: &[(bool, &str)]) -> Result<()> {
+    if let Some((_, option)) = options.iter().find(|(set, _)| *set) {
+        bail!(
+            "{option} is not supported for remote agents (remote '{}'); pass --local to \
+             create a local agent",
+            spec.name
+        );
+    }
+    if detect_backend() != BackendType::Tmux {
+        bail!("remote agents need tmux; pass --local to create a local agent");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     branch_name: Option<&str>,
-    pr: Option<u32>,
+    pr: Option<PrReference>,
+    forge: Option<Forge>,
     auto_name: bool,
     base: Option<&str>,
     name: Option<String>,
@@ -194,15 +409,69 @@ pub fn run(
     rescue: RescueArgs,
     multi: MultiArgs,
     layout: Option<String>,
+    continue_session: bool,
     fork: Option<String>,
     wait: bool,
+    dry_run: bool,
     mode_override: Option<MuxMode>,
+    headless: bool,
+    json: bool,
     config_override: Option<&std::path::Path>,
+    remote: Option<RemoteSpec>,
 ) -> Result<()> {
-    // Inside a sandbox guest, route through RPC to the host supervisor
-    if crate::sandbox::guest::is_sandbox_guest() {
+    if let Some(spec) = &remote {
+        check_remote_options(
+            spec,
+            &[
+                (headless, "--headless"),
+                (pr.is_some(), "--pr"),
+                (rescue.with_changes, "--with-changes"),
+                (fork.is_some(), "--fork"),
+                (continue_session, "--continue"),
+                (setup.open_if_exists, "--open-if-exists"),
+                (setup.sandbox, "--sandbox"),
+                (target_name.is_some(), "--target-name"),
+                (mode_override == Some(MuxMode::Session), "Session mode"),
+                (dry_run, "--dry-run"),
+            ],
+        )?;
+    }
+    if headless {
+        return run_headless(
+            branch_name,
+            pr,
+            auto_name,
+            base,
+            name.as_deref(),
+            target_name.as_deref(),
+            parent_session.as_deref(),
+            &prompt_args,
+            &setup,
+            &rescue,
+            &multi,
+            layout.as_deref(),
+            fork.as_deref(),
+            wait,
+            dry_run,
+            mode_override,
+            json,
+            config_override,
+        );
+    }
+
+    // Inside a sandbox guest, route through RPC to the host supervisor; an
+    // agent on a node without a sandbox asks the node directly.
+    if crate::sandbox::guest::is_sandbox_guest()
+        || crate::remote::node::spawn::session_parent().is_some()
+    {
+        if dry_run {
+            bail!("--dry-run is not supported from inside a sandbox");
+        }
         if layout.is_some() {
             bail!("--layout is not supported from inside a sandbox");
+        }
+        if continue_session {
+            bail!("--continue is not supported from inside a sandbox");
         }
         if fork.is_some() {
             bail!("--fork is not supported from inside a sandbox");
@@ -231,8 +500,11 @@ pub fn run(
         );
     }
 
-    // Ensure preconditions are met (git repo and multiplexer session)
-    check_preconditions()?;
+    // Creation requires both git and a running multiplexer. A dry run only reads
+    // repository and configuration state.
+    if !dry_run {
+        check_preconditions(false)?;
+    }
 
     // Extract sandbox override before consuming setup flags
     let sandbox_override = setup.sandbox;
@@ -283,6 +555,9 @@ pub fn run(
         None
     };
     let mode = mode_override.unwrap_or(initial_config.mode());
+    if let Some(spec) = &remote {
+        check_remote_options(spec, &[(mode == MuxMode::Session, "Session mode")])?;
+    }
 
     // Validate layout early to fail fast before any LLM calls
     if let Some(layout_name) = &layout {
@@ -294,6 +569,9 @@ pub fn run(
     options.focus_window = !setup.background;
     options.open_if_exists = setup.open_if_exists;
     options.mode = mode;
+    if continue_session {
+        options.resume_mode = crate::multiplexer::types::ResumeMode::Continue;
+    }
 
     // If using --auto-name and config has auto_name.background = true, run in background
     if auto_name && options.focus_window {
@@ -321,6 +599,8 @@ pub fn run(
 
     // Handle auto-name: load prompt first, generate branch name
     // In multi-worktree mode with auto-name, we defer LLM generation to the loop
+    let mut checkout_ref = None;
+    let mut pr_base_branch: Option<String> = None;
     let (final_branch_name, preloaded_prompt, remote_branch_for_pr, deferred_auto_name) =
         if auto_name {
             // Use editor if no prompt source specified, otherwise use provided source
@@ -359,9 +639,10 @@ pub fn run(
                 let generated = generate_branch_name_with_spinner(Some(&prompt_text), &config)?;
                 (generated, Some(prompt), None, false)
             }
-        } else if let Some(pr_number) = pr {
-            // Handle PR checkout if --pr flag is provided
-            let result = workflow::pr::resolve_pr_ref(pr_number, branch_name)?;
+        } else if let Some(pr_reference) = pr {
+            let result = pr_reference.resolve(forge, branch_name, dry_run)?;
+            checkout_ref = Some(result.checkout_ref);
+            pr_base_branch = result.base_branch;
             (result.local_branch, None, Some(result.remote_branch), false)
         } else {
             // Normal flow: use provided branch name
@@ -382,7 +663,6 @@ pub fn run(
     } else {
         base
     };
-    let config_base = initial_config.base_branch.as_deref();
 
     // Validate --with-changes compatibility
     if rescue.with_changes && multi.agent.len() > 1 {
@@ -414,7 +694,7 @@ pub fn run(
         .transpose()?;
     let parent_session = parent_session
         .as_deref()
-        .map(crate::naming::derive_target_name)
+        .map(crate::naming::validate_parent_session)
         .transpose()?;
     if mode == MuxMode::Session && parent_session.is_some() {
         return Err(anyhow!("--parent-session requires window mode"));
@@ -426,14 +706,33 @@ pub fn run(
         options.window_session_name = parent_session;
     }
 
+    // Validate multi-worktree arguments
+    if multi.count.is_some() && multi.agent.len() > 1 {
+        return Err(anyhow!(
+            "--count can only be used with zero or one --agent, but {} were provided",
+            multi.agent.len()
+        ));
+    }
+
+    // A remote agent's executable lives on the remote.
+    if remote.is_none() && !setup.no_pane_cmds && !sandbox_override && !dry_run {
+        for agent in &multi.agent {
+            let config = config::Config::load_with_override(Some(agent), config_override)?;
+            validate_agent_executable(&config)?;
+        }
+    }
+
     // Handle rescue flow early if requested
-    if rescue.with_changes {
+    if rescue.with_changes && !dry_run {
         let (mut rescue_config, rescue_location) = config::Config::load_with_location(
             multi.agent.first().map(|s| s.as_str()),
             config_override,
         )?;
         if sandbox_override {
             rescue_config.sandbox.enabled = Some(true);
+        }
+        if rescue_config.sandbox.is_enabled() {
+            crate::sandbox::notice::show_once();
         }
         if let Some(layout_name) = &layout {
             resolve_layout(&mut rescue_config, layout_name)?;
@@ -482,14 +781,6 @@ pub fn run(
         None
     };
 
-    // Validate multi-worktree arguments
-    if multi.count.is_some() && multi.agent.len() > 1 {
-        return Err(anyhow!(
-            "--count can only be used with zero or one --agent, but {} were provided",
-            multi.agent.len()
-        ));
-    }
-
     let has_foreach_in_prompt = prompt_doc
         .as_ref()
         .and_then(|d| d.meta.foreach.as_ref())
@@ -505,19 +796,30 @@ pub fn run(
     // Create template environment
     let env = create_template_env();
 
-    // Detect remote branch and extract base name
-    // If we have a PR remote branch, use that; otherwise detect from branch_name
+    // Detect explicit remote branches and extract their base names. Generated names
+    // always identify local branches, even when their first component names a remote.
     // Only pass CLI --base to detect_remote_branch; config base_branch should not
     // interfere with remote/fork branch detection.
     let (remote_branch, template_base_name) = if let Some(ref pr_remote) = remote_branch_for_pr {
         (Some(pr_remote.clone()), branch_name.to_string())
+    } else if auto_name {
+        (None, branch_name.to_string())
+    } else if dry_run {
+        detect_remote_branch_dry_run(branch_name, cli_base)?
     } else {
         detect_remote_branch(branch_name, cli_base)?
     };
+    if let (Some(spec), Some(remote_branch)) = (&remote, &remote_branch) {
+        bail!(
+            "remote agents start from a local commit; fetch '{remote_branch}' and pass a local \
+             branch name with --base instead (remote '{}')",
+            spec.name
+        );
+    }
     let resolved_base = if remote_branch.is_some() {
-        None
+        pr_base_branch.as_deref()
     } else {
-        cli_base.or(config_base)
+        cli_base
     };
 
     // Determine effective foreach matrix
@@ -560,13 +862,14 @@ pub fn run(
         specs: &specs,
         resolved_base,
         remote_branch: remote_branch.as_deref(),
-        pr_number: pr,
+        checkout_ref,
         prompt_doc: prompt_doc.as_ref(),
         options,
         mode_override,
         env: &env,
         explicit_name: name.as_deref(),
         wait,
+        dry_run,
         deferred_auto_name,
         max_concurrent: multi.max_concurrent,
         sandbox_override,
@@ -575,6 +878,7 @@ pub fn run(
         layout: layout.as_deref(),
         fork_source,
         config_override,
+        remote: remote.as_ref(),
     };
     plan.execute()
 }
@@ -700,13 +1004,14 @@ struct CreationPlan<'a> {
     specs: &'a [WorktreeSpec],
     resolved_base: Option<&'a str>,
     remote_branch: Option<&'a str>,
-    pr_number: Option<u32>,
+    checkout_ref: Option<CheckoutRef>,
     prompt_doc: Option<&'a PromptDocument>,
     options: SetupOptions,
     mode_override: Option<MuxMode>,
     env: &'a TemplateEnv,
     explicit_name: Option<&'a str>,
     wait: bool,
+    dry_run: bool,
     deferred_auto_name: bool,
     max_concurrent: Option<u32>,
     sandbox_override: bool,
@@ -715,6 +1020,7 @@ struct CreationPlan<'a> {
     layout: Option<&'a str>,
     fork_source: Option<crate::workflow::types::ForkSource>,
     config_override: Option<&'a std::path::Path>,
+    remote: Option<&'a RemoteSpec>,
 }
 
 impl<'a> CreationPlan<'a> {
@@ -725,7 +1031,11 @@ impl<'a> CreationPlan<'a> {
 
     fn create_worktrees(&mut self) -> Result<()> {
         if self.specs.len() > 1 {
-            println!("Preparing to create {} worktrees...", self.specs.len());
+            if self.dry_run {
+                println!("Dry run for {} worktrees:", self.specs.len());
+            } else {
+                println!("Preparing to create {} worktrees...", self.specs.len());
+            }
         }
 
         // Create backend once for all specs
@@ -733,6 +1043,7 @@ impl<'a> CreationPlan<'a> {
 
         // Track targets for --wait (all created windows/sessions)
         let mut created_targets = Vec::new();
+        let mut remote_wait_targets = Vec::new();
         // Track currently active targets for --max-concurrent
         let mut active_targets: Vec<String> = Vec::new();
         let mode = self.options.mode;
@@ -765,6 +1076,9 @@ impl<'a> CreationPlan<'a> {
             if self.sandbox_override {
                 config.sandbox.enabled = Some(true);
             }
+            if config.sandbox.is_enabled() && !self.dry_run {
+                crate::sandbox::notice::show_once();
+            }
 
             // Resolve layout: replace top-level panes with layout's panes
             if let Some(layout_name) = self.layout {
@@ -795,10 +1109,16 @@ impl<'a> CreationPlan<'a> {
             };
 
             if self.specs.len() > 1 {
+                let action = if self.dry_run {
+                    "Worktree"
+                } else {
+                    "Creating worktree"
+                };
                 println!(
-                    "\n--- [{}/{}] Creating worktree: {} ---",
+                    "\n--- [{}/{}] {}: {} ---",
                     i + 1,
                     self.specs.len(),
+                    action,
                     final_branch_name
                 );
             }
@@ -809,8 +1129,6 @@ impl<'a> CreationPlan<'a> {
                 crate::naming::derive_handle(&final_branch_name, self.explicit_name, &config)?;
 
             let prompt_for_spec = rendered_prompt.map(Prompt::Inline);
-
-            super::announce_hooks(&config, Some(&self.options), super::HookPhase::PostCreate);
 
             // For multi-worktree, re-resolve fork source for earlier specs;
             // last spec takes ownership to avoid unnecessary re-resolution.
@@ -833,16 +1151,107 @@ impl<'a> CreationPlan<'a> {
             };
 
             // Create a WorkflowContext for this spec's config (reuse shared mux)
+            let location = config_location.clone();
             let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
+            let configured_base = if self.resolved_base.is_none() && self.remote_branch.is_none() {
+                workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
+            } else {
+                None
+            };
+            let resolved_base = self.resolved_base.or(configured_base.as_deref());
+
+            if self.dry_run {
+                print_dry_run(
+                    &context,
+                    &final_branch_name,
+                    &handle,
+                    resolved_base,
+                    self.remote_branch,
+                    &self.options,
+                    self.explicit_name.is_some(),
+                )?;
+                continue;
+            }
+
+            super::announce_hooks(
+                &context.config,
+                Some(&self.options),
+                super::HookPhase::PostCreate,
+            );
+
+            if let Some(remote) = self.remote {
+                let remote = RemoteSpec::resolve(&context.config, &remote.name)?;
+                let record = crate::remote::lifecycle::create(
+                    &context,
+                    &remote,
+                    crate::remote::lifecycle::CreateRequest {
+                        branch: &final_branch_name,
+                        handle: &handle,
+                        explicit_name: self.explicit_name.is_some(),
+                        base: resolved_base,
+                        prompt: prompt_for_spec.as_ref(),
+                        agent: spec.agent.as_deref(),
+                        location: location.as_ref(),
+                        options: &self.options,
+                        prompt_file_only: self.prompt_file_only,
+                    },
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to create remote workspace for branch '{}' on '{}'",
+                        final_branch_name, remote.name
+                    )
+                })?;
+                if self.wait
+                    && let Some(target) =
+                        crate::remote::lifecycle::window_target(mux.as_ref(), &record)?
+                {
+                    remote_wait_targets.push(target);
+                }
+                if self.max_concurrent.is_some() {
+                    active_targets.push(record.window_name.clone());
+                }
+                println!(
+                    "✓ Successfully created remote workspace and tmux window for '{}' on '{}'",
+                    record.branch, record.remote
+                );
+                if let Some(base) = &record.base_label {
+                    println!("  Base: {base}");
+                }
+                if let Some(path) = &record.remote_worktree {
+                    println!("  Worktree: {}:{path}", record.remote);
+                }
+                println!("  Runs: {}", remote.runs_description());
+                continue;
+            }
+            if let Some(record) = crate::remote::cache::claimed(
+                &context.main_worktree_root,
+                &handle,
+                &final_branch_name,
+            ) {
+                if record.handle == handle {
+                    bail!(
+                        "'{handle}' is already a remote workspace on '{}'; pick another name \
+                         with --name",
+                        record.remote
+                    );
+                }
+                bail!(
+                    "Branch '{}' belongs to remote workspace '{}' on '{}'",
+                    record.branch,
+                    record.handle,
+                    record.remote
+                );
+            }
 
             let result = workflow::create(
                 &context,
                 workflow::CreateArgs {
                     branch_name: &final_branch_name,
                     handle: &handle,
-                    base_branch: self.resolved_base,
+                    base_branch: resolved_base,
                     remote_branch: self.remote_branch,
-                    pr_number: self.pr_number,
+                    checkout_ref: self.checkout_ref,
                     prompt: prompt_for_spec.as_ref(),
                     options: self.options.clone(),
                     mode_override,
@@ -885,6 +1294,13 @@ impl<'a> CreationPlan<'a> {
             println!("  Worktree: {}", result.worktree_path.display());
         }
 
+        for target in remote_wait_targets {
+            println!("Waiting for window '{}' to close...", target.full_name);
+            while mux.is_running()? && mux.window_target_exists(&target)? {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+
         if self.wait && !created_targets.is_empty() {
             if mode == MuxMode::Session {
                 // For sessions, wait for each one to close
@@ -900,6 +1316,115 @@ impl<'a> CreationPlan<'a> {
     }
 }
 
+fn print_dry_run(
+    context: &workflow::WorkflowContext,
+    branch_name: &str,
+    handle: &str,
+    base_branch: Option<&str>,
+    remote_branch: Option<&str>,
+    options: &SetupOptions,
+    is_explicit_name: bool,
+) -> Result<()> {
+    if context.config.panes.is_some() && context.config.windows.is_some() {
+        bail!("Cannot specify both 'panes' and 'windows' in configuration.");
+    }
+    if let Some(windows) = &context.config.windows {
+        if options.mode != MuxMode::Session {
+            bail!(
+                "'windows' configuration requires 'mode: session'. Either add 'mode: session' to your config or use --session flag."
+            );
+        }
+        crate::config::validate_windows_config(windows)?;
+    }
+    if let Some(panes) = &context.config.panes {
+        crate::config::validate_panes_config(panes)?;
+    }
+
+    let branch_exists = git::branch_exists_in(branch_name, Some(&context.execution_dir))?;
+    let base = if let Some(remote) = remote_branch {
+        remote.to_string()
+    } else if branch_exists {
+        "existing branch".to_string()
+    } else if let Some(base) = base_branch.filter(|base| !base.trim().is_empty()) {
+        base.to_string()
+    } else {
+        git::get_current_branch_in(&context.execution_dir)
+            .context("Failed to determine the current branch to use as the base")?
+    };
+
+    let base_dir = context.worktree_base_dir()?;
+    let worktree_path = base_dir.join(handle);
+    let target_name = options.primary_mux_target_name(handle);
+    let target = MuxHandle::new(
+        context.mux.as_ref(),
+        options.mode,
+        &context.prefix,
+        target_name,
+    );
+
+    println!("Worktree: {}", worktree_path.display());
+    println!("Branch:   {}", branch_name);
+    println!("Base:     {}", base.trim());
+    println!(
+        "Target:   {} ({})",
+        target.full_name(),
+        mode_label(options.mode)
+    );
+    if is_explicit_name {
+        println!("Handle:   {}", handle);
+    }
+
+    println!("\nFiles to copy or symlink:");
+    if !options.run_file_ops {
+        println!("  (disabled)");
+    } else {
+        let operations = workflow::file_ops::resolve_file_operations(
+            &context.config_source_dir,
+            &worktree_path,
+            &context.config.files,
+        )?;
+        if operations.is_empty() {
+            println!("  (none)");
+        }
+        for operation in operations {
+            let source = operation
+                .source
+                .strip_prefix(&context.config_source_dir)
+                .unwrap_or(&operation.source);
+            let destination = operation
+                .destination
+                .strip_prefix(&worktree_path)
+                .unwrap_or(&operation.destination);
+            let kind = match operation.kind {
+                workflow::file_ops::FileOperationKind::Copy => "copy",
+                workflow::file_ops::FileOperationKind::Symlink => "symlink",
+            };
+            println!(
+                "  {} -> {} ({})",
+                source.display(),
+                destination.display(),
+                kind
+            );
+        }
+    }
+
+    println!("\nPost-create hooks:");
+    if !options.run_hooks {
+        println!("  (disabled)");
+    } else if let Some(hooks) = &context.config.post_create {
+        if hooks.is_empty() {
+            println!("  (none)");
+        }
+        for hook in hooks {
+            println!("  {}", hook);
+        }
+    } else {
+        println!("  (none)");
+    }
+
+    Ok(())
+}
+
 /// Route `workmux add` through SpawnAgent RPC when running inside a sandbox.
 ///
 /// Only a subset of `add` flags are supported over RPC. Unsupported flags
@@ -913,7 +1438,7 @@ fn run_add_via_rpc(
     rescue: &RescueArgs,
     multi: &MultiArgs,
     base: Option<&str>,
-    pr: Option<u32>,
+    pr: Option<PrReference>,
     name: Option<&str>,
     wait: bool,
     mode_override: Option<MuxMode>,
@@ -980,6 +1505,21 @@ fn run_add_via_rpc(
         branch_name.map(|s| s.to_string())
     };
 
+    if let Some((root, parent)) = crate::remote::node::spawn::session_parent() {
+        use crate::remote::node::{NodeRoot, spawn};
+        let spawned = spawn::spawn(
+            &NodeRoot::at(root)?,
+            spawn::SpawnRequest {
+                parent,
+                branch: rpc_branch,
+                prompt: prompt_text,
+                background: setup.background,
+            },
+        )?;
+        println!("✓ Spawned agent: {}", spawned.branch);
+        return Ok(());
+    }
+
     let mut client = RpcClient::from_env().context(
         "Failed to connect to host RPC server. Is this running inside a workmux sandbox?",
     )?;
@@ -1000,5 +1540,49 @@ fn run_add_via_rpc(
             bail!("Host failed to spawn agent: {}", message)
         }
         other => bail!("Unexpected RPC response: {:?}", other),
+    }
+}
+
+#[cfg(test)]
+mod agent_validation_tests {
+    use super::*;
+
+    fn config(agent: &str) -> config::Config {
+        config::Config {
+            agent: Some(agent.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_missing_agent() {
+        let error =
+            validate_agent_executable(&config("workmux-nonexistent-agent-938472")).unwrap_err();
+        assert!(error.to_string().contains("Agent executable"));
+    }
+
+    #[test]
+    fn checks_absolute_executable_paths() {
+        assert!(validate_agent_executable(&config("/bin/sh")).is_ok());
+        assert!(validate_agent_executable(&config("/nonexistent/workmux-agent")).is_err());
+    }
+
+    #[test]
+    fn preserves_shell_commands_and_worktree_relative_paths() {
+        for command in [
+            "./agent",
+            "agent --flag",
+            "AGENT_MODE=test agent",
+            "$HOME/bin/agent",
+        ] {
+            assert!(validate_agent_executable(&config(command)).is_ok());
+        }
+    }
+
+    #[test]
+    fn skips_sandbox_agents() {
+        let mut config = config("workmux-nonexistent-agent-938472");
+        config.sandbox.enabled = Some(true);
+        assert!(validate_agent_executable(&config).is_ok());
     }
 }

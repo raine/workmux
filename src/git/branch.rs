@@ -53,6 +53,13 @@ pub fn get_default_branch_in(workdir: Option<&Path>) -> Result<String> {
     ))
 }
 
+/// Check whether a name satisfies Git's branch naming rules.
+pub fn is_valid_branch_name(branch_name: &str) -> Result<bool> {
+    Cmd::new("git")
+        .args(&["check-ref-format", "--branch", branch_name])
+        .run_as_check()
+}
+
 /// Check if a branch exists (can be local or remote tracking branch)
 pub fn branch_exists(branch_name: &str) -> Result<bool> {
     branch_exists_in(branch_name, None)
@@ -410,6 +417,19 @@ pub fn get_branch_base_in(branch: &str, workdir: Option<&Path>) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_branch_name_accepts_slashes() {
+        assert!(is_valid_branch_name("fix/issue-123").unwrap());
+        assert!(is_valid_branch_name("feat/search/ui").unwrap());
+    }
+
+    #[test]
+    fn valid_branch_name_rejects_invalid_refs() {
+        assert!(!is_valid_branch_name("fix//issue-123").unwrap());
+        assert!(!is_valid_branch_name("fix/issue-123.lock").unwrap());
+        assert!(!is_valid_branch_name("fix issue 123").unwrap());
+    }
 
     #[test]
     fn test_parse_fork_branch_spec_valid() {

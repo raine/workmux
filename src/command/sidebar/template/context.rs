@@ -2,24 +2,63 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::agent_display::{extract_project_name, extract_worktree_name, sanitize_pane_title};
+use crate::agent_display::{
+    extract_project_name, extract_worktree_name, resolve_labels, sanitize_pane_title,
+};
 use crate::agent_identity::AgentKind;
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::agent::resolve_profile_for_display;
 use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::ui::theme::ThemePalette;
 
 use super::super::app::{ResolvedAgentIcons, SidebarApp};
 use super::TokenId;
+use crate::util::display_width;
+
+/// Activity presentation without changing the agent's reported status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarStatus {
+    Reported(Option<AgentStatus>),
+    Quiet,
+}
+
+impl SidebarStatus {
+    pub(crate) fn for_agent(agent: &AgentPane, interrupted: bool) -> Self {
+        let preserve_remote_status = agent
+            .remote
+            .as_ref()
+            .is_some_and(|remote| !remote.connected || remote.ended.is_some());
+        if interrupted && agent.status == Some(AgentStatus::Working) && !preserve_remote_status {
+            Self::Quiet
+        } else {
+            Self::Reported(agent.status)
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Quiet => "Quiet",
+            Self::Reported(Some(AgentStatus::Working)) => "Working",
+            Self::Reported(Some(AgentStatus::Waiting)) => "Waiting",
+            Self::Reported(Some(AgentStatus::Done)) => "Done",
+            Self::Reported(None) => "",
+        }
+    }
+}
 
 /// Pre-computed values for every piece of row metadata.
 pub struct RowContext<'a> {
     pub agent: &'a AgentPane,
+    pub(crate) sidebar_status: SidebarStatus,
     /// Resolved primary label.
     pub primary: String,
     /// Resolved secondary label.
     pub secondary: String,
+    /// Raw window-derived value preserved for the `{worktree}` token.
+    pub(crate) template_worktree: String,
+    /// Project name shared by label, title, and token rendering.
+    pub(crate) project: String,
     /// Pane suffix like " (1)" when multiple agents share a window.
     pub pane_suffix: String,
     /// Compact elapsed string (e.g. "5:23", "2h", "1d").
@@ -34,6 +73,8 @@ pub struct RowContext<'a> {
     pub git_status: Option<&'a GitStatus>,
     /// PR summary for this agent's path.
     pub pr_summary: Option<&'a PrSummary>,
+    /// GitHub check summary for this agent's path.
+    pub check_summary: Option<&'a CheckSummary>,
     /// Row flags.
     pub is_stale: bool,
     pub is_active: bool,
@@ -48,8 +89,9 @@ pub struct RowContext<'a> {
     /// Pre-resolved agent label string (empty when no profile matches).
     pub agent_label: String,
     /// 0-based sidebar row index. Rendered as 1-based via the `idx` and
-    /// `jump_key` tokens.
-    pub idx: usize,
+    /// `jump_key` tokens. `None` for an agent the published pane list leaves
+    /// out, which no number can reach.
+    pub idx: Option<usize>,
     /// Current spinner frame for animated PR checks.
     pub spinner_frame: u8,
 }
@@ -63,34 +105,95 @@ impl<'a> RowContext<'a> {
         now_secs: u64,
         selected_idx: Option<usize>,
     ) -> Self {
-        let (primary, secondary) = app.resolve_agent_labels(agent);
+        let project = extract_project_name(&agent.path);
+        let (label_worktree, _) = extract_worktree_name(
+            &agent.session,
+            &agent.window_name,
+            app.window_prefix(),
+            &agent.path,
+        );
+        let (template_worktree, _) =
+            extract_worktree_name(&agent.session, &agent.window_name, "", &agent.path);
+        let (label_worktree, template_worktree) = match &agent.remote {
+            Some(remote) => (
+                crate::remote::agents::label(&label_worktree, &remote.at.remote),
+                crate::remote::agents::label(&template_worktree, &remote.at.remote),
+            ),
+            None => (label_worktree, template_worktree),
+        };
+        let session = if agent.session.starts_with(app.window_prefix()) {
+            ""
+        } else {
+            agent.session.as_str()
+        };
+        let window = if agent.window_name.starts_with(app.window_prefix()) {
+            ""
+        } else {
+            agent.window_name.as_str()
+        };
+        let (primary, secondary) = resolve_labels(
+            &project,
+            session,
+            &label_worktree,
+            window,
+            agent.window_cmd.as_deref(),
+        );
         let pane_suffix = pane_suffixes[idx].clone();
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
         let is_interrupted = app.interrupted_pane_ids.contains(&agent.pane_id);
-        let is_stale = is_agent_stale(
-            agent.status_ts,
-            agent.status,
-            now_secs,
-            app.stale_threshold_secs,
-            is_sleeping,
-            is_interrupted,
-        );
+        let title = build_pane_title(agent, &primary, &secondary, &label_worktree, &project);
+        let connectivity = agent.remote.as_ref().and_then(|remote| {
+            crate::remote::agents::row_title(remote, now_secs, title.as_deref())
+        });
+        // A remote that does not answer shows its last status dimmed.
+        let is_stale = connectivity.is_some()
+            || should_dim_agent(
+                app.dim_stale,
+                agent_is_stale(
+                    agent,
+                    now_secs,
+                    app.stale_threshold_secs,
+                    is_sleeping,
+                    is_interrupted,
+                ),
+            );
         let is_active = app.host_agent_idx == Some(idx);
+        let jump_idx = app.jump_numbers.get(idx).copied().flatten();
         let is_selected = selected_idx == Some(idx);
 
-        let (status_icon_spans, status_icon_style) =
-            super::super::ui::status_icon_and_style(app, agent.status, is_stale);
+        let sidebar_status = SidebarStatus::for_agent(agent, is_interrupted);
+        // A remote's last status stays recognizable, only dimmed.
+        let (mut status_icon_spans, mut status_icon_style) =
+            super::super::ui::status_icon_and_style(
+                app,
+                sidebar_status,
+                is_stale && connectivity.is_none(),
+            );
+        if connectivity.is_some() {
+            status_icon_style = status_icon_style.fg(app.palette.dimmed);
+            for (_, style) in &mut status_icon_spans {
+                *style = style.fg(app.palette.dimmed);
+            }
+        }
         let status_color = status_icon_style.fg.unwrap_or(Color::Reset);
 
-        let elapsed = agent
-            .status_ts
-            .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
-            .unwrap_or_default();
+        let elapsed = if sidebar_status == SidebarStatus::Quiet {
+            String::new()
+        } else {
+            agent
+                .status_ts
+                .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
+                .unwrap_or_default()
+        };
 
-        let pane_title = build_pane_title(agent, &primary, &secondary, app.window_prefix());
-        let git_status = app.git_statuses.get(&agent.path);
+        let pane_title = connectivity.clone().or(title);
+        let git_status = match &agent.remote {
+            Some(remote) => remote.git.as_ref(),
+            None => app.git_statuses.get(&agent.path),
+        };
         let pr_summary = app.pr_statuses.get(&agent.path);
+        let check_summary = app.check_statuses.get(&agent.path);
         let kind =
             effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
@@ -99,8 +202,11 @@ impl<'a> RowContext<'a> {
 
         Self {
             agent,
+            sidebar_status,
             primary,
             secondary,
+            template_worktree,
+            project,
             pane_suffix,
             elapsed,
             status_icon_spans,
@@ -108,6 +214,7 @@ impl<'a> RowContext<'a> {
             pane_title,
             git_status,
             pr_summary,
+            check_summary,
             is_stale,
             is_active,
             is_selected,
@@ -115,7 +222,7 @@ impl<'a> RowContext<'a> {
             agent_icon,
             agent_icon_color,
             agent_label,
-            idx,
+            idx: jump_idx,
             spinner_frame: app.spinner_frame,
         }
     }
@@ -125,11 +232,17 @@ impl<'a> RowContext<'a> {
         match token {
             TokenId::Primary => self.primary.clone(),
             TokenId::Secondary => self.secondary.clone(),
-            TokenId::Worktree => self.worktree_name(),
-            TokenId::Project => self.project_name(),
+            TokenId::Worktree => self.template_worktree.clone(),
+            TokenId::Project => self.project.clone(),
             TokenId::Session => self.agent.session.clone(),
             TokenId::Window => self.agent.window_name.clone(),
+            TokenId::WindowIndex => self
+                .agent
+                .window_index
+                .map(|index| index.to_string())
+                .unwrap_or_default(),
             TokenId::PaneTitle => self.pane_title.clone().unwrap_or_default(),
+            TokenId::Prompt => self.agent.prompt.clone().unwrap_or_default(),
             TokenId::AgentLabel => self.agent_label.clone(),
             TokenId::StatusIcon => self
                 .status_icon_spans
@@ -174,20 +287,17 @@ impl<'a> RowContext<'a> {
                 .pr_summary
                 .map(|pr| format!("#{}", pr.number))
                 .unwrap_or_default(),
-            TokenId::StatusLabel => match self.agent.status {
-                Some(AgentStatus::Working) => "Working".to_string(),
-                Some(AgentStatus::Waiting) => "Waiting".to_string(),
-                Some(AgentStatus::Done) => "Done".to_string(),
-                None => String::new(),
+            TokenId::StatusLabel => self.sidebar_status.label().to_string(),
+            // A header owns these; an agent row has no group of its own.
+            TokenId::Group | TokenId::GroupCount | TokenId::GroupStatus => String::new(),
+            TokenId::Idx => self
+                .idx
+                .map(|idx| (idx + 1).to_string())
+                .unwrap_or_default(),
+            TokenId::JumpKey => match self.idx {
+                Some(idx) if idx < 9 => format!("M-{}", idx + 1),
+                _ => String::new(),
             },
-            TokenId::Idx => (self.idx + 1).to_string(),
-            TokenId::JumpKey => {
-                if self.idx < 9 {
-                    format!("M-{}", self.idx + 1)
-                } else {
-                    String::new()
-                }
-            }
         }
     }
 
@@ -261,8 +371,12 @@ impl<'a> RowContext<'a> {
 
     /// Render PR checks with a given allocated width, returning styled spans and actual width.
     pub fn pr_check_spans(&self, allocated_width: usize) -> (Vec<(String, Style)>, usize) {
-        super::super::ui::format_sidebar_pr_status(
-            self.pr_summary,
+        let branch = self.git_status.and_then(|status| status.branch.as_deref());
+        let check_summary = self.check_summary.filter(|summary| {
+            branch.is_none_or(|branch| summary.should_display_for_branch(branch))
+        });
+        super::super::ui::format_sidebar_check_status(
+            check_summary,
             self.palette,
             self.is_stale,
             self.spinner_frame,
@@ -285,7 +399,7 @@ impl<'a> RowContext<'a> {
             TokenId::Secondary => Style::default()
                 .fg(self.palette.text)
                 .add_modifier(Modifier::DIM),
-            TokenId::PaneTitle => Style::default().fg(self.palette.dimmed),
+            TokenId::PaneTitle | TokenId::Prompt => Style::default().fg(self.palette.dimmed),
             TokenId::PaneSuffix => Style::default().fg(self.palette.dimmed),
             TokenId::Elapsed => Style::default()
                 .fg(self.palette.text)
@@ -304,26 +418,13 @@ impl<'a> RowContext<'a> {
             TokenId::StatusLabel => Style::default().fg(self.status_color),
             TokenId::Idx => Style::default().fg(self.palette.dimmed),
             TokenId::JumpKey => Style::default().fg(self.palette.dimmed),
+            TokenId::WindowIndex => Style::default().fg(self.palette.dimmed),
             TokenId::AgentIcon => {
                 let fg = self.agent_icon_color.unwrap_or(self.palette.text);
                 Style::default().fg(fg)
             }
             _ => Style::default().fg(self.palette.text),
         }
-    }
-
-    fn worktree_name(&self) -> String {
-        let (wt, _) = extract_worktree_name(
-            &self.agent.session,
-            &self.agent.window_name,
-            "",
-            &self.agent.path,
-        );
-        wt
-    }
-
-    fn project_name(&self) -> String {
-        extract_project_name(&self.agent.path)
     }
 }
 
@@ -372,51 +473,64 @@ fn build_pane_title(
     agent: &AgentPane,
     primary: &str,
     secondary: &str,
-    window_prefix: &str,
+    worktree: &str,
+    project: &str,
 ) -> Option<String> {
-    let title_worktree = extract_worktree_name(
-        &agent.session,
-        &agent.window_name,
-        window_prefix,
-        &agent.path,
-    )
-    .0;
-    let title_project = extract_project_name(&agent.path);
-    sanitize_pane_title(agent.pane_title.as_deref(), &title_worktree, &title_project)
+    sanitize_pane_title(agent.pane_title.as_deref(), worktree, project)
         .filter(|t| *t != primary && *t != secondary)
+        .filter(|t| !is_hostname_title(t))
         .map(|s| s.to_string())
 }
 
+fn is_hostname_title(title: &str) -> bool {
+    is_hostname_title_with(title, std::env::var("HOSTNAME").ok().as_deref())
+}
+
+fn is_hostname_title_with(title: &str, hostname: Option<&str>) -> bool {
+    hostname.is_some_and(|hostname| !hostname.is_empty() && title == hostname)
+}
+
+/// Whether an agent counts as stale: asleep, or not visibly progressing for
+/// longer than the threshold. Independent of `dim_stale`, which only decides
+/// whether staleness is also dimmed.
+pub(crate) fn agent_is_stale(
+    agent: &AgentPane,
+    now_secs: u64,
+    stale_threshold_secs: u64,
+    is_sleeping: bool,
+    is_interrupted: bool,
+) -> bool {
+    let is_interrupted = is_interrupted && agent.status == Some(AgentStatus::Working);
+    is_agent_stale(
+        agent.activity_ts(),
+        agent.status,
+        now_secs,
+        stale_threshold_secs,
+        is_sleeping,
+        is_interrupted,
+    )
+}
+
 fn is_agent_stale(
-    status_ts: Option<u64>,
+    activity_ts: Option<u64>,
     status: Option<AgentStatus>,
     now_secs: u64,
     stale_threshold_secs: u64,
     is_sleeping: bool,
     is_interrupted: bool,
 ) -> bool {
-    if is_sleeping {
-        return true;
-    }
-
-    if !is_interrupted
-        && matches!(
-            status,
-            Some(AgentStatus::Working) | Some(AgentStatus::Waiting)
-        )
-    {
-        return false;
-    }
-
-    status_ts
-        .map(|ts| now_secs.saturating_sub(ts) > stale_threshold_secs)
-        .unwrap_or(true)
+    crate::agent_staleness::is_stale(
+        activity_ts,
+        status,
+        now_secs,
+        stale_threshold_secs,
+        is_sleeping,
+        is_interrupted,
+    )
 }
 
-fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
-        .sum()
+fn should_dim_agent(dim_stale: bool, is_stale: bool) -> bool {
+    dim_stale && is_stale
 }
 
 fn format_compact_elapsed(secs: u64) -> String {
@@ -429,6 +543,36 @@ fn format_compact_elapsed(secs: u64) -> String {
     }
 }
 
+impl super::row::TemplateRow for RowContext<'_> {
+    fn resolve(&self, token: TokenId) -> String {
+        RowContext::resolve(self, token)
+    }
+
+    fn intrinsic_style(&self, token: TokenId) -> Style {
+        RowContext::intrinsic_style(self, token)
+    }
+
+    fn natural_width(&self, token: TokenId) -> usize {
+        RowContext::natural_width(self, token)
+    }
+
+    fn status_icon_spans(&self) -> &[(String, Style)] {
+        &self.status_icon_spans
+    }
+
+    fn is_stale(&self) -> bool {
+        self.is_stale
+    }
+
+    fn git_segment_spans(&self, token: TokenId, width: usize) -> (Vec<(String, Style)>, usize) {
+        RowContext::git_segment_spans(self, token, width)
+    }
+
+    fn pr_check_spans(&self, width: usize) -> (Vec<(String, Style)>, usize) {
+        RowContext::pr_check_spans(self, width)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,12 +582,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_status_timestamp_is_stale() {
+    fn missing_activity_timestamp_is_stale() {
         assert!(is_agent_stale(None, None, 100, 60, false, false));
     }
 
     #[test]
-    fn active_statuses_are_not_stale_without_timestamp() {
+    fn active_statuses_are_not_stale_without_activity_timestamp() {
         assert!(!is_agent_stale(
             None,
             Some(AgentStatus::Working),
@@ -460,6 +604,13 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn stale_rendering_can_be_disabled() {
+        assert!(should_dim_agent(true, true));
+        assert!(!should_dim_agent(false, true));
+        assert!(!should_dim_agent(true, false));
     }
 
     #[test]
@@ -519,6 +670,21 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_uses_curved_default_icon() {
+        let icons = ResolvedAgentIcons::default();
+        assert_eq!(resolve_agent_label(kind(None, Some("agy"))), "Antigravity");
+        assert_eq!(resolve_agent_icon(kind(None, Some("agy")), &icons), "⋂");
+    }
+
+    #[test]
+    fn hostname_pane_title_is_noise() {
+        assert!(is_hostname_title_with("framework", Some("framework")));
+        assert!(!is_hostname_title_with("framework", Some("other")));
+        assert!(!is_hostname_title_with("framework", None));
+        assert!(!is_hostname_title_with("framework", Some("")));
+    }
+
+    #[test]
     fn custom_icon_override_still_honored_with_cached_kind() {
         let mut icons = ResolvedAgentIcons::default();
         icons.icons.insert("claude".to_string(), "X".to_string());
@@ -528,6 +694,7 @@ mod tests {
         );
     }
 
+    use crate::command::sidebar::app::TemplateError;
     use crate::config::{ThemeMode, ThemeScheme};
     use crate::github::{CheckState, PrSummary};
     use crate::multiplexer::AgentPane;
@@ -546,15 +713,232 @@ mod tests {
             window_name: "w".to_string(),
             pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
+            window_index: None,
             path: PathBuf::from("/tmp/x"),
             pane_title: None,
             status: None,
             status_ts: None,
+            activity_ts: None,
             updated_ts: None,
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            prompt: None,
+            remote: None,
         }
+    }
+
+    #[test]
+    fn quiet_presentation_is_independent_of_stale_dimming() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Working);
+        agent.status_ts = Some(100);
+        agent.activity_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+
+        for dim in [false, true] {
+            app.dim_stale = dim;
+            for now in [130, 161] {
+                let ctx = RowContext::build(&app, &agent, 0, &suffixes, now, None);
+                assert_eq!(ctx.sidebar_status, SidebarStatus::Quiet);
+                assert_eq!(ctx.resolve(TokenId::StatusLabel), "Quiet");
+                assert_eq!(ctx.resolve(TokenId::Elapsed), "");
+                assert_eq!(ctx.status_color, app.palette.dimmed);
+                assert_eq!(ctx.is_stale, dim && now == 161);
+                if !ctx.is_stale {
+                    assert_eq!(ctx.resolve(TokenId::StatusIcon), "○");
+                    assert_eq!(
+                        ctx.intrinsic_style(TokenId::Primary).fg,
+                        Some(app.palette.text)
+                    );
+                } else {
+                    assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+                }
+            }
+        }
+
+        app.interrupted_pane_ids.clear();
+        let ctx = RowContext::build(&app, &agent, 0, &suffixes, 161, None);
+        assert_eq!(ctx.resolve(TokenId::StatusLabel), "Working");
+        assert_eq!(ctx.resolve(TokenId::Elapsed), "1:01");
+        assert_eq!(ctx.status_color, app.palette.info);
+        assert!(!ctx.is_stale);
+        assert_eq!(agent.status, Some(AgentStatus::Working));
+        assert_eq!(agent.status_ts, Some(100));
+        assert_eq!(agent.activity_ts, Some(100));
+    }
+
+    #[test]
+    fn obsolete_interruption_flags_do_not_override_actionable_statuses() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = true;
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.status_ts = Some(100);
+        agent.activity_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+        for (status, label) in [
+            (AgentStatus::Waiting, "Waiting"),
+            (AgentStatus::Done, "Done"),
+        ] {
+            agent.status = Some(status);
+            let ctx = RowContext::build(&app, &agent, 0, &suffixes, 200, None);
+            assert!(!ctx.is_stale);
+            assert_eq!(ctx.resolve(TokenId::StatusLabel), label);
+            assert_eq!(ctx.resolve(TokenId::Elapsed), "1:40");
+            assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+        }
+        agent.status = None;
+        assert_eq!(
+            SidebarStatus::for_agent(&agent, true),
+            SidebarStatus::Reported(None)
+        );
+    }
+
+    #[test]
+    fn remote_connectivity_takes_precedence_over_quiet() {
+        use crate::multiplexer::types::{EndReason, RemoteAgent, RemoteRef};
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Working);
+        agent.status_ts = Some(100);
+        app.interrupted_pane_ids.insert(agent.pane_id.clone());
+        let suffixes = vec![String::new()];
+        let mut remote = RemoteAgent::new(RemoteRef {
+            remote: "host".into(),
+            ws_id: "ws".into(),
+            ex_id: "ex".into(),
+            pane: 0,
+        });
+        for (connected, ended) in [(false, None), (true, Some(EndReason::HostReboot))] {
+            remote.connected = connected;
+            remote.ended = ended;
+            agent.remote = Some(remote.clone());
+            let ctx = RowContext::build(&app, &agent, 0, &suffixes, 130, None);
+            assert_eq!(ctx.resolve(TokenId::StatusLabel), "Working");
+            assert_eq!(ctx.resolve(TokenId::Elapsed), "0:30");
+            assert_ne!(ctx.resolve(TokenId::StatusIcon), "○");
+            assert_eq!(ctx.status_color, app.palette.dimmed);
+        }
+        remote.connected = true;
+        remote.ended = None;
+        agent.remote = Some(remote);
+        assert_eq!(SidebarStatus::for_agent(&agent, true), SidebarStatus::Quiet);
+    }
+
+    #[test]
+    fn newly_registered_agent_is_fresh_without_elapsed_status_time() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.activity_ts = Some(100);
+        let pane_suffixes = vec![String::new()];
+
+        let fresh = RowContext::build(&app, &agent, 0, &pane_suffixes, 160, None);
+        assert!(!fresh.is_stale);
+        assert!(fresh.elapsed.is_empty());
+
+        let stale = RowContext::build(&app, &agent, 0, &pane_suffixes, 161, None);
+        assert!(stale.is_stale);
+        assert!(stale.elapsed.is_empty());
+    }
+
+    #[test]
+    fn row_context_reuses_names_without_changing_label_or_token_semantics() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = false;
+
+        let cases = [
+            (
+                "session",
+                "wm-feature-auth",
+                None,
+                "/tmp/project__worktrees/feature-auth",
+                ("feature-auth", "project"),
+            ),
+            (
+                "wm-session-branch",
+                "zsh",
+                Some("zsh"),
+                "/tmp/project__worktrees/session-branch",
+                ("session-branch", "project"),
+            ),
+            (
+                "team-session",
+                "review",
+                Some("claude"),
+                "/tmp/project__worktrees/main",
+                ("review", "team-session · main"),
+            ),
+            (
+                "default",
+                "bash",
+                Some("bash"),
+                "/tmp/project",
+                ("project", "main"),
+            ),
+        ];
+        for (session, window, window_cmd, path, expected_labels) in cases {
+            let mut agent = test_agent();
+            agent.session = session.to_string();
+            agent.window_name = window.to_string();
+            agent.window_cmd = window_cmd.map(str::to_string);
+            agent.path = PathBuf::from(path);
+            let pane_suffixes = vec![String::new()];
+            let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 100, None);
+
+            assert_eq!(
+                (ctx.primary.as_str(), ctx.secondary.as_str()),
+                expected_labels,
+                "session={session} window={window}"
+            );
+            assert_eq!(ctx.resolve(TokenId::Worktree), window);
+        }
+
+        let mut agent = test_agent();
+        agent.window_name = "wm-feature-auth".to_string();
+        agent.pane_title = Some("feature-auth".to_string());
+        let pane_suffixes = vec![String::new()];
+        let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 100, None);
+        assert_eq!(ctx.resolve(TokenId::Project), "x");
+        assert_eq!(ctx.pane_title, None);
+    }
+
+    #[test]
+    fn row_context_keeps_stale_done_agent_colored_when_dimming_is_disabled() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = false;
+
+        let mut agent = test_agent();
+        agent.status = Some(AgentStatus::Done);
+        agent.status_ts = Some(1);
+        let pane_suffixes = vec![String::new()];
+        let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 7200, None);
+
+        assert!(!ctx.is_stale);
+        assert_eq!(ctx.status_color, app.palette.success);
     }
 
     fn make_context<'a>(
@@ -562,19 +946,23 @@ mod tests {
         git: Option<&'a GitStatus>,
         idx: usize,
     ) -> RowContext<'a> {
-        make_context_with_pr(agent, git, None, idx)
+        make_context_with_pr(agent, git, None, None, idx)
     }
 
     fn make_context_with_pr<'a>(
         agent: &'a AgentPane,
         git: Option<&'a GitStatus>,
         pr: Option<&'a PrSummary>,
+        checks: Option<&'a CheckSummary>,
         idx: usize,
     ) -> RowContext<'a> {
         RowContext {
             agent,
+            sidebar_status: SidebarStatus::Reported(agent.status),
             primary: String::new(),
             secondary: String::new(),
+            template_worktree: String::new(),
+            project: String::new(),
             pane_suffix: String::new(),
             elapsed: String::new(),
             status_icon_spans: vec![],
@@ -582,6 +970,7 @@ mod tests {
             pane_title: None,
             git_status: git,
             pr_summary: pr,
+            check_summary: checks,
             is_stale: false,
             is_active: false,
             is_selected: false,
@@ -589,7 +978,7 @@ mod tests {
             agent_icon: String::new(),
             agent_icon_color: None,
             agent_label: String::new(),
-            idx,
+            idx: Some(idx),
             spinner_frame: 0,
         }
     }
@@ -621,6 +1010,20 @@ mod tests {
         let ctx9 = make_context(&agent, None, 9);
         assert_eq!(ctx0.resolve(TokenId::Idx), "1");
         assert_eq!(ctx9.resolve(TokenId::Idx), "10");
+    }
+
+    #[test]
+    fn resolve_window_index_empty_when_unset() {
+        let mut agent = test_agent();
+        assert_eq!(
+            make_context(&agent, None, 0).resolve(TokenId::WindowIndex),
+            ""
+        );
+        agent.window_index = Some(3);
+        assert_eq!(
+            make_context(&agent, None, 0).resolve(TokenId::WindowIndex),
+            "3"
+        );
     }
 
     #[test]
@@ -759,8 +1162,13 @@ mod tests {
             checks: Some(CheckState::Success),
             check_meta: None,
             url: None,
+            closing_issues: Vec::new(),
         };
-        let ctx = make_context_with_pr(&agent, None, Some(&pr), 0);
+        let checks = CheckSummary {
+            state: CheckState::Success,
+            meta: None,
+        };
+        let ctx = make_context_with_pr(&agent, None, Some(&pr), Some(&checks), 0);
         assert_eq!(ctx.resolve(TokenId::PrNumber), "#123");
         assert_eq!(ctx.resolve(TokenId::PrChecks), "");
         assert!(ctx.natural_width(TokenId::PrChecks) > 0);

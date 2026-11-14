@@ -2,16 +2,16 @@ panes:
   - command: <agent> # Start the configured agent (e.g., claude)
     focus: true
   - split: horizontal
-    command: "(cd docs && npm install)"
+    command: "(cd docs && bun install)"
 
 # Commands run after worktree creation (blocks window creation, keep fast)
 files:
   symlink:
     - CLAUDE.md
     - tests/venv # Share Python venv for faster worktree creation
+    - docs/node_modules # Lets pre_merge's docs check run without a pane install
     - .ignore
     - history
 
 pre_merge:
   - just check-ci
-  - just itest

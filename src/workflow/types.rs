@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::MuxMode;
+use crate::git::RepositoryIdentity;
 use crate::github::PrSummary;
 use crate::multiplexer::conversation::{ConversationForker, SessionInfo};
 use crate::multiplexer::types::ResumeMode;
@@ -13,8 +14,8 @@ pub struct CreateArgs<'a> {
     pub handle: &'a str,
     pub base_branch: Option<&'a str>,
     pub remote_branch: Option<&'a str>,
-    /// PR number for PR checkout flow (fetches refs/pull/N/head from origin)
-    pub pr_number: Option<u32>,
+    /// Forge-specific review ref fetched from origin for checkout.
+    pub checkout_ref: Option<super::pr::CheckoutRef>,
     pub prompt: Option<&'a Prompt>,
     pub options: SetupOptions,
     pub mode_override: Option<MuxMode>,
@@ -27,6 +28,16 @@ pub struct CreateArgs<'a> {
     pub prompt_file_only: bool,
     /// Fork a conversation from another worktree into this one
     pub fork_source: Option<ForkSource>,
+}
+
+/// Result of provisioning a worktree without a multiplexer target.
+pub struct ProvisionResult {
+    pub worktree_path: PathBuf,
+    pub working_directory: PathBuf,
+    pub branch_name: String,
+    pub post_create_hooks_run: usize,
+    pub base_branch: Option<String>,
+    pub resolved_handle: String,
 }
 
 /// Result of creating a worktree
@@ -50,11 +61,14 @@ pub struct MergeResult {
     pub branch_merged: String,
     pub main_branch: String,
     pub had_staged_changes: bool,
+    pub cleanup_scheduled: bool,
+    pub cleanup_error: Option<anyhow::Error>,
 }
 
 /// Result of removing a worktree
 pub struct RemoveResult {
-    pub branch_removed: String,
+    pub branch_removed: Option<String>,
+    pub cleanup_scheduled: bool,
 }
 
 /// Result of renaming a worktree
@@ -72,36 +86,40 @@ pub struct RenameResult {
     pub agents_migrated: usize,
 }
 
-/// Deferred cleanup operations to run after window close.
-/// Used when running inside the target window to avoid invalidating the agent's CWD.
+#[derive(Clone, Debug)]
+pub struct WorktreeCleanupIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub repository: RepositoryIdentity,
+}
+
+/// Deferred cleanup operations to run after target close.
+/// Destructive cleanup waits so processes in the target retain a valid CWD.
 pub struct DeferredCleanup {
     pub worktree_path: PathBuf,
-    pub trash_path: PathBuf,
     pub branch_name: String,
     pub handle: String,
     pub keep_branch: bool,
     pub force: bool,
-    pub git_common_dir: PathBuf,
-    /// Path to the git worktree admin directory (e.g., $GIT_COMMON_DIR/worktrees/<name>/).
-    /// Used to remove lock files before pruning, since `git worktree prune` skips locked entries.
-    pub worktree_admin_dir: Option<PathBuf>,
+    pub expected_identity: WorktreeCleanupIdentity,
+}
+
+/// A source target that must close before destructive cleanup can run.
+/// Captured multiplexer IDs bind closure and waiting to stable target identity.
+#[derive(Clone, Debug)]
+pub enum SourceTarget {
+    Window(WindowTarget),
+    Session { name: String, id: Option<String> },
 }
 
 /// Result of cleanup operations
 pub struct CleanupResult {
     pub tmux_window_killed: bool,
-    pub worktree_removed: bool,
-    pub local_branch_deleted: bool,
     /// True when the source target is focused by the active client.
     pub source_target_is_active: bool,
-    /// The actual window name to close later (when running inside a duplicate window)
-    pub window_to_close_later: Option<String>,
-    pub window_target_to_close_later: Option<WindowTarget>,
-    pub target_id_to_close_later: Option<String>,
-    /// Trash directory path to delete after window close (deferred to avoid race condition)
-    pub trash_path_to_delete: Option<PathBuf>,
-    /// Full cleanup deferred until after window close (rename + prune + branch delete).
-    /// Used when running inside the target window to keep CWD valid for agent hooks.
+    pub source_target_to_close: Option<SourceTarget>,
+    /// Full cleanup deferred until after target close (rename + prune + branch delete).
+    /// Scheduled results retain this payload until the detached worker starts.
     pub deferred_cleanup: Option<DeferredCleanup>,
 }
 
@@ -116,7 +134,7 @@ pub struct SetupOptions {
     pub focus_window: bool,
     /// Working directory for the tmux window. If None, uses worktree_path.
     pub working_dir: Option<PathBuf>,
-    /// Config root directory in source repo (for file ops). If None, uses main worktree root.
+    /// Source directory for configured file operations. If None, uses the project root.
     pub config_root: Option<PathBuf>,
     /// If true, open existing worktree instead of failing when it already exists.
     pub open_if_exists: bool,
@@ -128,6 +146,10 @@ pub struct SetupOptions {
     pub target_session_name: Option<String>,
     /// Raw tmux parent session for window mode.
     pub window_session_name: Option<String>,
+    /// Stable ownership token attached to windows created for this worktree.
+    pub window_token: Option<String>,
+    /// Whether the created window is the primary worktree window.
+    pub primary_window: bool,
     /// How to resume a conversation (continue last, fork specific session, or none).
     pub resume_mode: ResumeMode,
 }
@@ -149,6 +171,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
@@ -168,6 +192,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
@@ -193,6 +219,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
@@ -227,6 +255,8 @@ pub struct AgentStatusSummary {
 /// List all worktrees with their status
 #[derive(Clone)]
 pub struct WorktreeInfo {
+    /// Canonical common Git directory shared by every checkout of this repository.
+    pub repo_key: PathBuf,
     pub handle: String,
     pub branch: String,
     pub path: PathBuf,

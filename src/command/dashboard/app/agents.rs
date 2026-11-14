@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::style::Style;
 
-use crate::github::PrSummary;
-use crate::multiplexer::{AgentPane, AgentStatus};
+use crate::github::{CheckSummary, PrSummary};
+use crate::multiplexer::{AgentPane, AgentStatus, RemoteAgent};
 
 use super::DashboardTab;
 
@@ -24,6 +24,10 @@ use crate::command::pane_history::pane_to_remember;
 pub(crate) struct PaneTarget {
     pub pane_id: String,
     pub window_name: String,
+}
+
+fn should_close_after_jump(mux_exits_on_jump: bool, close_on_jump: bool) -> bool {
+    mux_exits_on_jump && close_on_jump
 }
 
 impl App {
@@ -44,6 +48,10 @@ impl App {
                     window_prefix,
                     &a.path,
                 );
+                let worktree = match &a.remote {
+                    Some(remote) => crate::remote::agents::label(&worktree, &remote.at.remote),
+                    None => worktree,
+                };
                 let worktree_lower = worktree.to_lowercase();
                 project.contains(&filter_lower) || worktree_lower.contains(&filter_lower)
             });
@@ -56,11 +64,17 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            let sleeping = &self.sleeping_pane_ids;
+            let interrupted = &self.interrupted_pane_ids;
             self.agents.retain(|agent| {
-                agent
-                    .status_ts
-                    .map(|ts| now.saturating_sub(ts) <= threshold)
-                    .unwrap_or(true)
+                !crate::agent_staleness::is_stale(
+                    agent.activity_ts(),
+                    agent.status,
+                    now,
+                    threshold,
+                    sleeping.contains(&agent.pane_id),
+                    interrupted.contains(&agent.pane_id),
+                )
             });
         }
 
@@ -124,6 +138,8 @@ impl App {
     /// Sort agents based on the current sort mode
     fn sort_agents(&mut self) {
         let stale_threshold = self.stale_threshold_secs;
+        let sleeping = &self.sleeping_pane_ids;
+        let interrupted = &self.interrupted_pane_ids;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -132,10 +148,14 @@ impl App {
 
         // Helper closure to get status priority (lower = higher priority)
         let get_priority = |agent: &AgentPane| -> u8 {
-            let is_stale = agent
-                .status_ts
-                .map(|ts| now.saturating_sub(ts) > stale_threshold)
-                .unwrap_or(false);
+            let is_stale = crate::agent_staleness::is_stale(
+                agent.activity_ts(),
+                agent.status,
+                now,
+                stale_threshold,
+                sleeping.contains(&agent.pane_id),
+                interrupted.contains(&agent.pane_id),
+            );
 
             if is_stale {
                 return 4; // Stale: lowest priority
@@ -149,10 +169,10 @@ impl App {
             }
         };
 
-        // Helper closure to get elapsed time (lower = more recent)
-        let get_elapsed = |agent: &AgentPane| -> u64 {
+        // Helper closure to get activity age (lower = more recent)
+        let get_activity_age = |agent: &AgentPane| -> u64 {
             agent
-                .status_ts
+                .activity_ts()
                 .map(|ts| now.saturating_sub(ts))
                 .unwrap_or(u64::MAX)
         };
@@ -166,7 +186,7 @@ impl App {
             SortMode::Priority => {
                 // Sort by priority, then by elapsed time (most recent first), then by pane_id
                 self.agents
-                    .sort_by_cached_key(|a| (get_priority(a), get_elapsed(a), pane_num(a)));
+                    .sort_by_cached_key(|a| (get_priority(a), get_activity_age(a), pane_num(a)));
             }
             SortMode::Project => {
                 // Sort by project name first, then by status priority within each project
@@ -176,7 +196,7 @@ impl App {
             }
             SortMode::Recency => {
                 self.agents
-                    .sort_by_cached_key(|a| (get_elapsed(a), pane_num(a)));
+                    .sort_by_cached_key(|a| (get_activity_age(a), pane_num(a)));
             }
             SortMode::Natural => {
                 self.agents.sort_by_cached_key(pane_num);
@@ -204,6 +224,15 @@ impl App {
         self.refresh();
     }
 
+    pub fn select_agent(&mut self, index: usize) {
+        if index >= self.agents.len() {
+            return;
+        }
+        self.table_state.select(Some(index));
+        self.selected_pane_id = self.agents.get(index).map(|agent| agent.pane_id.clone());
+        self.update_preview();
+    }
+
     pub fn next(&mut self) {
         if self.agents.is_empty() {
             return;
@@ -218,9 +247,7 @@ impl App {
             }
             None => 0,
         };
-        self.table_state.select(Some(i));
-        self.selected_pane_id = self.agents.get(i).map(|a| a.pane_id.clone());
-        self.update_preview();
+        self.select_agent(i);
     }
 
     pub fn previous(&mut self) {
@@ -237,9 +264,7 @@ impl App {
             }
             None => 0,
         };
-        self.table_state.select(Some(i));
-        self.selected_pane_id = self.agents.get(i).map(|a| a.pane_id.clone());
-        self.update_preview();
+        self.select_agent(i);
     }
 
     /// Switch to a pane and track the previous pane for toggle feature.
@@ -263,8 +288,7 @@ impl App {
             return;
         }
 
-        // Exit dashboard after jump (or keep open, depending on multiplexer)
-        if self.mux.should_exit_on_jump() {
+        if self.should_close_after_jump() {
             self.should_jump = true;
         }
 
@@ -274,10 +298,60 @@ impl App {
         }
     }
 
+    pub(crate) fn should_close_after_jump(&self) -> bool {
+        should_close_after_jump(
+            self.mux.should_exit_on_jump(),
+            self.config.dashboard.close_on_jump(),
+        )
+    }
+
     pub fn jump_to_selected(&mut self) {
+        if let Some(remote) = self.selected_detached() {
+            if self.open_detached(&remote) && self.should_close_after_jump() {
+                self.should_jump = true;
+            }
+            return;
+        }
         if let Some(target) = self.selected_agent_target() {
             self.switch_to_pane_and_track(&target.pane_id);
         }
+    }
+
+    /// The selected remote agent, when no local pane relays it.
+    pub(crate) fn selected_detached(&self) -> Option<RemoteAgent> {
+        let agent = self.agents.get(self.table_state.selected()?)?;
+        if !crate::remote::agents::is_detached(agent) {
+            return None;
+        }
+        agent.remote.clone()
+    }
+
+    /// Open a window relaying a detached remote agent, reporting failure.
+    fn open_detached(&mut self, remote: &RemoteAgent) -> bool {
+        match crate::remote::agents::open_window(remote) {
+            Ok(()) => {
+                self.refresh();
+                true
+            }
+            Err(err) => {
+                self.status_message = Some((
+                    format!("open {}: {err:#}", remote.handle),
+                    std::time::Instant::now(),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Tell the user a pane action does not reach a detached remote agent.
+    pub(crate) fn report_detached(&mut self, remote: &RemoteAgent) {
+        self.status_message = Some((
+            format!(
+                "{} is not attached here; Enter opens it",
+                crate::remote::agents::label(&remote.handle, &remote.at.remote)
+            ),
+            std::time::Instant::now(),
+        ));
     }
 
     pub(crate) fn selected_agent_target(&self) -> Option<PaneTarget> {
@@ -335,6 +409,10 @@ impl App {
     }
 
     pub fn peek_selected(&mut self) {
+        if let Some(remote) = self.selected_detached() {
+            self.open_detached(&remote);
+            return;
+        }
         // Switch to pane but keep popup open
         if let Some(selected) = self.table_state.selected()
             && let Some(agent) = self.agents.get(selected)
@@ -420,7 +498,14 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        agent::is_stale(agent.status_ts, self.stale_threshold_secs, now)
+        crate::agent_staleness::is_stale(
+            agent.activity_ts(),
+            agent.status,
+            now,
+            self.stale_threshold_secs,
+            self.sleeping_pane_ids.contains(&agent.pane_id),
+            self.interrupted_pane_ids.contains(&agent.pane_id),
+        )
     }
 
     pub fn get_elapsed(&self, agent: &AgentPane) -> Option<u64> {
@@ -452,8 +537,18 @@ impl App {
 
         let base_style = Style::default().fg(base_color);
         let mut spans = ansi::parse_tmux_styles(icon, base_style);
+        let disconnected = agent
+            .remote
+            .as_ref()
+            .is_some_and(|remote| !remote.connected);
 
-        if is_stale {
+        if disconnected {
+            // The last status the remote reported, which may have moved on.
+            let dimmed = Style::default().fg(self.palette.dimmed);
+            for span in &mut spans {
+                span.1 = dimmed;
+            }
+        } else if is_stale {
             // Override all styling for stale agents
             let dimmed = Style::default().fg(self.palette.dimmed);
             for span in &mut spans {
@@ -472,12 +567,19 @@ impl App {
     /// Extract the worktree name from an agent.
     /// Returns (worktree_name, is_main) where is_main indicates if this is the main worktree.
     pub fn extract_worktree_name(&self, agent_pane: &AgentPane) -> (String, bool) {
-        agent::extract_worktree_name(
+        let (name, is_main) = agent::extract_worktree_name(
             &agent_pane.session,
             &agent_pane.window_name,
             self.config.window_prefix(),
             &agent_pane.path,
-        )
+        );
+        match &agent_pane.remote {
+            Some(remote) => (
+                crate::remote::agents::label(&name, &remote.at.remote),
+                is_main,
+            ),
+            None => (name, is_main),
+        }
     }
 
     pub fn extract_project_name(agent_pane: &AgentPane) -> String {
@@ -486,7 +588,7 @@ impl App {
 
     /// Get PR info for an agent by looking up its branch in PR statuses
     pub fn get_pr_for_agent(&self, agent: &AgentPane) -> Option<&PrSummary> {
-        let repo_root = self.repo_roots.get(&agent.path)?;
+        let repo_root = self.repo_keys.get(&agent.path)?;
         let git_status = self.git_statuses.get(&agent.path)?;
         let branch = git_status.branch.as_ref()?;
         // Don't show PRs for main/master - you merge INTO main, not FROM it
@@ -496,21 +598,44 @@ impl App {
         self.pr_statuses.get(repo_root)?.get(branch)
     }
 
+    pub fn get_checks_for_agent(&self, agent: &AgentPane) -> Option<&CheckSummary> {
+        let repo_root = self.repo_keys.get(&agent.path)?;
+        let branch = self.git_statuses.get(&agent.path)?.branch.as_ref()?;
+        self.check_statuses
+            .get(repo_root)?
+            .get(branch)
+            .filter(|summary| summary.should_display_for_branch(branch))
+    }
+
+    pub fn get_checks_for_worktree(
+        &self,
+        worktree: &crate::workflow::types::WorktreeInfo,
+    ) -> Option<&CheckSummary> {
+        self.check_statuses
+            .get(&worktree.repo_key)?
+            .get(&worktree.branch)
+            .filter(|summary| summary.should_display_for_branch(&worktree.branch))
+    }
+
     /// Whether a PR fetch is currently in progress
     pub fn is_pr_fetching(&self) -> bool {
         self.is_pr_fetching.load(Ordering::Relaxed)
     }
 
-    /// Whether any agent has a matching PR (for column visibility)
-    pub fn has_any_pr(&self) -> bool {
-        self.agents
-            .iter()
-            .any(|agent| self.get_pr_for_agent(agent).is_some())
+    /// Whether any agent has a matching PR or GitHub checks.
+    pub fn has_any_github_status(&self) -> bool {
+        self.agents.iter().any(|agent| {
+            self.get_pr_for_agent(agent).is_some() || self.get_checks_for_agent(agent).is_some()
+        })
     }
 
     /// Get PR statuses for caching
     pub fn pr_statuses(&self) -> &HashMap<PathBuf, HashMap<String, PrSummary>> {
         &self.pr_statuses
+    }
+
+    pub fn check_statuses(&self) -> &HashMap<PathBuf, HashMap<String, CheckSummary>> {
+        &self.check_statuses
     }
 
     /// Open the PR associated with the selected agent or worktree in the browser.
@@ -542,13 +667,7 @@ impl App {
         match pr {
             Some(ref pr) if pr.url.is_some() => {
                 let url = make_url(pr.url.as_ref().unwrap());
-
-                #[cfg(target_os = "macos")]
-                let cmd = "open";
-                #[cfg(not(target_os = "macos"))]
-                let cmd = "xdg-open";
-
-                if let Err(e) = std::process::Command::new(cmd).arg(&url).spawn() {
+                if let Err(e) = open_url(&url) {
                     self.status_message = Some((
                         format!("Failed to open browser: {e}"),
                         std::time::Instant::now(),
@@ -568,5 +687,73 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// Open the remote servers guide and retire the tip. When no browser
+    /// opens, the tip stays and the footer shows the address instead. Does
+    /// nothing unless the tip is on screen.
+    pub fn open_remote_guide(&mut self) {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
+            return;
+        }
+        let url = crate::tips::REMOTE_GUIDE_URL;
+        let message = match open_url(url) {
+            Ok(()) => {
+                self.show_remote_tip = false;
+                crate::tips::dismiss_remote_tip();
+                format!("Opened {url}")
+            }
+            Err(e) => format!("Failed to open browser: {e}. Guide: {url}"),
+        };
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
+    /// Count this session toward the remote servers tip's view limit the
+    /// first time the footer draws it.
+    pub fn note_remote_tip_drawn(&mut self) {
+        if !self.remote_tip_counted {
+            self.remote_tip_counted = true;
+            crate::tips::record_remote_tip_view();
+        }
+    }
+
+    /// Hide the remote servers tip for good. Does nothing unless the tip is
+    /// on screen.
+    pub fn dismiss_remote_tip(&mut self) {
+        if super::super::mouse::visible_remote_tip_footer(self).is_none() {
+            return;
+        }
+        self.show_remote_tip = false;
+        crate::tips::dismiss_remote_tip();
+        self.status_message = Some((
+            format!(
+                "Remote servers tip hidden. Guide: {}",
+                crate::tips::REMOTE_GUIDE_URL
+            ),
+            std::time::Instant::now(),
+        ));
+    }
+}
+
+/// Open `url` in the default browser.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let cmd = "xdg-open";
+
+    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_close_after_jump;
+
+    #[test]
+    fn jump_closes_only_when_config_and_multiplexer_allow_it() {
+        assert!(should_close_after_jump(true, true));
+        assert!(!should_close_after_jump(true, false));
+        assert!(!should_close_after_jump(false, true));
+        assert!(!should_close_after_jump(false, false));
     }
 }

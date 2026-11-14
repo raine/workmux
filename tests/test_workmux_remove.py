@@ -1,3 +1,7 @@
+import json
+import os
+import shlex
+import shutil
 import uuid
 from pathlib import Path
 
@@ -9,8 +13,10 @@ from .conftest import (
     TmuxEnvironment,
     create_commit,
     create_dirty_file,
+    get_scripts_dir,
     get_window_name,
     get_worktree_path,
+    poll_until,
     run_workmux_add,
     run_workmux_command,
     run_workmux_remove,
@@ -26,6 +32,110 @@ from .support.worktrees import (
 )
 
 
+@pytest.mark.parametrize("force,collision", [(True, False), (False, True)])
+def test_remove_detached_worktree(
+    mux_server: MuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    force: bool,
+    collision: bool,
+):
+    env = mux_server
+    handle = "detached-tree"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "checkout", "--detach"], cwd=tree)
+    env.run_command(
+        ["git", "config", f"workmux.worktree.{handle}.attachment", "headless"],
+        cwd=mux_repo_path,
+    )
+    if collision:
+        # An unmerged branch with the display label must neither prompt nor be deleted.
+        commit = env.run_command(
+            ["git", "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "unmerged"],
+            cwd=mux_repo_path,
+        ).stdout.strip()
+        env.run_command(["git", "branch", "(detached)", commit], cwd=mux_repo_path)
+
+    flags = "--force " if force else ""
+    result = run_workmux_command(
+        env, workmux_exe_path, mux_repo_path, f"remove {flags}{handle}"
+    )
+    assert "(detached)" not in result.stdout
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    assert poll_until(
+        lambda: not tree.exists()
+        and not list(tree.parent.glob(f".workmux_trash_{handle}_*"))
+        and not list(pending.glob("*.json")),
+        timeout=10,
+    )
+    assert (
+        str(tree)
+        not in env.run_command(
+            ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
+        ).stdout
+    )
+    assert (
+        env.run_command(
+            ["git", "config", "--get-regexp", f"^workmux\\.worktree\\.{handle}\\."],
+            cwd=mux_repo_path,
+            check=False,
+        ).returncode
+        != 0
+    )
+    assert_branches_present(env, mux_repo_path, [handle])
+    if collision:
+        assert_branches_present(env, mux_repo_path, ["(detached)"])
+
+
+def test_remove_branch_named_detached(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    handle = "named-detached"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "branch", "-m", "(detached)"], cwd=tree)
+    run_workmux_remove(env, workmux_exe_path, mux_repo_path, handle, force=True)
+    assert not tree.exists()
+    assert_branches_deleted(env, mux_repo_path, ["(detached)"])
+
+
+@pytest.mark.tmux_only
+def test_remove_detached_from_own_window(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    handle = "deferred-detached"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, handle)
+    tree = get_worktree_path(mux_repo_path, handle)
+    env.run_command(["git", "checkout", "--detach"], cwd=tree)
+    env.run_command(["git", "branch", "(detached)"], cwd=mux_repo_path)
+    output = env.tmp_path / "detached-removal-output"
+    env.send_keys(
+        get_window_name(handle),
+        f"cd {shlex.quote(str(tree))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {handle} "
+        f">{shlex.quote(str(output))} 2>&1",
+    )
+    assert poll_until(
+        lambda: output.exists() and "Scheduled removal" in output.read_text()
+    )
+    assert "(detached)" not in output.read_text()
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    assert poll_until(
+        lambda: not tree.exists()
+        and not list(tree.parent.glob(f".workmux_trash_{handle}_*"))
+        and not list(pending.glob("*.json")),
+        timeout=10,
+    )
+    assert_branches_present(env, mux_repo_path, [handle, "(detached)"])
+    assert get_window_name(handle) not in env.list_windows()
+
+
 def test_remove_clean_branch_succeeds_without_prompt(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
@@ -38,6 +148,16 @@ def test_remove_clean_branch_succeeds_without_prompt(
     run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
     worktree_path = get_worktree_path(mux_repo_path, branch_name)
     assert worktree_path.is_dir()
+    env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--remove-section",
+            f"workmux.worktree.{branch_name}",
+        ],
+        cwd=mux_repo_path,
+    )
 
     # This should succeed without any user input because the branch has no new commits
     run_workmux_remove(env, workmux_exe_path, mux_repo_path, branch_name, force=False)
@@ -46,6 +166,41 @@ def test_remove_clean_branch_succeeds_without_prompt(
     assert window_name not in env.list_windows()
     branch_list_result = env.run_command(["git", "branch", "--list", branch_name])
     assert branch_name not in branch_list_result.stdout
+
+
+@pytest.mark.tmux_only
+def test_remove_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-remove"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    run_workmux_remove(env, workmux_exe_path, mux_repo_path, branch_name, force=True)
+
+    window_ids = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}"], check=False
+    ).stdout.splitlines()
+    assert restored_id not in window_ids
+    assert not worktree_path.exists()
 
 
 @pytest.mark.tmux_only
@@ -104,6 +259,24 @@ def test_remove_unmerged_branch_with_confirmation(
     assert branch_name not in branch_list_result.stdout
 
 
+def test_remove_unmerged_branch_without_confirmation_when_configured(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "configured-unmerged-removal"
+    write_workmux_config(mux_repo_path, confirm_unmerged_removal=False)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    create_commit(env, worktree_path, "feat: reviewed change")
+
+    run_workmux_remove(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    assert not worktree_path.exists(), "Unmerged worktree should be removed"
+    branch_list_result = env.run_command(["git", "branch", "--list", branch_name])
+    assert branch_name not in branch_list_result.stdout
+
+
 def test_remove_unmerged_branch_aborted(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
@@ -151,6 +324,29 @@ def test_remove_fails_on_uncommitted_changes(
     )
 
     assert worktree_path.exists(), "Worktree should not be removed when command fails"
+
+
+def test_configured_unmerged_removal_still_rejects_uncommitted_changes(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "configured-dirty-removal"
+    write_workmux_config(mux_repo_path, confirm_unmerged_removal=False)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    create_commit(env, worktree_path, "feat: reviewed change")
+    create_dirty_file(worktree_path)
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        expect_fail=True,
+    )
+
+    assert worktree_path.exists(), "Dirty worktree should not be removed"
 
 
 def test_remove_with_force_on_unmerged_branch(
@@ -389,6 +585,7 @@ def test_remove_with_keep_branch_flag(
         mux_repo_path,
         branch_name,
         keep_branch=True,
+        from_window=window_name,
     )
 
     # Verify worktree is removed
@@ -721,6 +918,34 @@ def test_remove_all_skips_unmerged_without_force(
     assert unmerged_branch in result.stdout, "Unmerged branch should still exist"
 
 
+def test_remove_all_includes_unmerged_when_confirmation_disabled(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    write_workmux_config(mux_repo_path, confirm_unmerged_removal=False)
+
+    unmerged_branch = "all-configured-unmerged"
+    dirty_branch = "all-configured-dirty"
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, unmerged_branch)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, dirty_branch)
+
+    unmerged_worktree = get_worktree_path(mux_repo_path, unmerged_branch)
+    dirty_worktree = get_worktree_path(mux_repo_path, dirty_branch)
+    create_commit(env, unmerged_worktree, "feat: reviewed change")
+    create_dirty_file(dirty_worktree)
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        all=True,
+        user_input="y",
+    )
+
+    assert not unmerged_worktree.exists(), "Unmerged worktree should be removed"
+    assert dirty_worktree.exists(), "Dirty worktree should be skipped"
+
+
 def test_remove_all_with_keep_branch(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
@@ -979,3 +1204,658 @@ def test_remove_branch_merged_into_local_main_not_remote(
         ["git", "branch", "--list", branch_name], cwd=mux_repo_path
     )
     assert branch_name not in branch_list_result.stdout, "Branch should be deleted"
+
+
+@pytest.mark.tmux_only
+def test_deferred_remove_suppresses_reference_transaction_hook(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "deferred-hook"
+    handle = branch_name
+    window_name = get_window_name(handle)
+    worktree_path = get_worktree_path(mux_repo_path, handle)
+    marker = env.tmp_path / "reference-transaction-ran"
+    hook = mux_repo_path / ".git" / "hooks" / "reference-transaction"
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    env.run_command(["git", "branch", "plain-git-control"], cwd=mux_repo_path)
+    hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+    hook.chmod(0o755)
+
+    env.run_command(["git", "branch", "-D", "plain-git-control"], cwd=mux_repo_path)
+    assert marker.exists(), "plain Git must execute the positive-control hook"
+    marker.unlink()
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        force=True,
+        from_window=window_name,
+    )
+
+    assert not marker.exists()
+    assert not worktree_path.exists()
+    assert window_name not in env.list_windows()
+    assert (
+        branch_name
+        not in env.run_command(
+            ["git", "branch", "--list", branch_name], cwd=mux_repo_path
+        ).stdout
+    )
+
+    def metadata_removed() -> bool:
+        return (
+            env.run_command(
+                [
+                    "git",
+                    "config",
+                    "--local",
+                    "--get-regexp",
+                    f"^workmux\\.worktree\\.{handle}\\.",
+                ],
+                cwd=mux_repo_path,
+                check=False,
+            ).returncode
+            != 0
+        )
+
+    assert poll_until(metadata_removed, timeout=10.0)
+
+
+@pytest.mark.tmux_only
+def test_deferred_remove_cleans_up_after_final_tmux_window_closes(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "final-window-cleanup"
+    window_name = get_window_name(branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    windows = env.tmux(
+        ["list-windows", "-F", "#{window_id} #{window_name}"]
+    ).stdout.splitlines()
+    for window in windows:
+        window_id, name = window.split(" ", 1)
+        if name != window_name:
+            env.tmux(["kill-window", "-t", window_id])
+
+    output = env.tmp_path / "final-window-remove-output"
+    env.send_keys(
+        window_name,
+        f"cd {shlex.quote(str(worktree_path))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {branch_name} "
+        f">{shlex.quote(str(output))} 2>&1",
+    )
+
+    assert poll_until(
+        lambda: output.exists() and "Scheduled removal" in output.read_text()
+    )
+    assert poll_until(lambda: not worktree_path.exists(), timeout=10.0)
+    assert poll_until(
+        lambda: branch_name
+        not in env.run_command(
+            ["git", "branch", "--list", branch_name], cwd=mux_repo_path
+        ).stdout,
+        timeout=10.0,
+    )
+    registered = env.run_command(
+        ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
+    ).stdout
+    assert str(worktree_path) not in registered
+    assert poll_until(
+        lambda: env.run_command(
+            [
+                "git",
+                "config",
+                "--local",
+                "--get-regexp",
+                f"^workmux\\.worktree\\.{branch_name}\\.",
+            ],
+            cwd=mux_repo_path,
+            check=False,
+        ).returncode
+        != 0,
+        timeout=10.0,
+    )
+    assert env.tmux(["has-session"], check=False).returncode != 0
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    assert poll_until(
+        lambda: not list(worktree_path.parent.glob(f".workmux_trash_{branch_name}_*"))
+        and not list(pending.glob("*.json")),
+        timeout=10.0,
+    )
+
+
+@pytest.mark.tmux_only
+def test_synchronous_remove_rejects_symlink_substitution(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    write_workmux_config(mux_repo_path)
+    add_worktrees(env, workmux_exe_path, mux_repo_path, ["substitute-a", "victim-b"])
+    path_a = get_worktree_path(mux_repo_path, "substitute-a")
+    path_b = get_worktree_path(mux_repo_path, "victim-b")
+    parked_a = path_a.with_name("parked-a")
+    (path_a / "a-sentinel").write_text("a")
+    (path_b / "b-sentinel").write_text("b")
+    hook = f"mv {shlex.quote(str(path_a))} {shlex.quote(str(parked_a))}; ln -s {shlex.quote(str(path_b))} {shlex.quote(str(path_a))}"
+    write_workmux_config(mux_repo_path, pre_remove=[hook])
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "substitute-a",
+        force=True,
+        expect_fail=True,
+    )
+
+    assert path_a.is_symlink()
+    assert (parked_a / "a-sentinel").read_text() == "a"
+    assert (path_b / "b-sentinel").read_text() == "b"
+    assert_branches_present(env, mux_repo_path, ["substitute-a", "victim-b"])
+
+
+@pytest.mark.tmux_only
+def test_deferred_remove_rejects_worktree_substitution_while_waiting(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    ready = env.tmp_path / "remove-hook-ready"
+    proceed = env.tmp_path / "remove-hook-proceed"
+    hook = (
+        f"touch {shlex.quote(str(ready))}; "
+        f"while [ ! -e {shlex.quote(str(proceed))} ]; do sleep 0.01; done"
+    )
+    write_workmux_config(mux_repo_path, pre_remove=[hook])
+    add_worktrees(env, workmux_exe_path, mux_repo_path, ["deferred-a", "victim-b"])
+    path_a = get_worktree_path(mux_repo_path, "deferred-a")
+    path_b = get_worktree_path(mux_repo_path, "victim-b")
+    parked_a = path_a.with_name("parked-deferred-a")
+    (path_a / "a-sentinel").write_text("a")
+    (path_b / "b-sentinel").write_text("b")
+    window_a = get_window_name("deferred-a")
+    output = env.tmp_path / "deferred-substitution-output"
+    command = (
+        f"cd {shlex.quote(str(path_a))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force deferred-a "
+        f">{shlex.quote(str(output))} 2>&1"
+    )
+    env.send_keys(window_a, command)
+    assert poll_until(ready.exists)
+
+    path_a.rename(parked_a)
+    path_b.rename(path_a)
+    proceed.touch()
+
+    assert poll_until(lambda: window_a not in env.list_windows(), timeout=15.0)
+    assert poll_until(
+        lambda: output.exists()
+        and "Scheduled removal of worktree 'deferred-a'" in output.read_text(),
+        timeout=5.0,
+    )
+    parent_output = output.read_text()
+    assert "Scheduled removal of worktree 'deferred-a'" in parent_output
+    assert "Removed worktree 'deferred-a'" not in parent_output
+    log_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "workmux.log"
+    assert poll_until(
+        lambda: log_path.exists()
+        and 'deferred cleanup worker failed handle="deferred-a"' in log_path.read_text()
+        and "Worktree identity changed before quarantine" in log_path.read_text(),
+        timeout=10.0,
+    ), f"Expected substitution failure in {log_path}:\n" + (
+        log_path.read_text() if log_path.exists() else "Log file missing"
+    )
+    assert (parked_a / "a-sentinel").read_text() == "a"
+    assert (path_a / "b-sentinel").read_text() == "b"
+    assert_branches_present(env, mux_repo_path, ["deferred-a", "victim-b"])
+    assert not list(path_a.parent.glob(".workmux_trash_*"))
+
+
+@pytest.mark.tmux_only
+def test_deferred_remove_uses_structured_hostile_arguments(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path
+):
+    env = mux_server
+    marker = Path("/tmp") / f"workmux-hostile-{uuid.uuid4().hex}"
+    repo_path = env.tmp_path / "repo space ' ; $(literal)"
+    repo_path.mkdir()
+    env.run_command(["git", "init", "-b", "main"], cwd=repo_path)
+    env.run_command(["git", "config", "user.email", "test@example.com"], cwd=repo_path)
+    env.run_command(["git", "config", "user.name", "Test User"], cwd=repo_path)
+    (repo_path / "README").write_text("test\n")
+    env.run_command(["git", "add", "README"], cwd=repo_path)
+    env.run_command(["git", "commit", "-m", "initial"], cwd=repo_path)
+    write_workmux_config(repo_path)
+    branch_name = f"evil;touch${{IFS}}{marker};#$(touch${{IFS}}{marker})"
+    handle = "hostile-cleanup"
+
+    run_workmux_command(
+        env,
+        workmux_exe_path,
+        repo_path,
+        f"add {shlex.quote(branch_name)} --name {handle} --background",
+    )
+    worktree_path = get_worktree_path(repo_path, handle)
+    window_name = get_window_name(handle)
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        repo_path,
+        force=True,
+        from_window=window_name,
+    )
+
+    assert not marker.exists()
+    assert not worktree_path.exists()
+    assert window_name not in env.list_windows()
+    assert poll_until(
+        lambda: branch_name
+        not in env.run_command(
+            ["git", "branch", "--list", branch_name], cwd=repo_path
+        ).stdout,
+        timeout=10.0,
+    )
+
+
+@pytest.mark.tmux_only
+def test_deferred_worker_timeout_is_scheduled_and_durably_logged(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "deferred-timeout"
+    window_name = get_window_name(branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    output = env.tmp_path / "deferred-timeout-output"
+    log_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "workmux.log"
+    real_tmux = shutil.which("tmux")
+    assert real_tmux is not None
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    fake_tmux = env.fake_bin_dir / "tmux"
+    env.install_script(
+        fake_tmux,
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in kill-window|kill-session) exit 0;; esac\n'
+        "done\n"
+        f'exec {shlex.quote(real_tmux)} "$@"\n',
+    )
+    command = (
+        f"cd {shlex.quote(str(worktree_path))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {branch_name} "
+        f">{shlex.quote(str(output))} 2>&1"
+    )
+    env.send_keys(window_name, command)
+
+    assert poll_until(output.exists)
+    assert poll_until(
+        lambda: "Scheduled removal of worktree" in output.read_text(), timeout=5.0
+    )
+    parent_output = output.read_text()
+    assert "Removed worktree" not in parent_output
+    assert poll_until(
+        lambda: log_path.exists()
+        and f'deferred cleanup worker failed handle="{branch_name}"'
+        in log_path.read_text()
+        and "Timed out waiting for source target" in log_path.read_text()
+        and "close it and retry removal" in log_path.read_text(),
+        timeout=10.0,
+    )
+    assert worktree_path.is_dir()
+    assert window_name in env.list_windows()
+    assert_branches_present(env, mux_repo_path, [branch_name])
+    fake_tmux.unlink()
+
+
+def test_synchronous_metadata_lock_failure_reports_partial_cleanup(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "sync-metadata-lock"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    lock_path = mux_repo_path / ".git" / "config.lock"
+    lock_path.write_text("locked")
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        force=True,
+        expect_fail=True,
+    )
+
+    scripts_dir = get_scripts_dir(env)
+    stdout = (scripts_dir / "workmux_remove_stdout.txt").read_text()
+    stderr = (scripts_dir / "workmux_remove_stderr.txt").read_text()
+    assert "Removed worktree" not in stdout
+    assert "Failed to remove Workmux metadata after Git cleanup" in stderr
+    pending = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "pending-cleanup"
+    records = list(pending.glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert Path(record["quarantine_path"]).is_dir()
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get-regexp",
+            f"^workmux\\.worktree\\.{branch_name}\\.",
+        ],
+        cwd=mux_repo_path,
+        check=False,
+    )
+    assert metadata.returncode == 0
+    lock_path.unlink()
+
+
+@pytest.mark.tmux_only
+def test_deferred_metadata_lock_failure_is_scheduled_and_durably_logged(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "deferred-metadata-lock"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    lock_path = mux_repo_path / ".git" / "config.lock"
+    lock_path.write_text("locked")
+    log_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "workmux.log"
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        force=True,
+        from_window=window_name,
+    )
+
+    scripts_dir = get_scripts_dir(env)
+    stdout_path = scripts_dir / "workmux_remove_stdout.txt"
+    assert poll_until(
+        lambda: stdout_path.exists()
+        and f"Scheduled removal of worktree '{branch_name}'" in stdout_path.read_text(),
+        timeout=5.0,
+    )
+    stdout = stdout_path.read_text()
+    assert f"Scheduled removal of worktree '{branch_name}'" in stdout
+    assert f"Removed worktree '{branch_name}'" not in stdout
+    assert poll_until(
+        lambda: log_path.exists()
+        and f'deferred cleanup worker failed handle="{branch_name}"'
+        in log_path.read_text()
+        and "Failed to remove Workmux metadata after Git cleanup"
+        in log_path.read_text(),
+        timeout=10.0,
+    )
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get-regexp",
+            f"^workmux\\.worktree\\.{branch_name}\\.",
+        ],
+        cwd=mux_repo_path,
+        check=False,
+    )
+    assert metadata.returncode == 0
+    lock_path.unlink()
+
+
+@pytest.mark.tmux_only
+def test_missing_worktree_path_cleans_git_state_from_matching_target(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "missing-path-cleanup"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    parked_path = worktree_path.with_name(f"{worktree_path.name}-parked")
+    worktree_path.rename(parked_path)
+
+    output = env.tmp_path / "missing-path-output"
+    command = (
+        f"cd {shlex.quote(str(mux_repo_path))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {branch_name} "
+        f">{shlex.quote(str(output))} 2>&1"
+    )
+    env.send_keys(window_name, command)
+
+    assert poll_until(lambda: output.exists() and bool(output.read_text().strip()))
+    assert poll_until(lambda: window_name not in env.list_windows(), timeout=10.0)
+    assert poll_until(
+        lambda: branch_name
+        not in env.run_command(
+            ["git", "branch", "--list", branch_name], cwd=mux_repo_path
+        ).stdout,
+        timeout=10.0,
+    )
+    registered = env.run_command(
+        ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
+    ).stdout
+    assert str(worktree_path) not in registered
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get-regexp",
+            f"^workmux\\.worktree\\.{branch_name}\\.",
+        ],
+        cwd=mux_repo_path,
+        check=False,
+    )
+    assert metadata.returncode != 0
+    parked_path.rename(worktree_path)
+    shutil.rmtree(worktree_path)
+
+
+def test_absent_locked_worktree_keep_branch_removes_registration(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "absent-locked-keep-branch"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    parked_path = worktree_path.with_name(f"{worktree_path.name}-parked")
+    env.run_command(["git", "worktree", "lock", str(worktree_path)], cwd=mux_repo_path)
+    worktree_path.rename(parked_path)
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        force=True,
+        keep_branch=True,
+    )
+
+    assert_branches_present(env, mux_repo_path, [branch_name])
+    registered = env.run_command(
+        ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
+    ).stdout
+    assert str(worktree_path) not in registered
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get-regexp",
+            f"^workmux\\.worktree\\.{branch_name}\\.",
+        ],
+        cwd=mux_repo_path,
+        check=False,
+    )
+    assert metadata.returncode != 0
+    shutil.rmtree(parked_path)
+
+
+def linked_admin_dir(worktree_path: Path) -> Path:
+    pointer = (worktree_path / ".git").read_text().strip()
+    admin_dir = Path(pointer.removeprefix("gitdir: "))
+    if not admin_dir.is_absolute():
+        admin_dir = worktree_path / admin_dir
+    return admin_dir
+
+
+def test_synchronous_worktree_lock_removal_failure_is_partial(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "sync-registration-lock"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    admin_dir = linked_admin_dir(worktree_path)
+    lock_path = admin_dir / "locked"
+    lock_path.write_text("locked")
+    admin_dir.chmod(0o555)
+
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        force=True,
+        expect_fail=True,
+    )
+
+    stderr = (get_scripts_dir(env) / "workmux_remove_stderr.txt").read_text()
+    assert "Failed to remove linked-worktree lock" in stderr
+    assert_branches_present(env, mux_repo_path, [branch_name])
+    assert lock_path.is_file()
+    assert worktree_path.is_dir()
+    assert not list(worktree_path.parent.glob(f".workmux_trash_{branch_name}_*"))
+
+    admin_dir.chmod(0o755)
+    run_workmux_remove(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        force=True,
+    )
+    assert not worktree_path.exists()
+    assert_branches_deleted(env, mux_repo_path, [branch_name])
+
+
+@pytest.mark.tmux_only
+def test_deferred_worktree_lock_removal_failure_is_durably_logged(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "deferred-registration-lock"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    admin_dir = linked_admin_dir(worktree_path)
+    lock_path = admin_dir / "locked"
+    lock_path.write_text("locked")
+    admin_dir.chmod(0o555)
+    log_path = Path(env.env["XDG_STATE_HOME"]) / "workmux" / "workmux.log"
+
+    output = env.tmp_path / "deferred-lock-output"
+    command = (
+        f"cd {shlex.quote(str(worktree_path))} && "
+        f"{shlex.quote(str(workmux_exe_path))} remove --force {branch_name} "
+        f">{shlex.quote(str(output))} 2>&1"
+    )
+    env.send_keys(window_name, command)
+    assert poll_until(
+        lambda: output.exists() and "Scheduled removal" in output.read_text()
+    )
+    assert poll_until(lambda: window_name not in env.list_windows())
+
+    assert poll_until(
+        lambda: log_path.exists()
+        and f'deferred cleanup worker failed handle="{branch_name}"'
+        in log_path.read_text()
+        and "Failed to remove linked-worktree lock" in log_path.read_text(),
+        timeout=10.0,
+    )
+    assert_branches_present(env, mux_repo_path, [branch_name])
+    assert lock_path.is_file()
+    assert worktree_path.is_dir()
+    admin_dir.chmod(0o755)
+
+
+@pytest.mark.tmux_only
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_deferred_cleanup_retains_record_when_quarantine_deletion_fails(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+):
+    """A detached worker durably records a partially deleted quarantine."""
+    env = mux_server
+    branch = "cleanup-orphan"
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch)
+    tree = get_worktree_path(mux_repo_path, branch)
+    build = tree / "target" / "debug" / "build"
+    sibling = build / "crate-0"
+    sibling.mkdir(parents=True)
+    (sibling / "artifact").touch()
+    protected = build / "protected"
+    protected.mkdir()
+    (protected / "artifact").touch()
+    protected.chmod(0o555)
+    try:
+        output = env.tmp_path / "cleanup-orphan-output"
+        command = (
+            f"cd {shlex.quote(str(tree))} && "
+            f"{shlex.quote(str(workmux_exe_path))} remove --force {branch} "
+            f">{shlex.quote(str(output))} 2>&1"
+        )
+        env.send_keys(get_window_name(branch), command)
+        assert poll_until(
+            lambda: output.exists() and "Scheduled removal" in output.read_text()
+        ), env.capture_pane(get_window_name(branch))
+        state = Path(env.env["XDG_STATE_HOME"]) / "workmux"
+        pending = state / "pending-cleanup"
+        log = state / "workmux.log"
+        assert poll_until(
+            lambda: log.exists()
+            and "pending cleanup record retained at" in log.read_text(),
+            timeout=15,
+        )
+        assert get_window_name(branch) not in env.list_windows()
+        assert not tree.exists()
+        records = list(pending.glob("*.json"))
+        assert len(records) == 1
+        record = json.loads(records[0].read_text())
+        trash = Path(record["quarantine_path"])
+        assert record["original_path"] == str(tree)
+        assert trash.is_dir()
+        assert trash.stat().st_ino == record["inode"]
+        assert trash.stat().st_dev == record["device"]
+        assert "kind=PermissionDenied" in log.read_text()
+        assert "Permission denied" in log.read_text()
+        assert "Recursive deletion encountered" in log.read_text()
+        assert "post-failure snapshot" in log.read_text()
+        assert not list(trash.rglob("crate-*")), (
+            "An undeletable directory must not block sibling cleanup"
+        )
+        assert (trash / "target/debug/build/protected/artifact").is_file()
+    finally:
+        # The worker may have renamed the tree even if an assertion failed.
+        candidates = [tree, *tree.parent.glob(f".workmux_trash_{branch}_*")]
+        for candidate in candidates:
+            directory = candidate / "target/debug/build/protected"
+            if directory.exists():
+                directory.chmod(0o755)

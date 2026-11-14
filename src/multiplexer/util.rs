@@ -4,13 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::agent::SelectedAgent;
 use crate::config::Config;
-
-use crate::cmd::Cmd;
 
 use super::PaneHandshake;
 use super::handshake::UnixPipeHandshake;
@@ -21,6 +20,31 @@ use super::types::LivePaneInfo;
 /// Used by all backends to construct full window names from prefix and base name.
 pub fn prefixed(prefix: &str, window_name: &str) -> String {
     format!("{}{}", prefix, window_name)
+}
+
+/// Create a named window in an existing parent session, or as its first window.
+pub fn create_window_in_parent_session(
+    mux: &dyn super::Multiplexer,
+    session: &str,
+    name: &str,
+    cwd: &Path,
+) -> Result<String> {
+    if mux.session_exists(session)? {
+        mux.create_window_in_session(super::CreateWindowInSessionParams {
+            session_name: session,
+            name: Some(name),
+            cwd,
+        })
+        .context("Failed to create window in session")
+    } else {
+        mux.create_session(super::CreateSessionParams {
+            prefix: "",
+            name: session,
+            cwd,
+            initial_window_name: Some(name),
+        })
+        .context("Failed to create session")
+    }
 }
 
 /// Check if a shell is POSIX-compatible (supports `$(...)` syntax).
@@ -64,6 +88,7 @@ pub fn build_live_pane_info(
         window: Some(window),
         session_id: None,
         window_id: None,
+        window_index: None,
     }
 }
 
@@ -116,8 +141,16 @@ pub fn unix_pipe_handshake() -> Result<Box<dyn PaneHandshake>> {
 
 /// Run a shell script detached via `nohup sh -c`.
 pub fn run_detached_sh_c(script: &str) -> Result<()> {
-    let bg_script = format!("nohup sh -c '{}' >/dev/null 2>&1 &", script);
-    Cmd::new("sh").args(&["-c", &bg_script]).run().map(|_| ())
+    Command::new("nohup")
+        .arg("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Resolve a pane's command: handle `<agent>` placeholder, auto-detect known
@@ -133,6 +166,8 @@ pub struct ResolvedCommand {
     pub prompt_injected: bool,
     /// Selected agent metadata for agent panes.
     pub selected_agent: Option<SelectedAgent>,
+    /// Command before prompt injection, so `render_command` stays idempotent.
+    base_command: String,
     prompt_argument: Option<String>,
     posix_shell: bool,
     use_agent_command: bool,
@@ -163,21 +198,21 @@ impl ResolvedCommand {
         self.selected_agent
             .as_ref()
             .map(SelectedAgent::shell_command)
-            .unwrap_or_else(|| self.command.clone())
+            .unwrap_or_else(|| self.base_command.clone())
     }
 
     fn render_raw_command(&self) -> String {
         let Some(agent) = &self.selected_agent else {
-            return self.command.clone();
+            return self.base_command.clone();
         };
         if !self.apply_agent_prefix {
-            return self.command.clone();
+            return self.base_command.clone();
         }
         let mut prefix = agent.command.shell_string();
-        if prefix == self.command || !self.command.starts_with(&agent.command.program) {
-            return self.command.clone();
+        if prefix == self.base_command || !self.base_command.starts_with(&agent.command.program) {
+            return self.base_command.clone();
         }
-        prefix.push_str(&self.command[agent.command.program.len()..]);
+        prefix.push_str(&self.base_command[agent.command.program.len()..]);
         prefix
     }
 }
@@ -260,7 +295,8 @@ pub fn resolve_pane_command_with_config(
     }
 
     let mut resolved = ResolvedCommand {
-        command,
+        command: command.clone(),
+        base_command: command,
         prompt_injected,
         selected_agent,
         prompt_argument,
@@ -331,6 +367,34 @@ pub fn wrap_for_non_posix_shell(command: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn detached_runner_preserves_hostile_shell_literals() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output ' ; $(quoted)");
+        let marker = temp.path().join("injection-marker");
+        let hostile = format!(
+            "evil';touch${{IFS}}{};# $(touch {}) #{{session_name}}",
+            marker.display(),
+            marker.display()
+        );
+        let script = format!(
+            "printf %s {} > {}",
+            crate::shell::shell_quote(&hostile),
+            crate::shell::shell_quote(&output.to_string_lossy())
+        );
+
+        run_detached_sh_c(&script).unwrap();
+        for _ in 0..100 {
+            if output.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(std::fs::read_to_string(output).unwrap(), hostile);
+        assert!(!marker.exists());
+    }
 
     // --- prefixed tests ---
 
@@ -591,6 +655,57 @@ mod tests {
     }
 
     #[test]
+    fn resolve_structured_pane_command_injects_copilot_prompt_after_configured_args() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let mut config = config_with_agent("copilot-yolo");
+        config.agents.insert(
+            "copilot-yolo".to_string(),
+            crate::config::AgentEntry {
+                command: Some("copilot".to_string()),
+                agent_type: Some("copilot".to_string()),
+                args: vec!["--yolo".to_string()],
+                env: std::collections::BTreeMap::new(),
+            },
+        );
+        let resolved = resolve_pane_command_with_config(
+            Some("<agent>"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.command,
+            " copilot --yolo --interactive=\"$(cat PROMPT.md)\""
+        );
+        assert!(resolved.prompt_injected);
+        assert_eq!(resolved.selected_agent.unwrap().kind(), "copilot");
+    }
+
+    #[test]
+    fn resolve_structured_pane_command_injects_prompt_once_for_literal_agent_name() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let config = config_with_agent("claude");
+        let resolved = resolve_pane_command_with_config(
+            Some("claude"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+        assert_eq!(resolved.command, " claude -- \"$(cat PROMPT.md)\"");
+        assert_eq!(resolved.render_command(), resolved.command);
+    }
+
+    #[test]
     fn resolve_structured_pane_command_wraps_non_posix_shell() {
         let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
         let working_dir = PathBuf::from("/tmp/worktree");
@@ -623,6 +738,28 @@ mod tests {
         .unwrap();
         assert_eq!(resolved.command, "vim");
         assert!(resolved.selected_agent.is_none());
+    }
+
+    #[test]
+    fn resolve_structured_pane_command_injects_antigravity_prompt() {
+        let prompt = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+        let config = config_with_agent("agy");
+        let resolved = resolve_pane_command_with_config(
+            Some("agy"),
+            true,
+            Some(&prompt),
+            &working_dir,
+            &config,
+            None,
+            "/bin/zsh",
+        )
+        .unwrap();
+
+        assert!(resolved.prompt_injected);
+        assert!(resolved.command.contains("-i"));
+        assert!(resolved.command.contains("PROMPT.md"));
+        assert_eq!(resolved.selected_agent.unwrap().kind(), "agy");
     }
 
     #[test]
@@ -740,9 +877,7 @@ mod tests {
         )
         .unwrap();
         let agent = resolved.selected_agent.as_mut().unwrap();
-        agent
-            .command
-            .prepend_args_fragment("--dangerously-skip-permissions");
+        agent.add_sandbox_flags();
         assert_eq!(
             resolved.render_command(),
             " env FOO='bar baz' claude --dangerously-skip-permissions -- \"$(cat PROMPT.md)\""

@@ -1,0 +1,118 @@
+---
+title: "Sandbox"
+description: Run agents in isolated containers or VMs for enhanced security
+---
+
+import Screenshot from "../../../../components/Screenshot.astro";
+import screenshot from "../../../../assets/screenshots/sandbox-claude.webp";
+
+workmux provides first-class sandboxing for agents in containers or VMs. Agents are isolated from host secrets like SSH keys, AWS credentials, and other sensitive files. When a supported agent runs in a sandboxed agent pane, workmux automatically disables its interactive permission prompts and relies on the configured sandbox backend as the security boundary.
+
+Status indicators, the dashboard, [spawning agents](/guide/workflows/#from-an-ongoing-agent-session), [merging](/guide/workflows/#direct-merge), and [image pasting](/guide/sandbox/features/#clipboard-proxy) all work the same with or without a sandbox. A built-in RPC bridge keeps host-side workmux features in sync with agent activity inside the sandbox.
+
+<Screenshot
+  src={screenshot}
+  alt="Claude Code running inside a Lima VM sandbox"
+  framed={false}
+  shadow
+/>
+
+## Security model
+
+:::danger[Threat model]
+The sandbox limits an agent's access to host files, credentials, and processes,
+but the agent can edit the Git repository. Those edits are inherently untrusted
+and may run as your host user when you later build, test, or otherwise use the
+repository. Workmux host Git operations can also run configured content filters
+and merge drivers from the writable worktree.
+
+Host-side hooks and pane commands from `.workmux.yaml` and explicitly proxied
+host commands are also outside the sandbox boundary. Lima exposes writable Git
+metadata.
+
+**Do not use workmux sandbox if your threat model requires sandboxed agents to
+have no influence over code that runs on the host.**
+:::
+
+When sandbox is enabled, agents have access to:
+
+- The current worktree directory with read-write access
+- Git operational data needed for commits, branches, merges, and rebases
+- Agent settings and credentials (see [credentials](/guide/sandbox/features/#credentials))
+
+Container backends keep repository config and shared hooks read-only. Existing
+hooks can run inside the container, while hook setup stays in a regular host
+pane. Git operations on the host honor configured content filters, merge
+drivers, and credential helpers. Programs stored in the writable worktree remain
+repository content and may change during a sandbox session. See [Git
+hooks](/guide/sandbox/container/#git-hooks) for details.
+
+The Lima backend uses broad writable project mounts and requires explicit
+acceptance of its [reduced Git metadata isolation](/guide/sandbox/lima/#git-metadata-boundary).
+
+### Agent permission prompts
+
+For sandboxed agent panes, workmux automatically enables each supported agent's
+noninteractive approval mode, such as `--dangerously-skip-permissions` for
+Claude or `--yolo` for Codex and Gemini. The sandbox backend, rather than the
+agent's permission prompts, is the security boundary. Agents without a known
+approval flag are unchanged.
+
+Host secrets like SSH keys, AWS credentials, and GPG keys are not accessible. Additional directories can be mounted via [`extra_mounts`](/guide/sandbox/features/#extra-mounts).
+
+Outbound network access can be restricted to only approved domains using [network restrictions](/guide/sandbox/container/#network-restrictions) (container backend). When enabled, a CONNECT proxy and iptables firewall work together to block unauthorized connections and prevent access to internal networks.
+
+## Choosing a backend
+
+workmux supports two sandboxing backends:
+
+|                      | Container (Docker/Podman/Apple Container)                                                  | Lima VM                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| **Isolation**        | Process-level (namespaces) or VM-level (Apple Container)                                   | Machine-level (virtual machine)                                                |
+| **Persistence**      | Ephemeral (new container per session)                                                      | Persistent (stateful VMs)                                                      |
+| **Toolchain**        | Custom Dockerfile or [host commands](/guide/sandbox/features/#host-command-proxying)       | Built-in [Nix & Devbox](/guide/sandbox/lima/#nix-and-devbox-toolchain) support |
+| **Credential model** | Shared with host (see [credentials](/guide/sandbox/features/#credentials))                 | Shared with host (see [credentials](/guide/sandbox/features/#credentials))     |
+| **Network**          | Optional [restrictions](/guide/sandbox/container/#network-restrictions) (domain allowlist) | Unrestricted                                                                   |
+| **Platform**         | macOS, Linux (Apple Container: macOS only)                                                 | macOS, Linux                                                                   |
+
+Container is a good default: it's simple to set up and ephemeral, so no state accumulates between sessions. Choose Lima if you want persistent VMs with built-in Nix/Devbox toolchain support.
+
+To run agents on another machine instead, see [remote servers](/guide/remote/): individual agents run on an SSH-reachable Linux server, directly or in Docker, while the rest stay local.
+
+## Adding tools to the sandbox
+
+Agents often need project tooling (compilers, linters, build tools) available inside the sandbox. There are several ways to provide this depending on your backend:
+
+| Approach                   | Container | Lima | Details                                                                                                                                            |
+| -------------------------- | --------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Host commands**          | Yes       | Yes  | Proxy specific commands to the host via RPC. See [host command proxying](/guide/sandbox/features/#host-command-proxying).                          |
+| **Nix / Devbox toolchain** | No        | Yes  | Declare tools in `devbox.json` or `flake.nix` and they're available automatically. See [toolchain](/guide/sandbox/lima/#nix-and-devbox-toolchain). |
+| **Custom provisioning**    | No        | Yes  | Run a shell script at VM creation to install packages. See [custom provisioning](/guide/sandbox/lima/#custom-provisioning).                        |
+| **Custom Dockerfile**      | Yes       | No   | Build a custom container image with your tools baked in. See [custom images](/guide/sandbox/container/#custom-images).                             |
+
+## Quick start
+
+### Container backend
+
+Install [Docker](https://www.docker.com/), [Podman](https://podman.io/), or [Apple Container](https://github.com/apple/container) (macOS 26+, Apple Silicon), then enable in config:
+
+```yaml
+# ~/.config/workmux/config.yaml or .workmux.yaml
+sandbox:
+  enabled: true
+```
+
+The pre-built image is pulled automatically on first run. See the [container backend](/guide/sandbox/container/) page for details.
+
+### Lima VM backend
+
+Install [Lima](https://lima-vm.io/) (`brew install lima`), then enable in config:
+
+```yaml
+# ~/.config/workmux/config.yaml or .workmux.yaml
+sandbox:
+  enabled: true
+  backend: lima
+```
+
+The VM is created and provisioned automatically on first run. See the [Lima VM backend](/guide/sandbox/lima/) page for details.

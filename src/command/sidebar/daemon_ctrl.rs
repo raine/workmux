@@ -1,51 +1,56 @@
 //! Daemon lifecycle management: spawn, kill, signal, health checks.
 
 use anyhow::{Result, anyhow};
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cmd::Cmd;
-use crate::multiplexer::{create_backend, detect_backend};
-
 use super::daemon;
+use super::host::SidebarHost;
 
 /// Ensure the daemon is running, spawning it if needed. Returns the socket path.
-pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
-    let mux = create_backend(detect_backend());
-    let instance_id = mux.instance_id();
+pub(super) fn ensure_daemon_running(host: &SidebarHost) -> Result<PathBuf> {
+    let instance_id = host.instance_id();
     let sock_path = daemon::socket_path(&instance_id);
 
-    if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+    if UnixStream::connect(&sock_path).is_ok() {
+        return Ok(sock_path);
+    }
+
+    let _spawn = super::session_state::lock_spawn(&instance_id)?;
+    // Another caller may have started the daemon while this one waited
+    if UnixStream::connect(&sock_path).is_ok() {
         return Ok(sock_path);
     }
 
     // Stale socket from a crashed daemon
     let _ = std::fs::remove_file(&sock_path);
-    spawn_daemon()?;
-    if !wait_for_socket(&instance_id, Duration::from_secs(2)) {
+    spawn_daemon(host)?;
+    if !wait_for_daemon(&sock_path, Duration::from_secs(4)) {
         return Err(anyhow!("Sidebar daemon failed to start"));
     }
     Ok(sock_path)
 }
 
 /// Spawn the sidebar daemon as a detached background process.
-fn spawn_daemon() -> Result<()> {
+fn spawn_daemon(host: &SidebarHost) -> Result<()> {
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("_sidebar-daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    host.daemon_command(&mut command);
+    command.spawn()?;
     Ok(())
 }
 
-/// Wait for the daemon's Unix socket to appear.
-fn wait_for_socket(instance_id: &str, timeout: Duration) -> bool {
-    let path = daemon::socket_path(instance_id);
+/// Wait until the daemon accepts connections on its socket.
+fn wait_for_daemon(path: &Path, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if path.exists() {
+        if UnixStream::connect(path).is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -53,35 +58,28 @@ fn wait_for_socket(instance_id: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Read the daemon PID from the tmux global option.
-fn daemon_pid() -> Option<String> {
-    Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_daemon_pid"])
-        .run_and_capture_stdout()
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Kill the sidebar daemon (sends SIGTERM, cleans up tmux option).
-pub(super) fn kill_daemon() {
-    if let Some(pid) = daemon_pid() {
+/// Kill the sidebar daemon (sends SIGTERM, clears its recorded PID).
+pub(super) fn kill_daemon(host: &SidebarHost) {
+    let store = host.store();
+    if let Some(pid) = store.daemon_pid() {
         let _ = std::process::Command::new("kill")
             .args(["-TERM", &pid])
             .stderr(std::process::Stdio::null())
             .status();
     }
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sidebar_daemon_pid"])
-        .run();
+    store.clear_daemon_pid();
+}
+
+fn signal_pid(pid: &str) {
+    let _ = std::process::Command::new("kill")
+        .args(["-USR1", pid])
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Signal the daemon to do an immediate refresh, bypassing tmux hook latency.
-pub(super) fn signal_daemon() {
-    if let Some(pid) = daemon_pid() {
-        let _ = std::process::Command::new("kill")
-            .args(["-USR1", &pid])
-            .stderr(std::process::Stdio::null())
-            .status();
+pub(super) fn signal_daemon(host: &SidebarHost) {
+    if let Some(pid) = host.store().daemon_pid() {
+        signal_pid(&pid);
     }
 }

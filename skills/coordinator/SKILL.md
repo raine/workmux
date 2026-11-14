@@ -2,7 +2,6 @@
 name: coordinator
 description: Orchestrate multiple worktree agents. Spawn, monitor, communicate, and merge.
 allowed-tools: Bash, Write, Read, Task
-disable-model-invocation: true
 ---
 
 # Worktree Agent Coordinator
@@ -25,13 +24,19 @@ monitor them, send instructions, and trigger merges.
   (finished). Set automatically by agent hooks. Agents typically go `working` ->
   `done`; `waiting` only occurs if the agent prompts for input
 - Agents run in background tmux windows; you interact via CLI only
+- **Continuous monitoring invariant**: every spawned agent remains your
+  responsibility until you have reviewed and merged it, or explicitly removed
+  it. A user message or an interrupted `workmux wait` does not clear that
+  responsibility
 
 ## Command Reference
 
 ### Spawn Agents
 
-For each task, write a prompt file then run `workmux add`. You are a dispatcher.
-Do NOT read source files, edit code, or implement tasks yourself.
+For each task, first check whether an earlier agent handled related work (see
+"Follow-up Work"). Reuse that session when available. For an independent task,
+write a prompt file then run `workmux add`. You are a dispatcher. Do NOT read
+source files, edit code, or implement tasks yourself.
 
 **Prompt file rules:**
 
@@ -63,13 +68,21 @@ workmux add auth-module -b -P "$tmpfile_a"
 workmux add api-tests -b -P "$tmpfile_b"
 ```
 
+If `workmux add` reports that it cannot determine the tmux session for window
+placement, retry with `--parent-session <session>`. Use the intended session from
+the task or known coordinator context. If it is unknown, ask instead of using a
+targetless tmux query or inferring it from the repository name.
+
 Flags:
 
 - `-b`: background (do not switch to the new window)
 - `-P <file>`: prompt file (contents sent to agent on launch)
 - `-p <text>`: inline prompt (short tasks only)
 - `--name <handle>`: explicit handle name (otherwise derived from branch)
+- `-c, --continue`: resume the agent's most recent session at the destination
+  worktree path; can be combined with `-p` or `-P`, but not `--fork`
 - `--base <branch>`: base branch to branch from (default: current)
+- `--parent-session <session>`: tmux session that receives the agent window
 
 ### Monitor Status
 
@@ -100,6 +113,29 @@ workmux wait agent-a agent-b --status working --timeout 120
 Exit codes: 0 = reached target, 1 = timeout, 2 = worktree not found, 3 = agent
 exited unexpectedly.
 
+### Resume Waiting After Interruptions
+
+Treat waiting as an ongoing coordinator state, not as a single command. Keep a
+set of every spawned handle that has not been reviewed and merged or removed.
+Whenever a user message interrupts a wait or adds more work:
+
+1. Handle the user's request, including spawning any additional agents.
+2. Add newly spawned handles to the tracked set.
+3. Run `workmux status` for the entire tracked set.
+4. Process any agents that are `done` or `waiting`.
+5. Re-enter `workmux wait` for every remaining working handle, using `--any`
+   when multiple agents remain.
+
+Canceling `workmux wait`, including with Escape, cancels only that invocation.
+It does not end the monitoring loop. Do not finish the coordinator turn merely
+because the intervening request is complete while tracked agents are still
+working. Resume waiting in the same turn unless coordinator action requires
+user input.
+
+Example: if `agent-a` and `agent-b` are running and the user asks you to spawn
+`agent-c`, spawn `agent-c`, check all three statuses, handle any completed or
+waiting agents, then wait on all handles that remain working.
+
 ### Capture Output
 
 ```bash
@@ -113,6 +149,11 @@ workmux capture agent-a -n 50
 Output is ANSI-stripped plain text.
 
 ### Send Instructions
+
+Send only actionable changes to the agent's current assignment: corrections,
+verified blockers, concrete integration requirements, or approved scope changes.
+Batch guidance; keep speculative future plans and progress chatter to yourself.
+New phases get separate assignments/worktrees, not additions to active agents.
 
 ```bash
 # Send a short instruction
@@ -129,7 +170,15 @@ workmux send other-worktree "run the tests"
 
 # Disambiguate with project:handle when names collide
 workmux send myproject:docs-update "also add the API reference"
+
+# Confirm the agent picked up the instruction
+workmux send --wait --until working agent-a "fix the failing tests"
 ```
+
+`send` refuses an agent waiting on a dialog (`agent_waiting`, exit 3): look at
+it with `workmux capture` before answering it yourself. A worktree with several
+agents is refused too (`ambiguous_target`, exit 4); send to one of the listed
+pane IDs instead.
 
 ### Run Commands
 
@@ -184,9 +233,23 @@ the current repository.
 
 ## Workflow Patterns
 
+### Follow-up Work
+
+For improvements or corrections to earlier work, reuse the original agent session:
+
+- **Agent running:** `workmux send auth-module -f followup.md`
+- **Worktree exists, window closed:**
+  `workmux open auth-module --continue -P followup.md`
+- **Worktree removed:**
+  `workmux add auth-module --name auth-module --continue -b -P followup.md`
+
+Use the same worktree name. In the follow-up prompt, state whether the earlier
+work is merged. Resume the normal monitor, review, and merge
+loop.
+
 ### Fan-out / Fan-in
 
-Spawn multiple agents, wait for all, review, merge:
+Spawn multiple agents, then review and merge each one as soon as it finishes:
 
 ```bash
 # 1. Write ALL prompt files first (see "Spawn Agents" above)
@@ -198,38 +261,54 @@ workmux add docs-update -b -P "$tmpfile_docs"
 # 3. Confirm they started
 workmux wait auth-module api-tests docs-update --status working --timeout 120
 
-# 4. Wait for completion
-workmux wait auth-module api-tests docs-update --timeout 7200
+# 4. Wait for any agent to finish
+workmux wait auth-module api-tests docs-update --any --timeout 7200
 
-# 5. Review results
-workmux status
+# 5. Identify the finished agent, review its output, and merge it immediately
+workmux status auth-module api-tests docs-update
 workmux capture auth-module -n 50
-workmux capture api-tests -n 50
-
-# 6. Merge successful agents (one at a time, wait between each)
 workmux send auth-module "/merge"
 workmux wait auth-module --timeout 120
+
+# 6. Repeat with the remaining agents so completed work does not wait idle
+workmux wait api-tests docs-update --any --timeout 7200
+workmux status api-tests docs-update
+workmux capture docs-update -n 50
+workmux send docs-update "/merge"
+workmux wait docs-update --timeout 120
+
+workmux wait api-tests --timeout 7200
+workmux capture api-tests -n 50
 workmux send api-tests "/merge"
 workmux wait api-tests --timeout 120
-
-# 7. Send follow-up if needed
-workmux send docs-update "also add the API reference section"
-workmux wait docs-update
-workmux send docs-update "/merge"
 ```
+
+After each `--any` wait, use `workmux status` to identify every agent that is
+`done`. Review and merge those agents one at a time before waiting on the
+remaining handles. Keep finished handles out of subsequent wait commands.
 
 ## Rules
 
 1. **Write ALL prompt files before spawning any agents.** Prompts should be
    self-contained with full context. Agents cannot see your conversation.
 2. **Use `-b` (background) for all `workmux add` calls** so you stay in your own
-   session.
+   session. If placement is ambiguous, retry with `--parent-session` as described
+   above.
 3. **Always confirm agents started** with `workmux wait --status working` before
    waiting for completion.
-4. **Capture and review output** before merging. Do not blindly merge.
-5. **Merge one at a time** by sending `/merge` to each agent sequentially. Wait
+4. **Keep waiting across interruptions.** Track every unprocessed agent until it
+   is merged or removed. After handling any intervening user request, check the
+   full tracked set and resume `workmux wait` for all agents that are still
+   working in the same turn.
+5. **Wait with `--any` when multiple agents are running.** As soon as an agent
+   finishes, identify it with `workmux status`, capture and review its output,
+   and merge it before waiting again on the remaining handles.
+6. **Capture and review output** before merging. Do not blindly merge.
+7. **Merge one at a time** by sending `/merge` to each agent sequentially. Wait
    for each merge to complete before starting the next to avoid conflicts.
-6. **Use `--timeout`** to avoid waiting forever. Handle timeout exits
+8. **Use `--timeout`** to avoid waiting forever. Handle timeout exits
    gracefully.
-7. **Prompt files should use relative paths** (each worktree has its own root).
-8. You are a coordinator, not an implementer. Never edit source files directly.
+9. **Prompt files should use relative paths** (each worktree has its own root).
+10. **Reuse sessions for related follow-ups.** Follow "Follow-up Work" before
+    spawning a fresh agent.
+11. You are a coordinator, not an implementer. Never edit source files directly.

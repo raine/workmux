@@ -8,14 +8,15 @@ pub mod conversation;
 pub mod handle;
 pub mod handshake;
 pub mod kitty;
+pub mod rex;
 pub mod tmux;
 pub mod types;
 pub mod util;
 pub mod wezterm;
 pub mod zellij;
 
-use anyhow::{Result, anyhow};
-use std::collections::HashSet;
+use anyhow::{Context, Result, anyhow};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -26,7 +27,103 @@ pub use handshake::PaneHandshake;
 pub use tmux::TmuxBackend;
 pub use types::*;
 
-use crate::config::{Config, PaneConfig, SplitDirection};
+use crate::config::{Config, PaneConfig, SplitDirection, WindowPlacement};
+
+pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
+pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
+pub const STATUS_TARGET_PANE_ENV: &str = "WORKMUX_STATUS_PANE_ID";
+
+/// A shell statement that puts `dir` first on the pane shell's `PATH`.
+fn export_path_prefix(dir: &Path) -> String {
+    format!(
+        "export PATH={}:\"$PATH\"",
+        agent::shell_quote(&dir.to_string_lossy())
+    )
+}
+
+fn command_with_status_target(
+    command: &str,
+    backend: &str,
+    instance: &str,
+    pane_id: &str,
+) -> String {
+    format!(
+        "env {}={} {}={} {}={} {}",
+        STATUS_TARGET_BACKEND_ENV,
+        agent::shell_quote(backend),
+        STATUS_TARGET_INSTANCE_ENV,
+        agent::shell_quote(instance),
+        STATUS_TARGET_PANE_ENV,
+        agent::shell_quote(pane_id),
+        command
+    )
+}
+
+fn adoption_targets(
+    records: Vec<WindowOwnershipRecord>,
+    expected_full_name: &str,
+    parent_session: Option<&str>,
+    worktree_path: &Path,
+) -> Vec<OwnedWindowTarget> {
+    let canonical_worktree = crate::util::canon_or_self(worktree_path);
+    let duplicate_prefix = format!("{expected_full_name}-");
+    let mut candidates: HashMap<String, OwnedWindowTarget> = HashMap::new();
+
+    for record in records {
+        if record.token.is_some()
+            || parent_session.is_some_and(|parent| record.session_name != parent)
+        {
+            continue;
+        }
+
+        let name_matches = record.window_name == expected_full_name
+            || record
+                .window_name
+                .strip_prefix(&duplicate_prefix)
+                .is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                });
+        if !name_matches {
+            continue;
+        }
+
+        let pane_path = crate::util::canon_or_self(&record.pane_path);
+        if pane_path != canonical_worktree && !pane_path.starts_with(&canonical_worktree) {
+            continue;
+        }
+
+        let is_primary = record.window_name == expected_full_name;
+        candidates
+            .entry(record.window_id.clone())
+            .or_insert_with(|| OwnedWindowTarget {
+                target: WindowTarget::with_id(
+                    record.window_name,
+                    Some(record.session_name),
+                    record.window_id,
+                ),
+                is_primary,
+            });
+    }
+
+    let mut names = HashMap::<String, String>::new();
+    for (window_id, candidate) in &candidates {
+        if names
+            .insert(candidate.target.full_name.clone(), window_id.clone())
+            .is_some_and(|existing_id| existing_id != *window_id)
+        {
+            return Vec::new();
+        }
+    }
+
+    let mut candidates: Vec<_> = candidates.into_values().collect();
+    candidates.sort_by(|a, b| {
+        a.target
+            .full_name
+            .cmp(&b.target.full_name)
+            .then_with(|| a.target.window_id.cmp(&b.target.window_id))
+    });
+    candidates
+}
 
 /// Main trait for terminal multiplexer backends.
 ///
@@ -48,6 +145,16 @@ pub trait Multiplexer: Send + Sync {
         Ok(None)
     }
 
+    fn resolve_window_placement_target(
+        &self,
+        placement: WindowPlacement,
+    ) -> Result<Option<String>> {
+        match placement {
+            WindowPlacement::AfterCurrent => self.current_window_id(),
+            WindowPlacement::Rightmost => self.rightmost_window_id(),
+        }
+    }
+
     fn current_session_id(&self) -> Result<Option<String>> {
         Ok(None)
     }
@@ -60,8 +167,12 @@ pub trait Multiplexer: Send + Sync {
         ))
     }
 
-    fn shell_close_session_by_id_guard_cmd(&self, id: &str) -> Result<String> {
-        let _ = id;
+    fn shell_close_session_by_id_guard_cmd(
+        &self,
+        id: &str,
+        preferred_session: Option<&str>,
+    ) -> Result<String> {
+        let _ = (id, preferred_session);
         Err(anyhow!(
             "Closing sessions by stable ID is not supported by the {} backend",
             self.name()
@@ -101,6 +212,57 @@ pub trait Multiplexer: Send + Sync {
         ))
     }
 
+    fn supports_window_ownership(&self) -> bool {
+        false
+    }
+
+    fn set_window_ownership(&self, pane_id: &str, token: &str, is_primary: bool) -> Result<()> {
+        let _ = (pane_id, token, is_primary);
+        Ok(())
+    }
+
+    fn owned_window_targets(&self, token: &str) -> Result<Vec<OwnedWindowTarget>> {
+        let _ = token;
+        Ok(Vec::new())
+    }
+
+    fn owned_window_tokens(&self) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
+
+    fn window_ownership_records(&self) -> Result<Vec<WindowOwnershipRecord>> {
+        Ok(Vec::new())
+    }
+
+    fn resolve_owned_window_targets(
+        &self,
+        token: &str,
+        expected_full_name: &str,
+        parent_session: Option<&str>,
+        worktree_path: &Path,
+    ) -> Result<Vec<OwnedWindowTarget>> {
+        let owned = self.owned_window_targets(token)?;
+        if !owned.is_empty() {
+            return Ok(owned);
+        }
+
+        let adopted = adoption_targets(
+            self.window_ownership_records()?,
+            expected_full_name,
+            parent_session,
+            worktree_path,
+        );
+        for window in &adopted {
+            let window_id = window
+                .target
+                .window_id
+                .as_deref()
+                .expect("adopted windows have stable IDs");
+            self.set_window_ownership(window_id, token, window.is_primary)?;
+        }
+        Ok(adopted)
+    }
+
     /// Switch to a session by prefix and name.
     /// For tmux, this switches the client to the session.
     /// For WezTerm, this may switch to a workspace.
@@ -114,6 +276,12 @@ pub trait Multiplexer: Send + Sync {
     /// Kill a session by its full name (including prefix).
     fn kill_session(&self, _full_name: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Kill a session, preferring a destination for clients being relocated.
+    fn kill_session_to(&self, full_name: &str, destination: Option<&str>) -> Result<()> {
+        let _ = destination;
+        self.kill_session(full_name)
     }
 
     /// Kill a window by its full name (including prefix)
@@ -131,6 +299,14 @@ pub trait Multiplexer: Send + Sync {
         let _ = (old_full_name, new_full_name);
         Err(anyhow!(
             "Renaming windows is not supported by the {} backend",
+            self.name()
+        ))
+    }
+
+    fn rename_window_at_pane(&self, pane_id: &str, new_name: &str) -> Result<()> {
+        let _ = (pane_id, new_name);
+        Err(anyhow!(
+            "Renaming windows by pane is not supported by the {} backend",
             self.name()
         ))
     }
@@ -154,8 +330,32 @@ pub trait Multiplexer: Send + Sync {
         self.schedule_window_close(&target.full_name, delay)
     }
 
+    /// Whether the backend supports session mode (`--mode session`), where
+    /// each worktree gets its own session.
+    fn supports_session_mode(&self) -> bool {
+        false
+    }
+
+    /// Whether the backend handles client navigation as part of session closure.
+    fn session_close_handles_navigation(&self) -> bool {
+        false
+    }
+
     /// Schedule a session to close after a delay
     fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()>;
+
+    /// Schedule a session to close after a delay, preferring `destination` for
+    /// clients that must be relocated. Backends whose session closure does not
+    /// move clients ignore the preference.
+    fn schedule_session_close_to(
+        &self,
+        full_name: &str,
+        destination: Option<&str>,
+        delay: Duration,
+    ) -> Result<()> {
+        let _ = destination;
+        self.schedule_session_close(full_name, delay)
+    }
 
     /// Run a deferred script in the background (for cleanup operations).
     /// For tmux, this uses `run-shell`. For other backends, may use different mechanisms.
@@ -321,8 +521,21 @@ pub trait Multiplexer: Send + Sync {
     /// Respawn a pane with optional command. Returns the (possibly new) pane ID.
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String>;
 
+    /// Set a user-facing display name for a pane.
+    ///
+    /// Backends that do not support stable pane names can ignore this.
+    fn set_pane_name(&self, _pane_id: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Capture the content of a pane
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String>;
+
+    /// Capture a pane whose live info the caller already observed, which
+    /// spares backends that would otherwise look the pane up first.
+    fn capture_pane_at(&self, pane_id: &str, _info: &LivePaneInfo, lines: u16) -> Option<String> {
+        self.capture_pane(pane_id, lines)
+    }
 
     /// Whether this backend supports preview capture efficiently.
     /// Defaults to true. Override to return false for backends where preview capture
@@ -352,15 +565,30 @@ pub trait Multiplexer: Send + Sync {
         false
     }
 
-    /// Send keys to an agent pane, with special handling for Claude's ! prefix
+    /// Send keys to an agent pane, with agent-specific input handling.
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()> {
-        if agent::resolve_profile(agent).needs_bang_delay() && command.starts_with('!') {
+        let profile = agent::resolve_profile(agent);
+        if profile.needs_bang_delay() && command.starts_with('!') {
             self.send_text_fragment(pane_id, "!")?;
             thread::sleep(Duration::from_millis(50));
             self.send_text_fragment(pane_id, &command[1..])?;
             self.send_enter(pane_id)
+        } else if profile.uses_bracketed_paste_for_input() {
+            self.paste_and_submit(pane_id, command)
         } else {
             self.send_keys(pane_id, command)
+        }
+    }
+
+    /// Deliver a prompt using the target agent's input protocol.
+    fn send_prompt_to_agent(&self, pane_id: &str, prompt: &str, agent: Option<&str>) -> Result<()> {
+        let profile = agent::resolve_profile(agent);
+        if profile.uses_bracketed_paste_for_input() {
+            self.paste_and_submit(pane_id, prompt)
+        } else if prompt.contains('\n') {
+            self.paste_multiline(pane_id, prompt)
+        } else {
+            self.send_keys_to_agent(pane_id, prompt, agent)
         }
     }
 
@@ -369,6 +597,12 @@ pub trait Multiplexer: Send + Sync {
 
     /// Paste text to a pane.
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()>;
+
+    /// Paste text and submit it without a timing delay.
+    fn paste_and_submit(&self, pane_id: &str, content: &str) -> Result<()> {
+        self.paste_text(pane_id, content)?;
+        self.send_enter(pane_id)
+    }
 
     /// Paste multiline content to a pane (using bracketed paste)
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()> {
@@ -473,6 +707,7 @@ pub trait Multiplexer: Send + Sync {
                 &shell,
             );
 
+            let has_command = adjusted_command.is_some();
             let pane_id = if let Some(mut resolved) = adjusted_command {
                 let is_agent_pane = resolved.selected_agent.is_some();
 
@@ -519,7 +754,7 @@ pub trait Multiplexer: Send + Sync {
                             if let Some(forker) =
                                 crate::multiplexer::conversation::resolve_forker(agent_name)
                             {
-                                let resume_args = forker.resume_args(session_id);
+                                let resume_args = forker.resume_args(session_id, working_dir);
                                 selected_agent.command.args.extend(resume_args);
                             } else {
                                 tracing::warn!(
@@ -532,6 +767,10 @@ pub trait Multiplexer: Send + Sync {
                     }
                 }
 
+                if let Some(selected_agent) = resolved.selected_agent.as_mut() {
+                    selected_agent.add_launch_flags();
+                }
+
                 // Apply sandbox wrapping if enabled for this pane type
                 let final_command = if config.sandbox.is_enabled() {
                     let should_wrap = match config.sandbox.target() {
@@ -539,17 +778,18 @@ pub trait Multiplexer: Send + Sync {
                         crate::config::SandboxTarget::Agent => is_agent_pane,
                     };
                     if should_wrap {
+                        crate::sandbox::notice::show_once();
+
                         // Use worktree_root for mounting, working_dir for cwd
                         let wt_root = options.worktree_root.unwrap_or(working_dir);
 
                         // Inject skip-permissions flag for agent panes only
                         // (sandbox provides the security boundary, so permission
-                        // prompts are unnecessary and break autonomous workflow)
+                        // prompts are unnecessary and break autonomous workflow),
+                        // plus any other flags sandboxed launches need.
                         let command_to_wrap =
                             if let Some(selected_agent) = resolved.selected_agent.as_mut() {
-                                if let Some(flag) = selected_agent.profile.skip_permissions_flag() {
-                                    selected_agent.command.prepend_args_fragment(flag);
-                                }
+                                selected_agent.add_sandbox_flags();
                                 resolved.render_command()
                             } else {
                                 resolved.command.clone()
@@ -560,7 +800,7 @@ pub trait Multiplexer: Send + Sync {
                             crate::config::SandboxBackend::Container => {
                                 crate::sandbox::wrap_for_container(
                                     &command_to_wrap,
-                                    &config.sandbox,
+                                    options.sandbox_supervisor,
                                     wt_root,
                                     working_dir,
                                 )
@@ -597,6 +837,33 @@ pub trait Multiplexer: Send + Sync {
                     }
                 } else {
                     resolved.render_command()
+                };
+
+                let final_command = match options.path_prefix {
+                    Some(dir) => format!("{}; {final_command}", export_path_prefix(dir)),
+                    None => final_command,
+                };
+
+                // Only a node passes a supervisor. Its command lines name
+                // pinned binaries and supervisor arguments; clear the screen
+                // and scrollback they were typed into so the pane starts
+                // clean. The leading space keeps the line out of shell
+                // history where the shell honors that.
+                let final_command = if options.sandbox_supervisor.is_some() {
+                    format!(" printf '\\033[H\\033[2J\\033[3J'; {final_command}")
+                } else {
+                    final_command
+                };
+
+                let final_command = if is_agent_pane && self.name() == "zellij" {
+                    command_with_status_target(
+                        &final_command,
+                        self.name(),
+                        &self.instance_id(),
+                        &spawned_id,
+                    )
+                } else {
+                    final_command
                 };
 
                 let _ = self.clear_pane(&spawned_id);
@@ -637,10 +904,28 @@ pub trait Multiplexer: Send + Sync {
                 )?
             };
 
+            if let Some(dir) = options.path_prefix
+                && !has_command
+            {
+                // The keys reach the shell once it starts reading input.
+                self.send_keys(
+                    &pane_id,
+                    &format!(
+                        " {}; printf '\\033[H\\033[2J\\033[3J'",
+                        export_path_prefix(dir)
+                    ),
+                )?;
+            }
+
             if is_first {
                 pane_ids[0] = pane_id.clone();
             } else {
                 pane_ids.push(pane_id.clone());
+            }
+
+            if let Some(name) = pane_config.name.as_deref() {
+                self.set_pane_name(&pane_id, name)
+                    .with_context(|| format!("Failed to set pane name '{}'", name))?;
             }
 
             if pane_config.zoom || pane_config.focus {
@@ -669,6 +954,13 @@ pub trait Multiplexer: Send + Sync {
         None // Default: can't determine
     }
 
+    /// Get the session/workspace displayed by the active client.
+    ///
+    /// Backends without distinct client context use the current session.
+    fn client_session(&self) -> Option<String> {
+        self.current_session()
+    }
+
     /// Get all window names across ALL sessions/workspaces.
     ///
     /// Default implementation returns same as get_all_window_names() (single session).
@@ -689,17 +981,48 @@ pub trait Multiplexer: Send + Sync {
     /// For WezTerm: mux domain ID or workspace name
     fn instance_id(&self) -> String;
 
+    /// Resolve the backend instance identifier without a fallback identity.
+    ///
+    /// Observation commands use this to avoid treating an unresolved instance
+    /// as an empty agent set. Backends with infallible identities may use the
+    /// default implementation.
+    fn resolve_instance_id(&self) -> Result<String> {
+        Ok(self.instance_id())
+    }
+
     /// Get live pane info including PID and current command.
     ///
-    /// Returns None if pane does not exist. Used during state reconciliation
-    /// to validate stored state against actual pane state.
+    /// Returns None only when the backend can establish that the pane does not
+    /// exist. Query failures and unparseable responses return an error.
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>>;
+
+    /// Observe a pane and its server lifecycle for state persistence.
+    ///
+    /// Backends without reliable lifecycle identity use best-effort boot data.
+    /// Backends that require it can override this to collect both in one query
+    /// and reject incomplete observations.
+    fn get_live_pane_snapshot(&self, pane_id: &str) -> Result<Option<LivePaneSnapshot>> {
+        let Some(pane) = self.get_live_pane_info(pane_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(LivePaneSnapshot {
+            pane,
+            boot_id: self.server_boot_id().unwrap_or(None),
+        }))
+    }
 
     /// Get live pane info for all panes at once (batched query).
     ///
     /// Returns a HashMap from pane_id to LivePaneInfo. This is more efficient
     /// than calling get_live_pane_info repeatedly when validating many panes.
     fn get_all_live_pane_info(&self) -> Result<std::collections::HashMap<String, LivePaneInfo>>;
+
+    /// Get a live pane snapshot without dropping malformed backend output.
+    fn get_all_live_pane_info_strict(
+        &self,
+    ) -> Result<std::collections::HashMap<String, LivePaneInfo>> {
+        self.get_all_live_pane_info()
+    }
 
     /// Get the server's boot identifier for crash detection.
     ///
@@ -746,9 +1069,10 @@ pub trait Multiplexer: Send + Sync {
 /// 1. `$WORKMUX_BACKEND` set → use that backend
 /// 2. `$TMUX` set → tmux
 /// 3. `$WEZTERM_PANE` set → WezTerm
-/// 4. `$ZELLIJ` set → Zellij
+/// 4. `$ZELLIJ`, `$ZELLIJ_PANE_ID`, or `$ZELLIJ_SESSION_NAME` set → Zellij
 /// 5. `$KITTY_WINDOW_ID` set → Kitty
-/// 6. None → defaults to tmux (for backward compatibility)
+/// 6. `$REX_BLOCK` set (and not empty) → Rex
+/// 7. None → defaults to tmux (for backward compatibility)
 ///
 /// This ordering ensures that running tmux inside kitty (or wezterm) correctly
 /// selects the innermost multiplexer.
@@ -758,36 +1082,76 @@ pub fn detect_backend() -> BackendType {
             Ok(bt) => return bt,
             Err(_) => {
                 eprintln!(
-                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected {}",
+                    BackendType::expected_names()
                 );
             }
         }
     }
 
-    resolve_backend(
-        std::env::var("TMUX").is_ok(),
-        std::env::var("WEZTERM_PANE").is_ok(),
-        std::env::var("ZELLIJ").is_ok(),
-        std::env::var("KITTY_WINDOW_ID").is_ok(),
-    )
+    detect_backend_from_environment()
+}
+
+/// Detect the backend while rejecting an invalid explicit override.
+pub fn detect_backend_strict() -> Result<BackendType> {
+    if let Ok(value) = std::env::var("WORKMUX_BACKEND")
+        && !value.trim().is_empty()
+    {
+        return value.parse().map_err(|_| {
+            anyhow!(
+                "invalid WORKMUX_BACKEND={value:?}, expected {}",
+                BackendType::expected_names()
+            )
+        });
+    }
+
+    Ok(detect_backend_from_environment())
+}
+
+/// Which multiplexers the environment says we are running inside.
+#[derive(Debug, Default, Clone, Copy)]
+struct BackendSignals {
+    tmux: bool,
+    wezterm: bool,
+    zellij: bool,
+    kitty: bool,
+    rex: bool,
+}
+
+fn detect_backend_from_environment() -> BackendType {
+    resolve_backend(BackendSignals {
+        tmux: std::env::var("TMUX").is_ok(),
+        wezterm: std::env::var("WEZTERM_PANE").is_ok(),
+        zellij: std::env::var("ZELLIJ").is_ok()
+            || std::env::var("ZELLIJ_PANE_ID").is_ok()
+            || std::env::var("ZELLIJ_SESSION_NAME").is_ok(),
+        kitty: std::env::var("KITTY_WINDOW_ID").is_ok(),
+        rex: rex::in_rex_terminal(),
+    })
 }
 
 /// Pure auto-detection logic, separated for testability.
-fn resolve_backend(tmux: bool, wezterm: bool, zellij: bool, kitty: bool) -> BackendType {
-    if tmux {
+fn resolve_backend(signals: BackendSignals) -> BackendType {
+    if signals.tmux {
         return BackendType::Tmux;
     }
 
-    if wezterm {
+    if signals.wezterm {
         return BackendType::WezTerm;
     }
 
-    if zellij {
+    if signals.zellij {
         return BackendType::Zellij;
     }
 
-    if kitty {
+    if signals.kitty {
         return BackendType::Kitty;
+    }
+
+    // Last, because every terminal started from a Rex pane inherits
+    // REX_BLOCK: any other multiplexer seen here is nested inside Rex
+    if signals.rex {
+        return BackendType::Rex;
     }
 
     BackendType::Tmux
@@ -800,6 +1164,18 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
+        BackendType::Rex => Arc::new(rex::RexBackend::new()),
+    }
+}
+
+pub fn create_backend_for_instance(
+    backend_type: BackendType,
+    instance: &str,
+) -> Arc<dyn Multiplexer> {
+    match backend_type {
+        BackendType::Tmux => Arc::new(TmuxBackend::for_socket(instance)),
+        BackendType::Zellij => Arc::new(zellij::ZellijBackend::for_session(instance)),
+        _ => create_backend(backend_type),
     }
 }
 
@@ -807,10 +1183,78 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
 mod tests {
     use super::*;
 
+    fn ownership_record(
+        window_id: &str,
+        window_name: &str,
+        session_name: &str,
+        token: Option<&str>,
+        pane_path: &Path,
+    ) -> WindowOwnershipRecord {
+        WindowOwnershipRecord {
+            window_id: window_id.to_string(),
+            window_name: window_name.to_string(),
+            session_name: session_name.to_string(),
+            token: token.map(str::to_string),
+            pane_path: pane_path.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn adoption_requires_an_untagged_name_and_worktree_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let subdir = worktree.join("src");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let records = vec![
+            ownership_record("@1", "wm-work", "main", None, &subdir),
+            ownership_record("@2", "wm-work-2", "main", None, &worktree),
+            ownership_record("@3", "wm-work", "other", None, &worktree),
+            ownership_record("@4", "wm-work", "main", None, &other),
+            ownership_record("@5", "wm-work-3", "main", Some("another"), &worktree),
+        ];
+
+        let targets = adoption_targets(records, "wm-work", Some("main"), &worktree);
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].target.window_id.as_deref(), Some("@1"));
+        assert!(targets[0].is_primary);
+        assert_eq!(targets[1].target.window_id.as_deref(), Some("@2"));
+        assert!(!targets[1].is_primary);
+    }
+
+    #[test]
+    fn adoption_rejects_indistinguishable_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let records = vec![
+            ownership_record("@1", "wm-work", "one", None, &worktree),
+            ownership_record("@2", "wm-work", "two", None, &worktree),
+        ];
+
+        assert!(adoption_targets(records, "wm-work", None, &worktree).is_empty());
+    }
+
+    #[test]
+    fn status_target_command_quotes_identity_values() {
+        assert_eq!(
+            command_with_status_target(
+                "claude --continue",
+                "zellij",
+                "session with spaces",
+                "terminal_7",
+            ),
+            "env WORKMUX_STATUS_BACKEND=zellij WORKMUX_STATUS_INSTANCE='session with spaces' \
+             WORKMUX_STATUS_PANE_ID=terminal_7 claude --continue"
+        );
+    }
+
     #[test]
     fn no_env_defaults_to_tmux() {
         assert_eq!(
-            resolve_backend(false, false, false, false),
+            resolve_backend(BackendSignals::default()),
             BackendType::Tmux
         );
     }
@@ -818,7 +1262,10 @@ mod tests {
     #[test]
     fn tmux_only() {
         assert_eq!(
-            resolve_backend(true, false, false, false),
+            resolve_backend(BackendSignals {
+                tmux: true,
+                ..Default::default()
+            }),
             BackendType::Tmux
         );
     }
@@ -826,7 +1273,10 @@ mod tests {
     #[test]
     fn wezterm_only() {
         assert_eq!(
-            resolve_backend(false, true, false, false),
+            resolve_backend(BackendSignals {
+                wezterm: true,
+                ..Default::default()
+            }),
             BackendType::WezTerm
         );
     }
@@ -834,7 +1284,10 @@ mod tests {
     #[test]
     fn zellij_only() {
         assert_eq!(
-            resolve_backend(false, false, true, false),
+            resolve_backend(BackendSignals {
+                zellij: true,
+                ..Default::default()
+            }),
             BackendType::Zellij
         );
     }
@@ -842,30 +1295,58 @@ mod tests {
     #[test]
     fn kitty_only() {
         assert_eq!(
-            resolve_backend(false, false, false, true),
+            resolve_backend(BackendSignals {
+                kitty: true,
+                ..Default::default()
+            }),
             BackendType::Kitty
         );
     }
 
     #[test]
     fn tmux_inside_kitty() {
-        assert_eq!(resolve_backend(true, false, false, true), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                tmux: true,
+                kitty: true,
+                ..Default::default()
+            }),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn tmux_inside_wezterm() {
-        assert_eq!(resolve_backend(true, true, false, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                tmux: true,
+                wezterm: true,
+                ..Default::default()
+            }),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn tmux_inside_zellij() {
-        assert_eq!(resolve_backend(true, false, true, false), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                tmux: true,
+                zellij: true,
+                ..Default::default()
+            }),
+            BackendType::Tmux
+        );
     }
 
     #[test]
     fn wezterm_inside_kitty() {
         assert_eq!(
-            resolve_backend(false, true, false, true),
+            resolve_backend(BackendSignals {
+                wezterm: true,
+                kitty: true,
+                ..Default::default()
+            }),
             BackendType::WezTerm
         );
     }
@@ -873,13 +1354,85 @@ mod tests {
     #[test]
     fn zellij_inside_kitty() {
         assert_eq!(
-            resolve_backend(false, false, true, true),
+            resolve_backend(BackendSignals {
+                zellij: true,
+                kitty: true,
+                ..Default::default()
+            }),
             BackendType::Zellij
         );
     }
 
     #[test]
     fn all_env_vars_set() {
-        assert_eq!(resolve_backend(true, true, true, true), BackendType::Tmux);
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                tmux: true,
+                wezterm: true,
+                zellij: true,
+                kitty: true,
+                ..Default::default()
+            }),
+            BackendType::Tmux
+        );
+    }
+
+    #[test]
+    fn wezterm_inside_rex() {
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                wezterm: true,
+                rex: true,
+                ..Default::default()
+            }),
+            BackendType::WezTerm
+        );
+    }
+
+    #[test]
+    fn kitty_inside_rex() {
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                kitty: true,
+                rex: true,
+                ..Default::default()
+            }),
+            BackendType::Kitty
+        );
+    }
+
+    #[test]
+    fn rex_only() {
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                rex: true,
+                ..Default::default()
+            }),
+            BackendType::Rex
+        );
+    }
+
+    #[test]
+    fn tmux_inside_rex() {
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                tmux: true,
+                rex: true,
+                ..Default::default()
+            }),
+            BackendType::Tmux
+        );
+    }
+
+    #[test]
+    fn zellij_inside_rex() {
+        assert_eq!(
+            resolve_backend(BackendSignals {
+                zellij: true,
+                rex: true,
+                ..Default::default()
+            }),
+            BackendType::Zellij
+        );
     }
 }

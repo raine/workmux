@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub struct WindowTarget {
     pub full_name: String,
     pub parent_session: Option<String>,
+    pub window_id: Option<String>,
 }
 
 impl WindowTarget {
@@ -16,12 +17,36 @@ impl WindowTarget {
         Self {
             full_name,
             parent_session,
+            window_id: None,
+        }
+    }
+
+    pub fn with_id(full_name: String, parent_session: Option<String>, window_id: String) -> Self {
+        Self {
+            full_name,
+            parent_session,
+            window_id: Some(window_id),
         }
     }
 
     pub fn parent_session(&self) -> Option<&str> {
         self.parent_session.as_deref()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedWindowTarget {
+    pub target: WindowTarget,
+    pub is_primary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowOwnershipRecord {
+    pub window_id: String,
+    pub window_name: String,
+    pub session_name: String,
+    pub token: Option<String>,
+    pub pane_path: PathBuf,
 }
 
 /// How (if at all) to resume an existing agent conversation when launching.
@@ -51,8 +76,19 @@ pub enum AgentStatus {
     Done,
 }
 
+impl AgentStatus {
+    /// The status as commands take and print it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+        }
+    }
+}
+
 /// Information about a specific pane running a workmux agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPane {
     /// Session name (tmux session or WezTerm workspace)
     pub session: String,
@@ -63,6 +99,12 @@ pub struct AgentPane {
     /// Stable window ID (e.g., @42 in tmux). Empty when not yet resolved.
     #[serde(default)]
     pub window_id: String,
+    /// Window index as shown in the multiplexer's window list (e.g., 3 for
+    /// tmux window `3:wm-feature-auth`). Refreshed from the live tmux poll
+    /// because indexes change on renumber/move. `None` on backends without
+    /// window indexes.
+    #[serde(default)]
+    pub window_index: Option<u32>,
     /// Working directory path of the pane
     pub path: PathBuf,
     /// Pane title (set by Claude Code to show session summary)
@@ -71,6 +113,9 @@ pub struct AgentPane {
     pub status: Option<AgentStatus>,
     /// Unix timestamp when status was last set
     pub status_ts: Option<u64>,
+    /// Unix timestamp when the agent entered its sidebar activity state.
+    #[serde(default)]
+    pub activity_ts: Option<u64>,
     /// Unix timestamp of last state update (any RPC call, not just status change).
     /// Used by the inactivity tracker to detect when an agent resumes working.
     #[serde(default)]
@@ -90,6 +135,95 @@ pub struct AgentPane {
     /// before falling back to stem-based profile resolution.
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// Latest user prompt captured from the agent's hooks.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Set when the agent runs in a remote workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteAgent>,
+}
+
+/// The pane of a remote workspace a local attach pane relays.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RemoteRef {
+    /// Remote name from `remotes:`.
+    pub remote: String,
+    pub ws_id: String,
+    pub ex_id: String,
+    /// Index of the configured pane.
+    pub pane: usize,
+}
+
+/// A remote agent as views show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAgent {
+    #[serde(flatten)]
+    pub at: RemoteRef,
+    #[serde(default)]
+    pub handle: String,
+    /// Main worktree of the local repository the workspace belongs to.
+    #[serde(default)]
+    pub project_root: PathBuf,
+    /// ssh destination of the remote, for display.
+    #[serde(default)]
+    pub host: String,
+    /// Whether a local pane relays this agent; detached rows have no pane.
+    #[serde(default)]
+    pub attached: bool,
+    /// Whether the remote answered within the heartbeat deadline.
+    #[serde(default)]
+    pub connected: bool,
+    /// When the remote last answered (laptop clock).
+    #[serde(default)]
+    pub last_seen: Option<u64>,
+    /// Git status of the workspace on the node, as last observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::git::GitStatus>,
+    /// Why the execution ended under the agent, as the remote last said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<EndReason>,
+}
+
+/// Why a remote execution ended without anyone stopping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    /// The remote host rebooted.
+    HostReboot,
+}
+
+impl EndReason {
+    /// How `list` and `status` show the agent of an ended execution.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HostReboot => "exited (host rebooted)",
+        }
+    }
+}
+
+impl RemoteAgent {
+    pub fn new(at: RemoteRef) -> Self {
+        Self {
+            at,
+            handle: String::new(),
+            project_root: PathBuf::new(),
+            host: String::new(),
+            attached: true,
+            connected: false,
+            last_seen: None,
+            git: None,
+            ended: None,
+        }
+    }
+}
+
+impl AgentPane {
+    /// Timestamp used for recency ordering and age-based staleness.
+    pub fn activity_ts(&self) -> Option<u64> {
+        self.activity_ts
+            .or(self.status_ts)
+            .or_else(|| self.status.is_none().then_some(self.updated_ts).flatten())
+    }
 }
 
 /// Parameters for creating a new window/tab
@@ -151,6 +285,11 @@ pub struct PaneSetupOptions<'a> {
     pub lima_vm_name: Option<&'a str>,
     /// How to resume a conversation (continue last, fork specific session, or none).
     pub resume_mode: ResumeMode,
+    /// Shell-quoted words that replace `workmux sandbox run` in wrapped panes.
+    pub sandbox_supervisor: Option<&'a str>,
+    /// Directory put first on every pane shell's `PATH`, so commands typed
+    /// in the pane find it too.
+    pub path_prefix: Option<&'a std::path::Path>,
 }
 
 /// Backend type for multiplexer selection
@@ -165,6 +304,8 @@ pub enum BackendType {
     Kitty,
     /// Zellij backend
     Zellij,
+    /// Rex backend
+    Rex,
 }
 
 impl std::fmt::Display for BackendType {
@@ -174,7 +315,28 @@ impl std::fmt::Display for BackendType {
             BackendType::WezTerm => write!(f, "wezterm"),
             BackendType::Kitty => write!(f, "kitty"),
             BackendType::Zellij => write!(f, "zellij"),
+            BackendType::Rex => write!(f, "rex"),
         }
+    }
+}
+
+impl BackendType {
+    /// Every backend, in the order they are listed to users.
+    pub const ALL: [BackendType; 5] = [
+        BackendType::Tmux,
+        BackendType::WezTerm,
+        BackendType::Kitty,
+        BackendType::Zellij,
+        BackendType::Rex,
+    ];
+
+    /// The accepted `WORKMUX_BACKEND` values, as "tmux|wezterm|...".
+    pub fn expected_names() -> String {
+        Self::ALL
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|")
     }
 }
 
@@ -182,14 +344,19 @@ impl std::str::FromStr for BackendType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "tmux" => Ok(BackendType::Tmux),
-            "wezterm" => Ok(BackendType::WezTerm),
-            "kitty" => Ok(BackendType::Kitty),
-            "zellij" => Ok(BackendType::Zellij),
-            other => Err(format!("unknown backend: {}", other)),
-        }
+        let wanted = s.to_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|backend| backend.to_string() == wanted)
+            .ok_or_else(|| format!("unknown backend: {}", wanted))
     }
+}
+
+/// Pane information and the server lifecycle observed for state persistence.
+#[derive(Debug)]
+pub struct LivePaneSnapshot {
+    pub pane: LivePaneInfo,
+    pub boot_id: Option<String>,
 }
 
 /// Live pane information from the multiplexer (used for reconciliation).
@@ -221,4 +388,8 @@ pub struct LivePaneInfo {
 
     /// Stable window ID for backends that expose one.
     pub window_id: Option<String>,
+
+    /// Window index as shown in the tmux status bar. None for backends that
+    /// do not number their windows.
+    pub window_index: Option<u32>,
 }

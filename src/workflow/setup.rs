@@ -2,91 +2,64 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{MuxMode, WindowConfig, WindowPlacement};
+use crate::config::{MuxMode, WindowConfig};
 use crate::multiplexer::{
     CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, Multiplexer,
     PaneSetupOptions,
 };
-use crate::{cmd, config, git, prompt::Prompt};
+use crate::{cmd, config, prompt::Prompt};
 use tracing::{debug, info};
 
 use super::file_ops::{handle_file_operations, symlink_claude_local_md};
 use super::types::CreateResult;
 
-/// Sets up the terminal window, files, and hooks for a worktree.
-/// This is the shared logic between `create` and `open`.
-///
-/// # Arguments
-/// * `mux` - The terminal multiplexer backend
-/// * `branch_name` - The git branch name (for logging/reference)
-/// * `handle` - The display name used for window naming
-/// * `worktree_path` - Path to the worktree directory
-/// * `config` - Configuration settings
-/// * `options` - Setup options (hooks, file ops, etc.)
-/// * `agent` - Optional agent override
-/// * `after_window` - Optional window ID to insert after (for grouping duplicates)
-#[allow(clippy::too_many_arguments)]
-pub fn setup_environment(
+pub fn resolve_window_placement_target(
     mux: &dyn Multiplexer,
+    config: &config::Config,
+) -> Result<Option<String>> {
+    mux.resolve_window_placement_target(config.window_placement())
+}
+
+pub struct ProvisionedEnvironment {
+    pub working_directory: PathBuf,
+    pub post_create_hooks_run: usize,
+}
+
+pub fn provision_environment(
     branch_name: &str,
     handle: &str,
     worktree_path: &Path,
+    project_root: &Path,
     config: &config::Config,
     options: &super::types::SetupOptions,
-    agent: Option<&str>,
-    after_window: Option<String>,
-) -> Result<CreateResult> {
-    debug!(
-        branch = branch_name,
-        handle = handle,
-        path = %worktree_path.display(),
-        run_hooks = options.run_hooks,
-        run_file_ops = options.run_file_ops,
-        "setup_environment:start"
-    );
-    let prefix = config.window_prefix();
-    let repo_root = match &options.config_root {
-        Some(path) => path.clone(),
-        None => git::get_main_worktree_root()?,
-    };
-
-    // Determine effective working directory (config-relative or worktree root)
+    hook_output: cmd::ShellOutput,
+) -> Result<ProvisionedEnvironment> {
     let effective_working_dir = options.working_dir.as_deref().unwrap_or(worktree_path);
+    let file_ops_source = options.config_root.as_deref().unwrap_or(project_root);
 
-    // Determine source root for file operations
-    let file_ops_source = options.config_root.as_deref().unwrap_or(&repo_root);
-
-    // Perform file operations (copy and symlink) if requested
     if options.run_file_ops {
         handle_file_operations(file_ops_source, effective_working_dir, &config.files)
             .context("Failed to perform file operations")?;
+        symlink_claude_local_md(file_ops_source, effective_working_dir)
+            .context("Failed to auto-symlink CLAUDE.local.md")?;
         debug!(
             branch = branch_name,
-            "setup_environment:file operations applied"
+            "provision_environment:file operations applied"
         );
     }
 
-    // Auto-symlink CLAUDE.local.md from main worktree if it exists and is gitignored
-    if options.run_file_ops {
-        symlink_claude_local_md(&repo_root, effective_working_dir)
-            .context("Failed to auto-symlink CLAUDE.local.md")?;
-    }
-
-    // Run post-create hooks before opening tmux so the new window appears "ready"
     let mut hooks_run = 0;
     if options.run_hooks
         && let Some(post_create) = &config.post_create
         && !post_create.is_empty()
     {
         hooks_run = post_create.len();
-        // Resolve absolute paths for environment variables.
-        // canonicalize() ensures symlinks are resolved and paths are absolute.
         let abs_worktree_path = worktree_path
             .canonicalize()
             .unwrap_or_else(|_| worktree_path.to_path_buf());
-        let abs_project_root = repo_root
+        let abs_project_root = project_root
             .canonicalize()
-            .unwrap_or_else(|_| repo_root.clone());
+            .unwrap_or_else(|_| project_root.to_path_buf());
         let abs_config_dir = effective_working_dir
             .canonicalize()
             .unwrap_or_else(|_| effective_working_dir.to_path_buf());
@@ -101,18 +74,58 @@ pub fn setup_environment(
             ("WM_CONFIG_DIR", config_dir_str.as_ref()),
         ];
         for (idx, command) in post_create.iter().enumerate() {
-            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment:hook start");
-            info!(command = %command, "Running post-create hook {}/{}", idx + 1, hooks_run);
-            cmd::shell_command_with_env(command, effective_working_dir, &hook_env)
-                .with_context(|| format!("Failed to run post-create command: '{}'", command))?;
-            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment:hook complete");
+            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "provision_environment:hook start");
+            cmd::shell_command_with_env_mode(
+                config.hook_shell.as_deref(),
+                command,
+                effective_working_dir,
+                &hook_env,
+                hook_output,
+            )
+            .with_context(|| format!("Failed to run post-create command: '{}'", command))?;
+            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "provision_environment:hook complete");
         }
-        info!(
-            branch = branch_name,
-            total = hooks_run,
-            "setup_environment:hooks complete"
-        );
     }
+
+    Ok(ProvisionedEnvironment {
+        working_directory: effective_working_dir.to_path_buf(),
+        post_create_hooks_run: hooks_run,
+    })
+}
+
+/// Sets up files, hooks, and a multiplexer target for a worktree.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_environment(
+    mux: &dyn Multiplexer,
+    branch_name: &str,
+    handle: &str,
+    worktree_path: &Path,
+    project_root: &Path,
+    config: &config::Config,
+    options: &super::types::SetupOptions,
+    agent: Option<&str>,
+    after_window: Option<String>,
+) -> Result<CreateResult> {
+    debug!(
+        branch = branch_name,
+        handle = handle,
+        path = %worktree_path.display(),
+        run_hooks = options.run_hooks,
+        run_file_ops = options.run_file_ops,
+        "setup_environment:start"
+    );
+    let prefix = config.window_prefix();
+    let provisioned = provision_environment(
+        branch_name,
+        handle,
+        worktree_path,
+        project_root,
+        config,
+        options,
+        cmd::ShellOutput::Inherit,
+    )?;
+    let effective_working_dir = provisioned.working_directory.as_path();
+    let hooks_run = provisioned.post_create_hooks_run;
 
     // Build window plans: normalize windows/panes config into a list of window configs.
     // In window mode, we always use a single window from panes config.
@@ -158,6 +171,8 @@ pub fn setup_environment(
         worktree_root: Some(worktree_path),
         lima_vm_name: lima_vm_name.as_deref(),
         resume_mode: options.resume_mode.clone(),
+        sandbox_supervisor: None,
+        path_prefix: None,
     };
 
     let target_window_name = options.target_window_name.as_deref().unwrap_or(handle);
@@ -180,27 +195,17 @@ pub fn setup_environment(
             let initial_pane_id = if let Some(parent_session) =
                 options.window_session_name.as_deref()
             {
-                let parent_session_full_name = parent_session.to_string();
-                if mux.session_exists(&parent_session_full_name)? {
-                    mux.create_window_in_session(CreateWindowInSessionParams {
-                        session_name: &parent_session_full_name,
-                        name: Some(&mux_target_full_name),
-                        cwd: effective_working_dir,
-                    })
-                    .context("Failed to create window in session")?
-                } else {
-                    mux.create_session(CreateSessionParams {
-                        prefix: "",
-                        name: &parent_session_full_name,
-                        cwd: effective_working_dir,
-                        initial_window_name: Some(&mux_target_full_name),
-                    })
-                    .context("Failed to create session")?
-                }
+                crate::multiplexer::util::create_window_in_parent_session(
+                    mux,
+                    parent_session,
+                    &mux_target_full_name,
+                    effective_working_dir,
+                )?
             } else {
-                let placement_window_id = match config.window_placement() {
-                    WindowPlacement::AfterCurrent => mux.current_window_id()?,
-                    WindowPlacement::Rightmost => mux.rightmost_window_id()?,
+                let placement_window_id = if after_window.is_some() {
+                    None
+                } else {
+                    resolve_window_placement_target(mux, config)?
                 };
                 let insertion_target = after_window.as_deref().or(placement_window_id.as_deref());
                 mux.create_window(CreateWindowParams {
@@ -218,6 +223,11 @@ pub fn setup_environment(
                 pane_id = %initial_pane_id,
                 "setup_environment:window created"
             );
+
+            if let Some(token) = options.window_token.as_deref() {
+                mux.set_window_ownership(&initial_pane_id, token, options.primary_window)
+                    .context("Failed to attach worktree identity to window")?;
+            }
 
             let result = mux
                 .setup_panes(
@@ -453,21 +463,39 @@ pub fn resolve_pane_configuration(
 
     let mut panes = original_panes.to_vec();
 
-    if let Some(focused) = panes.iter_mut().find(|pane| pane.focus) {
-        focused.command = Some(injected_agent.clone());
+    // Inject the agent only into a pane that has no explicit command (a plain
+    // shell), preferring the focused one. Never overwrite an explicit command
+    // such as `nvim` or a dev server: those panes are deliberately configured
+    // and must not be replaced with a second agent.
+    if let Some(focused) = panes
+        .iter_mut()
+        .find(|pane| pane.focus && pane.command.is_none())
+    {
+        focused.command = Some(injected_agent);
+        return panes;
+    }
+    if let Some(first) = panes.iter_mut().find(|pane| pane.command.is_none()) {
+        first.command = Some(injected_agent);
         return panes;
     }
 
-    if let Some(first) = panes.get_mut(0) {
-        first.command = Some(injected_agent.clone());
-        return panes;
+    // With no panes at all (default layout), create a fresh agent pane.
+    if panes.is_empty() {
+        return vec![config::PaneConfig {
+            command: Some(injected_agent),
+            focus: true,
+            ..Default::default()
+        }];
     }
 
-    vec![config::PaneConfig {
-        command: Some(injected_agent),
-        focus: true,
-        ..Default::default()
-    }]
+    // Every pane has an explicit command: leave the layout untouched.
+    panes
+}
+
+/// Name of the file `write_prompt_file` writes under a worktree's
+/// `.workmux/` for `branch_name`.
+pub fn prompt_file_name(branch_name: &str) -> String {
+    format!("PROMPT-{}.md", branch_name.replace(['/', '\\', ':'], "-"))
 }
 
 /// Write a prompt file for agent consumption.
@@ -512,8 +540,7 @@ pub fn write_prompt_file(
             let _ = writeln!(file, "\n# workmux prompt files\n.workmux/");
         }
 
-        let prompt_filename = format!("PROMPT-{}.md", safe_branch_name);
-        workmux_dir.join(prompt_filename)
+        workmux_dir.join(prompt_file_name(branch_name))
     } else {
         // Legacy: write to temp directory for open command
         let prompt_filename = format!("workmux-prompt-{}.md", safe_branch_name);
@@ -551,7 +578,7 @@ fn resolve_git_exclude_path(dir: &Path) -> Option<PathBuf> {
 ///
 /// This prevents the case where a user provides `-p "some prompt"` but no pane
 /// is configured to run an agent that would receive it.
-fn validate_prompt_consumption(
+pub fn validate_prompt_consumption(
     panes: &[config::PaneConfig],
     cli_agent: Option<&str>,
     config: &config::Config,
@@ -646,10 +673,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_pane_configuration_agent_sets_focused_pane() {
+    fn resolve_pane_configuration_preserves_explicit_commands() {
         let original_panes = vec![
             config::PaneConfig {
-                command: Some("vim".to_string()),
+                command: Some("nvim".to_string()),
                 ..Default::default()
             },
             config::PaneConfig {
@@ -664,23 +691,65 @@ mod tests {
             &make_config_with_agent(Some("claude")),
             Some("claude"),
         );
-        assert_eq!(result[0].command, Some("vim".to_string()));
-        assert_eq!(result[1].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("npm run dev".to_string()));
     }
 
     #[test]
-    fn resolve_pane_configuration_agent_sets_first_pane_when_no_focus() {
+    fn resolve_pane_configuration_preserves_single_explicit_command() {
         let original_panes = vec![config::PaneConfig {
-            command: Some("vim".to_string()),
+            command: Some("nvim".to_string()),
             ..Default::default()
         }];
+
+        let result = resolve_pane_configuration(
+            &original_panes,
+            &make_config_with_agent(Some("pi")),
+            Some("pi"),
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+    }
+
+    #[test]
+    fn resolve_pane_configuration_agent_sets_focused_plain_shell_pane() {
+        let original_panes = vec![
+            config::PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            config::PaneConfig {
+                focus: true,
+                ..Default::default()
+            },
+        ];
 
         let result = resolve_pane_configuration(
             &original_panes,
             &make_config_with_agent(Some("claude")),
             Some("claude"),
         );
-        assert_eq!(result[0].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("<agent>".to_string()));
+    }
+
+    #[test]
+    fn resolve_pane_configuration_agent_sets_first_plain_shell_pane_when_no_focus() {
+        let original_panes = vec![
+            config::PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            config::PaneConfig::default(),
+        ];
+
+        let result = resolve_pane_configuration(
+            &original_panes,
+            &make_config_with_agent(Some("pi")),
+            Some("pi"),
+        );
+        assert_eq!(result[0].command, Some("nvim".to_string()));
+        assert_eq!(result[1].command, Some("<agent>".to_string()));
     }
 
     #[test]
@@ -698,7 +767,7 @@ mod tests {
     #[test]
     fn resolve_pane_configuration_preserves_named_profile_selector() {
         let original_panes = vec![config::PaneConfig {
-            command: Some("vim".to_string()),
+            command: Some("nvim".to_string()),
             focus: true,
             ..Default::default()
         }];
@@ -714,7 +783,7 @@ mod tests {
         );
 
         let result = resolve_pane_configuration(&original_panes, &config, Some("cc-work"));
-        assert_eq!(result[0].command, Some("<agent>".to_string()));
+        assert_eq!(result[0].command, Some("nvim".to_string()));
     }
 
     // --- validate_prompt_consumption tests ---
@@ -748,6 +817,8 @@ mod tests {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: crate::multiplexer::types::ResumeMode::default(),
         }
     }

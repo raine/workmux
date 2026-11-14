@@ -1,4 +1,4 @@
-//! Background thread spawning for git status and PR status fetches.
+//! Background thread spawning for git and GitHub status fetches.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -7,9 +7,26 @@ use std::sync::{Arc, Mutex};
 
 use crate::git;
 
-use super::super::agent;
 use super::App;
 use super::types::AppEvent;
+
+/// Group branches by repository identity while retaining a checkout for gh.
+fn group_pr_requests<'a>(
+    requests: impl IntoIterator<Item = (&'a PathBuf, &'a PathBuf, &'a str)>,
+) -> HashMap<PathBuf, (PathBuf, Vec<String>)> {
+    let mut grouped: HashMap<PathBuf, (PathBuf, Vec<String>)> = HashMap::new();
+    for (key, path, branch) in requests {
+        let (_, branches) = grouped
+            .entry(key.clone())
+            .or_insert_with(|| (path.clone(), Vec::new()));
+        branches.push(branch.to_string());
+    }
+    for (_, branches) in grouped.values_mut() {
+        branches.sort();
+        branches.dedup();
+    }
+    grouped
+}
 
 impl App {
     /// Spawn a background thread to fetch git status for all agent worktrees
@@ -27,7 +44,12 @@ impl App {
         let is_fetching = self.is_git_fetching.clone();
         let main_branch = self.config.main_branch.clone();
         // Include both agent paths and worktree paths so the worktree view gets git status too
-        let mut paths: Vec<PathBuf> = self.all_agents.iter().map(|a| a.path.clone()).collect();
+        let mut paths: Vec<PathBuf> = self
+            .all_agents
+            .iter()
+            .filter(|a| a.remote.is_none())
+            .map(|a| a.path.clone())
+            .collect();
         for wt in &self.worktrees {
             if !paths.contains(&wt.path) {
                 paths.push(wt.path.clone());
@@ -51,7 +73,7 @@ impl App {
         });
     }
 
-    /// Spawn a background thread to fetch PR status for all repos.
+    /// Spawn a background thread to fetch GitHub status for all repos.
     /// Returns true if a fetch was started, false if one is already in progress.
     pub(super) fn spawn_pr_status_fetch(&self) -> bool {
         // Skip if already fetching
@@ -63,57 +85,17 @@ impl App {
             return false;
         }
 
-        // Collect branches per repo root from agents
-        // Use all_agents (not filtered agents) because apply_filters() runs after
-        // this in refresh(), so self.agents may still be empty on first call.
-        let mut repo_branches: HashMap<PathBuf, Vec<String>> = HashMap::new();
-        for agent in &self.all_agents {
-            let Some(status) = self.git_statuses.get(&agent.path) else {
-                continue;
-            };
-            let Some(ref branch) = status.branch else {
-                continue;
-            };
-            if branch == "main" || branch == "master" {
-                continue;
-            }
-            if let Some(repo_root) = self.repo_roots.get(&agent.path) {
-                repo_branches
-                    .entry(repo_root.clone())
-                    .or_default()
-                    .push(branch.clone());
-            }
-        }
-
-        // Also collect branches from worktrees (keyed by main worktree path as repo root)
-        // Group non-main worktrees by their project's main worktree path
-        let main_paths: HashMap<String, PathBuf> = self
+        // Use unfiltered snapshots so filtering cannot omit branches from a fetch.
+        let worktree_requests = self
             .all_worktrees
             .iter()
-            .filter(|w| w.is_main)
-            .map(|w| {
-                let project = agent::extract_project_name(&w.path);
-                (project, w.path.clone())
-            })
-            .collect();
-        for wt in &self.all_worktrees {
-            if wt.is_main || wt.branch == "main" || wt.branch == "master" {
-                continue;
-            }
-            let project = agent::extract_project_name(&wt.path);
-            if let Some(repo_root) = main_paths.get(&project) {
-                repo_branches
-                    .entry(repo_root.clone())
-                    .or_default()
-                    .push(wt.branch.clone());
-            }
-        }
-
-        // Deduplicate branches per repo
-        for branches in repo_branches.values_mut() {
-            branches.sort();
-            branches.dedup();
-        }
+            .map(|wt| (&wt.repo_key, &wt.path, wt.branch.as_str()));
+        let agent_requests = self.all_agents.iter().filter_map(|agent| {
+            let branch = self.git_statuses.get(&agent.path)?.branch.as_deref()?;
+            let key = self.repo_keys.get(&agent.path)?;
+            Some((key, &agent.path, branch))
+        });
+        let repo_branches = group_pr_requests(worktree_requests.chain(agent_requests));
 
         if repo_branches.is_empty() {
             self.is_pr_fetching.store(false, Ordering::SeqCst);
@@ -126,16 +108,11 @@ impl App {
         let tx = self.event_tx.clone();
         let is_fetching = self.is_pr_fetching.clone();
 
-        // Identify the priority repo (current project) so it fetches first
-        let priority_repo = self
+        let priority_path = self
             .worktree_project_override
             .as_ref()
             .map(|(_, p)| p.clone())
-            .or_else(|| {
-                self.current_worktree
-                    .as_ref()
-                    .and_then(|p| self.repo_roots.get(p).cloned())
-            });
+            .or_else(|| self.current_worktree.clone());
 
         std::thread::spawn(move || {
             struct ResetFlag(Arc<AtomicBool>);
@@ -145,6 +122,10 @@ impl App {
                 }
             }
             let _reset = ResetFlag(is_fetching);
+
+            let priority_repo = priority_path
+                .as_deref()
+                .and_then(|path| git::get_repository_key_in(Some(path)).ok());
 
             // Sort repos so the priority repo (current project) is fetched first
             let mut repos: VecDeque<_> = repo_branches.into_iter().collect();
@@ -164,18 +145,19 @@ impl App {
                     let tx = tx.clone();
                     s.spawn(move || {
                         loop {
-                            let Some((repo_root, branches)) = queue.lock().unwrap().pop_front()
+                            let Some((repo_key, (checkout, branches))) =
+                                queue.lock().unwrap().pop_front()
                             else {
                                 break;
                             };
-                            match crate::github::list_prs_for_branches(&repo_root, &branches) {
-                                Ok(prs) => {
-                                    let _ = tx.send(AppEvent::PrStatus(repo_root, prs));
+                            match crate::github::list_branch_summaries(&checkout, &branches) {
+                                Ok(summaries) => {
+                                    let _ = tx.send(AppEvent::GithubStatus(repo_key, summaries));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        "Failed to fetch PRs for {:?}: {}",
-                                        repo_root,
+                                        "Failed to fetch GitHub status for {:?}: {}",
+                                        checkout,
                                         e
                                     );
                                 }
@@ -187,5 +169,45 @@ impl App {
         });
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_use_stable_keys_and_checkout_paths_without_main_rows() {
+        let key = PathBuf::from("/project/.git");
+        let first = PathBuf::from("/project/worktrees/branch-1");
+        let second = PathBuf::from("/project/worktrees/branch-2");
+        let agent = second.join("src");
+        let grouped = group_pr_requests([
+            (&key, &first, "branch-1"),
+            (&key, &second, "branch-2"),
+            (&key, &agent, "branch-2"),
+        ]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(
+            grouped[&key],
+            (first, vec!["branch-1".into(), "branch-2".into()])
+        );
+        let refreshed = group_pr_requests([(&key, &second, "branch-2")]);
+        assert_eq!(refreshed[&key], (second, vec!["branch-2".into()]));
+    }
+
+    #[test]
+    fn same_named_repositories_have_separate_requests() {
+        let key_a = PathBuf::from("/a/project/.git");
+        let key_b = PathBuf::from("/b/project/.git");
+        let checkout_a = PathBuf::from("/a/project/worktrees/feature");
+        let checkout_b = PathBuf::from("/b/project/worktrees/feature");
+        let grouped = group_pr_requests([
+            (&key_a, &checkout_a, "feature"),
+            (&key_b, &checkout_b, "feature"),
+        ]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[&key_a].0, checkout_a);
+        assert_eq!(grouped[&key_b].0, checkout_b);
     }
 }

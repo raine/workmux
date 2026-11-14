@@ -15,7 +15,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 
 use crate::config::StatusIcons;
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::AgentStatus;
 use crate::nerdfont;
 use crate::nerdfont::GitIcons;
@@ -278,15 +278,44 @@ pub fn format_git_status(
     }
 }
 
-/// Format PR status as styled spans for dashboard display
+/// Format the issues GitHub reports as closed by a pull request.
+pub fn format_pr_issues(pr: Option<&PrSummary>) -> String {
+    let Some(pr) = pr else {
+        return String::new();
+    };
+    let pr_repository = pr.url.as_deref().and_then(|url| {
+        let path = url.split_once("://")?.1.split_once('/')?.1;
+        let mut segments = path.split('/');
+        Some(format!("{}/{}", segments.next()?, segments.next()?))
+    });
+
+    pr.closing_issues
+        .iter()
+        .map(|issue| {
+            if pr_repository
+                .as_deref()
+                .is_none_or(|repository| repository.eq_ignore_ascii_case(&issue.repository))
+            {
+                format!("#{}", issue.number)
+            } else {
+                format!("{}#{}", issue.repository, issue.number)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Format GitHub PR and check status as styled spans for dashboard display
 pub fn format_pr_status(
     pr: Option<&PrSummary>,
+    checks: Option<&CheckSummary>,
     show_check_counts: bool,
     spinner_frame: u8,
     palette: &ThemePalette,
 ) -> Vec<(String, Style)> {
-    crate::ui::pr_status::format_pr_status(
+    crate::ui::pr_status::format_github_status(
         pr,
+        checks,
         PrStatusOptions {
             include_number: true,
             show_check_counts,
@@ -318,37 +347,39 @@ pub(crate) struct ResourceHeaderState<'a> {
     pub pr_fetching: bool,
 }
 
-/// Build the shared prefix columns for agent and worktree resource tables.
+/// A header cell of an agent or worktree resource table.
+pub(crate) enum ResourceHeaderCell {
+    /// Plain label with no fetch state.
+    Plain(&'static str),
+    /// `Git` label, spinning while git data is being fetched.
+    Git,
+    /// `PR` label, spinning while GitHub data is being fetched.
+    Pr,
+}
+
+/// Build the header row for agent and worktree resource tables.
 pub(crate) fn resource_table_header(
     state: ResourceHeaderState<'_>,
-    show_pr_column: bool,
-    trailing_columns: &[&'static str],
+    columns: &[ResourceHeaderCell],
 ) -> Row<'static> {
-    let git_header = build_column_header(
-        "Git",
-        state.git_fetching,
-        state.spinner_frame,
-        state.palette,
-    );
     let header_style = Style::default().fg(state.palette.header).bold();
-    let mut header_cells = vec![
-        Cell::from("#").style(header_style),
-        Cell::from("Project").style(header_style),
-        Cell::from("Worktree").style(header_style),
-        Cell::from(git_header),
-    ];
+    let header_cells = columns.iter().map(|column| match column {
+        ResourceHeaderCell::Plain(label) => Cell::from(*label).style(header_style),
+        ResourceHeaderCell::Git => Cell::from(build_column_header(
+            "Git",
+            state.git_fetching,
+            state.spinner_frame,
+            state.palette,
+        )),
+        ResourceHeaderCell::Pr => Cell::from(build_column_header(
+            "PR",
+            state.pr_fetching,
+            state.spinner_frame,
+            state.palette,
+        )),
+    });
 
-    if show_pr_column {
-        let pr_header =
-            build_column_header("PR", state.pr_fetching, state.spinner_frame, state.palette);
-        header_cells.push(Cell::from(pr_header));
-    }
-
-    for column in trailing_columns {
-        header_cells.push(Cell::from(*column).style(header_style));
-    }
-
-    Row::new(header_cells).height(1)
+    Row::new(header_cells.collect::<Vec<_>>()).height(1)
 }
 
 /// Bordered panel block with dashboard header styling.
@@ -411,6 +442,48 @@ pub fn calc_column_width(items: &[String], min: usize, max: usize, padding: usiz
         .saturating_add(padding) as u16
 }
 
+/// Color elapsed time by age without using the destructive-action color.
+pub(crate) fn elapsed_time_style(secs: Option<u64>, palette: &ThemePalette) -> Style {
+    match secs {
+        None => Style::default().fg(palette.dimmed),
+        Some(secs) if secs < 5 * 60 => Style::default().fg(palette.success),
+        Some(secs) if secs < 60 * 60 => Style::default().fg(palette.warning),
+        Some(_) => Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::DIM),
+    }
+}
+
+/// Render zero-valued clock units with less emphasis than active units.
+pub(crate) fn elapsed_time_line(
+    duration: String,
+    secs: Option<u64>,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let base = elapsed_time_style(secs, palette);
+    let inactive = base.add_modifier(Modifier::DIM);
+    let mut parts = duration.split(':');
+    let (Some(hours), Some(minutes), Some(seconds), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Line::styled(duration, inactive);
+    };
+
+    Line::from(vec![
+        Span::styled(
+            hours.to_string(),
+            if hours == "00" { inactive } else { base },
+        ),
+        Span::styled(":", inactive),
+        Span::styled(
+            minutes.to_string(),
+            if minutes == "00" { inactive } else { base },
+        ),
+        Span::styled(":", inactive),
+        Span::styled(seconds.to_string(), base),
+    ])
+}
+
 /// Create a style for a table row based on whether it's the current or main worktree.
 pub fn make_row_style(is_current: bool, is_main: bool, palette: &ThemePalette) -> Style {
     if is_current {
@@ -419,5 +492,69 @@ pub fn make_row_style(is_current: bool, is_main: bool, palette: &ThemePalette) -
         Style::default().fg(palette.dimmed)
     } else {
         Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ThemeMode, ThemeScheme};
+    use crate::github::ClosingIssue;
+
+    #[test]
+    fn pr_issues_qualify_only_external_repositories() {
+        let pr = PrSummary {
+            number: 42,
+            title: "Feature".into(),
+            state: "OPEN".into(),
+            is_draft: false,
+            checks: None,
+            check_meta: None,
+            url: Some("https://github.com/raine/workmux/pull/42".into()),
+            closing_issues: vec![
+                ClosingIssue {
+                    number: 308,
+                    repository: "Raine/Workmux".into(),
+                },
+                ClosingIssue {
+                    number: 12,
+                    repository: "acme/tracker".into(),
+                },
+            ],
+        };
+
+        assert_eq!(format_pr_issues(Some(&pr)), "#308 acme/tracker#12");
+        assert_eq!(format_pr_issues(None), "");
+    }
+
+    #[test]
+    fn elapsed_time_dims_inactive_clock_units() {
+        let palette = ThemePalette::for_scheme(ThemeScheme::Default, ThemeMode::Dark);
+        let line = elapsed_time_line("00:01:11".to_string(), Some(71), &palette);
+
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(!line.spans[2].style.add_modifier.contains(Modifier::DIM));
+        assert!(!line.spans[4].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn elapsed_time_color_progresses_with_age() {
+        let palette = ThemePalette::for_scheme(ThemeScheme::Default, ThemeMode::Dark);
+        assert_eq!(elapsed_time_style(None, &palette).fg, Some(palette.dimmed));
+        assert_eq!(
+            elapsed_time_style(Some(5 * 60 - 1), &palette).fg,
+            Some(palette.success)
+        );
+        assert_eq!(
+            elapsed_time_style(Some(5 * 60), &palette).fg,
+            Some(palette.warning)
+        );
+        assert_eq!(
+            elapsed_time_style(Some(60 * 60 - 1), &palette).fg,
+            Some(palette.warning)
+        );
+        let long_running = elapsed_time_style(Some(60 * 60), &palette);
+        assert_eq!(long_running.fg, Some(palette.accent));
+        assert!(long_running.add_modifier.contains(Modifier::DIM));
     }
 }

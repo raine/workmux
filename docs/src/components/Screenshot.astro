@@ -1,0 +1,165 @@
+---
+import { Image } from 'astro:assets';
+import type { ImageMetadata } from 'astro';
+
+interface Props {
+  src: ImageMetadata;
+  alt: string;
+  title?: string;
+  callout?: string;
+  caption?: string;
+  framed?: boolean;
+  shadow?: boolean;
+}
+
+const {
+  src,
+  alt,
+  title = 'Terminal',
+  callout,
+  caption,
+  framed = true,
+  shadow = false,
+} = Astro.props;
+---
+
+<figure class:list={['screenshot', { framed, shadow }]}>
+  {
+    framed && (
+      <div class="terminal-header" aria-hidden="true">
+        <div class="window-controls">
+          <span class="control red" />
+          <span class="control yellow" />
+          <span class="control green" />
+        </div>
+        <div class="window-title">{title}</div>
+      </div>
+    )
+  }
+  <div class="screenshot-image">
+    <Image
+      src={src}
+      alt={alt}
+      layout="constrained"
+      widths={[320, 640, 960, 1280, 1600]}
+      sizes="(max-width: 50rem) calc(100vw - 2rem), 46rem"
+    />
+    {callout && <span class="callout">{callout}</span>}
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .screenshot {
+    margin: 1.5rem 0;
+    overflow: hidden;
+    border-radius: 0.625rem;
+  }
+
+  /* Starlight spaces adjacent content siblings by 1rem, which would push the
+     caption away from the image it belongs to. */
+  .screenshot figcaption {
+    margin-top: 0;
+    padding-top: 0.5rem;
+    color: var(--sl-color-gray-3);
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+    text-align: center;
+  }
+
+  .screenshot.framed {
+    background: #1e1e1e;
+    box-shadow:
+      0 1.25rem 3.125rem -0.625rem rgb(0 0 0 / 30%),
+      0 0 0 1px rgb(255 255 255 / 10%);
+  }
+
+  .screenshot.shadow {
+    filter: drop-shadow(0 0.5rem 0.5rem rgb(0 0 0 / 40%));
+  }
+
+  :global(:root[data-theme='dark']) .screenshot.shadow {
+    filter: drop-shadow(0 0.5rem 0.5rem rgb(0 200 220 / 15%));
+  }
+
+  .terminal-header {
+    position: relative;
+    display: flex;
+    height: 1.75rem;
+    align-items: center;
+    justify-content: center;
+    background: #2d2d2d;
+  }
+
+  .window-controls {
+    position: absolute;
+    left: 0.625rem;
+    display: flex;
+    gap: 0.375rem;
+  }
+
+  .control {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 50%;
+  }
+
+  .red {
+    background: #ff5f56;
+  }
+
+  .yellow {
+    background: #ffbd2e;
+  }
+
+  .green {
+    background: #27c93f;
+  }
+
+  .window-title {
+    margin: 0;
+    color: rgb(255 255 255 / 72%);
+    font-family: var(--__sl-font-mono);
+    font-size: 0.75rem;
+    line-height: 1;
+  }
+
+  .screenshot-image {
+    position: relative;
+    margin: 0;
+  }
+
+  .screenshot-image > :global(.image-zoom-trigger) {
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .screenshot-image
+    > :global(.image-zoom-trigger:is(:hover, :focus-visible) img) {
+    transform: none;
+    box-shadow: none;
+  }
+
+  .screenshot-image :global(img) {
+    display: block;
+    width: 100%;
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .callout {
+    position: absolute;
+    bottom: 8%;
+    left: 18%;
+    padding: 0.125rem 0.5rem;
+    transform: translateX(-50%);
+    border: 1px solid rgb(255 255 255 / 20%);
+    border-radius: 0.5rem;
+    color: white;
+    background: rgb(0 0 0 / 70%);
+    font-size: 0.75rem;
+    font-weight: 600;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+</style>

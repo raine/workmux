@@ -1,0 +1,127 @@
+{
+  "instance_id": "f6e08034-7b7f-4680-ad5c-b7d29bf5d874",
+  "panes": [
+    {
+      "active": false,
+      "block_id": "block:01a1d6fa-d08f-7e38-9eb8-3a81b76b8549",
+      "child_name": "workmux",
+      "command": "workmux",
+      "cwd": "/private/tmp",
+      "floating": false,
+      "label": "workmux-sidebar",
+      "pid": 1797,
+      "session": "t",
+      "session_id": "session:01a1d6fa-8d3d-7a44-af38-4da61cb66edf",
+      "size": {
+        "cell_height_px": 16,
+        "cell_width_px": 8,
+        "columns": 80,
+        "desired": {},
+        "rows": 24
+      },
+      "title": "",
+      "window": "Window d2d12162",
+      "window_id": "window:01a1d6fa-8d5e-77d3-acd5-ec7cd2d12162",
+      "window_index": 1
+    },
+    {
+      "active": true,
+      "block_id": "block:01a1d6fa-8d3f-705d-a500-ecc67300e3d3",
+      "child_name": "sleep",
+      "command": "sleep",
+      "cwd": "/private/tmp",
+      "floating": false,
+      "label": "shell",
+      "pid": 99627,
+      "session": "t",
+      "session_id": "session:01a1d6fa-8d3d-7a44-af38-4da61cb66edf",
+      "title": "",
+      "window": "Window d2d12162",
+      "window_id": "window:01a1d6fa-8d5e-77d3-acd5-ec7cd2d12162",
+      "window_index": 1
+    },
+    {
+      "active": false,
+      "block_id": "block:01a1d6fa-a5ba-7261-9901-b286c06cab79",
+      "child_name": "sleep",
+      "command": "sleep",
+      "cwd": "/private/tmp",
+      "floating": false,
+      "label": "shell",
+      "pid": 314,
+      "session": "t",
+      "session_id": "session:01a1d6fa-8d3d-7a44-af38-4da61cb66edf",
+      "title": "",
+      "window": "Window d2d12162",
+      "window_id": "window:01a1d6fa-8d5e-77d3-acd5-ec7cd2d12162",
+      "window_index": 1
+    }
+  ],
+  "sessions": [
+    {
+      "label": "t",
+      "session_id": "session:01a1d6fa-8d3d-7a44-af38-4da61cb66edf"
+    }
+  ],
+  "windows": [
+    {
+      "active": true,
+      "layout": {
+        "rect": [
+          0,
+          0,
+          1,
+          1
+        ],
+        "split": {
+          "after": {
+            "rect": [
+              0.2,
+              0,
+              0.8,
+              1
+            ],
+            "split": {
+              "after": {
+                "block_id": "block:01a1d6fa-a5ba-7261-9901-b286c06cab79",
+                "rect": [
+                  0.2,
+                  0.5,
+                  0.8,
+                  0.5
+                ]
+              },
+              "before": {
+                "block_id": "block:01a1d6fa-8d3f-705d-a500-ecc67300e3d3",
+                "rect": [
+                  0.2,
+                  0,
+                  0.8,
+                  0.5
+                ]
+              },
+              "direction": "vertical",
+              "ratio": 0.5,
+              "split_id": "split:01a1d6fa-a5cd-7ae5-9ab4-0d9c08cc4504"
+            }
+          },
+          "before": {
+            "block_id": "block:01a1d6fa-d08f-7e38-9eb8-3a81b76b8549",
+            "rect": [
+              0,
+              0,
+              0.2,
+              1
+            ]
+          },
+          "direction": "horizontal",
+          "ratio": 0.2,
+          "split_id": "split:01a1d6fa-d0a1-771c-a49b-b685ebd364d1"
+        }
+      },
+      "session_id": "session:01a1d6fa-8d3d-7a44-af38-4da61cb66edf",
+      "window_id": "window:01a1d6fa-8d5e-77d3-acd5-ec7cd2d12162",
+      "window_index": 1
+    }
+  ]
+}

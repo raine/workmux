@@ -4,9 +4,21 @@ use crate::{config, git, sandbox};
 use anyhow::{Context, Result, anyhow};
 
 pub fn run(name: Option<&str>) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        anyhow::bail!("the window is on the local machine: run `workmux close <handle>` there");
+    }
     if crate::sandbox::guest::is_sandbox_guest() {
         let name_to_close = super::resolve_name(name)?;
         return run_via_rpc(&name_to_close);
+    }
+
+    let remote = match name {
+        Some(name) => crate::remote::cache::find_here(name),
+        None => current_remote_window(),
+    };
+    if let Some(record) = remote {
+        let mux = create_backend(detect_backend());
+        return crate::remote::lifecycle::close(mux.as_ref(), &record);
     }
 
     let config = config::Config::load(None)?;
@@ -16,7 +28,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
     // Resolve the handle first. When the user passes a branch name that differs
     // from the worktree directory name, find_worktree resolves through both handle
     // and branch lookups, then we extract the true handle from the path basename.
-    let resolved_handle = match name {
+    let (resolved_handle, worktree_path) = match name {
         Some(n) => {
             let (path, _branch) = git::find_worktree(n).map_err(|_| {
                 anyhow!(
@@ -24,13 +36,26 @@ pub fn run(name: Option<&str>) -> Result<()> {
                     n
                 )
             })?;
-            path.file_name()
+            let handle = path
+                .file_name()
                 .ok_or_else(|| anyhow!("Invalid worktree path: no directory name"))?
                 .to_string_lossy()
-                .to_string()
+                .to_string();
+            (handle, path)
         }
-        None => super::resolve_name(None)?,
+        None => {
+            let handle = super::resolve_name(None)?;
+            let (path, _branch) = git::find_worktree(&handle)?;
+            (handle, path)
+        }
     };
+
+    if !git::get_worktree_attachment(&resolved_handle).manages_mux() {
+        return Err(anyhow!(
+            "Worktree '{}' has no workmux-managed multiplexer target",
+            resolved_handle
+        ));
+    }
 
     // Determine if this worktree was created as a session or window
     let mode = git::get_worktree_mode(&resolved_handle);
@@ -48,7 +73,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
 
     // When no name is provided, prefer the current window/session name
     // This handles duplicate windows/sessions (e.g., wm:feature-2) correctly
-    let (full_target_name, is_current_target) = match name {
+    let (mut full_target_name, mut is_current_target) = match name {
         Some(_) => {
             // Explicit name provided - worktree already validated above
             let target = MuxHandle::new(mux.as_ref(), mode, prefix, &target_name);
@@ -83,10 +108,71 @@ pub fn run(name: Option<&str>) -> Result<()> {
         }
     };
 
+    let window_token = if mode == crate::config::MuxMode::Window && mux.supports_window_ownership()
+    {
+        git::get_worktree_window_token(&resolved_handle)
+    } else {
+        None
+    };
+    let expected_full_window_name = MuxHandle::new(
+        mux.as_ref(),
+        crate::config::MuxMode::Window,
+        prefix,
+        &target_name,
+    )
+    .full_name();
+    let owned_targets = window_token
+        .as_deref()
+        .map(|token| {
+            mux.resolve_owned_window_targets(
+                token,
+                &expected_full_window_name,
+                window_session.as_deref(),
+                &worktree_path,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let current_window_id = if mode == crate::config::MuxMode::Window {
+        mux.current_window_id()?
+    } else {
+        None
+    };
+    let owned_target = if name.is_none() {
+        current_window_id.as_deref().and_then(|current_id| {
+            owned_targets
+                .iter()
+                .find(|owned| owned.target.window_id.as_deref() == Some(current_id))
+        })
+    } else {
+        owned_targets
+            .iter()
+            .find(|owned| owned.is_primary)
+            .or_else(|| {
+                owned_targets
+                    .iter()
+                    .find(|owned| owned.target.full_name == full_target_name)
+            })
+    };
+
+    let window_target = if let Some(owned) = owned_target {
+        full_target_name = owned.target.full_name.clone();
+        is_current_target = current_window_id
+            .as_deref()
+            .zip(owned.target.window_id.as_deref())
+            .is_some_and(|(current, target)| current == target);
+        owned.target.clone()
+    } else {
+        WindowTarget::new(full_target_name.clone(), window_session.clone())
+    };
+
     let kind = mode_label(mode);
-    let window_target = WindowTarget::new(full_target_name.clone(), window_session.clone());
     let target_exists = if mode == crate::config::MuxMode::Window {
-        mux.window_target_exists(&window_target)?
+        if window_token.is_some() && window_target.window_id.is_none() {
+            false
+        } else {
+            mux.window_target_exists(&window_target)?
+        }
     } else {
         MuxHandle::exists_full(mux.as_ref(), mode, &full_target_name)?
     };
@@ -108,14 +194,20 @@ pub fn run(name: Option<&str>) -> Result<()> {
         if mode == crate::config::MuxMode::Window {
             MuxHandle::schedule_window_target_close(mux.as_ref(), &window_target, delay)?;
         } else {
-            MuxHandle::schedule_close_full(mux.as_ref(), mode, &full_target_name, delay)?;
+            MuxHandle::schedule_close_full(
+                mux.as_ref(),
+                mode,
+                &full_target_name,
+                delay,
+                config.default_session(),
+            )?;
         }
     } else {
         if mode == crate::config::MuxMode::Window {
             MuxHandle::kill_window_target(mux.as_ref(), &window_target)
                 .context("Failed to close target")?;
         } else {
-            MuxHandle::kill_full(mux.as_ref(), mode, &full_target_name)
+            mux.kill_session_to(&full_target_name, config.default_session())
                 .context("Failed to close target")?;
         }
         println!("✓ Closed {} '{}' (worktree kept)", kind, full_target_name);
@@ -162,6 +254,31 @@ fn run_via_rpc_impl(name: &str, client: &mut crate::sandbox::rpc::RpcClient) -> 
             other => anyhow::bail!("Unexpected RPC response: {:?}", other),
         }
     }
+}
+
+/// The remote workspace whose window the command runs in. Its panes run
+/// in the laptop's checkout, so the directory does not name it, and a
+/// local worktree of another project can have the same window name. Each
+/// relay pane is registered with the workspace it relays.
+fn current_remote_window() -> Option<crate::remote::cache::WorkspaceRecord> {
+    let records = crate::remote::cache::all();
+    if records.is_empty() {
+        return None;
+    }
+    let mux = create_backend(detect_backend());
+    let key = crate::state::PaneKey {
+        backend: mux.name().to_string(),
+        instance: mux.instance_id(),
+        pane_id: mux.current_pane_id().or_else(|| mux.active_pane_id())?,
+    };
+    let at = crate::state::StateStore::new()
+        .ok()?
+        .get_agent(&key)
+        .ok()??
+        .remote?;
+    records
+        .into_iter()
+        .find(|record| record.remote == at.remote && record.ws_id == at.ws_id)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub(crate) const FILENAME_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b'/').add(b'\\').add(b':').add(b'%');
 
-use crate::multiplexer::types::{AgentPane, AgentStatus};
+use crate::multiplexer::types::{AgentPane, AgentStatus, RemoteAgent, RemoteRef};
 
 /// Composite pane identifier for unique state file naming.
 ///
@@ -70,7 +70,7 @@ impl PaneKey {
 ///
 /// This is the persistent storage format. For dashboard display,
 /// convert to `AgentPane` using `to_agent_pane()`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentState {
     /// Composite identifier for the pane
     pub pane_key: PaneKey,
@@ -83,6 +83,12 @@ pub struct AgentState {
 
     /// Unix timestamp when status was last set
     pub status_ts: Option<u64>,
+
+    /// Unix timestamp when the agent entered its sidebar activity state.
+    /// Set by registration, status transitions, and resumption after interruption.
+    /// Drives recency and staleness without assigning a status during registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_ts: Option<u64>,
 
     /// Pane title (set by Claude Code to show session summary)
     pub pane_title: Option<String>,
@@ -97,7 +103,7 @@ pub struct AgentState {
 
     /// Unix timestamp of last persisted state update (any RPC call that writes state).
     /// Updated on status changes, title changes, and repeated same-status updates.
-    /// Used for staleness detection, recency sorting, and interruption resume detection.
+    /// Used for process reaping and interruption resume detection.
     pub updated_ts: u64,
 
     /// Window/tab name where this agent is running.
@@ -126,9 +132,34 @@ pub struct AgentState {
     /// over time, so we lock in the first definitive answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<String>,
+
+    /// Stable session identity reported by the agent's hook protocol.
+    ///
+    /// This binds pane-less hook events to a pane that an earlier event
+    /// identified directly or through process ancestry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+
+    /// Latest user prompt, normalized to one line. Stored only while the
+    /// configuration displays prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Set when the pane relays a remote workspace pane: `workdir` is then
+    /// the workspace's display path, and status, title and kind come from
+    /// the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteRef>,
 }
 
 impl AgentState {
+    /// Timestamp used for recency ordering and age-based staleness.
+    pub fn activity_ts(&self) -> Option<u64> {
+        self.activity_ts
+            .or(self.status_ts)
+            .or_else(|| self.status.is_none().then_some(self.updated_ts))
+    }
+
     /// Convert to AgentPane for dashboard display.
     ///
     /// The caller is responsible for providing the best available session/window names
@@ -139,14 +170,18 @@ impl AgentState {
             window_name,
             pane_id: self.pane_key.pane_id.clone(),
             window_id: String::new(),
+            window_index: None,
             path: self.workdir.clone(),
             pane_title: self.pane_title.clone(),
             status: self.status,
             status_ts: self.status_ts,
+            activity_ts: self.activity_ts(),
             updated_ts: Some(self.updated_ts),
             window_cmd: None,
             agent_command: Some(self.command.clone()),
             agent_kind: self.agent_kind.clone(),
+            prompt: self.prompt.clone(),
+            remote: self.remote.clone().map(RemoteAgent::new),
         }
     }
 }
@@ -193,6 +228,24 @@ pub struct GlobalSettings {
     /// Sidebar filter mode: "none" or "session"
     #[serde(default)]
     pub sidebar_filter: Option<String>,
+
+    /// Sidebar grouping override: "none", "project" or "session"
+    #[serde(default)]
+    pub sidebar_group_by: Option<String>,
+
+    /// Version whose sidebar hint has been offered. A different version means
+    /// the hint has not been shown for what is now installed.
+    #[serde(default)]
+    pub sidebar_hint_version: Option<String>,
+
+    /// When the sidebar hint was first shown for that version (Unix seconds),
+    /// so it can retire itself rather than becoming furniture.
+    #[serde(default)]
+    pub sidebar_hint_since: Option<u64>,
+
+    /// Whether the user has answered the sidebar hint.
+    #[serde(default)]
+    pub sidebar_hint_dismissed: bool,
 }
 
 /// Tracks which pane last-done navigated to, so repeated presses cycle
@@ -228,6 +281,47 @@ pub struct RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_state(status: Option<&str>, status_ts: Option<u64>, updated_ts: u64) -> AgentState {
+        serde_json::from_value(serde_json::json!({
+            "pane_key": {
+                "backend": "tmux",
+                "instance": "default",
+                "pane_id": "%1"
+            },
+            "workdir": "/tmp/project",
+            "status": status,
+            "status_ts": status_ts,
+            "pane_title": null,
+            "pane_pid": 123,
+            "command": "node",
+            "updated_ts": updated_ts,
+            "window_name": "wm-test",
+            "session_name": "main",
+            "boot_id": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_status_state_uses_status_time_for_activity() {
+        let state = legacy_state(Some("done"), Some(100), 200);
+        assert_eq!(state.activity_ts, None);
+        assert_eq!(state.activity_ts(), Some(100));
+        assert_eq!(
+            state
+                .to_agent_pane("main".into(), "wm-test".into())
+                .activity_ts,
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn legacy_statusless_registration_uses_update_time_for_activity() {
+        let state = legacy_state(None, None, 200);
+        assert_eq!(state.activity_ts, None);
+        assert_eq!(state.activity_ts(), Some(200));
+    }
 
     #[test]
     fn test_pane_key_to_filename() {

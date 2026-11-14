@@ -100,6 +100,27 @@ class TestGlobalPlaceholderPostCreate:
         assert (worktree_dir / global_hook).exists()
         assert (worktree_dir / after_hook).exists()
 
+    def test_global_placeholder_is_dropped_without_global_hook(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """Project hooks should run when no global post_create hook exists."""
+        env = mux_server
+        branch_name = "feature-missing-global-hook"
+        project_hook = "created_from_project.txt"
+
+        write_workmux_config(
+            mux_repo_path,
+            post_create=["<global>", f"touch {project_hook}"],
+        )
+
+        worktree_dir = add_branch_and_get_worktree(
+            env, workmux_exe_path, mux_repo_path, branch_name
+        )
+        assert (worktree_dir / project_hook).exists()
+
 
 class TestGlobalPlaceholderFiles:
     """Tests for <global> placeholder in file operations."""
@@ -380,6 +401,151 @@ class TestBaseBranchConfig:
         # The new worktree should have the commit from the configured base branch
         expected_file = file_for_commit(worktree_path, commit_msg)
         assert expected_file.exists()
+
+    def test_auto_base_branch_uses_configured_main_branch(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """The auto value should resolve to the effective main branch."""
+        env = mux_server
+        main_branch = "project-trunk"
+        current_branch = "unrelated-feature"
+        new_branch = "feature-from-auto-base"
+        main_commit = "Commit on configured main branch"
+        current_commit = "Commit on unrelated current branch"
+
+        env.run_command(["git", "checkout", "-b", main_branch], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, main_commit)
+        env.run_command(["git", "checkout", "main"], cwd=mux_repo_path)
+        env.run_command(["git", "checkout", "-b", current_branch], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, current_commit)
+        write_workmux_config(mux_repo_path, main_branch=main_branch, base_branch="auto")
+
+        worktree_path = add_branch_and_get_worktree(
+            env, workmux_exe_path, mux_repo_path, new_branch
+        )
+
+        assert file_for_commit(worktree_path, main_commit).exists()
+        assert not file_for_commit(worktree_path, current_commit).exists()
+        result = env.run_command(
+            ["git", "config", "--local", f"branch.{new_branch}.workmux-base"],
+            cwd=mux_repo_path,
+        )
+        assert result.stdout.strip() == main_branch
+
+    def test_global_auto_base_branch_uses_detected_main_branch(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """A global auto value should adapt to the current repository."""
+        env = mux_server
+        current_branch = "global-auto-current-feature"
+        new_branch = "feature-from-global-auto"
+        current_commit = "Commit on global auto current branch"
+
+        env.run_command(["git", "checkout", "-b", current_branch], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, current_commit)
+        write_global_workmux_config(env, base_branch="auto")
+
+        worktree_path = add_branch_and_get_worktree(
+            env, workmux_exe_path, mux_repo_path, new_branch
+        )
+
+        assert not file_for_commit(worktree_path, current_commit).exists()
+        result = env.run_command(
+            ["git", "config", "--local", f"branch.{new_branch}.workmux-base"],
+            cwd=mux_repo_path,
+        )
+        assert result.stdout.strip() == "main"
+
+    def test_cli_base_overrides_auto_base_branch(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """An explicit --base should take precedence over configured auto."""
+        env = mux_server
+        cli_base = "explicit-auto-override"
+        new_branch = "feature-from-explicit-auto-override"
+        commit_msg = "Commit on explicit auto override"
+
+        env.run_command(["git", "checkout", "-b", cli_base], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, commit_msg)
+        env.run_command(["git", "checkout", "main"], cwd=mux_repo_path)
+        write_workmux_config(mux_repo_path, base_branch="auto")
+
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            new_branch,
+            extra_args=f"--base {cli_base}",
+        )
+
+        assert file_for_commit(worktree_path, commit_msg).exists()
+        result = env.run_command(
+            ["git", "config", "--local", f"branch.{new_branch}.workmux-base"],
+            cwd=mux_repo_path,
+        )
+        assert result.stdout.strip() == cli_base
+
+    def test_dry_run_resolves_auto_base_branch(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """Dry-run output should show the resolved branch name."""
+        env = mux_server
+        current_branch = "dry-run-current-feature"
+        env.run_command(["git", "checkout", "-b", current_branch], cwd=mux_repo_path)
+        write_workmux_config(mux_repo_path, base_branch="auto")
+
+        result = env.run_command(
+            [str(workmux_exe_path), "add", "--dry-run", "dry-run-auto-base"],
+            cwd=mux_repo_path,
+        )
+
+        assert "Base:     main" in result.stdout
+        assert "Base:     auto" not in result.stdout
+
+    def test_dashboard_add_uses_auto_base_branch(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """Dashboard creation should resolve auto to the effective main branch."""
+        env = mux_server
+        current_branch = "dashboard-unrelated-feature"
+        new_branch = "dashboard-auto-created"
+        main_commit = "Commit on dashboard main"
+        current_commit = "Commit on dashboard unrelated feature"
+
+        create_commit(env, mux_repo_path, main_commit)
+        env.run_command(["git", "checkout", "-b", current_branch], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, current_commit)
+        write_workmux_config(mux_repo_path, base_branch="auto")
+
+        expected_file = file_for_commit(
+            get_worktree_path(mux_repo_path, new_branch), main_commit
+        )
+        worktree_path = self._add_from_dashboard(
+            env, workmux_exe_path, mux_repo_path, new_branch, expected_file
+        )
+
+        assert expected_file.exists()
+        assert not file_for_commit(worktree_path, current_commit).exists()
+        result = env.run_command(
+            ["git", "config", "--local", f"branch.{new_branch}.workmux-base"],
+            cwd=mux_repo_path,
+        )
+        assert result.stdout.strip() == "main"
 
     def test_dashboard_add_uses_project_base_branch_over_global(
         self,

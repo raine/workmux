@@ -17,6 +17,24 @@ use super::super::sort::WorktreeSortMode;
 use super::App;
 use super::types::*;
 
+fn merge_worktree_prs(
+    worktrees: &mut [workflow::types::WorktreeInfo],
+    statuses: &std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, crate::github::PrSummary>,
+    >,
+) {
+    for wt in worktrees {
+        if wt.pr_info.is_some() || wt.is_main {
+            continue;
+        }
+        wt.pr_info = statuses
+            .get(&wt.repo_key)
+            .and_then(|prs| prs.get(&wt.branch))
+            .cloned();
+    }
+}
+
 /// Delete the last word from a string (Emacs Ctrl+w behavior).
 fn delete_word_backward(s: &mut String) {
     // Trim trailing whitespace first
@@ -33,9 +51,11 @@ fn delete_word_backward(s: &mut String) {
 fn default_add_worktree_base(repo_path: &Path) -> String {
     crate::config::Config::load_with_location_from(repo_path, None)
         .ok()
-        .and_then(|(config, _)| config.base_branch)
-        .map(|branch| branch.trim().to_string())
-        .filter(|branch| !branch.is_empty())
+        .and_then(|(config, _)| {
+            workflow::resolve_configured_base_branch(&config, repo_path)
+                .ok()
+                .flatten()
+        })
         .or_else(|| {
             git::get_current_branch_in(repo_path)
                 .ok()
@@ -68,6 +88,7 @@ fn run_add_worktree_job(
         AddWorktreeJob::CreateBranch { name, base_branch } => {
             let (config, config_location) =
                 crate::config::Config::load_with_location_from(&repo_path, None)?;
+            crate::remote::reject_remote_placement(&config)?;
             let ctx = workflow::WorkflowContext::new_in(
                 &repo_path,
                 config.clone(),
@@ -86,7 +107,7 @@ fn run_add_worktree_job(
                     handle: &handle,
                     base_branch: base_branch.as_deref(),
                     remote_branch: None,
-                    pr_number: None,
+                    checkout_ref: None,
                     prompt: None,
                     options,
                     mode_override: None,
@@ -101,6 +122,7 @@ fn run_add_worktree_job(
         AddWorktreeJob::CheckoutPr { pr_number } => {
             let (config, config_location) =
                 crate::config::Config::load_with_location_from(&repo_path, None)?;
+            crate::remote::reject_remote_placement(&config)?;
 
             let pr_details = crate::github::get_pr_details_in(Some(&repo_path), pr_number)
                 .with_context(|| format!("Failed to fetch PR #{}", pr_number))?;
@@ -122,6 +144,9 @@ fn run_add_worktree_job(
                 pr_details.head_ref_name.clone()
             };
             let remote_branch = format!("{}/{}", remote_name, pr_details.head_ref_name);
+            // Compare the checkout against the PR target branch in the target
+            // repository (origin), not the head it was populated from.
+            let base_branch = crate::workflow::pr::pr_base_branch(&pr_details.base_ref_name);
 
             let ctx = workflow::WorkflowContext::new_in(
                 &repo_path,
@@ -139,9 +164,12 @@ fn run_add_worktree_job(
                 workflow::CreateArgs {
                     branch_name: &local_branch,
                     handle: &handle,
-                    base_branch: None,
+                    base_branch: base_branch.as_deref(),
                     remote_branch: Some(&remote_branch),
-                    pr_number: Some(pr_number),
+                    checkout_ref: Some(crate::workflow::pr::CheckoutRef {
+                        number: pr_number,
+                        forge: crate::workflow::pr::Forge::Github,
+                    }),
                     prompt: None,
                     options,
                     mode_override: None,
@@ -154,6 +182,24 @@ fn run_add_worktree_job(
             Ok(result.branch_name)
         }
     }
+}
+
+fn worktree_context(
+    path: &Path,
+    mux: Arc<dyn Multiplexer>,
+) -> anyhow::Result<workflow::WorkflowContext> {
+    let (config, config_location) = crate::config::Config::load_with_location_from(path, None)?;
+    workflow::WorkflowContext::new_in(path, config, mux, config_location)
+}
+
+fn remove_worktree(
+    handle: &str,
+    path: &Path,
+    keep_branch: bool,
+    mux: Arc<dyn Multiplexer>,
+) -> anyhow::Result<workflow::types::RemoveResult> {
+    let ctx = worktree_context(path, mux)?;
+    workflow::remove_quiet(handle, true, keep_branch, &ctx)
 }
 
 fn spawn_add_worktree_job(
@@ -250,20 +296,7 @@ impl App {
 
         // Merge PR data from dashboard's own PR fetching into worktrees
         // (workflow::list is called with fetch_pr_status=false to avoid spinner)
-        if !self.pr_statuses.is_empty() {
-            for wt in &mut self.worktrees {
-                if wt.pr_info.is_some() || wt.is_main {
-                    continue;
-                }
-                // Search all repo roots for a matching branch
-                for prs in self.pr_statuses.values() {
-                    if let Some(pr) = prs.get(&wt.branch) {
-                        wt.pr_info = Some(pr.clone());
-                        break;
-                    }
-                }
-            }
-        }
+        merge_worktree_prs(&mut self.worktrees, &self.pr_statuses);
 
         // Apply name filter
         if !self.worktree_filter_text.is_empty() {
@@ -297,6 +330,18 @@ impl App {
         self.update_worktree_preview();
     }
 
+    pub fn select_worktree(&mut self, index: usize) {
+        if index >= self.worktrees.len() {
+            return;
+        }
+        self.worktree_table_state.select(Some(index));
+        self.selected_worktree_path = self
+            .worktrees
+            .get(index)
+            .map(|worktree| worktree.path.clone());
+        self.update_worktree_preview();
+    }
+
     pub fn worktree_next(&mut self) {
         if self.worktrees.is_empty() {
             return;
@@ -307,9 +352,7 @@ impl App {
         } else {
             i + 1
         };
-        self.worktree_table_state.select(Some(next));
-        self.selected_worktree_path = self.worktrees.get(next).map(|w| w.path.clone());
-        self.update_worktree_preview();
+        self.select_worktree(next);
     }
 
     pub fn worktree_previous(&mut self) {
@@ -322,9 +365,7 @@ impl App {
         } else {
             i - 1
         };
-        self.worktree_table_state.select(Some(prev));
-        self.selected_worktree_path = self.worktrees.get(prev).map(|w| w.path.clone());
-        self.update_worktree_preview();
+        self.select_worktree(prev);
     }
 
     pub fn worktree_jump_to_index(&mut self, index: usize) {
@@ -367,11 +408,11 @@ impl App {
         };
 
         // Block removal of main worktree
-        if worktree.is_main {
+        if worktree.is_main || self.removals.contains(&worktree.path) {
             return;
         }
 
-        let is_dirty = git::has_uncommitted_changes(&worktree.path).unwrap_or(false);
+        let is_dirty = git::has_uncommitted_changes(&worktree.path).unwrap_or(true);
 
         self.pending_remove = Some(RemovePlan {
             handle: worktree.handle.clone(),
@@ -411,35 +452,47 @@ impl App {
             return;
         }
 
-        self.do_remove_worktree(&plan.path, plan.keep_branch);
+        if !self.removals.start(plan.path.clone()) {
+            return;
+        }
+        let mux = self.mux.clone();
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = remove_worktree(&plan.handle, &plan.path, plan.keep_branch, mux)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(AppEvent::RemoveWorktreeResult(plan.path, result));
+        });
     }
 
-    fn do_remove_worktree(&mut self, path: &Path, keep_branch: bool) {
-        let handle = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let Ok(ctx) = workflow::WorkflowContext::new(self.config.clone(), self.mux.clone(), None)
-        else {
-            return;
-        };
-
-        // force=true because user confirmed via modal
-        if workflow::remove(&handle, true, keep_branch, &ctx).is_ok() {
-            self.worktrees.retain(|w| w.path != *path);
-
-            if self.worktrees.is_empty() {
-                self.worktree_table_state.select(None);
-                self.selected_worktree_path = None;
-            } else {
-                let idx = self.worktree_table_state.selected().unwrap_or(0);
-                let new_idx = idx.min(self.worktrees.len() - 1);
-                self.worktree_table_state.select(Some(new_idx));
-                self.selected_worktree_path = self.worktrees.get(new_idx).map(|w| w.path.clone());
+    pub(super) fn handle_remove_worktree_result(
+        &mut self,
+        path: PathBuf,
+        result: Result<workflow::types::RemoveResult, String>,
+    ) {
+        let handle = path.file_name().unwrap_or_default().to_string_lossy();
+        let removed = result
+            .as_ref()
+            .is_ok_and(|result| !result.cleanup_scheduled);
+        self.removals.finish(&path, removed);
+        match result {
+            Ok(result) if result.cleanup_scheduled => {
+                self.status_message = Some((
+                    format!("Removal scheduled for '{handle}'"),
+                    std::time::Instant::now(),
+                ));
+            }
+            Ok(_) => {
+                self.all_worktrees.retain(|wt| wt.path != path);
+                self.apply_worktree_filters();
+            }
+            Err(error) => {
+                self.status_message = Some((
+                    format!("Failed to remove '{handle}': {error}"),
+                    std::time::Instant::now(),
+                ));
             }
         }
+        self.trigger_worktree_refetch();
     }
 
     /// Close the mux window/session for the selected worktree without removing it.
@@ -451,17 +504,55 @@ impl App {
             return;
         };
 
-        if worktree.is_main || !worktree.has_mux_window {
+        if worktree.is_main || !worktree.has_mux_window || self.removals.contains(&worktree.path) {
             return;
         }
 
         let prefix = self.config.window_prefix();
-        let full_name = crate::multiplexer::util::prefixed(prefix, &worktree.handle);
-        let _ = crate::multiplexer::handle::MuxHandle::kill_full(
-            self.mux.as_ref(),
-            worktree.mode,
-            &full_name,
-        );
+        if worktree.mode == crate::config::MuxMode::Window {
+            let target_name = crate::git::get_worktree_target_window(&worktree.handle)
+                .unwrap_or_else(|| worktree.handle.clone());
+            let full_name = crate::multiplexer::util::prefixed(prefix, &target_name);
+            let parent_session = crate::git::get_worktree_window_session(&worktree.handle);
+            let window_token = self
+                .mux
+                .supports_window_ownership()
+                .then(|| crate::git::get_worktree_window_token(&worktree.handle))
+                .flatten();
+            let target = if let Some(token) = window_token {
+                self.mux
+                    .resolve_owned_window_targets(
+                        &token,
+                        &full_name,
+                        parent_session.as_deref(),
+                        &worktree.path,
+                    )
+                    .ok()
+                    .and_then(|targets| {
+                        targets
+                            .iter()
+                            .find(|owned| owned.is_primary)
+                            .map(|owned| owned.target.clone())
+                    })
+            } else {
+                Some(crate::multiplexer::WindowTarget::new(
+                    full_name,
+                    parent_session,
+                ))
+            };
+            if let Some(target) = target {
+                let _ = self.mux.kill_window_target(&target);
+            }
+        } else {
+            let target_name = crate::git::get_worktree_target_session(&worktree.handle)
+                .unwrap_or_else(|| worktree.handle.clone());
+            let full_name = crate::multiplexer::util::prefixed(prefix, &target_name);
+            let _ = crate::multiplexer::handle::MuxHandle::kill_full(
+                self.mux.as_ref(),
+                worktree.mode,
+                &full_name,
+            );
+        }
         self.trigger_worktree_refetch();
     }
 
@@ -479,7 +570,7 @@ impl App {
         let mut candidates: Vec<SweepCandidate> = Vec::new();
 
         for wt in &self.worktrees {
-            if wt.is_main {
+            if wt.is_main || self.removals.contains(&wt.path) {
                 continue;
             }
 
@@ -569,7 +660,6 @@ impl App {
         }
 
         let total = paths_to_remove.len();
-        let config = self.config.clone();
         let mux = self.mux.clone();
         let tx = self.event_tx.clone();
 
@@ -580,30 +670,28 @@ impl App {
         });
 
         std::thread::spawn(move || {
-            let Ok(ctx) = workflow::WorkflowContext::new(config, mux, None) else {
-                let _ = tx.send(AppEvent::SweepComplete(Err(
-                    "Failed to create workflow context".to_string(),
-                )));
-                return;
+            let mut outcome = SweepOutcome {
+                completed: 0,
+                scheduled: 0,
             };
-
             let mut failures = 0;
-            for (i, (handle, _path)) in paths_to_remove.iter().enumerate() {
+            for (i, (handle, path)) in paths_to_remove.iter().enumerate() {
                 let _ = tx.send(AppEvent::SweepProgressUpdate(i + 1, total, handle.clone()));
 
-                if workflow::remove(handle, true, false, &ctx).is_err() {
-                    failures += 1;
+                match remove_worktree(handle, path, false, mux.clone()) {
+                    Ok(result) if result.cleanup_scheduled => outcome.scheduled += 1,
+                    Ok(_) => outcome.completed += 1,
+                    Err(_) => failures += 1,
                 }
             }
 
             if failures > 0 {
                 let _ = tx.send(AppEvent::SweepComplete(Err(format!(
-                    "Removed {}/{} worktrees",
-                    total - failures,
-                    total
+                    "Completed {}, scheduled {}, failed {} of {} worktrees",
+                    outcome.completed, outcome.scheduled, failures, total
                 ))));
             } else {
-                let _ = tx.send(AppEvent::SweepComplete(Ok(())));
+                let _ = tx.send(AppEvent::SweepComplete(Ok(outcome)));
             }
         });
     }
@@ -854,8 +942,7 @@ impl App {
         self.trigger_worktree_refetch();
     }
 
-    /// Open a tmux window/session for the selected worktree via workflow::open,
-    /// then close the dashboard.
+    /// Open a multiplexer window or session for the selected worktree.
     pub fn open_selected_worktree(&mut self) {
         let Some(selected) = self.worktree_table_state.selected() else {
             return;
@@ -864,17 +951,30 @@ impl App {
             return;
         };
 
-        let handle = worktree.handle.clone();
-
-        let Ok(ctx) = workflow::WorkflowContext::new(self.config.clone(), self.mux.clone(), None)
-        else {
+        if self.removals.contains(&worktree.path) {
             return;
-        };
+        }
 
-        let mut options = workflow::types::SetupOptions::new(false, false, true);
-        options.mode = self.config.mode();
-        if workflow::open(&handle, &ctx, options, false, None, None, None).is_ok() {
-            self.should_jump = true;
+        let result = (|| -> anyhow::Result<_> {
+            let ctx = worktree_context(&worktree.path, self.mux.clone())?;
+            let mut options = workflow::types::SetupOptions::new(false, false, true);
+            options.mode = ctx.config.mode();
+            workflow::open(&worktree.handle, &ctx, options, false, None, None, None)
+        })();
+
+        match result {
+            Ok(_) => {
+                self.trigger_worktree_refetch();
+                if self.should_close_after_jump() {
+                    self.should_jump = true;
+                }
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("Failed to open worktree: {e:#}"),
+                    std::time::Instant::now(),
+                ));
+            }
         }
     }
 
@@ -888,6 +988,10 @@ impl App {
         let Some(worktree) = self.worktrees.get(selected) else {
             return;
         };
+
+        if self.removals.contains(&worktree.path) {
+            return;
+        }
 
         // Try agent pane first for direct pane targeting
         if let Some(agent) = self.all_agents.iter().find(|a| a.path == worktree.path) {
@@ -1279,10 +1383,12 @@ impl App {
             if let Some(path) = current_path {
                 let tx = self.event_tx.clone();
                 std::thread::spawn(move || {
-                    let output = std::process::Command::new("git")
-                        .args(["log", "--format=%h\t%ar\t%s", "-n", "20"])
-                        .current_dir(&path)
-                        .output();
+                    let output = crate::git::unattended_git(Some(&path)).and_then(|mut command| {
+                        command
+                            .args(["log", "--format=%h\t%ar\t%s", "-n", "20"])
+                            .output()
+                            .map_err(anyhow::Error::from)
+                    });
                     if let Ok(out) = output {
                         let log = String::from_utf8_lossy(&out.stdout).to_string();
                         let _ = tx.send(AppEvent::WorktreeLog(path, log));
@@ -1290,5 +1396,125 @@ impl App {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MuxMode;
+    use crate::github::{ClosingIssue, PrSummary};
+    use crate::workflow::types::WorktreeInfo;
+    use std::collections::HashMap;
+
+    fn worktree(repo: &str, name: &str, is_main: bool) -> WorktreeInfo {
+        WorktreeInfo {
+            repo_key: format!("{repo}/.git").into(),
+            handle: name.into(),
+            branch: name.into(),
+            path: format!("{repo}/worktrees/{name}").into(),
+            is_main,
+            mode: MuxMode::Window,
+            has_mux_window: false,
+            has_unmerged: false,
+            pr_info: None,
+            agent_status: None,
+            created_at: None,
+            base_branch: None,
+        }
+    }
+
+    #[test]
+    fn worktree_context_uses_selected_repository_and_config() {
+        let repo = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .arg(repo.path())
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        std::fs::write(
+            repo.path().join(".workmux.yaml"),
+            "main_branch: main\nwindow_prefix: selected-\n",
+        )
+        .unwrap();
+        let mux = crate::multiplexer::create_backend(crate::multiplexer::BackendType::Tmux);
+        let ctx = worktree_context(repo.path(), mux).unwrap();
+        assert_eq!(ctx.execution_dir, repo.path().canonicalize().unwrap());
+        assert_eq!(ctx.main_worktree_root, ctx.execution_dir);
+        assert_eq!(ctx.prefix, "selected-");
+        assert_eq!(ctx.config_source_dir, ctx.execution_dir);
+    }
+
+    fn pr(number: u32) -> PrSummary {
+        PrSummary {
+            number,
+            title: format!("PR {number}"),
+            state: "OPEN".into(),
+            is_draft: false,
+            checks: None,
+            check_meta: None,
+            url: None,
+            closing_issues: vec![ClosingIssue {
+                number: 201,
+                repository: "test/project".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn bare_worktree_prs_survive_first_checkout_removal() {
+        let first = worktree("/project", "branch-1", false);
+        let second = worktree("/project", "branch-2", false);
+        let statuses = HashMap::from([(
+            first.repo_key.clone(),
+            HashMap::from([
+                (first.branch.clone(), pr(101)),
+                (second.branch.clone(), pr(102)),
+            ]),
+        )]);
+        let mut rows = vec![first, second.clone()];
+        merge_worktree_prs(&mut rows, &statuses);
+        assert_eq!(rows[0].pr_info, Some(pr(101)));
+        assert_eq!(rows[1].pr_info, Some(pr(102)));
+        let mut refreshed = vec![second];
+        merge_worktree_prs(&mut refreshed, &statuses);
+        assert_eq!(refreshed[0].pr_info, Some(pr(102)));
+    }
+
+    #[test]
+    fn matching_project_and_branch_names_do_not_mix_prs() {
+        let mut rows = vec![
+            worktree("/a/project", "feature", false),
+            worktree("/b/project", "feature", false),
+        ];
+        let statuses = HashMap::from([
+            (
+                rows[0].repo_key.clone(),
+                HashMap::from([("feature".into(), pr(101))]),
+            ),
+            (
+                rows[1].repo_key.clone(),
+                HashMap::from([("feature".into(), pr(102))]),
+            ),
+        ]);
+        merge_worktree_prs(&mut rows, &statuses);
+        assert_eq!(rows[0].pr_info, Some(pr(101)));
+        assert_eq!(rows[1].pr_info, Some(pr(102)));
+    }
+
+    #[test]
+    fn ordinary_main_checkout_keeps_existing_pr_suppression() {
+        let mut rows = vec![
+            worktree("/project", "main", true),
+            worktree("/project", "feature", false),
+        ];
+        let statuses = HashMap::from([(
+            rows[0].repo_key.clone(),
+            HashMap::from([("main".into(), pr(101)), ("feature".into(), pr(102))]),
+        )]);
+        merge_worktree_prs(&mut rows, &statuses);
+        assert_eq!(rows[0].pr_info, None);
+        assert_eq!(rows[1].pr_info, Some(pr(102)));
     }
 }

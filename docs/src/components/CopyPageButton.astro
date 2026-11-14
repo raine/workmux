@@ -1,0 +1,72 @@
+---
+const rawPath = `${Astro.url.pathname.replace(/\/$/, '') || '/index'}.md`;
+---
+
+<a class="copy-page" href={rawPath} data-copy-page>
+  <span class="copy-page-label" data-copy-label>Copy page</span>
+  <span class="sr-only" aria-live="polite" data-copy-status></span>
+</a>
+
+<script>
+  for (const link of document.querySelectorAll<HTMLAnchorElement>(
+    '[data-copy-page]',
+  )) {
+    if (link.dataset.enhanced === 'true') continue;
+    link.dataset.enhanced = 'true';
+
+    const label = link.querySelector<HTMLElement>('[data-copy-label]');
+    const status = link.querySelector<HTMLElement>('[data-copy-status]');
+    if (!label || !status) continue;
+
+    link.addEventListener('click', async (event) => {
+      if (!navigator.clipboard || !window.isSecureContext) return;
+      event.preventDefault();
+      label.textContent = 'Copying...';
+      status.textContent = 'Copying page as Markdown';
+
+      try {
+        const response = await fetch(link.href);
+        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+        await navigator.clipboard.writeText(await response.text());
+        label.textContent = 'Copied';
+        status.textContent = 'Page copied as Markdown';
+      } catch {
+        label.textContent = 'Open Markdown';
+        status.textContent = 'Copy failed. Open the Markdown page instead.';
+      }
+
+      window.setTimeout(() => {
+        label.textContent = 'Copy page';
+      }, 2200);
+    });
+  }
+</script>
+
+<style>
+  .copy-page {
+    display: inline-flex;
+    min-width: 6.8rem;
+    min-height: 2rem;
+    align-items: center;
+    justify-content: center;
+    padding: 0.3rem 0.65rem;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 0.4rem;
+    color: var(--sl-color-text-accent);
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .copy-page:hover {
+    border-color: var(--sl-color-text-accent);
+    color: var(--sl-color-white);
+  }
+
+  .copy-page:focus-visible {
+    outline: 2px solid var(--sl-color-text-accent);
+    outline-offset: 0.2rem;
+  }
+</style>

@@ -1,0 +1,987 @@
+---
+// The workmux dashboard popup rendered live as a character grid: the agents
+// table across projects, the preview of the selected agent, input mode and
+// sorting.
+import './grid.css';
+---
+
+<live-dash class="gl">
+  <div
+    class="gl-grid"
+    role="img"
+    aria-label="The workmux dashboard: a table of agents across projects with status, diff size and time, a live preview of the selected agent, an agent's question answered from input mode, and the list sorted by project"
+  >
+  </div>
+  <span class="gl-key" aria-hidden="true"></span>
+  <div class="gl-chapters"></div>
+  <span class="gl-time" aria-hidden="true"></span>
+</live-dash>
+
+<style is:global>
+  live-dash.gl {
+    color: #cdd6f4;
+  }
+
+  /* The dashboard's default dark palette (src/ui/theme.rs). */
+  live-dash .pb {
+    color: #6e6e6e;
+  }
+  live-dash .dm {
+    color: #6c7086;
+  }
+  live-dash .tx {
+    color: #cdd6f4;
+  }
+  live-dash .bd {
+    color: #3a4a5e;
+  }
+  live-dash .hd {
+    color: #b4c8dc;
+  }
+  live-dash .kc {
+    color: #f9e2af;
+  }
+  live-dash .in {
+    color: #78e1d5;
+  }
+  live-dash .su {
+    color: #a6da95;
+  }
+  live-dash .wn {
+    color: #f9e2af;
+  }
+  live-dash .dn {
+    color: #ed8796;
+  }
+  live-dash .ac {
+    color: #cba6f7;
+  }
+  live-dash .cf {
+    color: #f4f8ff;
+  }
+  live-dash .Bcr {
+    background-color: #18222e;
+  }
+  live-dash .Bhi {
+    background-color: #28303e;
+  }
+
+  /* The agent's own pane, as the preview captures it. */
+  live-dash .t {
+    color: #d4d4d4;
+  }
+  live-dash .w {
+    color: #f0f0f0;
+  }
+  live-dash .d {
+    color: #9b9b9b;
+  }
+  live-dash .code {
+    color: #a9c3f2;
+  }
+  live-dash .ok {
+    color: #9fd49a;
+  }
+  live-dash .sg {
+    color: #e0896d;
+  }
+  live-dash .up {
+    color: #b0b0b0;
+  }
+  live-dash .rule {
+    color: #4a4a4a;
+  }
+  live-dash .pm {
+    color: #e2a2b0;
+  }
+  live-dash .Bup {
+    background-color: #262626;
+  }
+  live-dash .Bcur {
+    background-color: #c6c6c6;
+  }
+
+  html[data-theme='light'] live-dash .pb {
+    color: #b8b8b8;
+  }
+  html[data-theme='light'] live-dash .dm {
+    color: #8c8fa1;
+  }
+  html[data-theme='light'] live-dash .tx {
+    color: #4c4f69;
+  }
+  html[data-theme='light'] live-dash .bd {
+    color: #a0a0af;
+  }
+  html[data-theme='light'] live-dash .hd {
+    color: #3c4b5f;
+  }
+  html[data-theme='light'] live-dash .kc {
+    color: #df8e1d;
+  }
+  html[data-theme='light'] live-dash .in {
+    color: #179299;
+  }
+  html[data-theme='light'] live-dash .su {
+    color: #40a02b;
+  }
+  html[data-theme='light'] live-dash .wn {
+    color: #df8e1d;
+  }
+  html[data-theme='light'] live-dash .dn {
+    color: #d20f39;
+  }
+  html[data-theme='light'] live-dash .ac {
+    color: #8839ef;
+  }
+  html[data-theme='light'] live-dash .cf {
+    color: #4c4f69;
+  }
+  html[data-theme='light'] live-dash .Bcr {
+    background-color: #d7e6d7;
+  }
+  html[data-theme='light'] live-dash .Bhi {
+    background-color: #c8c8d2;
+  }
+  html[data-theme='light'] live-dash .t {
+    color: #2f3337;
+  }
+  html[data-theme='light'] live-dash .w {
+    color: #111418;
+  }
+  html[data-theme='light'] live-dash .d {
+    color: #6b7076;
+  }
+  html[data-theme='light'] live-dash .code {
+    color: #2f5fb3;
+  }
+  html[data-theme='light'] live-dash .ok {
+    color: #2f7d32;
+  }
+  html[data-theme='light'] live-dash .sg {
+    color: #b4532f;
+  }
+  html[data-theme='light'] live-dash .up {
+    color: #555a60;
+  }
+  html[data-theme='light'] live-dash .rule {
+    color: #cfcfcf;
+  }
+  html[data-theme='light'] live-dash .pm {
+    color: #b4405a;
+  }
+  html[data-theme='light'] live-dash .Bup {
+    background-color: #ececec;
+  }
+  html[data-theme='light'] live-dash .Bcur {
+    background-color: #3a3f45;
+  }
+</style>
+
+<script>
+  import {
+    GridLoop,
+    STEP,
+    fit,
+    html,
+    lineW,
+    sp,
+    spread,
+    wrapPlain,
+  } from './grid';
+  import type { Line, Seg, Step } from './grid';
+
+  // The popup, border included: the size of `display-popup -w 130 -h 30`.
+  const COLS = 130;
+  const ROWS = 30;
+  const IN_W = COLS - 2;
+  const TABLE_H = 10; // 40% of the 25 rows between the tabs and the footer
+  const PREVIEW_H = 15;
+  const PANE_W = 112; // width of the agent pane the preview captures
+  const TICK = 100;
+
+  // Nerd Font glyphs the dashboard uses: nf-md-file_document_edit_outline,
+  // nf-oct-git_pull_request, nf-md-check_circle and nf-md-close_circle.
+  const SVG = {
+    edit: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M11.7 1.3a1.6 1.6 0 0 1 2.3 0l.7.7a1.6 1.6 0 0 1 0 2.3L5.9 13.1l-3.6 1 1-3.6z"/></svg>',
+    pr: '<svg viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg>',
+    ok: '<svg viewBox="0 0 24 24" style="width:1.1em;height:1.1em;vertical-align:-0.2em"><path fill="currentColor" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2m0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8m4.59-12.42L10 14.17l-2.59-2.58L6 13l4 4 8-8z"/></svg>',
+    fail: '<svg viewBox="0 0 24 24" style="width:1.1em;height:1.1em;vertical-align:-0.2em"><path fill="currentColor" d="M12 2c5.53 0 10 4.47 10 10s-4.47 10-10 10S2 17.53 2 12 6.47 2 12 2m3.59 5L12 10.59 8.41 7 7 8.41 10.59 12 7 15.59 8.41 17 12 13.41 15.59 17 17 15.59 13.41 12 17 8.41z"/></svg>',
+  };
+
+  // ------------------------------------------------------- agent panes
+
+  const tool = (name: string, arg: string): Line => [
+    ['● ', 'ok'],
+    [name, 'b t'],
+    [`(${arg})`, 't'],
+  ];
+  const out = (text: string, cls = 't'): Line => [
+    ['  ⎿  ', 'd'],
+    [text, cls],
+  ];
+  const more = (text: string): Line => [
+    ['     ', ''],
+    [text, 't'],
+  ];
+  const msg = (text: string): Line[] =>
+    wrapPlain(text, PANE_W - 4).map((l, i) => [
+      [i ? '  ' : '● ', 'w'],
+      [l, 't'],
+    ]);
+  const gap: Line = [];
+
+  const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+  const BRAILLE = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+  type Ask = { head: string; question: string; options: [string, string][] };
+  type State = 'work' | 'wait' | 'done';
+
+  interface Agent {
+    n: number; // pane order, the natural sort
+    proj: string;
+    name: string;
+    st: State;
+    since: number;
+    add: number;
+    del: number;
+    uadd: number;
+    udel: number;
+    ahead?: number;
+    main?: boolean;
+    current?: boolean;
+    pr?: { n: number; check: 'ok' | 'fail' };
+    title: string;
+    log: Line[];
+    feed?: Line[][];
+    feedAt?: number;
+    verb?: string;
+    verbAt?: number;
+    tokens?: number;
+    ask?: Ask | null;
+    choice?: number;
+    nextEdit?: number;
+  }
+
+  const p2 = (n: number) => String(n).padStart(2, '0');
+
+  const MIGRATION: Ask = {
+    head: 'Migration',
+    question:
+      'The limiter needs a new rate_limits table. How should I apply the migration?',
+    options: [
+      ['Apply it now', 'Run pnpm db:migrate against the dev database'],
+      [
+        'Staging first',
+        'Migrate staging, run the limiter suite there, then dev',
+      ],
+      ['Leave it to me', 'Commit the migration without running it'],
+    ],
+  };
+
+  class LiveDash extends GridLoop {
+    cols = COLS;
+    rowCount = ROWS;
+    chapters = ['Every agent', 'Live preview', 'Needs input', 'Reply', 'Sort'];
+    agents: Agent[] = [];
+    sel!: Agent;
+    sort: 'priority' | 'project' = 'priority';
+    input = false;
+
+    // Working agents keep writing to their pane and their worktree.
+    advance() {
+      for (const a of this.agents) this.advanceAgent(a);
+    }
+
+    advanceAgent(a: Agent) {
+      if (a.st !== 'work') return;
+      a.tokens = (a.tokens ?? 0) + ((6 + this.rand() * 22) * STEP) / TICK;
+      if (a.feed?.length && this.t >= (a.feedAt ?? 0)) {
+        a.log.push(...a.feed.shift()!);
+        a.feedAt = this.t + 1300 + this.rand() * 900;
+      }
+      if (this.t >= (a.nextEdit ?? 0)) {
+        if (a.nextEdit) {
+          a.uadd += 1 + Math.floor(this.rand() * 9);
+          a.udel += Math.floor(this.rand() * 3);
+        }
+        a.nextEdit = this.t + 2500 + this.rand() * 3500;
+      }
+    }
+
+    reset() {
+      this.begin();
+      const t = this.t;
+      this.sort = 'priority';
+      this.input = false;
+      const s = 1000;
+      const m = 60 * s;
+      const h = 60 * m;
+      let n = 0;
+      const ag = (
+        a: Omit<Agent, 'n' | 'uadd' | 'udel' | 'add' | 'del'> & Partial<Agent>,
+      ): Agent => ({
+        n: n++,
+        add: 0,
+        del: 0,
+        uadd: 0,
+        udel: 0,
+        ...a,
+      });
+      this.agents = [
+        ag({
+          proj: 'workmux',
+          name: 'sidebar-views',
+          st: 'work',
+          since: t - 27 * s,
+          add: 412,
+          del: 38,
+          uadd: 96,
+          udel: 4,
+          current: true,
+          title: '✳ Compact sidebar layout',
+          verb: 'Shimmying',
+          verbAt: t - 41 * s,
+          tokens: 1840,
+          log: [
+            ...msg(
+              'The compact layout can reuse the tile renderer. Each agent becomes one line built from the same template.',
+            ),
+            gap,
+            tool('Read', 'src/command/sidebar/ui.rs'),
+            out('Read 418 lines'),
+            gap,
+          ],
+          feed: [
+            [
+              tool('Update', 'src/command/sidebar/ui.rs'),
+              out(
+                'Updated src/command/sidebar/ui.rs with 38 additions and 6 removals',
+              ),
+              gap,
+            ],
+            [tool('Bash', 'cargo test sidebar'), out('running 24 tests')],
+            [
+              more('test sidebar::ui::tests::compact_row_fits_width ... '),
+              more('test sidebar::ui::tests::compact_row_shows_status ... '),
+            ],
+            [more('test result: ok. 24 passed; 0 failed; 0 ignored'), gap],
+            [
+              ...msg(
+                'All sidebar tests pass. Next, the `layout` option so compact can be picked from config.',
+              ),
+              gap,
+            ],
+            [
+              tool('Update', 'src/config.rs'),
+              out('Updated src/config.rs with 12 additions'),
+              gap,
+            ],
+          ],
+        }),
+        ag({
+          proj: 'consult-llm',
+          name: 'gemini-support',
+          st: 'work',
+          since: t - 94 * s,
+          add: 95,
+          del: 30,
+          uadd: 67,
+          udel: 12,
+          title: '✳ Implementing streaming',
+          verb: 'Brewing',
+          verbAt: t - 26 * s,
+          tokens: 1120,
+          log: [
+            tool('Bash', 'cargo test streaming'),
+            out('running 3 tests'),
+            more('test providers::gemini::tests::test_stream_basic ... ok'),
+            more('test providers::gemini::tests::test_stream_error ... ok'),
+            more('test providers::gemini::tests::test_stream_cancel ... ok'),
+            gap,
+            more('test result: ok. 3 passed; 0 failed'),
+            gap,
+          ],
+          feed: [
+            [
+              ...msg('Now adding error handling for network interruptions...'),
+              gap,
+            ],
+            [
+              tool('Edit', 'src/providers/gemini.rs'),
+              out(
+                'Updated src/providers/gemini.rs with 24 additions and 3 removals',
+              ),
+              gap,
+            ],
+            [
+              tool('Bash', 'cargo test providers::gemini'),
+              out('running 7 tests'),
+            ],
+            [more('test result: ok. 7 passed; 0 failed'), gap],
+          ],
+        }),
+        ag({
+          proj: 'web',
+          name: 'dark-mode',
+          st: 'done',
+          since: t - (2 * m + 41 * s),
+          add: 1278,
+          del: 400,
+          pr: { n: 212, check: 'ok' },
+          title: '✳ Theme toggle with system default',
+          log: [
+            tool('Bash', 'pnpm test theme'),
+            out('✓ 18 tests passed', 'ok'),
+            gap,
+            ...msg(
+              'The theme toggle is in. It defaults to the system preference and remembers an explicit choice in localStorage. PR #212 is up and its checks pass.',
+            ),
+            gap,
+            [
+              ['✻ ', 'd'],
+              ['Worked for 6m 12s', 'd'],
+            ],
+            gap,
+          ],
+        }),
+        ag({
+          proj: 'api',
+          name: 'rate-limit',
+          st: 'work',
+          since: t - 3 * m - 32 * s,
+          uadd: 188,
+          udel: 12,
+          title: '✳ Sliding window rate limiter',
+          verb: 'Pondering',
+          verbAt: t - 15 * s,
+          tokens: 2400,
+          log: [
+            tool('Write', 'src/middleware/rate_limit.ts'),
+            out('Wrote 142 lines to src/middleware/rate_limit.ts'),
+            gap,
+            tool('Write', 'migrations/0042_rate_limits.sql'),
+            out('Wrote 18 lines to migrations/0042_rate_limits.sql'),
+            gap,
+          ],
+          feed: [
+            [
+              tool('Bash', 'pnpm test limiter'),
+              out('✓ 14 tests passed', 'ok'),
+              gap,
+            ],
+          ],
+        }),
+        ag({
+          proj: 'aven',
+          name: 'ai-completion-server',
+          st: 'done',
+          since: t - (11 * h + 43 * m + 39 * s),
+          add: 8044,
+          del: 144,
+          pr: { n: 57, check: 'fail' },
+          title: 'π - ai-completion-server',
+          log: [
+            ...msg(
+              'Opened PR #57. The e2e job fails on a missing OPENAI_API_KEY secret in CI, unrelated to the change.',
+            ),
+            gap,
+          ],
+        }),
+        ag({
+          proj: 'anki-llm',
+          name: 'batch-processing',
+          st: 'work',
+          since: t - (5 * m + 12 * s),
+          uadd: 54,
+          udel: 9,
+          title: '✳ Refactoring queue handler',
+          verb: 'Crafting',
+          verbAt: t - 64 * s,
+          tokens: 3100,
+          log: [
+            tool('Update', 'src/queue.ts'),
+            out('Updated src/queue.ts with 31 additions and 17 removals'),
+            gap,
+          ],
+          feed: [
+            [
+              tool('Bash', 'pnpm vitest run queue'),
+              out('✓ 9 tests passed', 'ok'),
+              gap,
+            ],
+            [
+              tool('Update', 'src/worker.ts'),
+              out('Updated src/worker.ts with 8 additions and 2 removals'),
+              gap,
+            ],
+          ],
+        }),
+        ag({
+          proj: 'infra',
+          name: 'deploy-preview',
+          st: 'done',
+          since: t - (19 * h + 19 * m + 15 * s),
+          add: 42,
+          del: 8,
+          pr: { n: 88, check: 'ok' },
+          title: '✳ Pin preview images per branch',
+          log: [
+            ...msg(
+              'Preview deploys now pin the image to the branch head. Opened PR #88.',
+            ),
+            gap,
+          ],
+        }),
+        ag({
+          proj: 'workmux',
+          name: 'main',
+          st: 'done',
+          since: t - (22 * h + 53 * m + 37 * s),
+          main: true,
+          title: 'π - workmux',
+          log: [...msg('Released v0.1.277 and pushed the tag.'), gap],
+        }),
+        ag({
+          proj: 'WalkingMate',
+          name: 'bluetooth-reconnect',
+          st: 'done',
+          since: t - (34 * h + 51 * m + 21 * s),
+          ahead: 3,
+          title: '✳ Auto-reconnect on disconnect',
+          log: [
+            ...msg(
+              'Reconnects with backoff after the watch drops. Three commits are ready to push.',
+            ),
+            gap,
+          ],
+        }),
+      ];
+      this.sel = this.sorted()[0];
+      this.play(this.scenario());
+    }
+
+    scenario(): Step[] {
+      const by = (name: string) => this.agents.find((a) => a.name === name)!;
+      const rl = by('rate-limit');
+      const move = (dir: 1 | -1, times: number, gapMs: number): Step[] =>
+        Array.from({ length: times }, (): Step => [
+          gapMs,
+          () => {
+            const list = this.sorted();
+            const i = list.indexOf(this.sel);
+            this.sel = list[Math.max(0, Math.min(list.length - 1, i + dir))];
+            this.key(dir > 0 ? 'j' : 'k');
+          },
+        ]);
+      const rowOf = (a: Agent) => this.sorted().indexOf(a);
+      return [
+        // Every agent
+        [
+          4200,
+          () => {
+            this.mark(1);
+          },
+        ],
+        // Live preview
+        ...move(1, rowOf(by('sidebar-views')), 240),
+        [4600, () => {}],
+        ...move(1, 1, 0),
+        [
+          3600,
+          () => {
+            this.mark(2);
+            rl.st = 'wait';
+            rl.since = this.t;
+            rl.ask = MIGRATION;
+            rl.log.push(
+              ...msg(
+                'The limiter needs its table before the suite can run against a real database.',
+              ),
+              gap,
+            );
+          },
+        ],
+        // Needs input
+        [2000, () => {}],
+        [
+          0,
+          () => {
+            // Walk up to the waiting agent, one row per press.
+            const steps = rowOf(this.sel) - rowOf(rl);
+            this.play(move(-1, steps, 150));
+            return steps * 150 + 1700;
+          },
+        ],
+        [
+          0,
+          () => {
+            this.poster = true;
+            this.mark(3);
+            this.input = true;
+            this.key('i');
+          },
+        ],
+        // Reply
+        [
+          1500,
+          () => {
+            rl.choice = 1;
+            this.key('2');
+          },
+        ],
+        [
+          450,
+          () => {
+            rl.ask = null;
+            rl.choice = undefined;
+            rl.log.push(
+              [
+                ['● ', 'w'],
+                ['User answered: ', 't'],
+                ['How should I apply the migration?', 't'],
+              ],
+              out('Staging first'),
+              gap,
+            );
+            rl.st = 'work';
+            rl.since = this.t;
+            rl.verb = 'Migrating';
+            rl.verbAt = this.t;
+            rl.tokens = 0;
+            rl.feedAt = this.t + 900;
+            rl.feed = [
+              [
+                tool('Bash', 'pnpm db:migrate --env staging'),
+                out('Applied 1 migration: 0042_rate_limits (38ms)'),
+                gap,
+              ],
+              [
+                tool('Bash', 'pnpm test limiter --env staging'),
+                out('✓ 14 tests passed', 'ok'),
+                gap,
+              ],
+            ];
+          },
+        ],
+        [2600, () => this.key('Esc')],
+        [
+          300,
+          () => {
+            this.input = false;
+          },
+        ],
+        [
+          1300,
+          () => {
+            this.mark(4);
+            this.sort = 'project';
+            this.key('s');
+          },
+        ],
+        // Sort
+        [5800, () => this.reset()],
+      ];
+    }
+
+    // ------------------------------------------------------- table
+
+    // Waiting before done before working, the most recent change first.
+    sorted(): Agent[] {
+      const prio = (a: Agent) => ({ wait: 0, done: 1, work: 2 })[a.st];
+      return [...this.agents].sort((a, b) =>
+        this.sort === 'project'
+          ? a.proj.localeCompare(b.proj) || prio(a) - prio(b) || a.n - b.n
+          : prio(a) - prio(b) || b.since - a.since || a.n - b.n,
+      );
+    }
+
+    gitCell(a: Agent): Line {
+      const parts: Seg[][] = [];
+      const uncommitted = a.uadd > 0 || a.udel > 0;
+      if (!(uncommitted && a.add === 0 && a.del === 0)) {
+        if (a.add) parts.push([[`+${a.add}`, 'su dim']]);
+        if (a.del) parts.push([[`-${a.del}`, 'dn dim']]);
+      }
+      if (uncommitted) {
+        const u: Seg[] = [{ svg: 'edit', cls: 'ac' }];
+        if (a.uadd) u.push([` +${a.uadd}`, 'su']);
+        if (a.udel) u.push([` -${a.udel}`, 'dn']);
+        parts.push(u);
+      }
+      if (a.ahead) parts.push([[`↑${a.ahead}`, 'in']]);
+      if (!parts.length) return [['-', 'dm']];
+      return parts.flatMap((p, i) => (i ? [sp(1), ...p] : p));
+    }
+
+    prCell(a: Agent): Line {
+      if (!a.pr) return [['-', 'dm']];
+      return [
+        [`#${a.pr.n} `, 'su'],
+        { svg: 'pr', cls: 'su' },
+        sp(1),
+        a.pr.check === 'ok'
+          ? { svg: 'ok', cls: 'su' }
+          : { svg: 'fail', cls: 'dn' },
+      ];
+    }
+
+    statusCell(a: Agent, frame: number): Line {
+      if (a.st === 'work')
+        return [
+          ['🤖', 'in'],
+          [` ${BRAILLE[frame % BRAILLE.length]}`, 'in'],
+        ];
+      if (a.st === 'wait') return [['💬', 'ac']];
+      return [['✅', 'su']];
+    }
+
+    timeCell(a: Agent): Line {
+      const secs = Math.max(0, Math.floor((this.t - a.since) / 1000));
+      const base = secs < 300 ? 'su' : secs < 3600 ? 'wn' : 'ac dim';
+      const hh = Math.floor(secs / 3600);
+      const mm = Math.floor((secs % 3600) / 60);
+      const off = `${base} dim`;
+      return [
+        [p2(hh), hh ? base : off],
+        [':', off],
+        [p2(mm), hh || mm ? base : off],
+        [':', off],
+        [p2(secs % 60), base],
+      ];
+    }
+
+    tableRows(frame: number): { line: Line; bg: string }[] {
+      const list = this.sorted();
+      const cells = list.map((a) => ({
+        a,
+        git: this.gitCell(a),
+        pr: this.prCell(a),
+      }));
+      const clamp = (v: number, lo: number, hi: number) =>
+        Math.max(lo, Math.min(hi, v));
+      const wProj =
+        clamp(Math.max(...list.map((a) => a.proj.length)), 5, 20) + 2;
+      const wTree =
+        clamp(Math.max(...list.map((a) => a.name.length)), 8, 25) + 1;
+      const wGit =
+        clamp(Math.max(...cells.map((c) => lineW(c.git))), 4, 30) + 1;
+      const wPr = clamp(Math.max(...cells.map((c) => lineW(c.pr))), 4, 20) + 1;
+      const widths = [2, wProj, wTree, wGit, wPr, 8, 10];
+      const wTitle = IN_W - 2 - widths.reduce((s, w) => s + w + 1, 0);
+      const row = (cols: Line[]): Line => {
+        const outLine: Line = [];
+        cols.forEach((c, i) => {
+          const w = i < widths.length ? widths[i] : wTitle;
+          outLine.push(...fit(c, w));
+          if (i < cols.length - 1) outLine.push(sp(1));
+        });
+        return outLine;
+      };
+      const header = [
+        '#',
+        'Project',
+        'Worktree',
+        'Git',
+        'PR',
+        'Status',
+        'Time',
+        'Title',
+      ].map((h): Line => [[h, 'hd b']]);
+      const rows: { line: Line; bg: string }[] = [
+        { line: [sp(2), ...row(header)], bg: '' },
+      ];
+      cells.forEach(({ a, git, pr }, i) => {
+        const selected = a === this.sel;
+        const tree = a.current ? 'cf' : a.main ? 'dm' : 'tx';
+        const line = row([
+          [[i < 9 ? String(i + 1) : '', 'kc']],
+          [[a.proj, 'tx']],
+          [[a.name, tree]],
+          git,
+          pr,
+          this.statusCell(a, frame),
+          this.timeCell(a),
+          [[a.title, 'tx']],
+        ]);
+        rows.push({
+          line: [selected ? ['▌ ', 'in'] : sp(2), ...line],
+          bg: selected ? 'Bhi' : a.current ? 'Bcr' : '',
+        });
+      });
+      return rows;
+    }
+
+    // ------------------------------------------------------- preview
+
+    // The bottom of the selected agent's pane, as the preview shows it.
+    pane(a: Agent): Line[] {
+      const lines: Line[] = [...a.log];
+      const rule: Line = [sp(PANE_W, 'hl rule')];
+      if (a.ask) {
+        lines.push(
+          rule,
+          [
+            [' ☐ ', 'up Bup'],
+            [`${a.ask.head} `, 'up Bup'],
+          ],
+          gap,
+          [[a.ask.question, 'b w']],
+          gap,
+        );
+        a.ask.options.forEach(([label, desc], i) => {
+          const on = (a.choice ?? 0) === i;
+          lines.push([
+            [on ? '❯ ' : '  ', 'code'],
+            [
+              `${i + 1}. ${label}`,
+              on ? 'code' + (a.choice === i ? ' b' : '') : 't',
+            ],
+          ]);
+          lines.push([
+            ['     ', ''],
+            [desc, 'd'],
+          ]);
+        });
+        lines.push(
+          [
+            ['  ', ''],
+            [`${a.ask.options.length + 1}. Type something.`, 't'],
+          ],
+          gap,
+        );
+        lines.push([
+          ['Enter to select · ↑/↓ to navigate · Esc to cancel', 'd'],
+        ]);
+        return lines;
+      }
+      if (a.st === 'work') {
+        const frame = Math.floor(this.t / TICK);
+        const secs = Math.floor((this.t - (a.verbAt ?? this.t)) / 1000);
+        const k = ((a.tokens ?? 0) / 1000).toFixed(1);
+        lines.push(
+          [
+            [`${SPIN[frame % SPIN.length]} `, 'sg'],
+            [`${a.verb}… `, 'sg'],
+            [`(${secs}s · ↓ ${k}k tokens · esc to interrupt)`, 'd'],
+          ],
+          gap,
+        );
+      }
+      const cursor =
+        this.input && a === this.sel && Math.floor(this.t / 500) % 2 === 0;
+      lines.push(rule, [['❯ ', 't'], cursor ? [' ', 'Bcur'] : sp(1)], rule, [
+        ['  ⏵⏵ ', 'pm'],
+        ['bypass permissions on', 'pm'],
+        [' (shift+tab to cycle)', 'd'],
+      ]);
+      return lines;
+    }
+
+    previewRows(): Line[] {
+      const a = this.sel;
+      const inner = IN_W - 2;
+      const input = this.input;
+      const title = input ? ` INPUT: ${a.name} ` : ` Preview: ${a.name} `;
+      const bc = input ? 'su' : 'bd';
+      const tc = input ? 'su b' : 'hd';
+      const body = this.pane(a).slice(-(PREVIEW_H - 2));
+      const rows: Line[] = [
+        [
+          sp(1, `c1 ${bc}`),
+          [title, tc],
+          sp(inner - title.length, `hl ${bc}`),
+          sp(1, `c2 ${bc}`),
+        ],
+      ];
+      for (let i = 0; i < PREVIEW_H - 2; i++) {
+        rows.push([
+          sp(1, `vl ${bc}`),
+          ...fit(body[i] ?? [], inner),
+          sp(1, `vl ${bc}`),
+        ]);
+      }
+      rows.push([sp(1, `c3 ${bc}`), sp(inner, `hl ${bc}`), sp(1, `c4 ${bc}`)]);
+      return rows;
+    }
+
+    footer(): Line {
+      if (this.input) {
+        return [
+          ['  INPUT MODE', 'su b'],
+          [' — type to send keys to agent  ', 'tx'],
+          ['Esc', 'kc'],
+          [' exit', 'tx'],
+        ];
+      }
+      const cmd = (k: string, l: string): Line => [
+        [k, 'dm'],
+        [` ${l}`, 'tx b'],
+      ];
+      const tog = (k: string, l: string, v: string, on: boolean): Line => [
+        [k, 'dm'],
+        [` ${l} `, 'tx b'],
+        [`(${v})`, on ? 'in' : 'dm'],
+      ];
+      const items = [
+        cmd('i', 'Input'),
+        cmd('d', 'Diff'),
+        cmd('o', 'PR'),
+        cmd('1-9', 'Jump'),
+        tog('s', 'Sort', this.sort, true),
+        tog('F', 'Scope', 'all', false),
+        tog('f', 'Stale', 'hidden', true),
+        cmd('Tab', 'Worktrees'),
+        cmd('q', 'Quit'),
+      ];
+      const left: Line = [sp(2)];
+      items.forEach((it, i) => {
+        if (i) left.push([' │ ', 'bd']);
+        left.push(...it);
+      });
+      return spread(
+        fit(left, IN_W - 7),
+        [
+          ['?', 'dm'],
+          [' Help ', 'tx b'],
+        ],
+        IN_W,
+      );
+    }
+
+    // ------------------------------------------------------- paint
+
+    frame(): string[] {
+      const frame = Math.floor(this.t / 120);
+      const inner: { line: Line; bg: string }[] = [
+        {
+          line: [sp(2), ['Agents', 'hd b'], [' │ ', 'bd'], ['Worktrees', 'dm']],
+          bg: '',
+        },
+        { line: [sp(IN_W, 'hl bd')], bg: '' },
+      ];
+      const table = this.tableRows(frame);
+      for (let i = 0; i < TABLE_H; i++)
+        inner.push(table[i] ?? { line: [], bg: '' });
+      for (const line of this.previewRows()) inner.push({ line, bg: '' });
+      inner.push({ line: this.footer(), bg: '' });
+      const h = (l: Line) => html(l, SVG);
+      return Array.from({ length: ROWS }, (_, r) => {
+        if (r === 0 || r === ROWS - 1) {
+          const [l, rr] = r === 0 ? ['c1', 'c2'] : ['c3', 'c4'];
+          return h([sp(1, `${l} pb`), sp(IN_W, 'hl pb'), sp(1, `${rr} pb`)]);
+        }
+        const { line, bg } = inner[r - 1] ?? { line: [], bg: '' };
+        return (
+          h([sp(1, 'vl pb')]) +
+          `<span class="rg ${bg}" style="width:${IN_W}ch">${h(fit(line, IN_W))}</span>` +
+          h([sp(1, 'vl pb')])
+        );
+      });
+    }
+  }
+
+  if (!customElements.get('live-dash')) {
+    customElements.define('live-dash', LiveDash);
+  }
+</script>

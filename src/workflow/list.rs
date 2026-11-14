@@ -72,14 +72,15 @@ pub fn list_in(
         return Err(anyhow!("Not in a git repository"));
     }
 
-    let worktrees_data = git::list_worktrees_in(repo)?;
+    let listing = git::list_worktrees_with_main_in(repo)?;
+    let main_worktree_path = listing.main_path;
+    let worktrees_data = listing.worktrees;
 
     if worktrees_data.is_empty() {
         return Ok(Vec::new());
     }
 
-    // The first worktree from `git worktree list` is always the main worktree
-    let main_worktree_path = worktrees_data.first().map(|(p, _)| p.clone());
+    let repo_key = git::get_repository_key_in(repo)?;
 
     // Apply filter early before expensive operations
     let worktrees_data = filter_worktrees(worktrees_data, filter);
@@ -115,7 +116,7 @@ pub fn list_in(
     // Batch fetch all PRs if requested (single API call)
     let pr_map = if fetch_pr_status {
         spinner::with_spinner("Fetching PR status", || {
-            Ok(github::list_prs().unwrap_or_default())
+            Ok(github::list_prs_in(repo).unwrap_or_default())
         })?
     } else {
         std::collections::HashMap::new()
@@ -142,6 +143,13 @@ pub fn list_in(
     let target_windows = git::get_all_worktree_meta_key_in(repo, "target-window");
     let target_sessions = git::get_all_worktree_meta_key_in(repo, "target-session");
     let window_sessions = git::get_all_worktree_meta_key_in(repo, "window-session");
+    let window_tokens = git::get_all_worktree_meta_key_in(repo, "window-token");
+    let attachments = git::get_all_worktree_meta_key_in(repo, "attachment");
+    let active_window_tokens = if mux_running {
+        mux.owned_window_tokens().unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
     let mux_windows_with_sessions = if mux_running {
         mux.get_all_windows_with_sessions().unwrap_or_default()
     } else {
@@ -170,8 +178,25 @@ pub fn list_in(
                 target_windows.get(&handle).unwrap_or(&handle)
             };
             let prefixed_name = util::prefixed(prefix, target_name);
-            let has_mux_window = if mode == MuxMode::Session {
+            let has_mux_window = if attachments
+                .get(&handle)
+                .is_some_and(|value| value != "multiplexer")
+            {
+                false
+            } else if mode == MuxMode::Session {
                 mux_sessions.contains(&prefixed_name)
+            } else if mux.supports_window_ownership() && window_tokens.contains_key(&handle) {
+                window_tokens.get(&handle).is_some_and(|token| {
+                    active_window_tokens.contains(token)
+                        || mux
+                            .resolve_owned_window_targets(
+                                token,
+                                &prefixed_name,
+                                window_sessions.get(&handle).map(String::as_str),
+                                &path,
+                            )
+                            .is_ok_and(|targets| !targets.is_empty())
+                })
             } else if let Some(parent_session) = window_sessions.get(&handle) {
                 mux_windows_with_sessions.contains(&(prefixed_name.clone(), parent_session.clone()))
             } else {
@@ -212,19 +237,14 @@ pub fn list_in(
                 })
             };
 
-            let is_main = main_worktree_path
-                .as_ref()
-                .is_some_and(|main_path| *main_path == path);
+            let is_main = main_worktree_path == path;
 
-            let created_at = std::fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.created().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
+            let created_at = crate::creation_time::filesystem_birth_time(&path);
 
             let base_branch = git::get_branch_base_in(&branch, repo).ok();
 
             WorktreeInfo {
+                repo_key: repo_key.clone(),
                 handle,
                 branch,
                 path,

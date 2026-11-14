@@ -3,39 +3,56 @@
 //! This module provides persistent state storage that works across all
 //! terminal multiplexer backends (tmux, WezTerm, Zellij).
 
-pub mod codex_status;
 pub mod run;
+pub mod sent;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod types;
 
-use std::fs;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use tracing::warn;
 
 use crate::agent_identity::classify_agent_kind;
-use crate::multiplexer::{AgentStatus, Multiplexer};
+use crate::multiplexer::{AgentStatus, LivePaneSnapshot, Multiplexer, RemoteRef};
 
 pub use store::StateStore;
-pub use types::{AgentState, LastDoneCycleState, PaneKey, RuntimeState};
+pub(crate) use store::{AgentStateCache, AgentStateSource, ResurrectionAgentState};
+pub use types::{AgentState, GlobalSettings, LastDoneCycleState, PaneKey, RuntimeState};
 
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, content).context("Failed to write temp file")?;
-    fs::rename(&tmp, path).context("Failed to rename temp file")?;
-    Ok(())
+/// How a state write changes the agent's latest user prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptUpdate {
+    /// Preserve the stored prompt.
+    Keep,
+    /// Replace the stored prompt.
+    Set(String),
+    /// Remove the stored prompt.
+    Clear,
+}
+
+/// What a local attach pane's state takes from its remote agent.
+#[derive(Debug, Clone)]
+pub struct RemoteUpdate {
+    pub at: RemoteRef,
+    /// Display path of the remote workspace.
+    pub workdir: std::path::PathBuf,
+    /// The node's status timestamp, on the laptop clock.
+    pub status_ts: Option<u64>,
+    pub title: Option<String>,
+    pub agent_kind: Option<String>,
 }
 
 /// Persist an agent state update to the StateStore.
 ///
-/// Merges with existing state so partial updates don't wipe other fields:
+/// For tmux, merges state from the same pane process and server lifecycle so
+/// partial updates don't wipe other fields. Other backends merge by pane key:
 /// - If `status` is Some, updates the agent's status. If None, preserves existing.
 /// - If `title_override` is Some, uses it. If None, preserves existing stored title,
 ///   falling back to the live pane title.
+/// - If `agent_session_id` is Some, uses it. If None, preserves the existing binding.
+/// - `prompt` keeps, replaces or removes the stored prompt.
 ///
 /// Logs warnings on failure without propagating errors (best-effort persistence).
 pub fn persist_agent_update(
@@ -43,94 +60,355 @@ pub fn persist_agent_update(
     pane_id: &str,
     status: Option<AgentStatus>,
     title_override: Option<String>,
+    agent_session_id: Option<String>,
+    prompt: PromptUpdate,
 ) {
+    if status == Some(AgentStatus::Working) && mux.name() == "tmux" {
+        let tmux = crate::multiplexer::TmuxBackend::for_socket(&mux.instance_id());
+        if let Err(error) = tmux.wake_agent(pane_id) {
+            warn!(%pane_id, %error, "failed to clear agent sleep state");
+        }
+    }
+    persist_agent_snapshot(
+        mux,
+        pane_id,
+        status,
+        title_override,
+        agent_session_id,
+        prompt,
+        true,
+        None,
+    );
+}
+
+/// Persist the state of a local pane relaying a remote agent. `status`
+/// `None` keeps the stored status, as for [`persist_agent_update`].
+pub fn persist_remote_update(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    update: RemoteUpdate,
+    prompt: PromptUpdate,
+) {
+    persist_agent_snapshot(mux, pane_id, status, None, None, prompt, true, Some(update));
+}
+
+/// Register a local pane relaying a remote workspace pane, with no status.
+pub fn persist_remote_registration(mux: &dyn Multiplexer, pane_id: &str, update: RemoteUpdate) {
+    persist_agent_snapshot(
+        mux,
+        pane_id,
+        None,
+        None,
+        None,
+        PromptUpdate::Keep,
+        false,
+        Some(update),
+    );
+}
+
+/// Register a live agent pane without assigning it an activity status.
+///
+/// Registration snapshots only live pane data, preventing state from an
+/// unrelated agent process in the same pane from leaking into this record. A
+/// hook-provided session ID binds later pane-less events to this registration.
+pub fn persist_agent_registration(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    agent_session_id: Option<String>,
+    prompt: PromptUpdate,
+) {
+    persist_agent_snapshot(
+        mux,
+        pane_id,
+        None,
+        None,
+        agent_session_id,
+        prompt,
+        false,
+        None,
+    );
+}
+
+/// Clear an agent's persisted status without deleting its state record.
+///
+/// An explicit clear is not a status transition, so the pane identity and
+/// metadata (PID, command, title, agent session, kind) are preserved. Only the
+/// status fields are reset for the exact pane key, so other panes and other
+/// multiplexer instances keep their stored status.
+///
+/// `clear_prompt` also removes the stored prompt.
+///
+/// Logs warnings on failure without propagating errors (best-effort
+/// persistence).
+pub fn clear_agent_status(mux: &dyn Multiplexer, pane_id: &str, clear_prompt: bool) {
+    let Ok(store) = StateStore::new() else {
+        return;
+    };
     let pane_key = PaneKey {
         backend: mux.name().to_string(),
         instance: mux.instance_id(),
         pane_id: pane_id.to_string(),
     };
+    if let Err(error) = store.clear_agent_status(&pane_key, clear_prompt) {
+        warn!(%error, "failed to persist cleared agent status");
+    }
+}
 
-    let live_info = match mux.get_live_pane_info(pane_id) {
-        Ok(Some(info)) => info,
-        Ok(None) => {
-            warn!(%pane_id, "pane not found, skipping state persist");
-            return;
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to get live pane info, skipping state persist");
-            return;
-        }
+#[allow(clippy::too_many_arguments)]
+fn persist_agent_snapshot(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    title_override: Option<String>,
+    agent_session_id: Option<String>,
+    prompt: PromptUpdate,
+    preserve_existing: bool,
+    remote: Option<RemoteUpdate>,
+) {
+    let Ok(store) = StateStore::new() else {
+        return;
     };
+    let pane_key = PaneKey {
+        backend: mux.name().to_string(),
+        instance: mux.instance_id(),
+        pane_id: pane_id.to_string(),
+    };
+    let result = (|| -> anyhow::Result<()> {
+        // Persistence is best-effort: unrelated writers must not keep a hook
+        // retrying forever, and rejected snapshots must never be applied.
+        const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+            let generation = store.agent_generation()?;
+            let snapshot = match mux.get_live_pane_snapshot(pane_id) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    warn!(%pane_id, "pane not found, skipping state persist");
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(%error, "failed to get live pane snapshot, skipping state persist");
+                    return Ok(());
+                }
+            };
+            if store
+                .with_agent_generation(generation, |store| {
+                    persist_agent_snapshot_locked(
+                        store,
+                        pane_key.clone(),
+                        snapshot,
+                        status,
+                        title_override.clone(),
+                        agent_session_id.clone(),
+                        prompt.clone(),
+                        preserve_existing,
+                        remote.clone(),
+                    );
+                    Ok(())
+                })?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+        warn!(%pane_id, "agent state changed during every snapshot attempt, skipping state persist");
+        Ok(())
+    })();
+    if let Err(error) = result {
+        warn!(%error, "failed to persist agent state");
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn persist_agent_snapshot_locked(
+    store: &StateStore,
+    pane_key: PaneKey,
+    snapshot: LivePaneSnapshot,
+    status: Option<AgentStatus>,
+    title_override: Option<String>,
+    agent_session_id: Option<String>,
+    prompt: PromptUpdate,
+    preserve_existing: bool,
+    remote: Option<RemoteUpdate>,
+) {
+    let pane_id = &pane_key.pane_id;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Load existing state to merge with
-    let existing = StateStore::new()
-        .ok()
-        .and_then(|store| store.get_agent(&pane_key).ok().flatten());
+    let live_info = snapshot.pane;
+    let boot_id = snapshot.boot_id;
+    let live_pid = if pane_key.backend == "tmux" {
+        let Some(live_pid) = live_info.pid else {
+            warn!(%pane_id, "tmux pane PID unavailable, skipping state persist");
+            return;
+        };
+        if boot_id.is_none() {
+            warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
+            return;
+        }
+        live_pid
+    } else {
+        live_info.pid.unwrap_or(0)
+    };
+
+    if let Some(boot_id) = boot_id.as_deref()
+        && let Err(error) =
+            store.compact_context_locked(&pane_key.backend, &pane_key.instance, boot_id)
+    {
+        warn!(%error, "failed to compact historical agent state");
+        return;
+    }
+
+    // tmux pane PIDs and server lifecycles form a stable process identity.
+    // Other backends retain their established pane-key merge behavior.
+    let existing = preserve_existing
+        .then(|| {
+            store.get_agent(&pane_key).ok().flatten().filter(|state| {
+                pane_key.backend != "tmux"
+                    || (state.pane_pid == live_pid
+                        && state
+                            .boot_id
+                            .as_deref()
+                            .zip(boot_id.as_deref())
+                            .is_some_and(|(stored, current)| {
+                                store::same_server_boot("tmux", stored, current)
+                            }))
+            })
+        })
+        .flatten();
 
     // Resolve status: explicit update wins, otherwise preserve existing
     let final_status = status.or(existing.as_ref().and_then(|e| e.status));
 
+    let previous_status = existing.as_ref().and_then(|state| state.status);
+
+    // A remote agent's transitions happened on the node, at its timestamp.
+    let transition_ts = remote
+        .as_ref()
+        .and_then(|update| update.status_ts)
+        .filter(|_| status.is_some())
+        .unwrap_or(now);
+
     // Preserve existing status_ts if status hasn't changed (avoids resetting timer)
-    let status_ts = if final_status == existing.as_ref().and_then(|e| e.status) {
-        existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now)
-    } else {
-        now
+    let status_ts = match final_status {
+        None => None,
+        Some(_) if remote.is_some() && status.is_some() => Some(transition_ts),
+        Some(_) if final_status == previous_status => {
+            Some(existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now))
+        }
+        Some(_) => Some(now),
     };
+
+    let previous_activity_ts = existing.as_ref().and_then(AgentState::activity_ts);
+    let activity_ts = resolve_activity_ts(
+        preserve_existing,
+        status,
+        previous_status,
+        previous_activity_ts,
+        transition_ts,
+    );
 
     // Capture existing agent_kind before `existing` is consumed below.
     let existing_agent_kind = existing.as_ref().and_then(|e| e.agent_kind.clone());
+    let agent_session_id = agent_session_id.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|state| state.agent_session_id.clone())
+    });
+
+    let prompt = resolve_prompt(prompt, existing.as_ref());
 
     // Snapshot the live title for classification before the resolved
     // `pane_title` consumes `live_info.title`.
     let live_title_for_classify = live_info.title.clone();
 
-    // Resolve title: explicit override wins, then existing stored title, then live
-    let pane_title = title_override
-        .or(existing.and_then(|e| e.pane_title))
-        .or(live_info.title);
+    let existing_remote = existing.as_ref().and_then(|state| state.remote.clone());
+    let existing_workdir = existing.as_ref().map(|state| state.workdir.clone());
 
-    // Get server boot ID for crash detection (best-effort)
-    let boot_id = mux.server_boot_id().unwrap_or(None);
+    // Resolve title: explicit override wins, then existing stored title, then live
+    let remote_title = remote.as_ref().and_then(|update| update.title.clone());
+    let pane_title = title_override
+        .or(remote_title)
+        .or_else(|| existing.as_ref().and_then(|state| state.pane_title.clone()))
+        .or(live_info.title);
 
     // Classify the agent kind once and lock it in. The classifier sees the
     // *live* title (not the merged `pane_title` above, which prefers the
     // stored value): a stale stored title would otherwise re-confirm the
     // previous identity even after the foreground command has changed.
-    // Pane reuse (Claude exits, another agent launches in the same pane) is
-    // handled by reconcile in `state::store`, which deletes the stored
-    // entry on `command` change before this path runs again.
-    let agent_kind = merge_agent_kind(
-        classify_agent_kind(
-            live_info.current_command.as_deref(),
-            live_title_for_classify.as_deref(),
+    // Reconcile clears entries when it observes a foreground command change.
+    // This path does not use the command as process identity because a status
+    // hook can temporarily become the pane's foreground command.
+    let agent_kind = match &remote {
+        // The pane's foreground is the relay; the node knows the agent.
+        Some(update) => update.agent_kind.clone().or(existing_agent_kind),
+        None => merge_agent_kind(
+            classify_agent_kind(
+                live_info.current_command.as_deref(),
+                live_title_for_classify.as_deref(),
+            ),
+            existing_agent_kind,
         ),
-        existing_agent_kind,
-    );
+    };
+
+    let (workdir, remote) = match remote {
+        Some(update) => (update.workdir, Some(update.at)),
+        None => match existing_remote {
+            Some(at) => (existing_workdir.unwrap_or(live_info.working_dir), Some(at)),
+            None => (live_info.working_dir, None),
+        },
+    };
 
     let state = AgentState {
         pane_key,
-        workdir: live_info.working_dir,
+        workdir,
         status: final_status,
-        status_ts: Some(status_ts),
+        status_ts,
+        activity_ts,
         pane_title,
-        pane_pid: live_info.pid.unwrap_or(0),
+        pane_pid: live_pid,
         command: live_info.current_command.unwrap_or_default(),
         updated_ts: now,
         window_name: live_info.window,
         session_name: live_info.session,
         boot_id,
         agent_kind,
+        agent_session_id,
+        prompt,
+        remote,
     };
 
-    if let Ok(store) = StateStore::new()
-        && let Err(e) = store.upsert_agent(&state)
+    if let Err(error) = store.upsert_agent_locked(&state) {
+        warn!(%error, "failed to persist agent state");
+    }
+}
+
+/// `existing` is already limited to the same agent process, so a kept prompt
+/// never crosses into a new agent in a reused pane.
+fn resolve_prompt(update: PromptUpdate, existing: Option<&AgentState>) -> Option<String> {
+    match update {
+        PromptUpdate::Keep => existing.and_then(|state| state.prompt.clone()),
+        PromptUpdate::Set(prompt) => Some(prompt),
+        PromptUpdate::Clear => None,
+    }
+}
+
+fn resolve_activity_ts(
+    preserve_existing: bool,
+    explicit_status: Option<AgentStatus>,
+    previous_status: Option<AgentStatus>,
+    previous_activity_ts: Option<u64>,
+    now: u64,
+) -> Option<u64> {
+    if !preserve_existing
+        || previous_activity_ts.is_none()
+        || (explicit_status.is_some() && explicit_status != previous_status)
     {
-        warn!(error = %e, "failed to persist agent state");
+        Some(now)
+    } else {
+        previous_activity_ts
     }
 }
 
@@ -148,6 +426,93 @@ fn merge_agent_kind(new: Option<String>, existing: Option<String>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_starts_activity_without_status() {
+        assert_eq!(
+            resolve_activity_ts(false, None, Some(AgentStatus::Done), Some(10), 20),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn first_status_starts_new_activity() {
+        assert_eq!(
+            resolve_activity_ts(true, Some(AgentStatus::Working), None, Some(10), 20),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn status_transition_starts_new_activity() {
+        assert_eq!(
+            resolve_activity_ts(
+                true,
+                Some(AgentStatus::Done),
+                Some(AgentStatus::Working),
+                Some(10),
+                20,
+            ),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn repeated_status_preserves_activity() {
+        assert_eq!(
+            resolve_activity_ts(
+                true,
+                Some(AgentStatus::Working),
+                Some(AgentStatus::Working),
+                Some(10),
+                20,
+            ),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn metadata_update_preserves_activity() {
+        assert_eq!(
+            resolve_activity_ts(true, None, None, Some(10), 20),
+            Some(10)
+        );
+    }
+
+    fn state_with_prompt(prompt: &str) -> AgentState {
+        serde_json::from_value(serde_json::json!({
+            "pane_key": {"backend": "tmux", "instance": "default", "pane_id": "%1"},
+            "workdir": "/repo",
+            "status": "working",
+            "status_ts": 1,
+            "pane_title": null,
+            "pane_pid": 1,
+            "command": "claude",
+            "updated_ts": 1,
+            "prompt": prompt,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn prompt_survives_prompt_less_writes() {
+        let existing = state_with_prompt("fix the bug");
+        assert_eq!(
+            resolve_prompt(PromptUpdate::Keep, Some(&existing)),
+            Some("fix the bug".to_string())
+        );
+        assert_eq!(
+            resolve_prompt(PromptUpdate::Set("next".into()), Some(&existing)),
+            Some("next".to_string())
+        );
+        assert_eq!(resolve_prompt(PromptUpdate::Clear, Some(&existing)), None);
+    }
+
+    #[test]
+    fn prompt_is_not_inherited_without_matching_state() {
+        // Registration and pane reuse pass no existing state.
+        assert_eq!(resolve_prompt(PromptUpdate::Keep, None), None);
+    }
 
     #[test]
     fn merge_keeps_existing_when_new_is_none() {

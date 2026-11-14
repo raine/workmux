@@ -22,7 +22,13 @@ Behavior:
 
 Steps:
 
-1. Parse arguments:
+1. Check for local changes with `git status --porcelain`:
+   - If the working tree has staged, unstaged, or untracked changes, stash them
+     with `git stash push --include-untracked -m "workmux rebase"`.
+   - Remember whether this command created a stash. Existing stash entries must
+     remain untouched.
+   - If stashing fails, stop before fetching or rebasing.
+2. Parse arguments:
    - No args → target is the current branch's workmux base branch
      (`git config --get branch.$(git branch --show-current).workmux-base`); if
      that is empty, target is "main". No fetch.
@@ -30,10 +36,16 @@ Steps:
      remote, target is remote/branch
    - Just "origin" → fetch origin, target is "origin/main"
    - Anything else → target is that branch name, no fetch
-2. If fetching, run: `git fetch <remote>`
-3. Run: `git rebase <target>`
-4. If conflicts occur, handle them carefully (see below)
-5. Continue until rebase is complete
+3. If fetching, run: `git fetch <remote>`. If fetching or target resolution
+   fails before the rebase begins, restore the stash created in step 1 before
+   stopping.
+4. Run: `git rebase <target>`
+5. If conflicts occur, handle them carefully (see below)
+6. Continue until rebase is complete
+7. If step 1 created a stash, restore it with `git stash pop --index`:
+   - Restore the stash only after the rebase succeeds.
+   - If restoration conflicts, preserve the stash, report the conflicts, and
+     leave the affected files for manual resolution.
 
 Handling conflicts:
 

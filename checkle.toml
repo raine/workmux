@@ -11,14 +11,20 @@ mode = "auto"
 command = ["ruff", "format", "tests", "--check", "--quiet"]
 
 [[check]]
-name = "clippy"
-mode = "cargo"
-command = ["cargo", "clippy", "--all-targets", "--message-format=json"]
-
-[[check]]
 name = "unit-tests"
 mode = "cargo"
 command = ["cargo", "test", "--bin", "workmux", "--message-format=json"]
+
+[[check]]
+name = "status-plugin-tests"
+mode = "auto"
+command = ["bun", "test", "tests/opencode_status_plugin.test.ts", "tests/pi_status_extension.test.ts", "tests/omp_status_extension.test.ts"]
+
+# V2 tests use real subprocesses; isolate them from other suites' spawn mocks.
+[[check]]
+name = "opencode-v2-status-plugin-tests"
+mode = "auto"
+command = ["bun", "test", "tests/opencode_status_plugin_v2.test.ts", "tests/opencode_status_tracker_v2.test.ts"]
 
 [[check]]
 name = "ruff-check"
@@ -33,8 +39,8 @@ command = ["bash", "-lc", "source tests/venv/bin/activate && pyright tests"]
 [[check]]
 name = "docs-check"
 mode = "auto"
-command = ["bash", "-lc", "missing=(); while IFS= read -r file; do if ! sed -n '1,20p' \"$file\" | grep -q '^description:'; then missing+=(\"$file\"); fi; done < <(find docs -name '*.md' -not -path '*/node_modules/*' -not -path 'docs/README.md'); if [ ${#missing[@]} -gt 0 ]; then echo 'Missing meta description in:'; printf '  %s\n' \"${missing[@]}\"; exit 1; fi"]
+command = ["bash", "-lc", "cd docs && bun run format:check && node scripts/check-content.mjs"]
 
 [[group]]
 name = "all"
-checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "ruff-check", "pyright", "docs-check"]
+checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "status-plugin-tests", "opencode-v2-status-plugin-tests", "ruff-check", "pyright", "docs-check"]

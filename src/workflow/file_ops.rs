@@ -1,9 +1,57 @@
 use anyhow::{Context, Result, anyhow};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{config, git};
 use tracing::info;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOperation {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub kind: FileOperationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOperationKind {
+    Copy,
+    Symlink,
+}
+
+pub fn resolve_file_operations(
+    repo_root: &Path,
+    worktree_path: &Path,
+    file_config: &config::FileConfig,
+) -> Result<Vec<FileOperation>> {
+    let mut operations = Vec::new();
+    for (patterns, kind, label) in [
+        (
+            file_config.copy.as_deref().unwrap_or_default(),
+            FileOperationKind::Copy,
+            "copy",
+        ),
+        (
+            file_config.symlink.as_deref().unwrap_or_default(),
+            FileOperationKind::Symlink,
+            "symlink",
+        ),
+    ] {
+        for pattern in patterns {
+            let full_pattern = repo_root.join(pattern).to_string_lossy().to_string();
+            for entry in glob::glob(&full_pattern)? {
+                let source = entry?;
+                validate_path_within_repo(&source, repo_root, label, pattern)?;
+                let relative = source.strip_prefix(repo_root)?;
+                operations.push(FileOperation {
+                    destination: worktree_path.join(relative),
+                    source,
+                    kind,
+                });
+            }
+        }
+    }
+    Ok(operations)
+}
 
 /// Performs copy and symlink operations from the repo root to the worktree
 pub fn handle_file_operations(

@@ -165,6 +165,7 @@ mod tests {
             workdir: PathBuf::from("/tmp"),
             status: Some(status),
             status_ts: Some(status_ts),
+            activity_ts: Some(status_ts),
             pane_title: None,
             pane_pid: 1000,
             command: "node".to_string(),
@@ -173,6 +174,9 @@ mod tests {
             session_name: Some("main".to_string()),
             boot_id: None,
             agent_kind: None,
+            agent_session_id: None,
+            prompt: None,
+            remote: None,
         }
     }
 

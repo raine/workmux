@@ -8,6 +8,7 @@ from ..conftest import (
     MuxEnvironment,
     assert_window_exists,
     get_scripts_dir,
+    get_worktree_path,
     poll_until_file_has_content,
     run_workmux_command,
     slugify,
@@ -26,7 +27,8 @@ class TestStdinInput:
     ):
         """Verifies that an open stdin pipe with no data is ignored."""
         env = mux_server
-        write_workmux_config(mux_repo_path)
+        # Stdin handling does not depend on split-pane shell handshakes.
+        write_workmux_config(mux_repo_path, panes=[{"focus": True}])
 
         scripts_dir = get_scripts_dir(env)
         stdout_file = scripts_dir / "empty_stdin_stdout.txt"
@@ -76,12 +78,16 @@ class TestStdinInput:
             enter=True,
         )
 
-        assert poll_until_file_has_content(exit_code_file, timeout=5.0)
+        assert poll_until_file_has_content(exit_code_file, timeout=5.0), (
+            env.capture_pane("test:")
+        )
         stdout = stdout_file.read_text()
         stderr = stderr_file.read_text()
 
         assert int(exit_code_file.read_text()) == 0, stderr
         assert "Successfully created worktree" in stdout
+        assert get_worktree_path(mux_repo_path, "topic").is_dir()
+        assert_window_exists(env, f"{DEFAULT_WINDOW_PREFIX}topic")
 
     def test_stdin_creates_multiple_worktrees(
         self,

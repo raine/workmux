@@ -105,11 +105,12 @@ pub fn rename(
 
     // 7. tmux target collision check (only if handle is changing)
     let mode = git::get_worktree_mode(&old_handle);
+    let attachment = git::get_worktree_attachment_in(&old_handle, Some(&context.execution_dir));
     let old_full = prefixed(&context.prefix, &old_handle);
     let new_full = prefixed(&context.prefix, &new_handle);
     let mux_running = context.mux.is_running().unwrap_or(false);
 
-    if mux_running && new_handle != old_handle {
+    if mux_running && attachment.manages_mux() && new_handle != old_handle {
         match mode {
             MuxMode::Session => {
                 if context.mux.session_exists(&new_full)? {
@@ -145,14 +146,29 @@ pub fn rename(
     //    the worktree being moved, we'd otherwise lose our CWD.
     context.chdir_to_main_worktree()?;
 
-    // 10. Execute: git worktree move
+    // 10. Migrate metadata first so a successful path move leaves attachment
+    // state keyed by the resulting handle.
     if new_handle != old_handle {
-        git::move_worktree(&old_path, &new_path)
-            .context("Failed to move worktree (is the directory in use?)")?;
+        git::migrate_worktree_meta(&old_handle, &new_handle)
+            .context("Failed to migrate worktree metadata")?;
+    }
+
+    // 11. Execute: git worktree move
+    if new_handle != old_handle
+        && let Err(error) = git::move_worktree(&old_path, &new_path)
+    {
+        return match git::migrate_worktree_meta(&new_handle, &old_handle) {
+            Ok(()) => Err(error).context("Failed to move worktree (is the directory in use?)"),
+            Err(rollback_error) => Err(error).context(format!(
+                "Failed to move worktree and restore its metadata: {rollback_error:#}"
+            )),
+        };
+    }
+    if new_handle != old_handle {
         info!(from = %old_path.display(), to = %new_path.display(), "rename:worktree moved");
     }
 
-    // 11. Execute: git branch rename
+    // 12. Execute: git branch rename
     if let Some(ref nb) = new_branch
         && nb != &branch_name
     {
@@ -160,16 +176,9 @@ pub fn rename(
         info!(old = branch_name, new = nb, "rename:branch renamed");
     }
 
-    // 12. Migrate workmux.worktree.<handle>.* metadata
-    if new_handle != old_handle
-        && let Err(e) = git::migrate_worktree_meta(&old_handle, &new_handle)
-    {
-        warn!(error = %e, "rename:failed to migrate worktree metadata");
-    }
-
     // 13. Rename tmux window(s)/session
     let mut tmux_renamed = 0;
-    if mux_running && new_handle != old_handle {
+    if mux_running && attachment.manages_mux() && new_handle != old_handle {
         match mode {
             MuxMode::Session => {
                 if context.mux.session_exists(&old_full).unwrap_or(false) {

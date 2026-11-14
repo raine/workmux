@@ -7,6 +7,10 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+fn is_workmux_hook_command(command: &str) -> bool {
+    command.contains("workmux set-window-status") || command.contains("workmux register-agent")
+}
+
 /// Check if a parsed JSON value contains any workmux status hooks.
 pub fn has_workmux_hooks(settings: &Value) -> bool {
     let Some(hooks) = settings.get("hooks").and_then(|v| v.as_object()) else {
@@ -22,7 +26,7 @@ pub fn has_workmux_hooks(settings: &Value) -> bool {
             };
             for hook in hook_list {
                 if let Some(cmd) = hook.get("command").and_then(|v| v.as_str())
-                    && cmd.contains("workmux set-window-status")
+                    && is_workmux_hook_command(cmd)
                 {
                     return true;
                 }
@@ -57,7 +61,7 @@ pub fn remove_workmux_hooks(settings: &mut Value) -> bool {
                 hooks_list.retain(|e| {
                     !e.get("command")
                         .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.contains("workmux set-window-status"))
+                        .is_some_and(is_workmux_hook_command)
                 });
                 if hooks_list.len() < len_before {
                     modified = true;
@@ -125,6 +129,112 @@ pub fn remove_empty_hooks_wrapper(settings: &mut Value) -> bool {
         modified
     });
     root.unwrap_or(false)
+}
+
+fn groups_have_hook(groups: &[Value], required_group: &Value, required_hook: &Value) -> bool {
+    groups.iter().any(|group| {
+        group.get("matcher") == required_group.get("matcher")
+            && group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|installed_hooks| {
+                    installed_hooks.iter().any(|installed| {
+                        match required_hook.get("command").and_then(Value::as_str) {
+                            Some(command) => {
+                                installed.get("command").and_then(Value::as_str) == Some(command)
+                            }
+                            None => installed == required_hook,
+                        }
+                    })
+                })
+    })
+}
+
+/// Check whether every required hook command is present in the same event and matcher scope.
+pub fn has_required_hook_commands(config_root: &Value, required_hooks: &Value) -> bool {
+    let Some(installed_events) = config_root.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(required_events) = required_hooks.as_object() else {
+        return false;
+    };
+
+    required_events.iter().all(|(event, required_groups)| {
+        let Some(installed_groups) = installed_events.get(event).and_then(Value::as_array) else {
+            return false;
+        };
+        required_groups
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|required_group| {
+                required_group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .all(|required_hook| {
+                        groups_have_hook(installed_groups, required_group, required_hook)
+                    })
+            })
+    })
+}
+
+/// Merge only missing hook commands into their event and matcher scope.
+///
+/// Existing groups and user hooks remain unchanged. A required command already
+/// present in a group with the same matcher is not added again, even when that
+/// group also contains user hooks.
+pub fn merge_missing_hook_commands(config_root: &mut Value, hooks_to_add: &Value) -> Result<()> {
+    let config_obj = config_root
+        .as_object_mut()
+        .context("config root is not an object")?;
+
+    if !config_obj.contains_key("hooks") {
+        config_obj.insert("hooks".to_string(), Value::Object(serde_json::Map::new()));
+    }
+
+    let existing_hooks = config_obj
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .context("hooks value is not an object")?;
+    let hooks_map = hooks_to_add
+        .as_object()
+        .context("hooks to add is not an object")?;
+
+    for (event, hook_groups) in hooks_map {
+        let Some(required_groups) = hook_groups.as_array() else {
+            continue;
+        };
+        let existing_groups = existing_hooks
+            .entry(event.clone())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} is not an array"))?;
+
+        for required_group in required_groups {
+            let Some(required_hook_list) = required_group.get("hooks").and_then(Value::as_array)
+            else {
+                continue;
+            };
+            let missing: Vec<Value> = required_hook_list
+                .iter()
+                .filter(|required_hook| {
+                    !groups_have_hook(existing_groups, required_group, required_hook)
+                })
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+
+            let mut addition = required_group.clone();
+            addition["hooks"] = Value::Array(missing);
+            existing_groups.push(addition);
+        }
+    }
+
+    Ok(())
 }
 
 /// Merge hook groups into a config root, deduplicating by value equality.
@@ -265,6 +375,21 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_workmux_registration_hook() {
+        let mut settings = json!({
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{ "type": "command", "command": "workmux register-agent" }]
+                }]
+            }
+        });
+
+        assert!(remove_workmux_hooks(&mut settings));
+        remove_empty_hooks_wrapper(&mut settings);
+        assert!(settings.get("hooks").is_none());
+    }
+
+    #[test]
     fn test_remove_workmux_hooks_only_workmux() {
         let mut settings = json!({
             "hooks": {
@@ -375,6 +500,99 @@ mod tests {
         let mut settings = json!({ "enabledPlugins": {} });
         assert!(remove_empty_hooks_wrapper(&mut settings));
         assert!(settings.get("enabledPlugins").is_none());
+    }
+
+    #[test]
+    fn test_required_hooks_can_share_group_with_user_hooks() {
+        let config = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [
+                        { "type": "command", "command": "afplay Glass.aiff" },
+                        { "type": "command", "command": "workmux set-window-status done" }
+                    ]
+                }]
+            }
+        });
+        let required = json!({
+            "Stop": [{
+                "hooks": [
+                    { "type": "command", "command": "workmux set-window-status done" }
+                ]
+            }]
+        });
+
+        assert!(has_required_hook_commands(&config, &required));
+    }
+
+    #[test]
+    fn test_required_hooks_respect_matcher_scope() {
+        let config = json!({
+            "hooks": {
+                "Notification": [{
+                    "matcher": "other_event",
+                    "hooks": [{ "command": "workmux set-window-status waiting" }]
+                }]
+            }
+        });
+        let required = json!({
+            "Notification": [{
+                "matcher": "permission_prompt|elicitation_dialog",
+                "hooks": [{ "command": "workmux set-window-status waiting" }]
+            }]
+        });
+
+        assert!(!has_required_hook_commands(&config, &required));
+    }
+
+    #[test]
+    fn test_merge_missing_commands_preserves_mixed_group_without_duplicate() {
+        let mut config = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [
+                        { "type": "command", "command": "afplay Glass.aiff" },
+                        { "type": "command", "command": "workmux set-window-status done" }
+                    ]
+                }]
+            }
+        });
+        let original = config.clone();
+        let required = json!({
+            "Stop": [{
+                "hooks": [
+                    { "type": "command", "command": "workmux set-window-status done" }
+                ]
+            }]
+        });
+
+        merge_missing_hook_commands(&mut config, &required).unwrap();
+        assert_eq!(config, original);
+    }
+
+    #[test]
+    fn test_merge_missing_commands_adds_only_missing_hooks() {
+        let mut config = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{ "command": "workmux set-window-status done" }]
+                }]
+            }
+        });
+        let required = json!({
+            "Stop": [{
+                "hooks": [
+                    { "command": "workmux set-window-status done" },
+                    { "command": "workmux register-agent" }
+                ]
+            }]
+        });
+
+        merge_missing_hook_commands(&mut config, &required).unwrap();
+        let groups = config["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[1]["hooks"][0]["command"], "workmux register-agent");
     }
 
     #[test]

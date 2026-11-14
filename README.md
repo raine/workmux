@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://workmux.raine.dev/"><strong>📖 Documentation</strong></a> ·
+  <a href="https://workmux.dev/"><strong>📖 Documentation</strong></a> ·
   <a href="#installation">Install</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#commands">Commands</a> ·
@@ -28,9 +28,9 @@ parallel without conflict.
 windowing, git for worktrees, your agent for coding - workmux ties them together.
 
 <sup><sub>\* Also supports
-<a href="https://workmux.raine.dev/guide/kitty">kitty</a>,
-<a href="https://workmux.raine.dev/guide/wezterm">WezTerm</a>, and
-<a href="https://workmux.raine.dev/guide/zellij">Zellij</a> as alternative
+<a href="https://workmux.dev/guide/kitty">kitty</a>,
+<a href="https://workmux.dev/guide/wezterm">WezTerm</a>, and
+<a href="https://workmux.dev/guide/zellij">Zellij</a> as alternative
 backends.</sub></sup>
 
 📖 **New to workmux?** Read the
@@ -39,9 +39,16 @@ quick overview.
 
 ![workmux screenshot](https://raw.githubusercontent.com/raine/workmux/refs/heads/main/meta/screenshot_20260329_165534.webp)
 
-> [!TIP]
-> I'm building [aven](https://github.com/raine/aven), a local-first task manager
-> for power users and agents who live in the terminal.
+<a href="https://aventasks.dev/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://aventasks.dev/readme/aven-banner-dark.webp">
+    <img src="https://aventasks.dev/readme/aven-banner-light.webp" alt="aven: one task queue for you and your coding agents" width="100%">
+  </picture>
+</a>
+
+<sub>Also from the author of workmux: <a href="https://aventasks.dev/"><b>aven</b></a>, one
+queue for every project, with a keyboard-driven TUI for you and a CLI for your
+agents.</sub>
 
 ## Why workmux?
 
@@ -72,8 +79,8 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
   one command (`merge`)
 - [Dashboard](#workmux-dashboard) for monitoring agents, reviewing changes, and
   sending commands
-- [Sidebar](https://workmux.raine.dev/guide/sidebar/) for a persistent,
-  at-a-glance view of all agents across tmux windows
+- [Sidebar](https://workmux.dev/guide/sidebar/) for a persistent,
+  at-a-glance view of all agents across tmux windows or Zellij tabs
 - [Delegate tasks to worktree agents](#delegating-tasks-with-worktree) with the
   `/worktree` skill
 - [Display agent status in tmux window names](#agent-status-tracking)
@@ -83,29 +90,77 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 - Copy or symlink configuration files (`.env`, `node_modules`) into new
   worktrees
 - [Sandbox agents](#sandbox) in containers or VMs for enhanced security
+- [Run agents on a remote server](https://workmux.dev/guide/remote/)
+  over SSH while others stay local
 - [Automatic branch name generation](#automatic-branch-name-generation) from
   prompts using LLM
 - Shell completions
 
-## Hype
+## What people say
 
-> "I've been using (and loving) workmux which brings together tmux, git
-> worktrees, and CLI agents into an opinionated workflow."  
-> — @Coolin96 [🔗](https://news.ycombinator.com/item?id=46029809)
+- *"I've been using (and loving) workmux which brings together tmux, git
+  worktrees, and CLI agents into an opinionated workflow."* -
+  [Coolin96 on Hacker News](https://news.ycombinator.com/item?id=46029809)
+- *"Thank you so much for your work with workmux! It's a tool I've been wanting
+  to exist for a long time."* -
+  [rstacruz on GitHub](https://github.com/raine/workmux/issues/2)
+- *"It's become my daily driver - the perfect level of abstraction over tmux +
+  git, without getting in the way or obscuring the underlying tooling."* -
+  [cisaacstern on GitHub](https://github.com/raine/workmux/issues/33)
+- *"I have to mention workmux at every opportunity because it's the perfect glue
+  between worktrees, agents and tmux windows."* -
+  [dedbrizz on Threads](https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l)
+- *"Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you
+  like tmux and want to keep your config."* -
+  [MatijaSosic on X](https://x.com/MatijaSosic/status/2080022087281127659)
+- *"Using workmux with a well-configured tmux has been a breath of fresh air"* -
+  [sbeirakh_il on X](https://x.com/sbeirakh_il/status/2080279929778733305)
+- *"I've been using it for about a month now, and it's been nothing but
+  great."* -
+  [gabrielrockson_ on X](https://x.com/gabrielrockson_/status/2080386326566736189)
+- *"I still don't see the need for Herdr. Workmux adds busy/question/done
+  status, manages worktrees by itself, and etc. It lives on an already existing
+  tmux setup."* -
+  [13hcoks on X](https://x.com/13hcoks/status/2080278051309355485)
+- *"workmux is fantastic. nothing too fancy, solves a real problem and stays in
+  TMUX ❤️"* -
+  [devopstoolbox on X](https://x.com/devopstoolbox/status/2094442083717390547)
+- *"Workmux is fantastic if you're mostly terminal bound."* -
+  [cody1786 on X](https://x.com/cody1786/status/2033959173361213870)
+- *"Want modern terminal workspace features without abandoning your setup?
+  Here is how to keep Tmux and boost your workflow using Workmux."* -
+  [Sam Natale on YouTube](https://www.youtube.com/watch?v=ww1wykxJps8)
 
-> "Thank you so much for your work with workmux! It's a tool I've been wanting
-> to exist for a long time."  
-> — @rstacruz [🔗](https://github.com/raine/workmux/issues/2)
+## Community videos
 
-> "It's become my daily driver - the perfect level of abstraction over tmux +
-> git, without getting in the way or obscuring the underlying tooling."  
-> — @cisaacstern [🔗](https://github.com/raine/workmux/issues/33)
+Some kind people have made videos about workmux on YouTube. If you're looking
+for a demo, check them out.
 
-> "I have to mention workmux at every opportunity because it's the perfect glue
-> between worktrees, agents and tmux windows."  
-> — @dedbrizz [🔗](https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l)
+<table>
+  <tr>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=ww1wykxJps8"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/ww1wykxJps8.webp" alt="Tmux is Still Better Than Herdr (Here's Why)"></a><br>
+      <a href="https://www.youtube.com/watch?v=ww1wykxJps8">Tmux is Still Better Than Herdr (Here's Why)</a><br>
+      Sam Natale
+    </td>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=7uumknh43rM"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/7uumknh43rM.webp" alt="I Don't Want a New Terminal. I Want THIS for Tmux."></a><br>
+      <a href="https://www.youtube.com/watch?v=7uumknh43rM">I Don't Want a New Terminal. I Want THIS for Tmux.</a><br>
+      DevOps Toolbox
+    </td>
+    <td width="33%">
+      <a href="https://www.youtube.com/watch?v=0RGyt3EDP-E"><img src="https://raw.githubusercontent.com/raine/workmux/refs/heads/main/docs/src/assets/videos/0RGyt3EDP-E.webp" alt="Tmux Didn't Need a Replacement, It Needed Workmux"></a><br>
+      <a href="https://www.youtube.com/watch?v=0RGyt3EDP-E">Tmux Didn't Need a Replacement, It Needed Workmux</a><br>
+      Seth Phaeno
+    </td>
+  </tr>
+</table>
 
 ## Installation
+
+**Official sources:** [github.com/raine/workmux](https://github.com/raine/workmux)
+and [workmux.dev](https://workmux.dev/). This project is not affiliated
+with workmux.com.
 
 ### Bash YOLO
 
@@ -134,7 +189,7 @@ cargo install workmux
 mise use -g cargo:raine/workmux
 ```
 
-**Nix** ([flake and home-manager setup](https://workmux.raine.dev/guide/nix)):
+**Nix** ([flake and home-manager setup](https://workmux.dev/guide/nix)):
 
 ```bash
 nix profile install github:raine/workmux
@@ -206,11 +261,11 @@ workmux uses a two-level configuration system:
 Project settings override global settings. When you run workmux from a
 subdirectory, it walks upward to find the nearest `.workmux.yaml`, allowing
 nested configs for monorepos. See the
-[Monorepos guide](https://workmux.raine.dev/guide/monorepos#nested-configuration)
-for details. For `post_create` and file operation lists (`files.copy`,
-`files.symlink`), you can use `"<global>"` to include global values alongside
-project-specific ones. Other settings like `panes` are replaced entirely when
-defined in the project config.
+[Monorepos guide](https://workmux.dev/guide/monorepos#nested-configuration)
+for details. For hook lists (`post_create`, `pre_merge`, `pre_remove`) and file
+operation lists (`files.copy`, `files.symlink`), you can use `"<global>"` to
+include global values alongside project-specific ones. Other settings like
+`panes` are replaced entirely when defined in the project config.
 
 ### Global configuration example
 
@@ -220,6 +275,7 @@ defined in the project config.
 nerdfont: true # Enable nerdfont icons (prompted on first run)
 merge_strategy: rebase # Make workmux merge do rebase by default
 merge_keep: true # Keep worktree, window, and branch after merge by default
+confirm_unmerged_removal: false # Remove unmerged branches without confirmation
 agent: claude
 
 panes:
@@ -264,16 +320,24 @@ customize.
 | Option           | Description                                                                                           | Default                     |
 | ---------------- | ----------------------------------------------------------------------------------------------------- | --------------------------- |
 | `main_branch`    | Branch to merge into                                                                                  | Auto-detected               |
-| `base_branch`    | Default base branch for new worktrees                                                                 | Current branch              |
+| `base_branch`    | Default base ref for new worktrees, or `auto` for the effective main branch                           | Current branch              |
 | `worktree_dir`   | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.                         | `<project>__worktrees/`     |
-| `window_prefix`    | Prefix for tmux window/session names                                                                  | `wm-`                       |
+| `window_prefix`    | Prefix for tmux window/session names. Supports `{project}`.                                           | `wm-`                       |
 | `mode`             | Tmux mode (`window` or `session`)                                                                     | `window`                    |
+| `default_session`  | Session to return to when a workmux session closes (session mode)                                     | Previous session            |
 | `window_placement` | New tmux window placement (`after_current` or `rightmost`)                                            | `after_current`             |
 | `agent`            | Default agent for `<agent>` placeholder                                                               | `claude`                    |
-| `agents`         | Named agent commands ([docs](https://workmux.raine.dev/guide/agents#named-agents), global-only)       | `{}`                        |
-| `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`)                                                  | `merge`                     |
-| `merge_keep`     | Keep resources after `workmux merge` by default                                                       | `false`                     |
-| `theme`          | Dashboard color scheme ([custom colors](https://workmux.raine.dev/guide/configuration#custom-colors)) | `default` (auto dark/light) |
+| `agents`         | Named agent commands ([docs](https://workmux.dev/guide/agents#named-agents), global-only)       | `{}`                        |
+| `merge_strategy`           | Default merge strategy (`merge`, `rebase`, `squash`)                                                  | `merge`                     |
+| `merge_keep`               | Keep resources after `workmux merge` by default                                                       | `false`                     |
+| `confirm_unmerged_removal` | Confirm before deleting branches with commits not merged into their base                               | `true`                      |
+| `theme`                    | Dashboard color scheme ([custom colors](https://workmux.dev/guide/configuration#custom-colors)) | `default` (auto dark/light) |
+
+Set `base_branch: auto` to create independent work streams from each repository's
+effective main branch. Workmux uses configured `main_branch`, then the local
+`origin/HEAD`, `main`, or `master`. Detection uses local Git state and does not
+fetch. Omitting `base_branch` continues to create branches from the checked-out
+branch.
 
 #### Naming options
 
@@ -290,37 +354,59 @@ customize.
 
 #### Panes
 
-Define your tmux pane layout with the `panes` array. For multiple windows in
+Define your multiplexer pane layout with the `panes` array. For multiple windows in
 session mode, use [`windows`](#multiple-windows-per-session) instead (they are
 mutually exclusive).
 
 ```yaml
 panes:
   - command: <agent>
+    name: agent
     focus: true
   - command: npm run dev
+    name: dev
     split: horizontal
     size: 15
 ```
 
 Each pane supports:
 
-| Option       | Description                                                    | Default |
-| ------------ | -------------------------------------------------------------- | ------- |
-| `command`    | Command to run (see [agent placeholders](#agent-placeholders)) | Shell   |
-| `focus`      | Whether this pane receives focus                               | `false` |
-| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                | `false` |
-| `split`      | Split direction (`horizontal` or `vertical`)                   | —       |
-| `size`       | Absolute size in lines/cells                                   | 50%     |
-| `percentage` | Size as percentage (1-100)                                     | 50%     |
+| Option       | Description                                                                  | Default          |
+| ------------ | ---------------------------------------------------------------------------- | ---------------- |
+| `name`       | Pane display name (currently applied by the Zellij backend)                  | ---              |
+| `command`    | Command to run (see [agent placeholders](#agent-placeholders))               | Shell            |
+| `focus`      | Whether this pane receives focus                                             | `false`          |
+| `zoom`       | Zoom pane to fullscreen (implies `focus: true`)                              | `false`          |
+| `split`      | Split direction (`horizontal` or `vertical`)                                 | ---              |
+| `size`       | Absolute size in lines/cells                                                 | 50%              |
+| `percentage` | Size as percentage (1-100)                                                   | 50%              |
+| `target`     | 0-based pane index to split from; defaults to most recent pane               | most recent pane |
+
+Use `target` when you want to split something other than the pane that was just
+created. The target must reference an earlier pane in the same layout.
+
+```yaml
+panes:
+  - command: nvim
+    focus: true
+  - command: pnpm install && pnpm run dev
+    split: vertical
+    size: 15
+  - command: <agent>
+    split: horizontal
+    target: 0
+```
+
+This creates three panes: `nvim` is at the top left, the agent is to its right,
+and the dev server spans the bottom.
 
 ##### Agent placeholders
 
 - `<agent>`: resolves to the configured agent (from `agent` config or `--agent`
   flag)
 
-Built-in agents (`claude`, `gemini`, `codex`, `opencode`, `kiro-cli`, `vibe`,
-`pi`, `omp`) are auto-detected when used as literal commands and receive prompt
+Built-in agents (`claude`, `gemini`, `agy`, `codex`, `copilot`, `opencode`, `kiro-cli`,
+`vibe`, `pi`, `omp`, `grok`) are auto-detected when used as literal commands and receive prompt
 injection automatically, without needing the `<agent>` placeholder or a matching
 `agent` config:
 
@@ -335,6 +421,9 @@ panes:
 Each agent receives the prompt (via `-p`/`-P`/`-e`) using the correct format for
 that agent. Auto-detection matches the executable name regardless of flags or
 path.
+
+Antigravity CLI support covers command detection, prompt injection, and status
+tracking via lifecycle hooks installed by `workmux setup`.
 
 #### Named layouts
 
@@ -387,12 +476,27 @@ all worktrees at once.
 Run commands at specific points in the worktree lifecycle, such as installing
 dependencies or running database migrations. All hooks run with the **worktree
 directory** as the working directory (or the nested config directory for
-[nested configs](https://workmux.raine.dev/guide/monorepos#nested-configuration))
+[nested configs](https://workmux.dev/guide/monorepos#nested-configuration))
 and receive environment variables: `WM_HANDLE`, `WM_WORKTREE_PATH`,
 `WM_PROJECT_ROOT`, `WM_CONFIG_DIR`.
 
-`WM_CONFIG_DIR` points to the directory containing the `.workmux.yaml` that was
-used, which may differ from `WM_WORKTREE_PATH` when using nested configs.
+`hook_shell` is an argv list containing the executable followed by its
+arguments. Workmux appends each hook command as the final argument. It defaults
+to `["bash", "-c"]` for compatibility. Machine-specific paths belong in global
+configuration:
+
+```yaml
+hook_shell: ["/opt/homebrew/bin/bash", "-c"]
+```
+
+A project can override the complete argv, or inherit the global value by
+omitting `hook_shell`. The argv must contain a non-empty executable. Shell flags
+and error handling apply only when included explicitly.
+
+`WM_PROJECT_ROOT` points to the repository's main worktree, regardless of where
+the selected config is stored. `WM_CONFIG_DIR` points to the corresponding
+config directory in the new worktree, which may differ from `WM_WORKTREE_PATH`
+when using nested configs.
 
 | Hook          | When it runs                                      | Additional env vars                  |
 | ------------- | ------------------------------------------------- | ------------------------------------ |
@@ -408,6 +512,16 @@ post_create:
 
 pre_merge:
   - just check
+```
+
+In Node.js projects, `pre_remove` defaults to a fast `node_modules` cleanup, and
+defining your own commands replaces that default. Use
+`"<cleanup-node-modules>"` to keep it:
+
+```yaml
+pre_remove:
+  - cp -r test-results/ "$WM_PROJECT_ROOT/artifacts/$WM_HANDLE/"
+  - "<cleanup-node-modules>"
 ```
 
 #### Agent status icons
@@ -525,7 +639,7 @@ alias wm='workmux'
 - [`resurrect`](#workmux-resurrect) - Restore worktree windows after a crash
 - [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`dashboard`](#workmux-dashboard) - Show TUI dashboard of all active agents
-- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux
+- [`sidebar`](#workmux-sidebar) - Toggle a compact agent status sidebar in tmux, Zellij or Rex
 - [`reap-agents`](#workmux-reap-agents) - Exit tracked agent processes older than a threshold
 - [`config edit`](#workmux-config-edit) - Edit the global configuration file
 - [`init`](#workmux-init) - Generate configuration file
@@ -549,11 +663,13 @@ immediately. If the branch doesn't exist, it will be created automatically.
 #### Options
 
 - `--base <branch|commit|tag>`: Specify a base branch, commit, or tag to branch
-  from when creating a new branch. Overrides `base_branch` config. Defaults to
-  `base_branch` from config, then the currently checked out branch.
-- `--pr <number>`: Checkout a GitHub pull request by its number into a new
-  worktree.
+  from when creating a new branch. Overrides `base_branch` config. The config
+  value `auto` uses the effective main branch. Without either setting, workmux
+  uses the currently checked out branch.
+- `--pr <number|url>`: Checkout a GitHub pull request by its number or full URL
+  into a new worktree.
   - Requires the `gh` command-line tool to be installed and authenticated.
+  - URLs use the form `https://github.com/<owner>/<repository>/pull/<number>`.
   - The local branch name defaults to the PR's head branch name, but can be
     overridden (e.g., `workmux add custom-name --pr 123`).
   - If that local branch already exists and has no worktree, it is reused.
@@ -565,6 +681,11 @@ immediately. If the branch doesn't exist, it will be created automatically.
   `--agent`).
 - `-b, --background`: Create the tmux window in the background without switching
   to it. Useful with `--prompt-editor`.
+- `--remote [<name>]`: Create the workspace on a
+  [remote server](https://workmux.dev/guide/remote/). The name is
+  optional when `placement` names a remote or only one is configured. Put the
+  branch name first: `workmux add my-branch --remote`.
+- `--local`: Create the workspace locally even when `placement` names a remote.
 - `-w, --with-changes`: Move uncommitted changes from the current worktree to
   the new worktree, then reset the original worktree to a clean state. Useful
   when you've started working on main and want to move your branches to a new
@@ -596,12 +717,19 @@ immediately. If the branch doesn't exist, it will be created automatically.
   know or care whether the worktree already exists.
 - `-s, --session`: Create a tmux session instead of a window. See
   [Session mode](#session-mode) for details.
+- `--dry-run`: Print the resolved worktree path, branch, base, multiplexer
+  target, file operations, and post-create hooks without creating or modifying
+  anything.
+- `--headless`: Create the worktree, apply file operations, and run
+  `post_create` hooks without requiring or creating a multiplexer target.
+- `--json`: Emit a versioned provisioning receipt on stdout. Requires
+  `--headless`. Hook output and diagnostics use stderr.
 - `--config <path>`: Use an alternate config file for this invocation. Still
   merges with global config.
 - `--fork`: Fork the last conversation from the current worktree into the new
   one. The agent resumes with the forked conversation context. Use
   `--fork=<session-id>` to fork a specific session (prefix matching supported).
-  Currently supports Claude Code.
+  Supports Claude Code and Codex.
 
 #### Skip options
 
@@ -629,6 +757,37 @@ These options allow you to skip expensive setup steps when they're not needed
 6. Sets up your configured tmux pane layout
 7. Automatically switches your tmux client to the new window
 
+In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
+calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
+workmux uses live pane working directories when their closest matches identify
+one session. A tmux server with one session is the final fallback. Remaining
+ambiguity requires `--parent-session <name>`. The working directory selects the
+Git repository and only provides conservative evidence for tmux placement.
+
+#### Headless provisioning
+
+Automation can provision a fully configured worktree without asking workmux to
+manage its terminal process:
+
+```bash
+workmux add suba-parser-a1b2c3d4 \
+  --name suba-parser-a1b2c3d4 \
+  --headless \
+  --json
+```
+
+The command creates or checks out the local branch, applies configured file
+operations, and runs `post_create` hooks. It does not inspect or create mux
+sessions, windows, panes, layouts, or pane commands. The JSON receipt includes
+`schema_version`, `handle`, `branch`, absolute `worktree_path`, absolute
+`working_directory`, `base_branch`, and `post_create_hooks_run`.
+
+Headless worktrees persist until removed with `workmux remove <handle>`. A later
+`workmux open <handle>` attaches a workmux-managed multiplexer target. Headless
+branch arguments are local branch names; remote branch syntax is rejected.
+Prompt, rescue, multi-worktree, sandbox, wait, dry-run, and mux-specific options
+are not accepted with `--headless`.
+
 #### Examples
 
 ##### Basic usage
@@ -649,6 +808,9 @@ workmux add origin/user-auth-pr
 # Remote branches with slashes work too (creates local branch "feature/foo")
 workmux add origin/feature/foo
 
+# Preview the resolved plan without creating anything
+workmux add feature/parallel-task --dry-run
+
 # Create a worktree in the background without switching to it
 workmux add feature/parallel-task --background
 
@@ -665,8 +827,8 @@ workmux add my-feature -o
 # Checkout PR #123. The local branch will be named after the PR's branch.
 workmux add --pr 123
 
-# Checkout PR #456 with a custom local branch name
-workmux add fix/api-bug --pr 456
+# Checkout a pull request from its full GitHub URL with a custom local branch
+workmux add --pr https://github.com/raine/workmux/pull/456 fix/api-bug
 
 # Checkout a fork branch using GitHub's owner:branch format (copy from GitHub UI)
 # Creates local branch "someuser-feature-branch" tracking the fork
@@ -731,8 +893,8 @@ done
 
 When you provide a prompt via `--prompt`, `--prompt-file`, or `--prompt-editor`,
 workmux automatically injects the prompt into panes running the configured agent
-command (e.g., `claude`, `codex`, `opencode`, `gemini`, `kiro-cli`, `vibe`,
-`pi`, `omp`, or whatever you've set via the `agent` config or `--agent` flag) without
+command (e.g., `claude`, `codex`, `copilot`, `opencode`, `gemini`, `agy`, `kiro-cli`, `vibe`,
+`pi`, `omp`, `grok`, or whatever you've set via the `agent` config or `--agent` flag) without
 requiring any `.workmux.yaml` changes:
 
 - Panes with a command matching the configured agent are automatically started
@@ -756,7 +918,7 @@ The `--auto-name` (`-A`) flag generates a branch name from your prompt using an
 LLM. The tool used depends on your configuration:
 
 1. `auto_name.command` is set: uses that command as-is
-2. `config.agent` is a known agent (`claude`, `gemini`, `codex`, `opencode`,
+2. `config.agent` is a known agent (`claude`, `gemini`, `agy`, `codex`, `opencode`,
    `kiro-cli`, `vibe`, `pi`, `omp`): uses the agent's CLI with a fast/cheap model
 3. Neither: falls back to the [`llm`](https://llm.datasette.io/) CLI tool
 
@@ -800,15 +962,15 @@ If you set `auto_name.command`, `llm` is not required.
 
 When an agent is configured, these commands are used automatically:
 
-| Agent      | Auto-name command                                                        |
-| ---------- | ------------------------------------------------------------------------ |
-| `claude`   | `claude --model haiku -p`                                                |
-| `gemini`   | `gemini -m gemini-2.5-flash-lite -p`                                     |
-| `codex`    | `codex exec --config model_reasoning_effort="low" -m gpt-5.1-codex-mini` |
-| `opencode` | `opencode run`                                                           |
-| `kiro-cli` | `kiro-cli chat --no-interactive`                                         |
-| `pi`       | `pi -p`                                                                  |
-| `omp`      | `omp -p`                                                                 |
+| Agent      | Auto-name command                                                            |
+| ---------- | ---------------------------------------------------------------------------- |
+| `claude`   | `claude --model haiku --no-session-persistence -p`                           |
+| `gemini`   | `gemini -m gemini-2.5-flash-lite -p`                                         |
+| `codex`    | `codex exec --ephemeral --config model_reasoning_effort="low" -m gpt-6-luna` |
+| `opencode` | `opencode run`                                                               |
+| `kiro-cli` | `kiro-cli chat --no-interactive`                                             |
+| `pi`       | `pi --no-session -p`                                                         |
+| `omp`      | `omp --no-session -p`                                                        |
 
 To override back to `llm` when an agent is configured, set
 `auto_name.command: "llm"`.
@@ -841,7 +1003,9 @@ auto_name:
 ```
 
 To use a specific tool, set `auto_name.command`. The command string is split
-into program and arguments, and the composed prompt is piped via stdin.
+into program and arguments, and the composed prompt is piped via stdin. Valid
+Git branch names are preserved, including slash-separated prefixes such as
+`fix/issue-123`.
 
 ```yaml
 auto_name:
@@ -1220,6 +1384,10 @@ Supports removing multiple worktrees in a single command.
 - `--keep-branch`, `-k`: Remove only the worktree and tmux window while keeping
   the local branch
 
+Set `confirm_unmerged_removal: false` to remove branches with unmerged commits
+without an extra confirmation. Worktrees with uncommitted changes remain
+protected and still require `--force`.
+
 #### Examples
 
 ```bash
@@ -1292,7 +1460,7 @@ are made.
 
 ### `workmux list` (alias: `ls`)
 
-Lists all git worktrees with their agent status, multiplexer window status, and
+Lists git worktrees with their agent status, multiplexer window status, and
 merge status. Supports filtering by worktree handle or branch name.
 
 #### Arguments
@@ -1306,9 +1474,12 @@ merge status. Supports filtering by worktree handle or branch name.
   installed and authenticated. Note that it shows pull requests' statuses with
   [Nerd Font](https://www.nerdfonts.com/) icons, which requires Nerd Font
   compatible font installed.
+- `--all`: Include worktrees from every repository represented by a tracked
+  agent in the current multiplexer instance. Repositories without tracked agents
+  cannot be discovered.
 - `--json`: Output as JSON. Produces a JSON array of objects with fields:
-  `handle`, `branch`, `path`, `is_main`, `mode`, `has_uncommitted_changes`,
-  `is_open`, `created_at`.
+  `project`, `project_path`, `handle`, `branch`, `path`, `is_main`, `mode`,
+  `has_uncommitted_changes`, `is_open`, `agent_statuses`, `created_at`.
 
 #### Examples
 
@@ -1321,6 +1492,9 @@ workmux list --pr
 
 # Output as JSON for scripting
 workmux list --json
+
+# List tracked projects in one JSON response
+workmux list --all --json
 
 # Filter to specific worktrees
 workmux list my-feature
@@ -1347,6 +1521,26 @@ api-work    1w   -      ✓    -         ~/project__worktrees/api-work
 - `✓` in MUX column = multiplexer window exists for this worktree
 - `●` in UNMERGED column = branch has commits not merged into main
 - `-` = not applicable
+
+---
+
+### `workmux status [worktree...]`
+
+Queries tracked agents in the current repository or in explicitly requested
+worktrees. Use `project:handle` to target a worktree in another project.
+
+- `--all`: Include tracked agents across every repository in the current
+  multiplexer instance. This option conflicts with explicit worktree targets.
+- `--json`: Emit an observation object containing the selected multiplexer
+  context, repository and target scope, state-file counts, the reconciled agent
+  count before scope filtering, and the scoped `agents` array. Agent entries
+  include `project` and `project_path` when their Git repository can be resolved.
+- `--git`: Include staged, unstaged, and unmerged commit information.
+
+Automation must check the command exit status before interpreting an empty
+`agents` array. See the
+[`status` command reference](https://workmux.dev/reference/commands/status/) for
+the JSON contract and fail-closed rules.
 
 ---
 
@@ -1394,7 +1588,7 @@ worktrees at once.
 - `-n, --new`: Force opening in a new window even if one already exists. Creates
   a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having
   multiple terminal views into the same worktree. In tmux, the duplicate appears
-  immediately to the right of the window where the command runs.
+  immediately to the right of the window identified by `$TMUX_PANE`.
 - `-s, --session`: Open in session mode, overriding the stored mode. Persists
   the mode change for subsequent opens. Cannot be combined with `--new`. Only
   supported with tmux.
@@ -1511,6 +1705,14 @@ workmux resurrect
 3. Skips worktrees that are already open or no longer exist
 4. Opens each matched worktree with `--continue` to resume the agent
 
+Agent state from known earlier multiplexer boots is compacted to one recovery
+candidate per exact working directory. This keeps repeated server restarts from
+accumulating duplicate recovery history while retaining unrestored worktrees
+across any number of restarts. Current-boot records, records without a reliable
+boot identity, malformed files, and state owned by another multiplexer instance
+or backend are preserved. Each instance compacts its own history when workmux
+observes that instance with a reliable boot identity.
+
 ---
 
 ### `workmux sync-files`
@@ -1602,7 +1804,20 @@ Useful for monitoring multiple parallel agents and quickly jumping between them.
 | `Enter`   | Go to selected agent (closes dashboard) |
 | `j`/`k`   | Navigate up/down                        |
 | `:`       | Open command palette                    |
-| `q`/`Esc` | Quit                                    |
+| `q`       | Quit                                    |
+
+#### Mouse controls
+
+The dashboard captures mouse input while it is open. Click the **Agents** and
+**Worktrees** tabs to switch views, click a table row to select it, and
+double-click a row to jump to its agent or worktree. Right-click a row to open
+its action menu, then click an action or use `j`/`k` and `Enter`. Click a footer
+command to run it. Use the mouse wheel over a table to change the selection
+without wrapping, or over the live preview to scroll its output.
+
+In diff view, use the wheel to scroll and click a file in the sidebar to jump to
+its diff. Visible diff and patch footer commands are clickable. Mouse capture is
+released when the dashboard exits.
 
 #### Live preview
 
@@ -1721,16 +1936,18 @@ Then press `prefix + Ctrl-s` to open the dashboard as a tmux popup.
 
 ### `workmux sidebar`
 
-Toggles a live agent status sidebar on the left or top edge of all tmux
-windows. By default, each sidebar pane shows active agents across all tmux
-sessions with live status updates, providing an always-visible overview without
-taking over the full screen like the dashboard. Use `workmux sidebar filter session`
-to show only agents in the current tmux session.
+Toggles a live agent status sidebar on the left or top edge of tmux windows or
+Zellij tabs. tmux can show agents across sessions; Zellij is scoped to the
+current session. The sidebar provides an always-visible overview without taking
+over the full screen like the dashboard.
 
 ```bash
-workmux sidebar                 # Toggle sidebar on/off (all sessions)
-workmux sidebar --session       # Toggle current session only, or opt out of global mode
-workmux sidebar --position top  # Override configured placement for this toggle
+workmux sidebar                       # Toggle sidebar on/off (all sessions)
+workmux sidebar on                    # Ensure the global sidebar is running
+workmux sidebar off                   # Ensure the global sidebar is stopped
+workmux sidebar --session on          # Ensure it is running in this session
+workmux sidebar --session off         # Ensure it is stopped in this session
+workmux sidebar on --position top     # Enable with a top sidebar
 ```
 
 The sidebar displays:
@@ -1739,14 +1956,15 @@ The sidebar displays:
 - Project and worktree name (e.g. `myproject/fix-bug`)
 - Elapsed time since last status change
 
-| Key     | Action                |
-| ------- | --------------------- |
-| `j`/`k` | Navigate up/down      |
-| `Enter` | Jump to agent         |
-| `g`/`G` | Jump to first/last    |
-| `v`     | Toggle layout mode    |
-| `f`     | Toggle session filter |
-| `q`     | Quit sidebar          |
+| Key     | Action                 |
+| ------- | ---------------------- |
+| `j`/`k` | Navigate up/down       |
+| `Enter` | Run configured action  |
+| `o`     | Focus the agent pane   |
+| `g`/`G` | Jump to first/last     |
+| `v`     | Toggle layout mode     |
+| `f`     | Toggle session filter  |
+| `q`     | Open quit confirmation |
 
 With tmux mouse mode enabled (`set -g mouse on`), click an agent row or top-bar
 chip to jump to its pane, or scroll to navigate the list.
@@ -1762,14 +1980,20 @@ sidebar:
   position: left # "left" (default) or "top"
   width: 40 # left width in columns, or "15%" for percentage
   layout: tiles # left only: "compact" or "tiles" (default)
+  enter_action: focus # "focus" (default) or "select"
 ```
+
+Set `enter_action: select` to show an agent's window while keeping focus in its
+sidebar. Press `o` to focus the selected agent pane.
 
 The left sidebar defaults to 10% of terminal width, clamped between 25 and 50
 columns. Widths above 80 columns use the default width so tmux pane expansion
 recovers automatically.
 
-Use `workmux sidebar --position top` or `--position left` to override the
-configured placement when enabling the sidebar.
+Use `workmux sidebar on --position top` or `--position left` to override the
+configured placement when enabling the sidebar. The `on` action also accepts
+`--width` and `--height`. The `off` action rejects appearance flags because they
+have no effect while stopping the sidebar.
 
 #### Example tmux binding
 
@@ -1779,9 +2003,10 @@ bind C-t run-shell "workmux sidebar"
 
 Then press `prefix + Ctrl-t` to toggle the sidebar.
 
-> **Note:** The sidebar is currently tmux-only. When enabled, a sidebar pane is
-> created in every existing window, and new windows automatically get one via a
-> tmux hook.
+> **Note:** Zellij and Rex sidebar support is experimental. See the
+> [Zellij guide](https://workmux.dev/guide/zellij/#sidebar) and the
+> [Rex guide](https://workmux.dev/guide/rex/#sidebar) for their behavior and
+> limitations.
 
 ---
 
@@ -1805,7 +2030,7 @@ after they exit.
 ### `workmux sandbox`
 
 Commands for managing sandbox functionality. See the
-[sandbox guide](https://workmux.raine.dev/guide/sandbox/) for full
+[sandbox guide](https://workmux.dev/guide/sandbox/) for full
 documentation.
 
 | Command               | Description                                            |
@@ -1925,26 +2150,29 @@ at-a-glance visibility into what the agent in each window doing.
 | ------------ | --------------------------------------------------------------------------- |
 | Claude Code  | ✅ Supported                                                                |
 | OpenCode     | ✅ Supported                                                                |
-| Codex        | ✅ Supported\*                                                              |
+| Codex        | ✅ Supported                                                                |
 | Copilot CLI  | ✅ Supported\*                                                              |
 | Pi           | ✅ Supported\*                                                              |
 | Oh My Pi    | ✅ Supported                                                                |
 | Gemini CLI   | ✅ Supported                                                                |
+| Grok         | ✅ Supported                                                                |
+| Antigravity CLI (`agy`) | ✅ Supported\*                                                   |
 | Kiro         | [Tracking issue](https://github.com/kirodotdev/Kiro/issues/5440)            |
 | Mistral Vibe | [Tracking issue](https://github.com/mistralai/mistral-vibe/discussions/334) |
 
 **Notes:**
 
-- **Codex**: No 💬 waiting state
-- **Copilot CLI**: No 💬 waiting state
+- **Copilot CLI**: 💬 waiting state requires Copilot CLI 1.0.18 or later
 - **Pi**: No 💬 waiting state
+- **Antigravity CLI (`agy`)**: No 💬 waiting state
 - **Kiro**: Hooks support is messy: requires a custom agent since the default
   can't be edited
 
 ### Setup
 
-Run `workmux setup` to automatically detect Claude Code, Copilot CLI, OpenCode,
-Pi, Oh My Pi, and other supported agent CLIs, install status tracking hooks, and install skills:
+Run `workmux setup` to automatically detect Claude Code, Antigravity CLI,
+Copilot CLI, OpenCode, Pi, Oh My Pi, Grok, and other supported agent CLIs, install
+status tracking hooks, and install skills:
 
 ```bash
 workmux setup
@@ -1976,35 +2204,33 @@ Or manually add the hooks to `~/.claude/settings.json`. See
 [.claude-plugin/plugin.json](.claude-plugin/plugin.json) for the hook
 configuration.
 
-**Copilot CLI**: copy the hooks to your repository:
+**Copilot CLI**: with Copilot CLI 0.0.422 or later, install the personal hook:
 
 ```bash
-mkdir -p .github/hooks/workmux-status
-curl -o .github/hooks/workmux-status/hooks.json \
-  https://raw.githubusercontent.com/raine/workmux/main/.github/hooks/workmux-status/hooks.json
+mkdir -p ~/.copilot/hooks
+curl -o ~/.copilot/hooks/workmux-status.json \
+  https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 
-Note: Copilot hooks are per-repository. The waiting state is not supported due
-to limitations in the Copilot CLI hooks implementation.
+Copilot loads personal hooks in every repository. If the repository contains a
+`.github/hooks/workmux-status` installation, remove that directory to avoid
+running both copies of the hook. The waiting state requires Copilot CLI 1.0.18
+or later.
 
-**OpenCode**: download the workmux status plugin:
+**Antigravity CLI (`agy`)**: `workmux setup` installs lifecycle hooks in
+`~/.gemini/config/hooks.json`. `PreInvocation` marks the pane working, and the
+terminal `Stop` event marks it done.
 
-```bash
-mkdir -p ~/.config/opencode/plugins
-curl -o ~/.config/opencode/package.json \
-  https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/package.json
-curl -o ~/.config/opencode/plugins/workmux-status.ts \
-  https://raw.githubusercontent.com/raine/workmux/main/resources/opencode/plugins/workmux-status.ts
-```
-
-Restart OpenCode for the plugin to take effect.
+**OpenCode**: run `workmux setup --hooks`. For manual installation, see the
+[OpenCode setup guide](https://workmux.dev/guide/status-tracking/#opencode-setup).
+V2 status tracking requires the terminal UI; headless `opencode run` is not tracked.
 
 **Oh My Pi**: copy the workmux status extension to your global OMP extensions directory:
 
 ```bash
 mkdir -p ~/.omp/agent/extensions
 curl -o ~/.omp/agent/extensions/workmux-status.ts \
-  https://raw.githubusercontent.com/raine/workmux/main/.omp/extensions/workmux-status.ts
+  https://raw.githubusercontent.com/raine/workmux/main/resources/omp/extensions/workmux-status.ts
 ```
 
 Restart omp for the extension to take effect.
@@ -2119,7 +2345,7 @@ Both backends support:
 - **Network restrictions** (container only): Block outbound connections except
   to approved domains
 
-See the [sandbox guide](https://workmux.raine.dev/guide/sandbox/) for full
+See the [sandbox guide](https://workmux.dev/guide/sandbox/) for full
 setup, configuration, and security details.
 
 ## Session mode
@@ -2150,6 +2376,23 @@ workmux add feature-branch --session
   use session mode for that worktree.
 - **Navigation**: After `merge` or `remove`, workmux switches you back to the
   previous session.
+
+### Returning to a default session
+
+By default a client viewing a closing session returns to whichever session it
+was in previously. Set `default_session` to name a session to prefer instead:
+
+```yaml
+mode: session
+default_session: main
+```
+
+`close`, `remove` and `merge` then send clients to the `main` session. A managed
+session for the destination branch still wins, so this applies only where tmux
+would otherwise fall back to the previous session. The value is a literal tmux
+session name, so `window_prefix` is not applied and it can name a session
+workmux does not manage; if nothing matches it exactly, clients fall back to
+their previous sessions as before.
 
 ### Multiple windows per session
 
@@ -2185,7 +2428,7 @@ which window is selected when the session opens.
 
 ### Limitations
 
-- **tmux only**: Session mode is currently only supported for the tmux backend.
+- **tmux and Rex only**: Session mode is currently only supported for the tmux and Rex backends.
 - **No duplicates**: Unlike window mode which supports opening multiple windows
   for the same worktree (`-2`, `-3` suffixes), session mode creates one session
   per worktree.
@@ -2373,7 +2616,10 @@ Note: In large monorepos, cleaning up `node_modules` during worktree removal can
 take significant time. workmux has a
 [special cleanup mechanism](https://github.com/raine/workmux/blob/main/src/scripts/cleanup_node_modules.sh)
 that moves `node_modules` to a temporary location and deletes it in the
-background, making the `remove` command return almost instantly.
+background, making the `remove` command return almost instantly. It is enabled
+automatically when a lockfile (`pnpm-lock.yaml`, `package-lock.json`, or
+`yarn.lock`) exists at the project root or in a direct subdirectory. You can also
+request it explicitly with `"<cleanup-node-modules>"` in `pre_remove`.
 
 ### Rust projects
 
@@ -2477,7 +2723,7 @@ Each worktree now gets unique ports derived from its name, allowing multiple
 instances to run simultaneously without conflicts. The `.env` file stays
 untouched, and `.env.local` is gitignored.
 
-See the [Monorepos guide](https://workmux.raine.dev/guide/monorepos) for
+See the [Monorepos guide](https://workmux.dev/guide/monorepos) for
 alternative approaches using direnv.
 
 ### Symlinks and `.gitignore` trailing slashes
@@ -2551,7 +2797,7 @@ to `.gitignore`:
 
 **Named agent profiles**
 
-Define [named agents](https://workmux.raine.dev/guide/agents#named-agents) in
+Define [named agents](https://workmux.dev/guide/agents#named-agents) in
 your global config when an agent needs a wrapper command, extra arguments, or
 environment variables. Simple string aliases still work:
 
@@ -2606,7 +2852,7 @@ profiles support `command`, `args`, `env`, and `type` fields.
 
 ### Delegating tasks with `/worktree`
 
-The `/worktree` [skill](https://workmux.raine.dev/guide/skills) lets you
+The `/worktree` [skill](https://workmux.dev/guide/skills) lets you
 delegate tasks to parallel worktree agents directly from your conversation. A
 main agent on the main branch can act as a coordinator: planning work and
 spinning up worktree agents for each task.
@@ -2623,7 +2869,7 @@ detailed walkthrough of the workflow.
 > /worktree Add dark mode, Implement caching  # multiple tasks
 ```
 
-See the [Skills guide](https://workmux.raine.dev/guide/skills) for more skills
+See the [Skills guide](https://workmux.dev/guide/skills) for more skills
 including `/merge`, `/rebase`, `/coordinator`, and `/open-pr`.
 
 ## Shell completions
@@ -2660,19 +2906,22 @@ workmux completions fish | source
 While tmux is the primary and recommended backend, workmux also supports
 alternative terminal multiplexers:
 
-- **[WezTerm](https://workmux.raine.dev/guide/wezterm)** (experimental) - For
+- **[WezTerm](https://workmux.dev/guide/wezterm)** (experimental) - For
   users who prefer WezTerm's features. Thanks to
   [@JeremyBYU](https://github.com/JeremyBYU) for contributing this backend.
-- **[kitty](https://workmux.raine.dev/guide/kitty)** (experimental) - For users
+- **[kitty](https://workmux.dev/guide/kitty)** (experimental) - For users
   who prefer kitty terminal. Requires `allow_remote_control` and `listen_on`
   configuration.
-- **[Zellij](https://workmux.raine.dev/guide/zellij)** (experimental) - For
+- **[Zellij](https://workmux.dev/guide/zellij)** (experimental) - For
   users who prefer Zellij. Detected automatically via `$ZELLIJ`.
+- **[Rex](https://workmux.dev/guide/rex)** (experimental) - For users of
+  the Rex multiplexer. Detected automatically via `$REX_BLOCK`.
 
 workmux auto-detects the backend from environment variables (`$TMUX`,
-`$WEZTERM_PANE`, `$KITTY_WINDOW_ID`, or `$ZELLIJ`). Session-specific variables
-are checked first, so running tmux inside kitty correctly selects the tmux
-backend. Set `$WORKMUX_BACKEND` to override detection.
+`$WEZTERM_PANE`, `$ZELLIJ`, `$KITTY_WINDOW_ID`, or `$REX_BLOCK`).
+Session-specific variables are checked first, so running tmux inside kitty or
+Rex correctly selects the tmux backend. Set `$WORKMUX_BACKEND` to override
+detection.
 
 ## Inspiration and related tools
 

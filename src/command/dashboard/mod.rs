@@ -27,9 +27,11 @@ mod actions;
 pub mod agent;
 mod ansi;
 mod app;
-mod diff;
+pub(crate) mod diff;
 mod diff_ops;
 mod keymap;
+mod layout;
+mod mouse;
 mod scope;
 mod settings;
 mod sort;
@@ -39,9 +41,10 @@ pub use app::DashboardTab;
 
 use anyhow::Result;
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyEventKind, MouseEventKind,
+        Event, KeyEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -59,6 +62,7 @@ use self::actions::apply_action;
 use self::app::{App, AppEvent, ViewMode};
 use self::diff_ops::DiffOps;
 use self::keymap::{Context, action_for_key};
+use self::mouse::handle_mouse_event;
 use self::spinner::SPINNER_FRAME_COUNT;
 use self::ui::ui;
 
@@ -67,29 +71,71 @@ fn get_context(app: &App) -> Context {
     app.keymap_context()
 }
 
-/// Handle mouse events for diff view scrolling.
-fn handle_mouse_event(app: &mut App, kind: MouseEventKind) {
-    if let ViewMode::Diff(ref mut diff_view) = app.view_mode {
-        let total_lines = if diff_view.patch_mode {
-            diff_view
-                .hunks
-                .get(diff_view.current_hunk)
-                .map(|h| h.parsed_lines.len())
-                .unwrap_or(0)
-        } else {
-            diff_view.line_count
-        };
+fn enter_terminal(mut writer: impl io::Write) -> io::Result<()> {
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+}
 
-        match kind {
-            MouseEventKind::ScrollUp => {
-                diff_view.scroll = diff_view.scroll.saturating_sub(3);
-            }
-            MouseEventKind::ScrollDown => {
-                let max_scroll = total_lines.saturating_sub(diff_view.viewport_height as usize);
-                diff_view.scroll = (diff_view.scroll + 3).min(max_scroll);
-            }
-            _ => {}
+fn leave_terminal(mut writer: impl io::Write) -> io::Result<()> {
+    execute!(
+        writer,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    )
+}
+
+struct TerminalSession {
+    active: bool,
+}
+
+impl TerminalSession {
+    fn start() -> Result<Self> {
+        enable_raw_mode()?;
+        let stdout = io::stdout();
+        if let Err(error) = enter_terminal(stdout) {
+            let _ = disable_raw_mode();
+            let _ = leave_terminal(io::stdout());
+            return Err(error.into());
         }
+        Ok(Self { active: true })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        let raw_result = disable_raw_mode();
+        let screen_result = leave_terminal(io::stdout());
+        self.active = raw_result.is_err() || screen_result.is_err();
+        raw_result?;
+        screen_result?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Time until the next enabled timer deadline.
+fn next_timeout(
+    tick_rate: Duration,
+    since_tick: Duration,
+    preview_interval: Option<Duration>,
+    since_preview: Duration,
+) -> Duration {
+    let time_until_tick = tick_rate.saturating_sub(since_tick);
+    match preview_interval {
+        Some(interval) => time_until_tick.min(interval.saturating_sub(since_preview)),
+        None => time_until_tick,
     }
 }
 
@@ -108,14 +154,8 @@ pub fn run(
     }
 
     // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    let mut terminal_session = TerminalSession::start()?;
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
@@ -127,7 +167,7 @@ pub fn run(
     // get queued and processed before the app is ready.
     let mut app = App::new(mux, session_filter, event_tx.clone())?;
 
-    // CLI preview size overrides config/tmux if provided
+    // CLI preview size overrides config and saved preference if provided
     if let Some(size) = cli_preview_size {
         app.preview_size = size;
     }
@@ -180,15 +220,17 @@ pub fn run(
         terminal.draw(|f| ui(f, &mut app))?;
 
         // Calculate timeout: wake for the earliest timer deadline
-        let current_preview_interval = if app.input_mode {
+        let current_preview_interval = app.mux.supports_preview().then_some(if app.input_mode {
             preview_refresh_interval_input
         } else {
             preview_refresh_interval_normal
-        };
-        let time_until_preview =
-            current_preview_interval.saturating_sub(last_preview_refresh.elapsed());
-        let time_until_tick = tick_rate.saturating_sub(last_tick.elapsed());
-        let timeout = time_until_tick.min(time_until_preview);
+        });
+        let timeout = next_timeout(
+            tick_rate,
+            last_tick.elapsed(),
+            current_preview_interval,
+            last_preview_refresh.elapsed(),
+        );
 
         // Block until an event arrives OR the timeout fires
         match event_rx.recv_timeout(timeout) {
@@ -218,7 +260,8 @@ pub fn run(
 
         // Auto-refresh preview more frequently for live updates
         // Uses faster refresh rate in input mode (set at top of loop)
-        if app.mux.supports_preview() && last_preview_refresh.elapsed() >= current_preview_interval
+        if let Some(interval) = current_preview_interval
+            && last_preview_refresh.elapsed() >= interval
         {
             app.refresh_preview();
             last_preview_refresh = std::time::Instant::now();
@@ -232,18 +275,11 @@ pub fn run(
     // Save git status cache before exiting
     git::save_status_cache(&app.git_statuses);
 
-    // Save PR status cache before exiting
+    // Save GitHub status caches before exiting
     github::save_pr_cache(app.pr_statuses());
+    github::save_check_cache(app.check_statuses());
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
-    terminal.show_cursor()?;
+    terminal_session.restore()?;
 
     Ok(())
 }
@@ -278,9 +314,11 @@ fn handle_terminal_event(
         return;
     }
 
-    // Handle mouse scroll events in diff view
-    if let Event::Mouse(mouse) = &event {
-        handle_mouse_event(app, mouse.kind);
+    // Mouse input is routed against the most recently rendered frame.
+    if let Event::Mouse(mouse) = event {
+        if handle_mouse_event(app, mouse) {
+            *last_preview_refresh = std::time::Instant::now();
+        }
         return;
     }
 
@@ -302,6 +340,43 @@ fn handle_terminal_event(
     // Help overlay handling - close on any key if open
     if app.show_help {
         app.show_help = false;
+        return;
+    }
+
+    if app.pending_row_context.is_some() {
+        let action = match key.code {
+            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
+                app.pending_row_context = None;
+                return;
+            }
+            crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                if let Some(menu) = &mut app.pending_row_context {
+                    menu.move_next();
+                }
+                return;
+            }
+            crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                if let Some(menu) = &mut app.pending_row_context {
+                    menu.move_previous();
+                }
+                return;
+            }
+            crossterm::event::KeyCode::Enter => app
+                .pending_row_context
+                .as_ref()
+                .and_then(|menu| menu.selected_action()),
+            crossterm::event::KeyCode::Char(character) => app
+                .pending_row_context
+                .as_ref()
+                .and_then(|menu| menu.action_for_hint(&character.to_string())),
+            _ => None,
+        };
+        if let Some(action) = action {
+            app.pending_row_context = None;
+            if apply_action(app, action) {
+                *last_preview_refresh = std::time::Instant::now();
+            }
+        }
         return;
     }
 
@@ -543,15 +618,93 @@ fn handle_terminal_event(
     if ctx == Context::DiffNormal
         && let ViewMode::Diff(ref diff) = app.view_mode
         && diff.is_branch_diff
-        && let Some(actions::Action::EnterPatchMode) = action_for_key(ctx, key)
+        && let Some(actions::Action::EnterPatchMode) =
+            action_for_key(ctx, key, app.config.dashboard.input_exit_key())
     {
         return;
     }
 
-    if let Some(action) = action_for_key(ctx, key) {
+    if let Some(action) = action_for_key(ctx, key, app.config.dashboard.input_exit_key()) {
         let refreshed_preview = apply_action(app, action);
         if refreshed_preview {
             *last_preview_refresh = std::time::Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{enter_terminal, leave_terminal, next_timeout};
+    use std::time::Duration;
+
+    #[test]
+    fn disabled_preview_deadline_does_not_shorten_tick_wait() {
+        let tick = Duration::from_millis(250);
+        for preview_elapsed in [Duration::ZERO, Duration::from_secs(10)] {
+            for tick_elapsed_ms in [0, 50, 249, 250, 300] {
+                let elapsed = Duration::from_millis(tick_elapsed_ms);
+                assert_eq!(
+                    next_timeout(tick, elapsed, None, preview_elapsed),
+                    tick.saturating_sub(elapsed),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_preview_deadline_preserves_normal_and_input_cadence() {
+        let tick = Duration::from_millis(250);
+        for (interval_ms, elapsed_ms, expected_ms) in [
+            (500, 0, 200),
+            (500, 450, 50),
+            (100, 80, 20),
+            (500, 500, 0),
+            (500, 600, 0),
+            (100, 100, 0),
+            (100, 150, 0),
+        ] {
+            assert_eq!(
+                next_timeout(
+                    tick,
+                    Duration::from_millis(50),
+                    Some(Duration::from_millis(interval_ms)),
+                    Duration::from_millis(elapsed_ms),
+                ),
+                Duration::from_millis(expected_ms),
+                "preview interval {interval_ms}ms, elapsed {elapsed_ms}ms",
+            );
+        }
+    }
+
+    #[test]
+    fn due_tick_wakes_even_when_preview_is_not_due() {
+        for elapsed_ms in [250, 300] {
+            assert_eq!(
+                next_timeout(
+                    Duration::from_millis(250),
+                    Duration::from_millis(elapsed_ms),
+                    Some(Duration::from_millis(500)),
+                    Duration::ZERO,
+                ),
+                Duration::ZERO,
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_control_sequences_enable_and_disable_mouse_capture() {
+        let mut enter = Vec::new();
+        enter_terminal(&mut enter).unwrap();
+        let mut leave = Vec::new();
+        leave_terminal(&mut leave).unwrap();
+
+        let enter = String::from_utf8(enter).unwrap();
+        let leave = String::from_utf8(leave).unwrap();
+        assert!(enter.contains("\u{1b}[?1049h"));
+        assert!(enter.contains("\u{1b}[?1000h"));
+        assert!(enter.contains("\u{1b}[?2004h"));
+        assert!(leave.contains("\u{1b}[?2004l"));
+        assert!(leave.contains("\u{1b}[?1000l"));
+        assert!(leave.contains("\u{1b}[?1049l"));
     }
 }

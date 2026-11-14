@@ -1,13 +1,10 @@
+use crate::cmd::Cmd;
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
-use std::process::Command;
-
-use crate::cmd::Cmd;
 
 /// Commit staged changes in a worktree using the user's editor
 pub fn commit_with_editor(worktree_path: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .current_dir(worktree_path)
+    let status = super::interactive_git(worktree_path)?
         .arg("commit")
         .status()
         .context("Failed to run git commit")?;
@@ -69,7 +66,8 @@ pub fn switch_branch_in_worktree(worktree_path: &Path, branch_name: &str) -> Res
 pub fn stash_push(message: &str, include_untracked: bool, patch: bool) -> Result<()> {
     if patch {
         // For --patch mode, we need an interactive terminal
-        let status = Command::new("git")
+        let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+        let status = super::interactive_git(&cwd)?
             .args(["stash", "push", "-m", message, "--patch"])
             .status()
             .context("Failed to run interactive git stash")?;

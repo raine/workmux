@@ -3,13 +3,6 @@
 // Re-export shared display helpers so existing `agent::extract_*` paths keep working.
 pub use crate::agent_display::{extract_project_name, extract_worktree_name};
 
-/// Check if an agent is stale based on its status timestamp.
-pub fn is_stale(status_ts: Option<u64>, stale_threshold_secs: u64, now_secs: u64) -> bool {
-    status_ts
-        .map(|ts| now_secs.saturating_sub(ts) > stale_threshold_secs)
-        .unwrap_or(false)
-}
-
 /// Get elapsed seconds since the status timestamp.
 pub fn elapsed_secs(status_ts: Option<u64>, now_secs: u64) -> Option<u64> {
     status_ts.map(|ts| now_secs.saturating_sub(ts))
@@ -31,21 +24,6 @@ pub fn format_age(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_stale_true() {
-        assert!(is_stale(Some(100), 60, 200)); // 100 seconds elapsed > 60 threshold
-    }
-
-    #[test]
-    fn test_is_stale_false() {
-        assert!(!is_stale(Some(150), 60, 200)); // 50 seconds elapsed < 60 threshold
-    }
-
-    #[test]
-    fn test_is_stale_none() {
-        assert!(!is_stale(None, 60, 200));
-    }
 
     #[test]
     fn test_elapsed_secs() {

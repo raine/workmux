@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::git::GitStatus;
-use crate::github::{PrListEntry, PrSummary};
+use crate::github::{BranchSummary, PrListEntry};
 use crate::workflow::types::WorktreeInfo;
 
 use super::super::diff::DiffView;
@@ -16,12 +17,17 @@ pub enum AppEvent {
     Terminal(crossterm::event::Event),
     /// Git status update for a worktree path
     GitStatus(PathBuf, GitStatus),
-    /// PR status update for a repo root
-    PrStatus(PathBuf, HashMap<String, PrSummary>),
+    /// GitHub status update for a repo root
+    GithubStatus(PathBuf, HashMap<String, BranchSummary>),
     /// Full worktree list from background fetch
     WorktreeList(Vec<WorktreeInfo>),
     /// Git log preview for a worktree path
     WorktreeLog(PathBuf, String),
+    /// Result of a confirmed background removal.
+    RemoveWorktreeResult(
+        PathBuf,
+        Result<crate::workflow::types::RemoveResult, String>,
+    ),
     /// Result of a background add-worktree operation
     AddWorktreeResult(Result<String, String>),
     /// Result of fetching open PRs for the add-worktree modal
@@ -29,10 +35,26 @@ pub enum AppEvent {
     /// Progress update during background sweep (current, total, handle)
     SweepProgressUpdate(usize, usize, String),
     /// Sweep operation completed
-    SweepComplete(Result<(), String>),
+    SweepComplete(Result<SweepOutcome, String>),
+    /// Capture of a remote agent's pane fetched from its node, by row pane id
+    RemotePreview(String, Result<String, String>),
+    /// Diff of a remote workspace fetched from its node: workspace id and
+    /// whether it is the branch diff
+    RemoteDiff(
+        String,
+        bool,
+        Result<crate::remote::agents::CachedDiff, String>,
+    ),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepOutcome {
+    pub completed: usize,
+    pub scheduled: usize,
 }
 
 use clap::ValueEnum;
+use ratatui::layout::Rect;
 
 /// Which tab is active in the dashboard
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -40,6 +62,18 @@ pub enum DashboardTab {
     #[default]
     Agents,
     Worktrees,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MouseRowId {
+    Agent(String),
+    Worktree(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct MouseRowClick {
+    pub id: MouseRowId,
+    pub at: Instant,
 }
 
 /// Current view mode of the dashboard
@@ -428,6 +462,80 @@ impl CommandPaletteState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowContextKind {
+    Agent,
+    Worktree,
+}
+
+pub struct RowContextMenu {
+    pub kind: RowContextKind,
+    pub commands: Vec<PaletteCommand>,
+    pub cursor: usize,
+    pub column: u16,
+    pub row: u16,
+}
+
+impl RowContextMenu {
+    pub fn move_next(&mut self) {
+        if !self.commands.is_empty() {
+            self.cursor = (self.cursor + 1).min(self.commands.len() - 1);
+        }
+    }
+
+    pub fn move_previous(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn selected_action(&self) -> Option<super::super::actions::Action> {
+        self.commands
+            .get(self.cursor)
+            .map(|command| command.action.clone())
+    }
+
+    pub fn action_for_hint(&self, hint: &str) -> Option<super::super::actions::Action> {
+        self.commands
+            .iter()
+            .find(|command| command.key_hint == hint)
+            .map(|command| command.action.clone())
+    }
+
+    pub fn area(&self, terminal: Rect) -> Rect {
+        let content_width = self
+            .commands
+            .iter()
+            .map(|command| 4 + command.label.len() + command.key_hint.len())
+            .max()
+            .unwrap_or(20);
+        let width = (content_width as u16 + 2).clamp(24, 48).min(terminal.width);
+        let height = (self.commands.len() as u16 + 2).min(terminal.height);
+        let x = self
+            .column
+            .min(terminal.right().saturating_sub(width))
+            .max(terminal.x);
+        let y = self
+            .row
+            .min(terminal.bottom().saturating_sub(height))
+            .max(terminal.y);
+        Rect::new(x, y, width, height)
+    }
+
+    pub fn item_at(&self, terminal: Rect, column: u16, row: u16) -> Option<usize> {
+        let area = self.area(terminal);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if column < inner.x || column >= inner.right() || row < inner.y || row >= inner.bottom() {
+            return None;
+        }
+        let index = usize::from(row - inner.y);
+        (index < self.commands.len()).then_some(index)
+    }
+}
+
 /// Score a fuzzy match: higher is better, None means no match.
 /// Exact prefix > word-boundary match > substring > subsequence.
 fn fuzzy_score(query: &str, target: &str) -> Option<i32> {
@@ -485,4 +593,97 @@ pub struct RemovePlan {
     pub is_unmerged: bool,
     pub keep_branch: bool,
     pub force_armed: bool,
+}
+
+/// Tracks active removals and suppresses completed rows in stale list snapshots.
+#[derive(Default)]
+pub struct WorktreeRemovals {
+    pending: HashSet<PathBuf>,
+    completed: HashSet<PathBuf>,
+}
+
+impl WorktreeRemovals {
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        self.pending.contains(path)
+    }
+
+    pub fn start(&mut self, path: PathBuf) -> bool {
+        self.pending.insert(path)
+    }
+
+    pub fn finish(&mut self, path: &std::path::Path, removed: bool) {
+        self.pending.remove(path);
+        if removed {
+            self.completed.insert(path.to_path_buf());
+        }
+    }
+
+    pub fn filter_snapshot(&mut self, worktrees: &mut Vec<WorktreeInfo>) {
+        self.completed
+            .retain(|path| worktrees.iter().any(|wt| wt.path == *path));
+        worktrees.retain(|wt| !self.completed.contains(&wt.path));
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    fn worktree(path: &str) -> WorktreeInfo {
+        WorktreeInfo {
+            repo_key: "/repo/.git".into(),
+            handle: "feature".into(),
+            branch: "feature".into(),
+            path: path.into(),
+            is_main: false,
+            mode: crate::config::MuxMode::Window,
+            has_mux_window: false,
+            has_unmerged: false,
+            pr_info: None,
+            agent_status: None,
+            created_at: None,
+            base_branch: None,
+        }
+    }
+
+    #[test]
+    fn removal_tracks_paths_and_rejects_duplicates() {
+        let mut state = WorktreeRemovals::default();
+        let first = PathBuf::from("/repo-a/feature");
+        let second = PathBuf::from("/repo-b/feature");
+        assert!(state.start(first.clone()));
+        assert!(!state.start(first.clone()));
+        assert!(state.start(second.clone()));
+        state.finish(&first, false);
+        assert!(!state.contains(&first));
+        assert!(state.contains(&second));
+        assert!(state.start(first));
+    }
+
+    #[test]
+    fn completed_removal_suppresses_stale_snapshots_until_absent() {
+        let mut state = WorktreeRemovals::default();
+        let wt = worktree("/repo/feature");
+        state.start(wt.path.clone());
+        state.finish(&wt.path, true);
+        let mut stale = vec![wt.clone()];
+        state.filter_snapshot(&mut stale);
+        assert!(stale.is_empty());
+        state.filter_snapshot(&mut Vec::new());
+        let mut recreated = vec![wt];
+        state.filter_snapshot(&mut recreated);
+        assert_eq!(recreated.len(), 1);
+    }
+
+    #[test]
+    fn failed_or_scheduled_removal_keeps_the_row() {
+        let mut state = WorktreeRemovals::default();
+        let wt = worktree("/repo/feature");
+        state.start(wt.path.clone());
+        state.finish(&wt.path, false);
+        let mut snapshot = vec![wt];
+        state.filter_snapshot(&mut snapshot);
+        assert_eq!(snapshot.len(), 1);
+        assert!(!state.contains(&snapshot[0].path));
+    }
 }

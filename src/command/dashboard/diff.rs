@@ -1,7 +1,7 @@
 //! Diff domain types and helper functions.
 
 use ratatui::text::Line;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::ansi::{parse_ansi_to_lines, strip_ansi_escapes};
 
@@ -236,6 +236,16 @@ pub struct DiffView {
     pub comment_input: Option<String>,
     /// List of files in the diff for the sidebar
     pub file_list: Vec<FileEntry>,
+    /// The remote workspace whose node produced the diff, which nothing
+    /// local can stage.
+    pub remote: Option<RemoteDiff>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteDiff {
+    pub at: crate::multiplexer::RemoteRef,
+    /// The title without a note on the diff's age.
+    pub title: String,
 }
 
 impl DiffView {
@@ -521,7 +531,7 @@ pub fn extract_file_list(hunks: &[DiffHunk]) -> Vec<FileEntry> {
 
 /// Get file list using git diff --numstat --summary (single command for stats and status)
 pub fn get_file_list_numstat(
-    path: &PathBuf,
+    path: &Path,
     diff_arg: &str,
     include_untracked: bool,
 ) -> Vec<FileEntry> {
@@ -529,12 +539,16 @@ pub fn get_file_list_numstat(
 
     let mut file_map: HashMap<String, FileEntry> = HashMap::new();
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(path)
-        .arg("diff")
-        .arg("--numstat")
-        .arg("--summary");
+    let Ok(mut cmd) = crate::git::unattended_git(Some(path)) else {
+        return Vec::new();
+    };
+    cmd.args([
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--numstat",
+        "--summary",
+    ]);
     if !diff_arg.is_empty() {
         cmd.arg(diff_arg);
     }
@@ -592,9 +606,8 @@ pub fn get_file_list_numstat(
 
     // Include untracked files if requested (separate command required)
     if include_untracked
-        && let Ok(out) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(path)
+        && let Ok(mut command) = crate::git::unattended_git(Some(path))
+        && let Ok(out) = command
             .args(["ls-files", "--others", "--exclude-standard"])
             .output()
     {
@@ -652,14 +665,22 @@ pub fn map_file_offsets(file_list: &mut [FileEntry], parsed_lines: &[Line]) {
 /// Get diff content, optionally piped through delta for syntax highlighting
 /// Returns (content, lines_added, lines_removed, hunks)
 pub fn get_diff_content(
-    path: &PathBuf,
+    path: &Path,
     diff_arg: &str,
     include_untracked: bool,
     parse_hunks: bool,
 ) -> Result<(String, usize, usize, Vec<DiffHunk>), String> {
+    let diff_content = raw_diff(path, diff_arg, include_untracked)?;
+    render_diff(diff_content, parse_hunks)
+}
+
+/// Uncolored `git diff <diff_arg>` of `path`, with untracked files as new
+/// files when `include_untracked`.
+pub fn raw_diff(path: &Path, diff_arg: &str, include_untracked: bool) -> Result<Vec<u8>, String> {
     // Run git diff without color - delta will add syntax highlighting
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C").arg(path).arg("--no-pager").arg("diff");
+    let mut cmd =
+        crate::git::pinned_git(path).map_err(|e| format!("Cannot validate Git metadata: {e}"))?;
+    cmd.args(["diff", "--no-ext-diff", "--no-textconv"]);
 
     // Only add diff_arg if non-empty (empty = unstaged changes only)
     if !diff_arg.is_empty() {
@@ -679,7 +700,15 @@ pub fn get_diff_content(
             diff_content.extend_from_slice(untracked_diff.as_bytes());
         }
     }
+    Ok(diff_content)
+}
 
+/// Colored display text of a raw diff, with its line counts and, when
+/// `parse_hunks`, its hunks.
+pub fn render_diff(
+    diff_content: Vec<u8>,
+    parse_hunks: bool,
+) -> Result<(String, usize, usize, Vec<DiffHunk>), String> {
     // Count stats before any transformation
     let (lines_added, lines_removed) = count_diff_stats(&diff_content);
 
@@ -731,11 +760,10 @@ pub fn get_diff_content(
 }
 
 /// Generate diff output for untracked files (new files not yet staged)
-pub fn get_untracked_files_diff(path: &PathBuf) -> Result<String, String> {
+pub fn get_untracked_files_diff(path: &Path) -> Result<String, String> {
     // Get list of untracked files
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = crate::git::pinned_git(path)
+        .map_err(|e| format!("Cannot validate Git metadata: {e}"))?
         .arg("ls-files")
         .arg("--others")
         .arg("--exclude-standard")
@@ -758,14 +786,18 @@ pub fn get_untracked_files_diff(path: &PathBuf) -> Result<String, String> {
         }
 
         // Use git diff --no-index to generate proper diff format for new files
-        let diff_output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .arg("diff")
-            .arg("--no-index")
-            .arg("/dev/null")
-            .arg(file)
-            .output();
+        let diff_output = crate::git::pinned_git(path).and_then(|mut command| {
+            command
+                .args([
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-index",
+                    "/dev/null",
+                ])
+                .arg(file);
+            command.output().map_err(anyhow::Error::from)
+        });
 
         if let Ok(output) = diff_output {
             // git diff --no-index returns exit code 1 when files differ, which is expected

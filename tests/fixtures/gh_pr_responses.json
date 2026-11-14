@@ -27,6 +27,7 @@
       "login": "vilmibm",
       "name": "Nate Smith"
     },
+    "baseRefName": "trunk",
     "headRefName": "gh-pr",
     "headRepository": {
       "id": "MDEwOlJlcG9zaXRvcnkyMTI2MTMwNDk=",

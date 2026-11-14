@@ -113,6 +113,72 @@ impl LimaInstance {
 /// the main process BEFORE creating tmux panes.
 ///
 /// Returns the VM name for use by `wrap_for_lima()`.
+fn acknowledge_reduced_git_isolation(config: &Config, vm_name: &str) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    let state_dir = crate::xdg::state_dir()?
+        .join("lima-acknowledgements")
+        .join("git-metadata-isolation-v1");
+    let acknowledgement = state_dir.join(vm_name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&acknowledgement) {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || !matches!(
+                std::fs::read_to_string(&acknowledgement).as_deref(),
+                Ok("accepted-v1\n")
+            )
+        {
+            bail!(
+                "Invalid Lima reduced-isolation acknowledgement at {}",
+                acknowledgement.display()
+            );
+        }
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: Lima exposes broad writable host mounts to a privileged guest. Git metadata control files cannot be isolated from ordinary writable Git data on this backend. A Lima guest can modify Git policy later consumed by host Git. Docker, Podman, and Apple Container provide the enforced Git metadata boundary."
+    );
+
+    let accepted = if config.sandbox.lima.accepts_reduced_git_metadata_isolation() {
+        true
+    } else if std::io::stdin().is_terminal() {
+        eprint!("Continue with reduced Git metadata isolation? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        input.trim().eq_ignore_ascii_case("y")
+    } else {
+        false
+    };
+
+    if !accepted {
+        bail!(
+            "Lima requires explicit acceptance of reduced Git metadata isolation. Set sandbox.lima.accept_reduced_git_metadata_isolation: true for unattended use, or use Docker, Podman, or Apple Container."
+        );
+    }
+
+    std::fs::create_dir_all(&state_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&acknowledgement)?;
+        file.write_all(b"accepted-v1\n")?;
+    }
+    #[cfg(not(unix))]
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&acknowledgement)?
+        .write_all(b"accepted-v1\n")?;
+    Ok(())
+}
+
 pub fn ensure_vm_running(config: &Config, worktree_path: &Path) -> Result<String> {
     if !LimaInstance::is_lima_available() {
         bail!(
@@ -124,6 +190,7 @@ pub fn ensure_vm_running(config: &Config, worktree_path: &Path) -> Result<String
 
     let isolation = config.sandbox.lima.isolation();
     let vm_name = super::instance_name(worktree_path, isolation.clone(), config)?;
+    acknowledge_reduced_git_isolation(config, &vm_name)?;
 
     debug!(vm_name = %vm_name, "checking Lima VM state");
     let vm_state = check_vm_state(&vm_name)?;

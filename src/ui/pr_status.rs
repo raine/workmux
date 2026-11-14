@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
-use crate::github::{CheckMeta, CheckState, PrSummary};
+use crate::github::{CheckMeta, CheckState, CheckSummary, PrSummary};
 use crate::nerdfont;
 use crate::ui::theme::ThemePalette;
 
@@ -15,41 +15,42 @@ pub struct PrStatusOptions {
     pub is_stale: bool,
 }
 
-pub fn format_pr_status(
+pub fn format_github_status(
     pr: Option<&PrSummary>,
+    check_summary: Option<&CheckSummary>,
     options: PrStatusOptions,
     spinner_frame: u8,
     palette: &ThemePalette,
 ) -> Vec<(String, Style)> {
-    match pr {
-        Some(pr) => format_pr_status_present(pr, options, spinner_frame, palette),
-        None => options
+    let check_state = check_summary
+        .map(|summary| &summary.state)
+        .or_else(|| pr.and_then(|pr| pr.checks.as_ref()));
+    let check_meta = check_summary
+        .and_then(|summary| summary.meta.as_ref())
+        .or_else(|| pr.and_then(|pr| pr.check_meta.as_ref()));
+
+    if pr.is_none() && check_state.is_none() {
+        return options
             .none_placeholder
             .map(|placeholder| vec![(placeholder.to_string(), Style::default().fg(palette.dimmed))])
-            .unwrap_or_default(),
+            .unwrap_or_default();
     }
-}
 
-pub fn format_pr_status_present(
-    pr: &PrSummary,
-    options: PrStatusOptions,
-    spinner_frame: u8,
-    palette: &ThemePalette,
-) -> Vec<(String, Style)> {
-    let (icon, color) = pr_state_icon_color(pr, palette);
-    let color = if options.is_stale {
-        palette.dimmed
-    } else {
-        color
-    };
     let mut spans = Vec::new();
-
-    if options.include_number {
-        spans.push((format!("#{} ", pr.number), Style::default().fg(color)));
+    if let Some(pr) = pr {
+        let (icon, color) = pr_state_icon_color(pr, palette);
+        let color = if options.is_stale {
+            palette.dimmed
+        } else {
+            color
+        };
+        if options.include_number {
+            spans.push((format!("#{} ", pr.number), Style::default().fg(color)));
+        }
+        spans.push((icon.to_string(), Style::default().fg(color)));
     }
-    spans.push((icon.to_string(), Style::default().fg(color)));
 
-    if let Some(ref checks) = pr.checks {
+    if let Some(checks) = check_state {
         let check_icons = nerdfont::check_icons();
         let (check_icon, check_color, counts) = match checks {
             CheckState::Success => (check_icons.success.to_string(), palette.success, None),
@@ -69,7 +70,9 @@ pub fn format_pr_status_present(
             check_color
         };
 
-        spans.push((" ".to_string(), Style::default()));
+        if !spans.is_empty() {
+            spans.push((" ".to_string(), Style::default()));
+        }
         spans.push((check_icon, Style::default().fg(check_color)));
 
         if options.show_check_counts
@@ -81,7 +84,7 @@ pub fn format_pr_status_present(
             ));
         }
 
-        if let Some(time_str) = format_check_elapsed(checks, pr.check_meta.as_ref()) {
+        if let Some(time_str) = format_check_elapsed(checks, check_meta) {
             spans.push((
                 format!(" {}", time_str),
                 Style::default().fg(palette.dimmed),
@@ -176,5 +179,52 @@ fn format_compact_duration(secs: u64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn palette() -> ThemePalette {
+        ThemePalette::from_config(
+            &crate::config::ThemeConfig::default(),
+            crate::config::ThemeMode::Dark,
+        )
+    }
+
+    fn options() -> PrStatusOptions {
+        PrStatusOptions {
+            include_number: true,
+            show_check_counts: true,
+            none_placeholder: Some("-"),
+            is_stale: false,
+        }
+    }
+
+    #[test]
+    fn branch_checks_render_without_pr() {
+        let checks = CheckSummary {
+            state: CheckState::Failure {
+                passed: 2,
+                total: 3,
+            },
+            meta: None,
+        };
+
+        let spans = format_github_status(None, Some(&checks), options(), 0, &palette());
+        let text: String = spans.into_iter().map(|(text, _)| text).collect();
+
+        assert!(text.contains("2/3"), "{text:?}");
+        assert!(!text.contains('#'), "{text:?}");
+        assert_ne!(text, "-");
+    }
+
+    #[test]
+    fn missing_pr_and_checks_use_placeholder() {
+        let spans = format_github_status(None, None, options(), 0, &palette());
+        let text: String = spans.into_iter().map(|(text, _)| text).collect();
+
+        assert_eq!(text, "-");
     }
 }

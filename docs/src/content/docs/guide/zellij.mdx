@@ -1,0 +1,130 @@
+---
+title: "Zellij"
+description: Use Zellij as an alternative multiplexer backend
+---
+
+import Screenshot from "../../../components/Screenshot.astro";
+import screenshot from "../../../assets/screenshots/zellij-screenshot.webp";
+
+:::caution[Experimental]
+The Zellij backend is new and experimental and requires Zellij 0.44.1 or later. Expect rough edges and potential issues.
+:::
+
+[Zellij](https://zellij.dev/) can be used as an alternative to tmux. Detected automatically via `$ZELLIJ`.
+
+<Screenshot
+  src={screenshot}
+  alt="workmux running in zellij with multiple agents"
+  framed={false}
+/>
+
+## Differences from tmux
+
+| Feature              | tmux                 | Zellij             |
+| -------------------- | -------------------- | ------------------ |
+| Agent status in tabs | Yes (window names)   | Yes (tab titles)   |
+| Tab ordering         | Insert after current | Appends to end     |
+| Scope                | tmux session         | Zellij session     |
+| Session mode         | Yes                  | No (window only)   |
+| Pane size control    | Percentage-based     | 50/50 splits only  |
+| Stacked panes        | No                   | Yes                |
+| Dashboard preview    | Yes                  | No                 |
+| Agent sidebar        | Yes                  | Yes (experimental) |
+
+- **Tab ordering**: New tabs appear at the end of the tab bar (no "insert after" support like tmux)
+- **Session isolation**: workmux operates within the current Zellij session. Tabs in other sessions are not affected.
+- **Window mode only**: Session mode (`--session`) is not supported. Use window mode instead.
+- **Pane splits**: Horizontal and vertical splits are 50/50 - percentage-based sizing is not available via the Zellij CLI.
+- **Stacked panes**: Use `split: stacked` in a pane config to create a Zellij stack with the previous pane, or with the pane selected by `target`.
+- **No dashboard preview**: Zellij's `dump-screen` only captures the focused pane, so preview in the dashboard is disabled.
+
+## Sidebar
+
+The [agent sidebar](/guide/sidebar/) works across every tab in the current
+Zellij session:
+
+```bash
+workmux sidebar
+workmux sidebar on --position top
+workmux sidebar off
+```
+
+Zellij has no hook for new tabs, so the sidebar daemon polls session state and
+adds a sidebar to a new tab when it becomes active, usually within about two
+seconds. Closing the sidebar or running `workmux sidebar off` removes it from
+every tab in the session.
+
+The sidebar is limited to the current Zellij session, so
+`workmux sidebar --session` behaves the same as `workmux sidebar`. Left and top
+placement are supported.
+
+Adding or removing the sidebar rebuilds each tab's layout. Running terminal
+panes keep running, and pane order, focus, floating panes and split proportions
+are preserved. The configured `panes` are not launched again. `sidebar.width`,
+`sidebar.height`, `--width` and `--height` apply when the sidebar is added; a
+manually resized sidebar keeps its size until you run `workmux sidebar on`
+again, which replaces the existing sidebars.
+
+:::caution[Zellij 0.45.1 and earlier]
+These releases reuse client IDs, so concurrent `zellij action` calls can
+intermittently fail with `There is no active session!` or return empty output.
+Toggling the sidebar runs many such calls while the daemon polls session state,
+so a toggle can occasionally fail partway and leave panes out of order. This
+is fixed in Zellij releases after 0.45.1
+([zellij-org/zellij#5630](https://github.com/zellij-org/zellij/pull/5630)).
+:::
+
+## Requirements
+
+- Zellij 0.44.1 or later
+- Unix-like OS (named pipes for handshakes)
+- Windows is **not supported**
+
+## Configuration
+
+No special Zellij configuration is required. workmux uses Zellij's built-in CLI actions (`zellij action`) which work out of the box.
+
+If you want to override the auto-detected backend, set the `WORKMUX_BACKEND` environment variable:
+
+```bash
+export WORKMUX_BACKEND=zellij
+```
+
+Zellij stacked panes are supported with `split: stacked`:
+
+```yaml
+panes:
+  - command: <agent>
+    name: agent
+    focus: true
+  - command: just test --watch
+    name: tests
+    split: stacked
+  - command: tail -f app.log
+    name: logs
+    split: stacked
+    target: 0
+```
+
+Zellij pane display names are supported with `name`. workmux applies them using
+`zellij action rename-pane --pane-id`, so the pane does not need to be focused.
+
+Agent status icons are appended to workmux tab titles. Zellij does not expose a
+focus hook equivalent to tmux, so waiting and done icons are replaced by the
+next status update rather than clearing when the tab receives focus.
+
+## Known limitations
+
+- Windows is not supported (requires Unix-specific features)
+- Session mode is not supported - only window mode works
+- Agent status icons do not auto-clear when a tab receives focus
+- Dashboard preview pane is disabled (captures focused pane only)
+- Horizontal and vertical pane splits are always 50/50 (no percentage-based sizing)
+- Fixed sidebar sizes follow Zellij's layout behavior when the terminal itself
+  is resized
+- Tab insertion ordering is not supported (new tabs always appear at the end)
+- Some edge cases may not be as thoroughly tested as the tmux backend
+
+## Credits
+
+Thanks to [Leonid Danilov](https://github.com/Infonautica) for contributing Zellij support.

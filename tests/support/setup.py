@@ -15,21 +15,17 @@ from ..conftest import (
 
 def write_claude_manual_status_hook(claude_dir: Path) -> None:
     claude_dir.mkdir(parents=True, exist_ok=True)
-    settings = {
-        "hooks": {
-            "Stop": [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "workmux set-window-status done",
-                        }
-                    ]
-                }
-            ]
-        }
-    }
-    (claude_dir / "settings.json").write_text(json.dumps(settings))
+    plugin_path = Path(__file__).parents[2] / ".claude-plugin" / "plugin.json"
+    plugin = json.loads(plugin_path.read_text())
+    (claude_dir / "settings.json").write_text(json.dumps({"hooks": plugin["hooks"]}))
+
+
+def install_opencode_version(env: MuxEnvironment, version: str) -> None:
+    """Make setup tests independent of the host's installed OpenCode version."""
+    env.install_script(
+        env.fake_bin_dir / "opencode",
+        f"#!/bin/sh\nprintf 'opencode {version}\\n'\n",
+    )
 
 
 def run_setup_interactive(env: MuxEnvironment, workmux_exe_path: Path) -> Path:
@@ -62,10 +58,15 @@ def run_setup_with_answers(
     *,
     hooks_answer: str = "y",
     skills_answer: str = "n",
+    expected_output: tuple[str, ...] = (),
     timeout: float = 5.0,
 ) -> Path:
     exit_code_file = run_setup_interactive(env, workmux_exe_path)
-    wait_for_pane_output(env, "test", "Install status tracking hooks?", timeout=timeout)
+    for text in expected_output:
+        wait_for_pane_output(env, "test", text, timeout=timeout)
+    wait_for_pane_output(
+        env, "test", "Install or update status tracking hooks?", timeout=timeout
+    )
     env.send_keys("test:", hooks_answer)
     wait_for_pane_output(env, "test", "Install bundled skills?", timeout=timeout)
     env.send_keys("test:", skills_answer)

@@ -1,5 +1,6 @@
 //! Scope filter for the dashboard agent list.
 
+use crate::multiplexer::AgentPane;
 use crate::state::StateStore;
 
 /// Whether the dashboard shows all agents or only those in the current session.
@@ -45,6 +46,13 @@ impl ScopeMode {
         }
     }
 
+    /// Retain agents visible within this scope.
+    pub fn retain_agents(&self, agents: &mut Vec<AgentPane>, session: Option<&str>) {
+        if *self == ScopeMode::Session {
+            agents.retain(|agent| session.is_some_and(|session| agent.session == session));
+        }
+    }
+
     /// Load scope mode from StateStore.
     pub fn load() -> Self {
         StateStore::new()
@@ -68,7 +76,30 @@ impl ScopeMode {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    fn agent(pane_id: &str, session: &str, path: &str, status_ts: Option<u64>) -> AgentPane {
+        AgentPane {
+            session: session.to_string(),
+            window_name: format!("wm-{pane_id}"),
+            pane_id: pane_id.to_string(),
+            window_id: String::new(),
+            window_index: None,
+            path: PathBuf::from(path),
+            pane_title: None,
+            status: None,
+            status_ts,
+            activity_ts: status_ts,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+            prompt: None,
+            remote: None,
+        }
+    }
 
     #[test]
     fn test_toggle() {
@@ -100,5 +131,78 @@ mod tests {
     fn test_from_str_case_insensitive() {
         assert_eq!(ScopeMode::from_str("Session"), ScopeMode::Session);
         assert_eq!(ScopeMode::from_str("SESSION"), ScopeMode::Session);
+    }
+
+    #[test]
+    fn session_scope_uses_session_identity_only() {
+        let mut agents = vec![
+            agent(
+                "%1",
+                "claude-codex-proxy",
+                "/code/claude-codex-proxy",
+                Some(1),
+            ),
+            agent(
+                "%2",
+                "claude-codex-proxy",
+                "/code/claude-codex-proxy__worktrees/feature",
+                None,
+            ),
+            agent("%3", "workmux", "/code/workmux", None),
+            agent("%4", "raine", "/Users/raine", None),
+            agent("%5", "aven", "/code/aven", None),
+            agent("%6", "WalkingMate", "/code/WalkingMate", None),
+        ];
+
+        ScopeMode::Session.retain_agents(&mut agents, Some("claude-codex-proxy"));
+
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.pane_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["%1", "%2"]
+        );
+    }
+
+    #[test]
+    fn session_scope_without_session_identity_shows_no_agents() {
+        let mut agents = vec![
+            agent("%1", "workmux", "/code/workmux", None),
+            agent("%2", "aven", "/code/aven", None),
+        ];
+
+        ScopeMode::Session.retain_agents(&mut agents, None);
+
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn all_scope_ignores_session_identity() {
+        let mut agents = vec![
+            agent("%1", "workmux", "/code/workmux", None),
+            agent("%2", "aven", "/code/aven", None),
+        ];
+
+        ScopeMode::All.retain_agents(&mut agents, None);
+
+        assert_eq!(agents.len(), 2);
+    }
+
+    #[test]
+    fn scope_cycle_restores_all_agents() {
+        let all_agents = vec![
+            agent("%1", "claude-codex-proxy", "/code/proxy", None),
+            agent("%2", "workmux", "/code/workmux", None),
+        ];
+        let mut mode = ScopeMode::All.toggle();
+        let mut visible = all_agents.clone();
+        mode.retain_agents(&mut visible, Some("claude-codex-proxy"));
+        assert_eq!(visible.len(), 1);
+
+        mode = mode.toggle();
+        visible = all_agents;
+        mode.retain_agents(&mut visible, Some("claude-codex-proxy"));
+        assert_eq!(visible.len(), 2);
     }
 }

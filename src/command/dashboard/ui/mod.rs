@@ -30,11 +30,14 @@ pub use self::dashboard::render_dashboard;
 pub use self::diff::render_diff_view;
 pub use self::help::{
     render_add_worktree, render_base_picker, render_command_palette, render_confirm_kill,
-    render_confirm_remove, render_help, render_project_picker, render_sweep, render_sweep_progress,
+    render_confirm_remove, render_help, render_project_picker, render_row_context, render_sweep,
+    render_sweep_progress,
 };
 
 /// Main UI entry point - renders the appropriate view based on app state.
 pub fn ui(f: &mut Frame, app: &mut App) {
+    app.terminal_area = f.area();
+
     // Render either dashboard or diff view based on view mode
     match &mut app.view_mode {
         ViewMode::Dashboard => render_dashboard(f, app),
@@ -50,7 +53,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         || app.pending_project_picker.is_some()
         || app.pending_sweep.is_some()
         || app.pending_add_worktree.is_some()
-        || app.pending_command_palette.is_some();
+        || app.pending_command_palette.is_some()
+        || app.pending_row_context.is_some();
 
     if has_modal {
         dim_buffer(f);
@@ -64,6 +68,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         render_confirm_kill(f, app);
     } else if app.pending_remove.is_some() {
         render_confirm_remove(f, app);
+    } else if app.pending_row_context.is_some() {
+        render_row_context(f, app);
     } else if app.pending_command_palette.is_some() {
         render_command_palette(f, app);
     } else if app.pending_base_picker.is_some() {

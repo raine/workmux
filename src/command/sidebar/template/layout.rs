@@ -1,11 +1,12 @@
-//! Layout solver: turns a parsed token line and a RowContext into styled spans.
+//! Layout solver: turns a parsed token line and a template row into styled spans.
 
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-use super::context::RowContext;
 use super::parser::{Token, TokenId};
+use super::row::TemplateRow;
 use crate::tmux_style::apply_tmux_directives;
+use crate::util::{display_width, truncate_with_ellipsis};
 
 /// Optional layout constraints applied while rendering a template line.
 #[derive(Default)]
@@ -36,12 +37,16 @@ impl RenderOptions {
 /// 3. Left segment: fixed tokens at natural width; first flex token absorbs slack.
 /// 4. If total exceeds width: drop right-segment field tokens in reverse order.
 /// 5. If still exceeding: truncate leftmost flex token with ellipsis.
-pub fn render_line(ctx: &RowContext, tokens: &[Token], width: usize) -> Vec<Span<'static>> {
+pub fn render_line(
+    ctx: &(impl TemplateRow + ?Sized),
+    tokens: &[Token],
+    width: usize,
+) -> Vec<Span<'static>> {
     render_line_with_options(ctx, tokens, width, &RenderOptions::default())
 }
 
 pub fn render_line_with_options(
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     tokens: &[Token],
     width: usize,
     options: &RenderOptions,
@@ -145,7 +150,7 @@ struct TokenInfo {
 }
 
 impl TokenInfo {
-    fn new(token: &Token, ctx: &RowContext, options: &RenderOptions) -> Self {
+    fn new(token: &Token, ctx: &(impl TemplateRow + ?Sized), options: &RenderOptions) -> Self {
         match token {
             Token::Literal(s) => Self {
                 token: Token::Literal(s.clone()),
@@ -260,7 +265,7 @@ fn is_whitespace_literal(info: &TokenInfo) -> bool {
 
 fn render_common_token(
     info: &TokenInfo,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     user_style: &mut Style,
     spans: &mut Vec<Span<'static>>,
     used_width: &mut usize,
@@ -281,7 +286,7 @@ fn render_common_token(
 }
 
 fn render_with_layout(
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     left: &[TokenInfo],
     right: &[TokenInfo],
     width: usize,
@@ -383,7 +388,7 @@ fn render_with_layout(
 
 fn render_field(
     spans: &mut Vec<Span<'static>>,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     id: TokenId,
     target_width: usize,
     max_width: usize,
@@ -401,6 +406,12 @@ fn render_field(
             spans.push(styled_span(text, style, user_style, ctx));
         }
         git_width
+    } else if id == TokenId::GroupStatus {
+        let (status_spans, status_width) = ctx.group_status_spans(target_width);
+        for (text, style) in status_spans {
+            spans.push(styled_span(text, style, user_style, ctx));
+        }
+        status_width
     } else if is_pr_segment(id) {
         let (pr_spans, pr_width) = ctx.pr_check_spans(target_width);
         for (text, style) in pr_spans {
@@ -438,12 +449,12 @@ fn render_field(
 
 fn render_status_icon_spans(
     spans: &mut Vec<Span<'static>>,
-    ctx: &RowContext,
+    ctx: &(impl TemplateRow + ?Sized),
     max_width: usize,
     user_style: Style,
 ) -> usize {
     let mut width = 0;
-    for (text, style) in &ctx.status_icon_spans {
+    for (text, style) in ctx.status_icon_spans() {
         let remaining = max_width.saturating_sub(width);
         if remaining == 0 {
             break;
@@ -461,54 +472,26 @@ fn render_status_icon_spans(
 
 /// Build a `Span` whose style is the intrinsic base patched by the user
 /// overlay, except on stale rows where the user overlay is ignored.
-fn styled_span(text: String, base: Style, user_style: Style, ctx: &RowContext) -> Span<'static> {
-    if ctx.is_stale {
+fn styled_span(
+    text: String,
+    base: Style,
+    user_style: Style,
+    ctx: &(impl TemplateRow + ?Sized),
+) -> Span<'static> {
+    if ctx.is_stale() {
         Span::styled(text, base)
     } else {
         Span::styled(text, base.patch(user_style))
     }
 }
 
-fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
-        .sum()
-}
-
-fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if display_width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 1 {
-        return "\u{2026}".to_string();
-    }
-
-    let mut out = String::new();
-    let mut width = 0;
-    for c in s.chars() {
-        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-        if width + char_width + 1 > max_width {
-            break;
-        }
-        out.push(c);
-        width += char_width;
-    }
-    let trimmed = out.trim_end();
-    let mut result = trimmed.to_string();
-    result.push('\u{2026}');
-    result
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::context::RowContext;
+    use super::super::context::{RowContext, SidebarStatus};
     use super::super::parser::{Token, TokenId};
     use super::*;
     use crate::git::GitStatus;
-    use crate::github::{CheckState, PrSummary};
+    use crate::github::{CheckState, CheckSummary, PrSummary};
     use crate::multiplexer::AgentPane;
     use crate::ui::theme::ThemePalette;
     use std::path::PathBuf;
@@ -527,14 +510,18 @@ mod tests {
             window_name: format!("wm-{}", name),
             pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
+            window_index: None,
             path: PathBuf::from(format!("/tmp/{}", name)),
             pane_title: None,
             status: None,
             status_ts: None,
+            activity_ts: None,
             updated_ts: None,
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
+            prompt: None,
+            remote: None,
         }
     }
 
@@ -546,8 +533,11 @@ mod tests {
         // Build a minimal RowContext manually for unit tests
         RowContext {
             agent,
+            sidebar_status: SidebarStatus::Reported(agent.status),
             primary: "feature-auth".to_string(),
             secondary: "myproject".to_string(),
+            template_worktree: "feature-auth".to_string(),
+            project: "myproject".to_string(),
             pane_suffix: String::new(),
             elapsed: "5:23".to_string(),
             status_icon_spans: vec![("💤".to_string(), ratatui::style::Style::default())],
@@ -555,6 +545,7 @@ mod tests {
             pane_title: None,
             git_status: None,
             pr_summary: None,
+            check_summary: None,
             is_stale: false,
             is_active: false,
             is_selected: false,
@@ -562,7 +553,7 @@ mod tests {
             agent_icon: String::new(),
             agent_icon_color: None,
             agent_label: String::new(),
-            idx: 0,
+            idx: Some(0),
             spinner_frame: 0,
         }
     }
@@ -660,12 +651,35 @@ mod tests {
             }),
             check_meta: None,
             url: None,
+            closing_issues: Vec::new(),
         }
     }
 
-    fn make_pr_context<'a>(agent: &'a AgentPane, pr: &'a PrSummary) -> RowContext<'a> {
+    fn test_checks() -> CheckSummary {
+        CheckSummary {
+            state: CheckState::Failure {
+                passed: 2,
+                total: 3,
+            },
+            meta: None,
+        }
+    }
+
+    fn successful_checks() -> CheckSummary {
+        CheckSummary {
+            state: CheckState::Success,
+            meta: None,
+        }
+    }
+
+    fn make_pr_context<'a>(
+        agent: &'a AgentPane,
+        pr: &'a PrSummary,
+        checks: &'a CheckSummary,
+    ) -> RowContext<'a> {
         let mut ctx = make_context(agent);
         ctx.pr_summary = Some(pr);
+        ctx.check_summary = Some(checks);
         ctx
     }
 
@@ -673,16 +687,57 @@ mod tests {
     fn pr_checks_renders_as_single_composite_token() {
         let agent = test_agent("pr");
         let pr = test_pr();
-        let ctx = make_pr_context(&agent, &pr);
+        let checks = test_checks();
+        let ctx = make_pr_context(&agent, &pr, &checks);
         let text = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 20);
         assert!(!text.trim().is_empty(), "{text:?}");
+    }
+
+    #[test]
+    fn pr_checks_render_without_pr_identity() {
+        let agent = test_agent("branch");
+        let checks = test_checks();
+        let mut ctx = make_context(&agent);
+        ctx.check_summary = Some(&checks);
+
+        let text = render_text(&ctx, &tokens("{pr_number} {pr_checks}"), 20);
+
+        assert!(ctx.pr_summary.is_none());
+        assert!(text.contains("2/3"), "{text:?}");
+    }
+
+    #[test]
+    fn main_branch_only_renders_failed_checks() {
+        let agent = test_agent("main");
+        let status = GitStatus {
+            branch: Some("main".to_string()),
+            ..Default::default()
+        };
+        let success = successful_checks();
+        let failure = test_checks();
+        let mut ctx = make_git_context(&agent, &status);
+
+        ctx.check_summary = Some(&success);
+        assert!(
+            render_text(&ctx, &tokens("{pr_checks}"), 20)
+                .trim()
+                .is_empty(),
+            "successful main checks should be hidden"
+        );
+
+        ctx.check_summary = Some(&failure);
+        assert!(
+            render_text(&ctx, &tokens("{pr_checks}"), 20).contains("2/3"),
+            "failed main checks should be visible"
+        );
     }
 
     #[test]
     fn pr_checks_self_fits_when_narrow() {
         let agent = test_agent("pr");
         let pr = test_pr();
-        let ctx = make_pr_context(&agent, &pr);
+        let checks = test_checks();
+        let ctx = make_pr_context(&agent, &pr, &checks);
         let wide = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 20);
         let narrow = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 1);
         assert!(wide.contains("2/3"), "{wide:?}");

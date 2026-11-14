@@ -1,32 +1,18 @@
-"""Tests for session navigation scenarios during cleanup operations.
+"""Headless checks for deferred session cleanup scripts and lifecycle.
 
-These tests verify that session-mode cleanup generates correct navigation
-commands in the deferred scripts. The headless test environment cannot fully
-test client-attached navigation (switch-client requires a PTY-attached
-terminal), but we can verify:
-
-  1. The deferred script content is correct (via RUST_LOG capture)
-  2. The end state is correct (session killed, worktree cleaned up)
-
-For full navigation testing (verifying the user actually lands on the right
-session after remove/merge), manual testing is required because tmux
-switch-client needs a client that headless test environments don't provide.
-
-Pseudo-client attachment via `script -q /dev/null tmux attach` is possible
-but fragile and platform-dependent, so we test script content instead.
-
-Mixed-mode navigation (session worktree navigating to a window-mode target
-during merge) also requires manual testing: tmux's window_exists_by_full_name
-only checks the current session's windows, so a window-mode target in another
-session can't be detected when running from inside the source session.
+PTY-attached navigation coverage lives in test_popup_navigation.py and
+test_session_relocation.py.
 """
 
 import shlex
+import shutil
+import time
 from pathlib import Path
 
 import pytest
 
 from .conftest import (
+    FakeAgentInstaller,
     TmuxEnvironment,
     WorkmuxCommandResult,
     assert_session_exists,
@@ -70,10 +56,8 @@ def run_workmux_in_session(
     log file (not stderr), so the log content is appended to stderr in the
     returned result.
 
-    Note: After the command completes, the session may be killed by deferred
-    scripts (e.g., after workmux remove). The exit code and output are
-    captured before deferred scripts run (they have a 300ms sleep), so they
-    are still available.
+    The script ignores the pane's hangup signal so it can capture the command's
+    exit code after a deferred cleanup kills the session.
     """
     scripts_dir = get_scripts_dir(env)
     stdout_file = scripts_dir / "in_session_stdout.txt"
@@ -99,7 +83,6 @@ def run_workmux_in_session(
         rust_log_line = f"export RUST_LOG={shlex.quote(rust_log)}"
 
     script_content = f"""#!/bin/sh
-trap 'echo $? > {shlex.quote(str(exit_code_file))}' EXIT
 export PATH={shlex.quote(env.env["PATH"])}
 export TMPDIR={shlex.quote(env.env.get("TMPDIR", "/tmp"))}
 export HOME={shlex.quote(env.env.get("HOME", ""))}
@@ -108,12 +91,17 @@ export WORKMUX_TEST=1
 {rust_log_line}
 cd {shlex.quote(str(workdir))}
 {shlex.quote(str(workmux_exe_path))} {command} > {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}
+status=$?
+echo "$status" > {shlex.quote(str(exit_code_file))}
+exit "$status"
 """
     script_file.write_text(script_content)
-    script_file.chmod(0o755)
 
-    # Send the script to the target session's pane (not the test session)
-    env.send_keys(f"={session_name}:", str(script_file))
+    # Ignore the pane hangup so deferred session removal cannot interrupt capture.
+    env.send_keys(
+        f"={session_name}:",
+        f"nohup /bin/sh {shlex.quote(str(script_file))} >/dev/null 2>&1 &",
+    )
 
     # Wait for completion (longer timeout to account for deferred scripts)
     if not poll_until_file_has_content(exit_code_file, timeout=10.0):
@@ -144,28 +132,12 @@ cd {shlex.quote(str(workdir))}
 
 
 class TestRemoveFromInsideSession:
-    """Tests for removing session-mode worktrees from inside the session.
+    """Session removal defers cleanup and lets tmux relocate attached clients."""
 
-    When running `workmux remove` from inside a session-mode worktree,
-    the deferred script should switch to the last session before killing
-    the source session, so the user returns to where they were previously
-    instead of tmux picking an arbitrary session.
-
-    Limitation: These tests verify the deferred script content and end state
-    but cannot verify the actual client navigation because switch-client
-    requires an attached terminal (PTY). Full navigation testing requires
-    manual verification with an attached tmux client.
-    """
-
-    def test_remove_generates_switch_to_last_session(
+    def test_remove_uses_guarded_navigation_with_native_fallback(
         self, mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
     ):
-        """Verify remove from inside session generates switch-client -l.
-
-        The deferred cleanup script should contain `switch-client -l` before
-        `kill-session` so that the user's client returns to their previous
-        session rather than tmux choosing an arbitrary one.
-        """
+        """Session closure changes only the source's destruction behavior."""
         env = mux_server
         branch_name = "feature-session-nav-switch"
         session_name = get_session_name(branch_name)
@@ -195,27 +167,10 @@ class TestRemoveFromInsideSession:
 
         assert result.exit_code == 0, f"Remove failed: {result.stderr}"
 
-        # Verify the deferred script contains switch-client -l.
-        # The debug log includes the full script string in a line containing
-        # "kill_only_script" (when target doesn't exist) or
-        # "nav_and_kill_script" (when target exists and we navigate to it).
-        assert "switch-client -l" in result.stderr, (
-            f"Expected 'switch-client -l' in deferred script.\n"
-            f"Debug output:\n{result.stderr}"
-        )
-
-        # switch-client -l must come BEFORE kill-session in the script
-        # to ensure the client switches away before the session is destroyed
-        switch_pos = result.stderr.find("switch-client -l")
-        kill_pos = result.stderr.find("kill-session")
-        assert kill_pos > 0, (
-            f"Expected 'kill-session' in deferred script.\n"
-            f"Debug output:\n{result.stderr}"
-        )
-        assert switch_pos < kill_pos, (
-            f"switch-client -l (pos {switch_pos}) should come before "
-            f"kill-session (pos {kill_pos}) in the deferred script"
-        )
+        assert "detach-on-destroy off" in result.stderr
+        assert "if-shell -F" in result.stderr
+        assert "switch-client -c" in result.stderr
+        assert "switch-client -l" not in result.stderr
 
         # Wait for deferred script to complete (session killed, worktree removed)
         assert poll_until(lambda: not worktree_path.exists(), timeout=5.0), (
@@ -279,3 +234,71 @@ class TestCreateAndSwitch:
         assert worktree_path.is_dir(), (
             f"Worktree at {worktree_path} should exist after 'add --session'"
         )
+
+
+class TestStableSessionCleanupIdentity:
+    def test_session_rename_does_not_release_deferred_cleanup(
+        self,
+        mux_server: TmuxEnvironment,
+        workmux_exe_path: Path,
+        repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+    ):
+        env = mux_server
+        branch_name = "stable-session-id"
+        session_name = get_session_name(branch_name)
+        renamed_session = f"{session_name}-renamed"
+        write_workmux_config(repo_path)
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            branch_name,
+            extra_args="--session --background",
+        )
+        session_id = env.tmux(
+            ["display-message", "-p", "-t", f"={session_name}:", "#{session_id}"]
+        ).stdout.strip()
+        assert session_id.startswith("$")
+
+        real_tmux = shutil.which("tmux")
+        assert real_tmux is not None
+        fake_tmux = fake_agent_installer.install(
+            "tmux",
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = kill-session ]; then exit 0; fi\n'
+            "done\n"
+            f'exec {shlex.quote(real_tmux)} "$@"\n',
+        )
+
+        scripts_dir = get_scripts_dir(env)
+        output = scripts_dir / "stable-session-output"
+        script = scripts_dir / "stable-session-remove.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"export PATH={shlex.quote(env.env['PATH'])}\n"
+            f"export HOME={shlex.quote(env.env['HOME'])}\n"
+            f"export XDG_STATE_HOME={shlex.quote(env.env['XDG_STATE_HOME'])}\n"
+            f"cd {shlex.quote(str(worktree_path))}\n"
+            f"exec {shlex.quote(str(workmux_exe_path))} remove --force "
+            f">{shlex.quote(str(output))} 2>&1\n"
+        )
+        env.send_keys(f"={session_name}:", f"/bin/sh {shlex.quote(str(script))}")
+        assert poll_until(
+            lambda: output.exists() and "Scheduled removal" in output.read_text()
+        )
+        env.tmux(["rename-session", "-t", session_id, renamed_session])
+
+        time.sleep(0.8)
+        live_ids = env.tmux(
+            ["list-sessions", "-F", "#{session_id}"]
+        ).stdout.splitlines()
+        assert session_id in live_ids
+        assert worktree_path.is_dir()
+
+        env.run_command(
+            [real_tmux, "-S", str(env.socket_path), "kill-session", "-t", session_id]
+        )
+        assert poll_until(lambda: not worktree_path.exists(), timeout=10.0)
+        fake_tmux.unlink()

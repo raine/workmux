@@ -20,13 +20,16 @@ Commit, rebase, and merge the current branch.
 
 This command finishes work on the current branch by:
 
-1. Committing any staged changes
+1. Committing all uncommitted changes
 2. Rebasing onto the base branch
 3. Running `workmux merge` to merge and clean up
 
 ## Step 1: Commit
 
-If there are staged changes, commit them. Use lowercase, imperative mood, no conventional commit prefixes. Skip if nothing is staged.
+Check for staged, unstaged, and untracked changes with `git status --porcelain`. If
+there are changes, stage all of them with `git add -A`, review the staged diff,
+and commit. Use lowercase, imperative mood, no conventional commit prefixes.
+Skip if the working tree is clean.
 
 ## Step 2: Rebase
 
@@ -37,6 +40,10 @@ git config --local --get "branch.$(git branch --show-current).workmux-base"
 ```
 
 If no base branch is configured, default to "main".
+
+If the base branch doesn't exist locally (`git rev-parse --verify --quiet
+<base-branch>` prints nothing), skip this step. This is the case in a workspace
+on a remote server, where `workmux merge --rebase` rebases on the local machine.
 
 Rebase onto the local base branch (do NOT fetch from origin first):
 

@@ -1,7 +1,17 @@
 //! Event dispatching for background events.
 
 use super::App;
-use super::types::{AppEvent, PrListState};
+use super::types::{AppEvent, PrListState, SweepOutcome};
+
+fn sweep_complete_message(outcome: SweepOutcome) -> String {
+    match (outcome.completed, outcome.scheduled) {
+        (_, 0) => "Sweep complete".to_string(),
+        (0, scheduled) => format!("Sweep cleanup scheduled for {scheduled} worktree(s)"),
+        (completed, scheduled) => {
+            format!("Sweep complete: {completed} removed, {scheduled} scheduled")
+        }
+    }
+}
 
 impl App {
     /// Apply a background event to app state.
@@ -9,22 +19,50 @@ impl App {
     pub fn apply_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Terminal(_) => {} // handled separately in main loop
+            AppEvent::RemotePreview(pane_id, capture) => {
+                if let Some((_, running)) = &mut self.remote_preview_fetch {
+                    *running = false;
+                }
+                let text =
+                    capture.unwrap_or_else(|err| format!("(remote preview unavailable: {err})"));
+                if self.preview_pane_id.as_ref() == Some(&pane_id) {
+                    self.preview = Some(text.clone());
+                }
+                self.remote_previews.insert(pane_id, text);
+            }
+            AppEvent::RemoteDiff(ws_id, branch_diff, result) => {
+                super::super::diff_ops::apply_remote_diff(self, &ws_id, branch_diff, result);
+            }
             AppEvent::GitStatus(path, status) => {
                 self.git_statuses.insert(path, status);
             }
-            AppEvent::PrStatus(repo_root, prs) => {
-                // Clear stale state when a repo has no PRs, otherwise update
+            AppEvent::GithubStatus(repo_root, summaries) => {
+                let mut prs = std::collections::HashMap::new();
+                let mut checks = std::collections::HashMap::new();
+                for (branch, summary) in summaries {
+                    if let Some(pr) = summary.pr {
+                        prs.insert(branch.clone(), pr);
+                    }
+                    if let Some(check_summary) = summary.checks {
+                        checks.insert(branch, check_summary);
+                    }
+                }
                 if prs.is_empty() {
                     self.pr_statuses.remove(&repo_root);
                 } else {
-                    self.pr_statuses.insert(repo_root, prs);
+                    self.pr_statuses.insert(repo_root.clone(), prs);
                 }
-                // Re-apply worktree filters to merge new PR data
+                if checks.is_empty() {
+                    self.check_statuses.remove(&repo_root);
+                } else {
+                    self.check_statuses.insert(repo_root, checks);
+                }
                 if !self.all_worktrees.is_empty() {
                     self.apply_worktree_filters();
                 }
             }
-            AppEvent::WorktreeList(worktrees) => {
+            AppEvent::WorktreeList(mut worktrees) => {
+                self.removals.filter_snapshot(&mut worktrees);
                 let needs_pr_fetch = self.all_worktrees.is_empty() && !worktrees.is_empty();
                 self.all_worktrees = worktrees;
                 self.apply_worktree_filters();
@@ -39,6 +77,9 @@ impl App {
                 if self.worktree_preview_path.as_ref() == Some(&path) {
                     self.worktree_preview = Some(log);
                 }
+            }
+            AppEvent::RemoveWorktreeResult(path, result) => {
+                self.handle_remove_worktree_result(path, result);
             }
             AppEvent::AddWorktreeResult(result) => {
                 self.handle_add_worktree_result(result);
@@ -63,9 +104,9 @@ impl App {
             AppEvent::SweepComplete(result) => {
                 self.sweep_progress = None;
                 match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         self.status_message =
-                            Some(("Sweep complete".to_string(), std::time::Instant::now()));
+                            Some((sweep_complete_message(outcome), std::time::Instant::now()));
                     }
                     Err(e) => {
                         self.status_message =
@@ -75,5 +116,39 @@ impl App {
                 self.trigger_worktree_refetch();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{AppEvent, SweepOutcome};
+    use super::sweep_complete_message;
+
+    #[test]
+    fn sweep_event_preserves_scheduled_cleanup_count() {
+        let event = AppEvent::SweepComplete(Ok(SweepOutcome {
+            completed: 1,
+            scheduled: 2,
+        }));
+        let AppEvent::SweepComplete(Ok(outcome)) = event else {
+            panic!("expected successful sweep event");
+        };
+        assert_eq!(outcome.completed, 1);
+        assert_eq!(outcome.scheduled, 2);
+        assert_eq!(
+            sweep_complete_message(outcome),
+            "Sweep complete: 1 removed, 2 scheduled"
+        );
+    }
+
+    #[test]
+    fn scheduled_only_sweep_is_not_reported_as_complete() {
+        assert_eq!(
+            sweep_complete_message(SweepOutcome {
+                completed: 0,
+                scheduled: 2,
+            }),
+            "Sweep cleanup scheduled for 2 worktree(s)"
+        );
     }
 }

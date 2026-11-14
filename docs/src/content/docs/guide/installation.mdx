@@ -1,0 +1,126 @@
+---
+title: "Installation"
+description: Install workmux via Homebrew, pre-built binaries, Cargo, mise, or Nix
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Bash YOLO
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raine/workmux/main/scripts/install.sh | bash
+```
+
+## Homebrew (macOS/Linux)
+
+```bash
+brew install raine/workmux/workmux
+```
+
+## Other methods
+
+### Cargo
+
+Requires Rust. Install via [rustup](https://rustup.rs/) if you don't have it.
+
+```bash
+cargo install workmux
+```
+
+### mise
+
+```bash
+mise use -g cargo:raine/workmux
+```
+
+### Nix
+
+Requires [Nix with flakes enabled](https://nixos.wiki/wiki/Flakes).
+
+```bash
+nix profile install github:raine/workmux
+```
+
+Or try without installing:
+
+```bash
+nix run github:raine/workmux -- --help
+```
+
+See [Nix guide](/guide/nix/) for flake integration and home-manager setup.
+
+---
+
+For manual installation, see [pre-built binaries](https://github.com/raine/workmux/releases/latest).
+
+## Shell alias (recommended)
+
+For faster typing, alias `workmux` to `wm`:
+
+```bash
+alias wm='workmux'
+```
+
+Add this to your `.bashrc`, `.zshrc`, or equivalent shell configuration file.
+
+## Shell completions
+
+To enable tab completions for commands and branch names, add the following to your shell's configuration file.
+
+<Tabs syncKey="shell">
+  <TabItem label="Bash">
+
+```bash
+# Add to ~/.bashrc
+eval "$(workmux completions bash)"
+```
+
+  </TabItem>
+  <TabItem label="Zsh">
+
+```bash
+# Add to ~/.zshrc
+eval "$(workmux completions zsh)"
+```
+
+  </TabItem>
+  <TabItem label="Fish">
+
+```bash
+# Add to ~/.config/fish/config.fish
+workmux completions fish | source
+```
+
+  </TabItem>
+</Tabs>
+
+## Uninstalling
+
+### Automatic (recommended)
+
+Run the uninstall script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raine/workmux/main/scripts/uninstall.sh | bash
+```
+
+If installed via [Homebrew](#homebrew-macoslinux), also run:
+
+```bash
+brew uninstall workmux
+brew untap raine/workmux
+```
+
+If installed via [Cargo](#cargo), also run:
+
+```bash
+cargo uninstall workmux
+```
+
+### Manual
+
+1. Remove hooks, skills, cache and state by running the uninstall script, or delete workmux data directly: `rm -rf ~/.cache/workmux ~/.local/state/workmux`
+2. Remove the binary from `/usr/local/bin`, `~/.local/bin`, or `~/.cargo/bin`
+3. Optionally remove config: `rm -rf ~/.config/workmux`
+4. Remove shell completions and `alias wm=workmux` from your shell config
+5. Clean up worktrees with `git worktree list` / `git worktree remove`

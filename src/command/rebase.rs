@@ -5,6 +5,9 @@ use crate::{config, git};
 pub fn run(name: Option<&str>) -> Result<()> {
     let name_to_rebase = super::resolve_name(name)?;
     let config = config::Config::load(None)?;
+    if let Some(record) = crate::remote::cache::find_here(&name_to_rebase) {
+        return crate::remote::homecoming::rebase(&config, record);
+    }
 
     let (worktree_path, branch_to_rebase) = git::find_worktree(&name_to_rebase).map_err(|_| {
         anyhow!(

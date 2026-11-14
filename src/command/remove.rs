@@ -12,19 +12,70 @@ pub fn run(
     force: bool,
     keep_branch: bool,
 ) -> Result<()> {
+    if crate::remote::node::operation::in_session() {
+        if gone || all || keep_branch {
+            anyhow::bail!(
+                "remote rm does not support --gone, --all or --keep-branch; run it on the local machine"
+            );
+        }
+        return crate::remote::node::operation::submit(
+            &names,
+            crate::remote::node::operation::Operation::Remove { force },
+        );
+    }
+    if crate::sandbox::guest::is_sandbox_guest() {
+        if gone || all || keep_branch || names.len() > 1 {
+            anyhow::bail!(
+                "a sandboxed agent can only remove its own workspace, without --gone, --all or --keep-branch"
+            );
+        }
+        let name = super::resolve_name(names.first().map(String::as_str))?;
+        return run_via_rpc(&name, force);
+    }
+    let config = config::Config::load(None)?;
+    let confirm_unmerged = config.confirm_unmerged_removal.unwrap_or(true);
+
     if all {
-        return run_all(force, keep_branch);
+        return run_all(force, keep_branch, confirm_unmerged);
     }
 
     if gone {
-        return run_gone(force, keep_branch);
+        return run_gone(force, keep_branch, confirm_unmerged);
     }
 
-    run_specified(names, force, keep_branch)
+    run_specified(names, force, keep_branch, confirm_unmerged, config)
+}
+
+/// Ask the sandbox supervisor to remove this workspace, printing its output.
+fn run_via_rpc(name: &str, force: bool) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+
+    let mut client = RpcClient::from_env()?;
+    client.send(&RpcRequest::Remove {
+        name: name.to_string(),
+        force,
+    })?;
+    loop {
+        match client.recv()? {
+            RpcResponse::Output { message } => {
+                print!("{message}");
+                io::stdout().flush().ok();
+            }
+            RpcResponse::Ok => return Ok(()),
+            RpcResponse::Error { message } => anyhow::bail!("{message}"),
+            _ => {}
+        }
+    }
 }
 
 /// Remove specific worktrees provided by user (or current if empty)
-fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<()> {
+fn run_specified(
+    names: Vec<String>,
+    force: bool,
+    keep_branch: bool,
+    confirm_unmerged: bool,
+    config: config::Config,
+) -> Result<()> {
     // Normalize all inputs (handles "." and other special cases)
     let resolved_names: Vec<String> = if names.is_empty() {
         vec![super::resolve_name(None)?]
@@ -35,7 +86,81 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
             .collect::<Result<Vec<_>>>()?
     };
 
-    let config = config::Config::load(None)?;
+    let mut local_names = Vec::new();
+    let mut remote_failures = 0;
+    let mux = create_backend(detect_backend());
+    let current_window = mux.current_window_name()?;
+    let mut removed = Vec::new();
+    // Reaching a node can finish other pending cleanups. Resolve all targets
+    // first so those records are not subsequently mistaken for local worktrees.
+    let targets: Vec<_> = resolved_names
+        .into_iter()
+        .map(|name| {
+            let record = crate::remote::cache::find_here(&name);
+            (name, record)
+        })
+        .collect();
+    let mut batch = crate::remote::lifecycle::RemovalBatch::new(
+        targets
+            .iter()
+            .filter_map(|(_, record)| record.as_ref().map(|r| r.ws_id.clone())),
+    );
+    for (name, remote) in targets {
+        let Some(record) = remote else {
+            local_names.push(name);
+            continue;
+        };
+        let options = crate::remote::lifecycle::RemoveOptions {
+            force,
+            keep_branch,
+            run_hooks: true,
+            confirm_unmerged,
+            refuse_unmerged: false,
+        };
+        if let Err(err) = batch.remove(record.clone(), options) {
+            eprintln!("✗ {err:#}");
+            remote_failures += 1;
+        } else if crate::remote::cache::find_here(&record.handle).is_none() {
+            removed.push(record);
+        }
+    }
+    let local = if local_names.is_empty() {
+        Ok(())
+    } else {
+        remove_local(local_names, force, keep_branch, confirm_unmerged, config)
+    };
+    let result = local.and_then(|()| {
+        if remote_failures > 0 {
+            Err(anyhow!(
+                "{remote_failures} remote workspace(s) could not be removed"
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    // Closing the invoking window can terminate this process. Finish every
+    // target and report failures before closing it, after all other windows.
+    if removed
+        .iter()
+        .any(|record| current_window.as_deref() == Some(&record.window_name))
+        && let Err(err) = &result
+    {
+        eprintln!("✗ {err:#}");
+    }
+    removed.sort_by_key(|record| current_window.as_deref() == Some(&record.window_name));
+    for record in removed {
+        crate::remote::lifecycle::close_relay(mux.as_ref(), &record);
+    }
+    result
+}
+
+fn remove_local(
+    resolved_names: Vec<String>,
+    force: bool,
+    keep_branch: bool,
+    confirm_unmerged: bool,
+    config: config::Config,
+) -> Result<()> {
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
 
@@ -77,7 +202,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 
         for (handle, _, _) in candidates {
             if let Err(e) = remove_worktree(&handle, true, keep_branch) {
-                failed.push((handle, e.to_string()));
+                failed.push((handle, format!("{e:#}")));
             }
         }
 
@@ -101,7 +226,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
         // Check uncommitted (blocking)
         if path.exists()
             && !git::has_missing_admin_dir(&path)
-            && git::has_uncommitted_changes(&path).unwrap_or(false)
+            && git::has_uncommitted_changes(&path)?
         {
             uncommitted.push(handle);
             continue;
@@ -115,8 +240,12 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
             ));
         }
 
-        // Check unmerged (promptable), only if we're deleting the branch
-        if !keep_branch && let Some(base) = is_unmerged(&branch)? {
+        // Check unmerged (promptable), only if configured and we're deleting the branch
+        if confirm_unmerged
+            && !keep_branch
+            && git::worktree_branch_in(&path, &context.execution_dir)?.is_some()
+            && let Some(base) = is_unmerged(&branch)?
+        {
             unmerged.push((handle, branch, base));
             continue;
         }
@@ -184,7 +313,9 @@ fn is_unmerged(branch: &str) -> Result<Option<String>> {
             // If we can't determine base, try falling back to main
             match git::get_merge_base(&main_branch) {
                 Ok(b) => b,
-                Err(_) => return Ok(None), // Can't determine, assume safe
+                Err(error) => {
+                    return Err(error.context("Cannot establish whether the branch is merged"));
+                }
             }
         }
     };
@@ -261,17 +392,28 @@ fn prompt_removal_confirmation(
 }
 
 /// Report removal results: successful and failed removals.
-fn report_removal_results(success_count: usize, failed: &[(String, String)]) {
-    if success_count > 0 {
-        println!("\n✓ Successfully removed {} worktree(s)", success_count);
+fn report_removal_results(summary: &BulkRemovalSummary) {
+    if summary.removed > 0 {
+        println!("\n✓ Successfully removed {} worktree(s)", summary.removed);
     }
 
-    if !failed.is_empty() {
-        eprintln!("\nFailed to remove {} worktree(s):", failed.len());
-        for (branch, error) in failed {
+    if summary.scheduled > 0 {
+        println!("\n✓ Scheduled removal of {} worktree(s)", summary.scheduled);
+    }
+
+    if !summary.failed.is_empty() {
+        eprintln!("\nFailed to remove {} worktree(s):", summary.failed.len());
+        for (branch, error) in &summary.failed {
             eprintln!("  - {}: {}", branch, error);
         }
     }
+}
+
+#[derive(Default)]
+struct BulkRemovalSummary {
+    removed: usize,
+    scheduled: usize,
+    failed: Vec<(String, String)>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -344,6 +486,7 @@ fn collect_bulk_removal_plan(
     mode: &BulkRemovalMode,
     force: bool,
     keep_branch: bool,
+    confirm_unmerged: bool,
 ) -> Result<BulkRemovalPlan> {
     let worktrees = git::list_worktrees()?;
     let main_branch = git::get_default_branch()?;
@@ -367,7 +510,7 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        if !force && path.exists() && git::has_uncommitted_changes(&path).unwrap_or(false) {
+        if !force && path.exists() && git::has_uncommitted_changes(&path)? {
             plan.skipped.push(BulkSkippedWorktree {
                 branch,
                 reason: BulkSkipReason::Uncommitted,
@@ -375,14 +518,15 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        if mode.allow_unmerged_skip() && !force && !keep_branch {
+        if confirm_unmerged && mode.allow_unmerged_skip() && !force && !keep_branch {
             let base = git::get_branch_base(&branch)
                 .ok()
                 .unwrap_or_else(|| main_branch.clone());
-            if let Ok(merge_base) = git::get_merge_base(&base)
-                && let Ok(unmerged_branches) = git::get_unmerged_branches(&merge_base)
-                && unmerged_branches.contains(&branch)
-            {
+            let merge_base = git::get_merge_base(&base)
+                .context("Cannot establish the merge base for bulk removal")?;
+            let unmerged_branches = git::get_unmerged_branches(&merge_base)
+                .context("Cannot establish merged branches for bulk removal")?;
+            if unmerged_branches.contains(&branch) {
                 plan.skipped.push(BulkSkippedWorktree {
                     branch,
                     reason: BulkSkipReason::Unmerged,
@@ -415,22 +559,29 @@ fn split_skipped_worktrees(skipped: &[BulkSkippedWorktree], reason: BulkSkipReas
 fn execute_bulk_removals(
     to_remove: &[BulkRemovableWorktree],
     keep_branch: bool,
-) -> (usize, Vec<(String, String)>) {
-    let mut success_count = 0;
-    let mut failed: Vec<(String, String)> = Vec::new();
+) -> BulkRemovalSummary {
+    let mut summary = BulkRemovalSummary::default();
 
     for worktree in to_remove {
         match remove_worktree(&worktree.handle, true, keep_branch) {
-            Ok(()) => success_count += 1,
-            Err(e) => failed.push((worktree.branch.clone(), e.to_string())),
+            Ok(result) if result.cleanup_scheduled => summary.scheduled += 1,
+            Ok(_) => summary.removed += 1,
+            Err(error) => summary
+                .failed
+                .push((worktree.branch.clone(), format!("{error:#}"))),
         }
     }
 
-    (success_count, failed)
+    summary
 }
 
-fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Result<()> {
-    let plan = collect_bulk_removal_plan(&mode, force, keep_branch)?;
+fn run_bulk_removal(
+    mode: BulkRemovalMode,
+    force: bool,
+    keep_branch: bool,
+    confirm_unmerged: bool,
+) -> Result<()> {
+    let plan = collect_bulk_removal_plan(&mode, force, keep_branch, confirm_unmerged)?;
 
     let skipped_uncommitted = split_skipped_worktrees(&plan.skipped, BulkSkipReason::Uncommitted);
     let skipped_unmerged = split_skipped_worktrees(&plan.skipped, BulkSkipReason::Unmerged);
@@ -458,26 +609,35 @@ fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Re
         return Ok(());
     }
 
-    let (success_count, failed) = execute_bulk_removals(&plan.to_remove, keep_branch);
-    report_removal_results(success_count, &failed);
+    let summary = execute_bulk_removals(&plan.to_remove, keep_branch);
+    report_removal_results(&summary);
     Ok(())
 }
 
 /// Remove all managed worktrees (except main)
-fn run_all(force: bool, keep_branch: bool) -> Result<()> {
-    run_bulk_removal(BulkRemovalMode::All, force, keep_branch)
+fn run_all(force: bool, keep_branch: bool, confirm_unmerged: bool) -> Result<()> {
+    run_bulk_removal(BulkRemovalMode::All, force, keep_branch, confirm_unmerged)
 }
 
 /// Remove worktrees whose upstream remote branch has been deleted
-fn run_gone(force: bool, keep_branch: bool) -> Result<()> {
+fn run_gone(force: bool, keep_branch: bool, confirm_unmerged: bool) -> Result<()> {
     // Fetch with prune to update remote-tracking refs
     spinner::with_spinner("Fetching from remote", git::fetch_prune)?;
     let gone_branches = git::get_gone_branches().unwrap_or_default();
-    run_bulk_removal(BulkRemovalMode::Gone(gone_branches), force, keep_branch)
+    run_bulk_removal(
+        BulkRemovalMode::Gone(gone_branches),
+        force,
+        keep_branch,
+        confirm_unmerged,
+    )
 }
 
 /// Execute the actual worktree removal
-fn remove_worktree(handle: &str, force: bool, keep_branch: bool) -> Result<()> {
+fn remove_worktree(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+) -> Result<workflow::types::RemoveResult> {
     let config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
@@ -487,19 +647,20 @@ fn remove_worktree(handle: &str, force: bool, keep_branch: bool) -> Result<()> {
     let result = workflow::remove(handle, force, keep_branch, &context)
         .context("Failed to remove worktree")?;
 
-    if keep_branch {
-        println!(
-            "✓ Removed worktree '{}' (branch '{}' kept)",
-            handle, result.branch_removed
-        );
-    } else {
-        println!(
-            "✓ Removed worktree '{}' and branch '{}'",
-            handle, result.branch_removed
-        );
+    if !result.cleanup_scheduled {
+        match result.branch_removed.as_deref() {
+            Some(branch) if keep_branch => {
+                println!("✓ Removed worktree '{}' (branch '{}' kept)", handle, branch);
+            }
+            Some(branch) => {
+                println!("✓ Removed worktree '{}' and branch '{}'", handle, branch);
+            }
+            None => println!("✓ Removed worktree '{}'", handle),
+        }
+        io::stdout().flush()?;
     }
 
-    super::sidebar::request_refresh();
+    super::sidebar::request_refresh_for(context.mux.as_ref());
 
-    Ok(())
+    Ok(result)
 }

@@ -8,7 +8,7 @@ on:
       - 'CHANGELOG.md'
       - '.github/workflows/docs.yml'
   schedule:
-    - cron: '0 6 * * *' # Daily at 6am UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -28,22 +28,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
+          bun-version-file: 'docs/package.json'
 
       - name: Install dependencies
         working-directory: docs
-        run: npm ci
+        run: bun install --frozen-lockfile
 
-      - name: Build
+      - name: Validate and build
         working-directory: docs
-        run: npm run build
+        run: |
+          bun run format:check
+          bun run check
+          bun run build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
-          path: docs/.vitepress/dist
+          path: docs/dist
 
   deploy:
     environment:
@@ -54,4 +59,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

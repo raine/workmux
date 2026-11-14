@@ -61,6 +61,7 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
+    let attachment = git::get_worktree_attachment_in(&base_handle, Some(&context.execution_dir));
     // Resolve mode using canonical base_handle (not the CLI-provided name which may be a branch).
     // Precedence: CLI override > stored git metadata > config default (from options.mode)
     let stored_mode = git::get_worktree_mode_opt_in(&base_handle, Some(&context.execution_dir));
@@ -76,10 +77,10 @@ pub fn open(
         MuxMode::Session => cli_target_session_name.as_deref(),
     };
 
-    if mode == MuxMode::Session && context.mux.name() != "tmux" {
+    if mode == MuxMode::Session && !context.mux.supports_session_mode() {
         anyhow::bail!(
-            "Session mode (--mode session / --session) is only supported with tmux.\n\
-             Current backend: {}. Use window mode instead.",
+            "Session mode (--mode session / --session) is not supported by the {} backend.\n\
+             Use window mode instead.",
             context.mux.name()
         );
     }
@@ -123,29 +124,65 @@ pub fn open(
         }
     }
 
-    if prior_mode != mode {
+    if attachment.manages_mux() && prior_mode != mode {
         match prior_mode {
             MuxMode::Window => {
-                // Kill all matching window targets (base + any -N numeric duplicates only)
-                let all_names = context.mux.get_all_window_names()?;
+                let window_token = context
+                    .mux
+                    .supports_window_ownership()
+                    .then(|| {
+                        git::get_worktree_window_token_in(
+                            &base_handle,
+                            Some(&context.execution_dir),
+                        )
+                    })
+                    .flatten();
                 let prior_window_name =
                     git::get_worktree_target_window_in(&base_handle, Some(&context.execution_dir))
                         .unwrap_or_else(|| base_handle.clone());
                 let full_base = prefixed(&context.prefix, &prior_window_name);
-                let full_base_dash = format!("{}-", full_base);
-                for name in &all_names {
-                    let is_exact = *name == full_base;
-                    let is_numeric_suffix = name
-                        .strip_prefix(&full_base_dash)
-                        .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+                let prior_parent_session =
+                    git::get_worktree_window_session_in(&base_handle, Some(&context.execution_dir));
+                let owned_targets = window_token
+                    .as_deref()
+                    .map(|token| {
+                        context.mux.resolve_owned_window_targets(
+                            token,
+                            &full_base,
+                            prior_parent_session.as_deref(),
+                            &worktree_path,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
 
-                    if is_exact || is_numeric_suffix {
+                if window_token.is_none() {
+                    let all_names = context.mux.get_all_window_names()?;
+                    let full_base_dash = format!("{}-", full_base);
+                    for name in &all_names {
+                        let is_exact = *name == full_base;
+                        let is_numeric_suffix =
+                            name.strip_prefix(&full_base_dash).is_some_and(|s| {
+                                !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+                            });
+
+                        if is_exact || is_numeric_suffix {
+                            info!(
+                                handle = base_handle,
+                                window = name,
+                                "open:closing window before mode conversion"
+                            );
+                            MuxHandle::kill_full(context.mux.as_ref(), prior_mode, name)?;
+                        }
+                    }
+                } else {
+                    for owned in owned_targets {
                         info!(
                             handle = base_handle,
-                            window = name,
+                            window = owned.target.full_name,
                             "open:closing window before mode conversion"
                         );
-                        MuxHandle::kill_full(context.mux.as_ref(), prior_mode, name)?;
+                        MuxHandle::kill_window_target(context.mux.as_ref(), &owned.target)?;
                     }
                 }
             }
@@ -178,7 +215,7 @@ pub fn open(
     });
 
     // Update options with the resolved mode
-    let options = SetupOptions {
+    let mut options = SetupOptions {
         mode,
         target_window_name: if mode == MuxMode::Window {
             target_window_name.clone()
@@ -203,9 +240,38 @@ pub fn open(
         MuxMode::Session => target_session_name.as_deref().unwrap_or(&base_handle),
     };
     let target = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, target_name);
-    let window_target = WindowTarget::new(target.full_name(), window_session_name.clone());
-    let target_exists = if mode == MuxMode::Window {
-        context.mux.window_target_exists(&window_target)?
+    let fallback_window_target = WindowTarget::new(target.full_name(), window_session_name.clone());
+    let window_token = if mode == MuxMode::Window && context.mux.supports_window_ownership() {
+        git::get_worktree_window_token_in(&base_handle, Some(&context.execution_dir))
+    } else {
+        None
+    };
+    let owned_primary = window_token
+        .as_deref()
+        .map(|token| {
+            context.mux.resolve_owned_window_targets(
+                token,
+                &target.full_name(),
+                window_session_name.as_deref(),
+                &worktree_path,
+            )
+        })
+        .transpose()?
+        .and_then(|targets| {
+            targets
+                .iter()
+                .find(|owned| owned.is_primary)
+                .map(|owned| owned.target.clone())
+        });
+    let window_target = owned_primary.unwrap_or(fallback_window_target);
+    let target_exists = if !attachment.manages_mux() {
+        false
+    } else if mode == MuxMode::Window {
+        if window_token.is_some() && window_target.window_id.is_none() {
+            false
+        } else {
+            context.mux.window_target_exists(&window_target)?
+        }
     } else {
         target.exists()?
     };
@@ -251,7 +317,9 @@ pub fn open(
             }
         }
         if options.focus_window {
-            if mode == MuxMode::Window && window_target.parent_session().is_some() {
+            if mode == MuxMode::Window
+                && (window_target.parent_session().is_some() || window_target.window_id.is_some())
+            {
                 context.mux.select_window_target(&window_target)?;
             } else {
                 target.select()?;
@@ -329,6 +397,14 @@ pub fn open(
         .context("Failed to persist window session")?;
     }
 
+    if mode == MuxMode::Window && context.mux.supports_window_ownership() {
+        options.window_token = Some(git::ensure_worktree_window_token_in(
+            &base_handle,
+            Some(&context.execution_dir),
+        )?);
+        options.primary_window = !new_window || !target_exists;
+    }
+
     // Determine handle: use suffix if forcing new target and one exists
     let handle = if new_window && target_exists {
         resolve_unique_handle(context, target_name)?
@@ -374,10 +450,16 @@ pub fn open(
         &branch_name,
         &handle,
         &worktree_path,
+        &context.main_worktree_root,
         &context.config,
         &options_with_workdir,
         agent,
         None,
+    )?;
+    git::set_worktree_attachment_in(
+        &base_handle,
+        git::WorktreeAttachment::Multiplexer,
+        Some(&context.execution_dir),
     )?;
     info!(
         handle = handle,

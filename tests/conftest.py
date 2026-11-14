@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 import pytest
 import yaml
 
+from .support.executable import SCRIPT_RUNNER, install_script
+
 
 # =============================================================================
 # Shell Testing Configuration
@@ -199,8 +201,11 @@ class MuxEnvironment(ABC):
             '  echo "Test commit" > "$1"\n'
             "fi\n"
         )
-        fake_editor_script.chmod(0o755)
-        self.env["GIT_EDITOR"] = str(fake_editor_script)
+        self.env["GIT_EDITOR"] = f"/bin/sh {shlex.quote(str(fake_editor_script))}"
+
+    def install_script(self, path: Path, body: str) -> Path:
+        """Install a PATH-discoverable test double with a shared entry point."""
+        return install_script(path, body)
 
     @property
     @abstractmethod
@@ -255,6 +260,11 @@ class MuxEnvironment(ABC):
         pass
 
     @abstractmethod
+    def list_window_ids(self) -> list[str]:
+        """Return stable window/tab identities, independent of automatic titles."""
+        pass
+
+    @abstractmethod
     def capture_pane(self, window_name: str) -> Optional[str]:
         """Capture the content of a pane in the specified window."""
         pass
@@ -301,8 +311,11 @@ class MuxEnvironment(ABC):
         pass
 
     @abstractmethod
-    def new_window(self, name: Optional[str] = None) -> None:
-        """Create a new window/tab with optional name."""
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
+        """Create a new window/tab with optional name.
+
+        With `detached`, the current window stays active.
+        """
         pass
 
     @abstractmethod
@@ -313,6 +326,31 @@ class MuxEnvironment(ABC):
         For WezTerm: sets SHELL env var (workmux already starts with -l).
         """
         pass
+
+    # Whether switching to a new session fails in the test environment. tmux
+    # has no attached client to switch, so `open` exits non-zero after the
+    # session is created. Rex treats the switch as best effort.
+    session_switch_fails = True
+
+    def list_sessions(self) -> list[str]:
+        """Return the names of all sessions, for backends with session mode."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """Return the window names of one session."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def new_session(self, session_name: str) -> None:
+        """Create a detached session, outside workmux."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the working directory of a session's active pane."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
+
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into a session's active pane and press Enter."""
+        raise NotImplementedError(f"{self.backend_name} has no session mode")
 
 
 class TmuxEnvironment(MuxEnvironment):
@@ -335,8 +373,10 @@ class TmuxEnvironment(MuxEnvironment):
 
         # Ensure we don't accidentally target user's tmux or WezTerm
         self.env.pop("TMUX", None)
+        self.env.pop("TMUX_PANE", None)
         self.env.pop("WEZTERM_PANE", None)
         self.env["TMUX_CONF"] = "/dev/null"
+        self.runner_pane_id: Optional[str] = None
 
     @property
     def backend_name(self) -> str:
@@ -344,7 +384,9 @@ class TmuxEnvironment(MuxEnvironment):
 
     def start_server(self) -> None:
         """Start isolated tmux server with a 'test' session."""
-        self.mux_command(["new-session", "-d", "-s", "test"])
+        self.runner_pane_id = self.mux_command(
+            ["new-session", "-d", "-s", "test", "-P", "-F", "#{pane_id}"]
+        ).stdout.strip()
 
     def stop_server(self) -> None:
         """Kill the tmux server and clean up socket."""
@@ -369,6 +411,12 @@ class TmuxEnvironment(MuxEnvironment):
         result = self.mux_command(["list-windows", "-F", "#{window_name}"])
         return [w for w in result.stdout.strip().split("\n") if w]
 
+    def list_window_ids(self) -> list[str]:
+        """List tmux window IDs, which survive automatic renaming."""
+        return self.mux_command(
+            ["list-windows", "-F", "#{window_id}"]
+        ).stdout.splitlines()
+
     def capture_pane(self, window_name: str) -> Optional[str]:
         """Capture pane content from a tmux window."""
         result = self.mux_command(
@@ -386,8 +434,10 @@ class TmuxEnvironment(MuxEnvironment):
         self.mux_command(args)
 
     def run_shell_background(self, script: str) -> None:
-        """Run script in background using tmux run-shell."""
-        self.mux_command(["run-shell", "-b", script])
+        """Run from the test pane, independently of the active worktree window."""
+        assert self.runner_pane_id is not None, "tmux server has not been started"
+        command = make_env_script(self, script, {})
+        self.send_keys(self.runner_pane_id, f"nohup {command} >/dev/null 2>&1 &")
 
     def set_session_env(self, key: str, value: str) -> None:
         """Set environment variable in tmux session."""
@@ -414,9 +464,11 @@ class TmuxEnvironment(MuxEnvironment):
         if result.returncode != 0:
             raise RuntimeError(f"Window '{window_name}' not found: {result.stderr}")
 
-    def new_window(self, name: Optional[str] = None) -> None:
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
         """Create a new tmux window with optional name."""
         args = ["new-window"]
+        if detached:
+            args.append("-d")
         if name:
             args.extend(["-n", name])
         self.mux_command(args)
@@ -424,6 +476,36 @@ class TmuxEnvironment(MuxEnvironment):
     def configure_default_shell(self, shell: str) -> None:
         """Configure tmux to use the specified shell for new panes."""
         self.mux_command(["set-option", "-g", "default-shell", shell])
+
+    def list_sessions(self) -> list[str]:
+        """List tmux session names. No server means no sessions."""
+        result = self.mux_command(
+            ["list-sessions", "-F", "#{session_name}"], check=False
+        )
+        if result.returncode != 0:
+            return []
+        return [s for s in result.stdout.strip().split("\n") if s]
+
+    def new_session(self, session_name: str) -> None:
+        """Create a detached tmux session."""
+        self.mux_command(["new-session", "-d", "-s", session_name])
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """List the window names of one tmux session."""
+        result = self.mux_command(
+            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
+        )
+        return [w for w in result.stdout.strip().split("\n") if w]
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the current path of a tmux session's active pane."""
+        return self.mux_command(
+            ["display-message", "-t", f"={session_name}:", "-p", "#{pane_current_path}"]
+        ).stdout.strip()
+
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into a tmux session's active pane."""
+        self.mux_command(["send-keys", "-t", f"={session_name}:", text, "C-m"])
 
 
 class WezTermEnvironment(MuxEnvironment):
@@ -511,6 +593,10 @@ class WezTermEnvironment(MuxEnvironment):
                 seen.add(title)
                 result.append(title)
         return result
+
+    def list_window_ids(self) -> list[str]:
+        """List distinct tab IDs in workspace order."""
+        return list(dict.fromkeys(str(p["tab_id"]) for p in self._list_panes()))
 
     def _find_pane_by_tab_title(self, tab_title: str) -> Optional[dict]:
         """Find a pane by its tab title."""
@@ -610,7 +696,7 @@ class WezTermEnvironment(MuxEnvironment):
         pane_id = str(pane["pane_id"])
         self.mux_command(["activate-pane", "--pane-id", pane_id])
 
-    def new_window(self, name: Optional[str] = None) -> None:
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
         """Create a new WezTerm tab in the test workspace."""
         # Find window_id from existing pane in our workspace
         panes = self._list_panes()
@@ -646,6 +732,297 @@ class WezTermEnvironment(MuxEnvironment):
         self.env["SHELL"] = shell
 
 
+class RexEnvironment(MuxEnvironment):
+    """
+    Rex-specific test environment.
+
+    Each test starts its own Rex server on a private socket, like the tmux
+    tests. The server is started with the isolated environment, so every
+    terminal it opens (including the ones workmux creates) inherits HOME,
+    PATH and the XDG directories. It never touches the user's Rex server.
+    """
+
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+
+        # Short socket path, to stay under the macOS limit for Unix sockets
+        self.server_dir = Path(tempfile.mkdtemp(prefix="rex_"))
+        self.server_endpoint = f"unix://{self.server_dir / 's.sock'}"
+        self.server_process: Optional[subprocess.Popen] = None
+        self.session_id: Optional[str] = None
+        self.runner_block_id: Optional[str] = None
+
+        # Keep the tests off any multiplexer the test run itself is inside
+        for key in ("TMUX", "TMUX_PANE", "WEZTERM_PANE", "REX_SESSION", "REX_BLOCK"):
+            self.env.pop(key, None)
+        self.env["REX_SERVER"] = self.server_endpoint
+
+    @property
+    def backend_name(self) -> str:
+        return "rex"
+
+    session_switch_fails = False
+
+    def _server_ready(self) -> bool:
+        status = ["api", "call", "server.status", "{}"]
+        return self.mux_command(status, check=False).returncode == 0
+
+    def start_server(self) -> None:
+        """Start a private Rex server and a 'test' session with one window."""
+        # The server keeps its own copy of the log file's descriptor
+        with open(self.server_dir / "server.log", "w") as log:
+            self.server_process = subprocess.Popen(
+                [
+                    "rex",
+                    "server",
+                    "run",
+                    "--listen",
+                    self.server_endpoint,
+                    "--state-dir",
+                    str(self.server_dir / "state"),
+                    "--restore=false",
+                    "--config",
+                    "/dev/null",
+                ],
+                cwd=self.tmp_path,
+                env=self.env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        if not poll_until(self._server_ready, timeout=10.0):
+            raise RuntimeError(
+                "Rex test server did not start:\n"
+                + (self.server_dir / "server.log").read_text()
+            )
+
+        shell = self.env.get("SHELL", "/bin/sh")
+        result = self.mux_command(
+            [
+                "new",
+                "test",
+                "-c",
+                str(self.tmp_path),
+                "--window",
+                "test",
+                "--shell=none",
+                "--json",
+                "--",
+                shell,
+                "-l",
+            ]
+        )
+        created = json.loads(result.stdout)
+        self.session_id = created["session_id"]
+        self.runner_block_id = created["initial_windows"][0]["block_ids"][0]
+
+    def stop_server(self) -> None:
+        """Stop the private server, which ends every terminal it started."""
+        if self.server_process is not None:
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+            self.server_process = None
+        self.session_id = None
+        shutil.rmtree(self.server_dir, ignore_errors=True)
+
+    def mux_command(
+        self, args: list[str], check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a rex CLI command against the private server."""
+        return self.run_command(
+            ["rex", "--autostart=false", "-S", self.server_endpoint] + args,
+            check=check,
+        )
+
+    def _api(self, method: str, args: dict) -> dict:
+        result = self.mux_command(["api", "call", method, json.dumps(args)])
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+
+    def _block_args(self, block_id: str) -> list[str]:
+        """The `-s SESSION -b BLOCK` pair that addresses a block."""
+        return ["-s", str(self.session_id), "-b", block_id]
+
+    def _window_ref(self, window: dict) -> dict:
+        return {"session_id": self.session_id, "window_id": window["window_id"]}
+
+    def _view(self) -> dict:
+        return self._api("session.view", {"session_id": self.session_id})
+
+    def _windows(self) -> list[dict]:
+        return self._view().get("windows") or []
+
+    def _active_window(self) -> Optional[dict]:
+        view = self._view()
+        for window in view.get("windows") or []:
+            if window.get("window_id") == view.get("active_window_id"):
+                return window
+        return None
+
+    def _find_window(self, window_name: str) -> Optional[dict]:
+        for window in self._windows():
+            if window.get("label") == window_name:
+                return window
+        return None
+
+    def _require_window(self, window_name: str) -> dict:
+        window = self._find_window(window_name)
+        if not window:
+            raise RuntimeError(f"Window '{window_name}' not found in session")
+        return window
+
+    @staticmethod
+    def _focused_block(window: dict) -> Optional[str]:
+        """A window's focused block, falling back to its first tiled block."""
+        if window.get("focused_block_id"):
+            return window["focused_block_id"]
+        for layer in window.get("layers") or []:
+            if layer.get("kind") == "tiled" and layer.get("blocks"):
+                return layer["blocks"][0]["block_id"]
+        return None
+
+    def _window_block(self, window_name: str) -> Optional[str]:
+        window = self._find_window(window_name)
+        return self._focused_block(window) if window else None
+
+    def _target_block(self, target: str) -> str:
+        """Resolve a send target. 'test:' means the active block, like tmux."""
+        if target == "test:":
+            window = self._active_window()
+            block_id = self._focused_block(window) if window else None
+            if block_id:
+                return block_id
+            assert self.runner_block_id is not None, "Rex session has not been started"
+            return self.runner_block_id
+        block_id = self._focused_block(self._require_window(target))
+        if not block_id:
+            raise RuntimeError(f"Window '{target}' has no blocks")
+        return block_id
+
+    def list_windows(self) -> list[str]:
+        """List window labels in the test session."""
+        return [w["label"] for w in self._windows() if w.get("label")]
+
+    def list_window_ids(self) -> list[str]:
+        """List window IDs, which survive relabelling."""
+        return [w["window_id"] for w in self._windows()]
+
+    def capture_pane(self, window_name: str) -> Optional[str]:
+        """Capture the screen of a window's focused block."""
+        block_id = self._window_block(window_name)
+        if not block_id:
+            return None
+        result = self.mux_command(["capture", *self._block_args(block_id)], check=False)
+        if result.returncode == 0:
+            return result.stdout
+        return None
+
+    def _send(self, block_id: str, text: str, enter: bool) -> None:
+        # `--` so text starting with "-" isn't read as a flag. Rex rejects
+        # empty text, and there is nothing to send anyway.
+        if text:
+            self.mux_command(["send", *self._block_args(block_id), "--", text])
+        if enter:
+            self.mux_command(["send-key", *self._block_args(block_id), "enter"])
+
+    def send_keys(self, target: str, text: str, enter: bool = True) -> None:
+        """Send text to the active block ('test:') or a window's focused block."""
+        self._send(self._target_block(target), text, enter)
+
+    def run_shell_background(self, script: str) -> None:
+        """Run from the runner block, independently of the active worktree window."""
+        assert self.runner_block_id is not None, "Rex session has not been started"
+        command = make_env_script(self, script, {})
+        self._send(self.runner_block_id, f"nohup {command} >/dev/null 2>&1 &", True)
+
+    def set_session_env(self, key: str, value: str) -> None:
+        """Set an environment variable via shell export in the active block."""
+        self.send_keys("test:", f"export {key}={shlex.quote(value)}", enter=True)
+
+    def kill_window(self, window_name: str) -> None:
+        """Close a window by label. Raises if it doesn't exist."""
+        window = self._require_window(window_name)
+        self._api("session.close_window", self._window_ref(window))
+
+    def get_current_window(self) -> Optional[str]:
+        """Get the label of the session's active window."""
+        window = self._active_window()
+        return window.get("label") if window else None
+
+    def select_window(self, window_name: str) -> None:
+        """Make a window active by label. Raises if it doesn't exist."""
+        window = self._require_window(window_name)
+        self._api("session.focus_window", self._window_ref(window))
+
+    def new_window(self, name: Optional[str] = None, detached: bool = False) -> None:
+        """Create a new window in the test session."""
+        args = ["window", "new", "-s", str(self.session_id)]
+        if detached:
+            args.append("--focus=false")
+        if name:
+            args.append(name)
+        self.mux_command(args + ["-c", str(self.tmp_path)])
+
+    def configure_default_shell(self, shell: str) -> None:
+        """Rex has no default-shell option; set SHELL for workmux to read."""
+        self.env["SHELL"] = shell
+
+    def _sessions(self) -> list[dict]:
+        return self._api("session.list", {}).get("sessions") or []
+
+    def list_sessions(self) -> list[str]:
+        """List session labels on the private server."""
+        return [s["label"] for s in self._sessions() if s.get("label")]
+
+    def _session_view(self, session_name: str) -> tuple[str, dict]:
+        for session in self._sessions():
+            if session.get("label") == session_name:
+                view = self._api("session.view", {"session_id": session["session_id"]})
+                return session["session_id"], view
+        raise RuntimeError(f"Session '{session_name}' not found")
+
+    def new_session(self, session_name: str) -> None:
+        """Create a session on the private server, without switching to it."""
+        self.mux_command(["new", session_name, "-c", str(self.tmp_path)])
+
+    def list_windows_in_session(self, session_name: str) -> list[str]:
+        """List the window labels of one session."""
+        _, view = self._session_view(session_name)
+        return [w["label"] for w in view.get("windows") or [] if w.get("label")]
+
+    def session_pane_path(self, session_name: str) -> str:
+        """Return the cwd of the focused block in a session's active window."""
+        session_id, view = self._session_view(session_name)
+        for window in view.get("windows") or []:
+            if window.get("window_id") != view.get("active_window_id"):
+                continue
+            block_id = self._focused_block(window)
+            if not block_id:
+                break
+            result = self.mux_command(
+                ["block", "call", "-s", session_id, "-b", block_id, "process", "{}"]
+            )
+            process = json.loads(result.stdout)
+            return (process.get("foreground") or {}).get("cwd") or ""
+        raise RuntimeError(f"Session '{session_name}' has no active pane")
+
+    def send_keys_to_session(self, session_name: str, text: str) -> None:
+        """Type a command into the focused block of a session's active window."""
+        session_id, view = self._session_view(session_name)
+        for window in view.get("windows") or []:
+            if window.get("window_id") != view.get("active_window_id"):
+                continue
+            block_id = self._focused_block(window)
+            if not block_id:
+                break
+            block_args = ["-s", session_id, "-b", block_id]
+            self.mux_command(["send", *block_args, "--", text])
+            self.mux_command(["send-key", *block_args, "enter"])
+            return
+        raise RuntimeError(f"Session '{session_name}' has no active pane")
+
+
 def skip_if_backend_unavailable(backend: str):
     """
     Skip test if the required multiplexer backend is not available.
@@ -653,6 +1030,7 @@ def skip_if_backend_unavailable(backend: str):
     For tmux: Checks binary exists and `tmux -V` succeeds.
     For WezTerm: Checks binary exists and `wezterm cli list` succeeds
                 (requires WezTerm to be running).
+    For Rex: Checks the binary exists. Each test starts its own server.
 
     This ensures CI environments without WezTerm can still run tmux tests.
     """
@@ -672,16 +1050,24 @@ def skip_if_backend_unavailable(backend: str):
         )
         if result.returncode != 0:
             pytest.skip("wezterm not running or not available")
+    elif backend == "rex":
+        if not shutil.which("rex"):
+            pytest.skip("rex not installed")
 
 
-# Type alias for tests that accept either backend
-MuxEnv = Union[TmuxEnvironment, WezTermEnvironment]
+# Type alias for tests that accept any backend
+MuxEnv = Union[TmuxEnvironment, WezTermEnvironment, RexEnvironment]
+
+# Test environment class for each --backend value
+MUX_ENVIRONMENTS: dict[str, type[MuxEnvironment]] = {
+    "tmux": TmuxEnvironment,
+    "wezterm": WezTermEnvironment,
+    "rex": RexEnvironment,
+}
 
 # Default window prefix - must match src/config.rs window_prefix() default
 DEFAULT_WINDOW_PREFIX = "wm-"
 
-# Type alias for backward compatibility - tests can use either
-MuxEnv = Union[TmuxEnvironment, WezTermEnvironment]
 
 # =============================================================================
 # Shared Assertion Helpers
@@ -696,34 +1082,25 @@ def assert_window_exists(env: MuxEnvironment, window_name: str) -> None:
     )
 
 
-def assert_session_exists(env: "TmuxEnvironment", session_name: str) -> None:
-    """Ensure a tmux session with the provided name exists."""
-    result = env.tmux(["list-sessions", "-F", "#{session_name}"])
-    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+def assert_session_exists(env: MuxEnvironment, session_name: str) -> None:
+    """Ensure a session with the provided name exists."""
+    existing_sessions = env.list_sessions()
     assert session_name in existing_sessions, (
         f"Session {session_name!r} not found. Existing: {existing_sessions!r}"
     )
 
 
-def assert_session_not_exists(env: "TmuxEnvironment", session_name: str) -> None:
-    """Ensure a tmux session with the provided name does NOT exist."""
-    result = env.tmux(["list-sessions", "-F", "#{session_name}"], check=False)
-    if result.returncode != 0:
-        # No sessions exist at all
-        return
-    existing_sessions = [s for s in result.stdout.strip().split("\n") if s]
+def assert_session_not_exists(env: MuxEnvironment, session_name: str) -> None:
+    """Ensure a session with the provided name does NOT exist."""
+    existing_sessions = env.list_sessions()
     assert session_name not in existing_sessions, (
         f"Session {session_name!r} should not exist but was found. Existing: {existing_sessions!r}"
     )
 
 
-def assert_window_not_exists(env: "TmuxEnvironment", window_name: str) -> None:
-    """Ensure a tmux window with the provided name does NOT exist."""
-    result = env.tmux(["list-windows", "-F", "#{window_name}"], check=False)
-    if result.returncode != 0:
-        # No windows exist at all
-        return
-    existing_windows = [w for w in result.stdout.strip().split("\n") if w]
+def assert_window_not_exists(env: MuxEnvironment, window_name: str) -> None:
+    """Ensure a window with the provided name does NOT exist."""
+    existing_windows = env.list_windows()
     assert window_name not in existing_windows, (
         f"Window {window_name!r} should not exist but was found. Existing: {existing_windows!r}"
     )
@@ -983,10 +1360,13 @@ class FakeAgentInstaller:
 
     def install(self, name: str, script_body: str) -> Path:
         """Creates a fake agent command; the bin dir is already on PATH."""
-        script_path = self.bin_dir / name
-        script_path.write_text(script_body)
-        script_path.chmod(0o755)
-        return script_path
+        return self.env.install_script(self.bin_dir / name, script_body)
+
+
+@pytest.fixture(scope="session")
+def script_runner() -> Path:
+    """All test doubles share the repository runner's executable inode."""
+    return SCRIPT_RUNNER
 
 
 @pytest.fixture
@@ -1027,7 +1407,7 @@ def pytest_addoption(parser):
         "--backend",
         action="store",
         default=None,
-        help="Multiplexer backend to test: tmux, wezterm, or both (comma-separated)",
+        help="Multiplexer backend to test: tmux, wezterm, rex, or several (comma-separated)",
     )
 
 
@@ -1105,10 +1485,7 @@ def mux_server(request, tmp_path: Path) -> Generator[MuxEnvironment, None, None]
     backend = request.param
     skip_if_backend_unavailable(backend)
 
-    if backend == "tmux":
-        test_env = TmuxEnvironment(tmp_path)
-    else:
-        test_env = WezTermEnvironment(tmp_path)
+    test_env = MUX_ENVIRONMENTS.get(backend, WezTermEnvironment)(tmp_path)
 
     test_env.start_server()
     yield test_env
@@ -1329,12 +1706,16 @@ def write_workmux_config(
     agent: Optional[str] = None,
     merge_strategy: Optional[str] = None,
     merge_keep: Optional[bool] = None,
+    confirm_unmerged_removal: Optional[bool] = None,
     worktree_naming: Optional[str] = None,
     worktree_prefix: Optional[str] = None,
+    main_branch: Optional[str] = None,
     base_branch: Optional[str] = None,
     prompt_file_only: Optional[bool] = None,
     window_placement: Optional[str] = None,
+    default_session: Optional[str] = None,
     layouts: Optional[Dict[str, Any]] = None,
+    status_icons: Optional[Dict[str, str]] = None,
 ):
     """Creates a .workmux.yaml file from structured data and optionally commits it."""
     # Disable nerdfonts by default to ensure consistent "wm-" prefix in tests,
@@ -1360,16 +1741,24 @@ def write_workmux_config(
         config["merge_strategy"] = merge_strategy
     if merge_keep is not None:
         config["merge_keep"] = merge_keep
+    if confirm_unmerged_removal is not None:
+        config["confirm_unmerged_removal"] = confirm_unmerged_removal
     if worktree_naming:
         config["worktree_naming"] = worktree_naming
     if worktree_prefix:
         config["worktree_prefix"] = worktree_prefix
+    if main_branch:
+        config["main_branch"] = main_branch
     if base_branch:
         config["base_branch"] = base_branch
     if prompt_file_only is not None:
         config["prompt_file_only"] = prompt_file_only
     if window_placement is not None:
         config["window_placement"] = window_placement
+    if default_session is not None:
+        config["default_session"] = default_session
+    if status_icons:
+        config["status_icons"] = status_icons
     (repo_path / ".workmux.yaml").write_text(yaml.dump(config))
 
     # If env is provided, commit the config file to avoid uncommitted changes in merge tests
@@ -1395,6 +1784,7 @@ def write_global_workmux_config(
     base_branch: Optional[str] = None,
     merge_keep: Optional[bool] = None,
     agents: Optional[Dict[str, Any]] = None,
+    auto_name: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Creates the global ~/.config/workmux/config.yaml file within the isolated HOME."""
     config: Dict[str, Any] = {}
@@ -1414,6 +1804,8 @@ def write_global_workmux_config(
         config["merge_keep"] = merge_keep
     if agents is not None:
         config["agents"] = agents
+    if auto_name is not None:
+        config["auto_name"] = auto_name
 
     config_dir = env.home_path / ".config" / "workmux"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1475,7 +1867,7 @@ def make_env_script(env: MuxEnvironment, command: str, env_vars: dict[str, str])
         env_vars: Environment variables to set (e.g., {"XDG_STATE_HOME": "/path"})
 
     Returns:
-        Path to the script file (as string) that can be passed to send_keys
+        Shell command that can be passed to send_keys
     """
     global _script_counter
     _script_counter += 1
@@ -1487,8 +1879,9 @@ def make_env_script(env: MuxEnvironment, command: str, env_vars: dict[str, str])
 {command}
 """
     script_file.write_text(script_content)
-    script_file.chmod(0o755)
-    return str(script_file)
+    # Invoke the interpreter directly: cold shebang execution on macOS can
+    # stall before the script body starts, consuming the command's wait budget.
+    return f"/bin/sh {shlex.quote(str(script_file))}"
 
 
 def get_session_name(branch_name: str) -> str:
@@ -1561,8 +1954,9 @@ def run_workmux_command(
 
     # Write the command to a script file to avoid tmux send-keys line length limits.
     # The PATH can be very long in test environments, causing command truncation.
+    exit_trap = f"echo $? > {shlex.quote(str(exit_code_file))}"
     script_content = f"""#!/bin/sh
-trap 'echo $? > {shlex.quote(str(exit_code_file))}' EXIT
+trap {shlex.quote(exit_trap)} EXIT
 export PATH={shlex.quote(env.env["PATH"])}
 export TMPDIR={shlex.quote(env.env.get("TMPDIR", "/tmp"))}
 export HOME={shlex.quote(env.env.get("HOME", ""))}
@@ -1572,10 +1966,10 @@ export WORKMUX_TEST=1
 {pipe_cmd}{shlex.quote(str(workmux_exe_path))} {command} > {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}
 """
     script_file.write_text(script_content)
-    script_file.chmod(0o755)
 
-    # Execute the script - this keeps the send_keys command short
-    env.send_keys("test:", str(script_file), enter=True)
+    # Read the script through its interpreter, avoiding cold shebang startup
+    # delays before the command can execute (as in make_env_script).
+    env.send_keys("test:", f"/bin/sh {shlex.quote(str(script_file))}", enter=True)
 
     if not poll_until_file_has_content(exit_code_file, timeout=timeout):
         # Capture pane content for debugging
@@ -1930,27 +2324,42 @@ def run_workmux_merge(
     branch_arg = branch_name if branch_name else ""
     flags_str = " ".join(flags)
 
+    started_file: Optional[Path] = None
     if from_window:
         from_branch = from_window.replace(DEFAULT_WINDOW_PREFIX, "")
         worktree_path = get_worktree_path(repo_path, from_branch)
         workdir = worktree_path
+        started_file = scripts_dir / "workmux_merge_started.txt"
+        if started_file.exists():
+            started_file.unlink()
     else:
         workdir = repo_path
 
     # Create a simple editor script for non-interactive git commits
     editor_script = scripts_dir / "git_editor.sh"
     editor_script.write_text('#!/bin/sh\necho "Auto commit from test" > "$1"\n')
-    editor_script.chmod(0o755)
+    editor_command = f"/bin/sh {shlex.quote(str(editor_script))}"
 
+    started_command = (
+        f"echo started > {shlex.quote(str(started_file))}; " if started_file else ""
+    )
     merge_script = (
-        f"export GIT_EDITOR={shlex.quote(str(editor_script))} && "
-        f"cd {workdir} && "
-        f"{workmux_exe_path} merge {flags_str} {branch_arg} "
-        f"> {stdout_file} 2> {stderr_file}; "
-        f"echo $? > {exit_code_file}"
+        f"{started_command}"
+        f"export GIT_EDITOR={shlex.quote(editor_command)} && "
+        f"cd {shlex.quote(str(workdir))} && "
+        f"{shlex.quote(str(workmux_exe_path))} merge {flags_str} {branch_arg} "
+        f"> {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}; "
+        f"echo $? > {shlex.quote(str(exit_code_file))}"
     )
 
-    env.run_shell_background(merge_script)
+    if from_window:
+        env.send_keys(from_window, merge_script)
+        assert started_file is not None
+        assert poll_until_file_has_content(started_file, timeout=5.0), (
+            "workmux merge did not start in target window"
+        )
+    else:
+        env.run_shell_background(merge_script)
 
     assert poll_until_file_has_content(exit_code_file, timeout=10.0), (
         "workmux merge did not complete in time"
@@ -2022,8 +2431,7 @@ echo "gh: command not implemented in fake" >&2
 exit 1
 """
 
-    gh_script.write_text(script_content)
-    gh_script.chmod(0o755)
+    env.install_script(gh_script, script_content)
 
     # Add the bin directory to PATH
     new_path = f"{bin_dir}:{env.env.get('PATH', '')}"

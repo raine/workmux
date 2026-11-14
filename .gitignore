@@ -16,11 +16,10 @@ venv/
 .pytest_cache/
 tests/venv
 
-# VitePress
+# Documentation
 node_modules/
-docs/.vitepress/dist/
-docs/.vitepress/cache/
-docs/public/_1x/
+docs/.astro/
+docs/dist/
 
 # Nix
 result

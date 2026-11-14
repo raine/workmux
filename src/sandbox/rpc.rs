@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -26,6 +26,10 @@ use crate::sandbox::constant_time::constant_time_eq;
 pub enum RpcRequest {
     SetStatus {
         status: String,
+        /// Latest user prompt from the hook payload, already filtered for
+        /// delegated turns. The host decides whether to store it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     SetTitle {
         title: String,
@@ -53,12 +57,165 @@ pub enum RpcRequest {
         no_hooks: bool,
         notification: bool,
     },
+    Remove {
+        name: String,
+        force: bool,
+    },
     Close {
         name: String,
     },
     ClipboardRead {
         mime: String,
     },
+}
+
+impl RpcRequest {
+    /// Request type name, safe to log: payloads can carry user prompts.
+    fn kind(&self) -> &'static str {
+        match self {
+            RpcRequest::SetStatus { .. } => "SetStatus",
+            RpcRequest::SetTitle { .. } => "SetTitle",
+            RpcRequest::Heartbeat => "Heartbeat",
+            RpcRequest::SpawnAgent { .. } => "SpawnAgent",
+            RpcRequest::Exec { .. } => "Exec",
+            RpcRequest::Merge { .. } => "Merge",
+            RpcRequest::Remove { .. } => "Remove",
+            RpcRequest::Close { .. } => "Close",
+            RpcRequest::ClipboardRead { .. } => "ClipboardRead",
+        }
+    }
+}
+
+/// How a node supervisor answers `request`, or `None` when it serves it
+/// as the laptop does. Requests that act on the laptop's worktrees, windows
+/// or clipboard cannot be served on a node; the refusal says what works
+/// instead. The node names a workspace's worktree after its handle.
+fn on_node(request: &RpcRequest, node: &NodeWorkspace, worktree: &Path) -> Option<RpcResponse> {
+    let handle = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<handle>".to_string());
+    let refusal = match request {
+        RpcRequest::SetStatus { .. }
+        | RpcRequest::SetTitle { .. }
+        | RpcRequest::Heartbeat
+        | RpcRequest::Exec { .. } => return None,
+        RpcRequest::SpawnAgent {
+            prompt,
+            branch_name,
+            background,
+        } => {
+            return Some(handle_node_spawn(
+                node,
+                prompt,
+                branch_name.as_deref(),
+                *background,
+            ));
+        }
+        RpcRequest::Merge { .. } | RpcRequest::Remove { .. } => return None,
+        RpcRequest::ClipboardRead { .. } => "the clipboard is on the local machine, which remote \
+             agents cannot read; copy the image into the worktree instead"
+            .to_string(),
+        RpcRequest::Close { .. } => {
+            format!("the window is on the local machine: run `workmux close {handle}` there")
+        }
+    };
+    Some(RpcResponse::Error { message: refusal })
+}
+
+/// The laptop operation a node supervisor requests for `request`, if any.
+fn laptop_operation(request: &RpcRequest) -> Option<crate::remote::node::operation::Operation> {
+    use crate::remote::node::operation::Operation;
+    match request {
+        RpcRequest::Remove { force, .. } => Some(Operation::Remove { force: *force }),
+        RpcRequest::Merge {
+            into,
+            rebase,
+            squash,
+            ignore_uncommitted,
+            keep,
+            cleanup,
+            no_verify,
+            no_hooks,
+            notification,
+            ..
+        } => Some(Operation::Merge {
+            into: into.clone(),
+            rebase: *rebase,
+            squash: *squash,
+            ignore_uncommitted: *ignore_uncommitted,
+            keep: *keep,
+            cleanup: *cleanup,
+            no_verify: *no_verify,
+            no_hooks: *no_hooks,
+            notification: *notification,
+        }),
+        _ => None,
+    }
+}
+
+/// Ask the laptop to perform `operation` on the guest's own workspace, as
+/// a pane on the node would, streaming the laptop's progress. The request
+/// is marked sandboxed, so the laptop runs no hooks for it. The guest
+/// cannot name another workspace: its worktree's name is its handle.
+fn handle_node_operation(
+    node: &NodeWorkspace,
+    worktree: &Path,
+    operation: crate::remote::node::operation::Operation,
+    writer: &mut impl Write,
+) -> Result<()> {
+    let handle = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut sent = 0;
+    let mut write_err = None;
+    let result = crate::remote::node::NodeRoot::at(node.root.clone()).and_then(|root| {
+        crate::remote::node::operation::request(
+            &root,
+            &node.ws_id,
+            &[handle],
+            operation,
+            true,
+            &mut |lines| {
+                for line in &lines[sent.min(lines.len())..] {
+                    let response = RpcResponse::Output {
+                        message: format!("{line}\n"),
+                    };
+                    if let Err(e) = write_response(writer, &response) {
+                        write_err.get_or_insert(e);
+                    }
+                }
+                sent = sent.max(lines.len());
+            },
+        )
+    });
+    if let Some(e) = write_err {
+        return Err(e);
+    }
+    let response = match result {
+        Ok(Some(message)) => {
+            write_response(
+                writer,
+                &RpcResponse::Output {
+                    message: format!("{message}\n"),
+                },
+            )?;
+            RpcResponse::Ok
+        }
+        Ok(None) => RpcResponse::Ok,
+        Err(e) => RpcResponse::Error {
+            message: format!("{e:#}"),
+        },
+    };
+    write_response(writer, &response)
+}
+
+/// The node workspace a node supervisor serves, from its own arguments;
+/// the guest never names it.
+pub struct NodeWorkspace {
+    pub root: PathBuf,
+    pub ws_id: String,
 }
 
 /// RPC response sent from host to guest.
@@ -84,6 +241,10 @@ pub struct RpcContext {
     pub worktree_path: PathBuf,
     /// Multiplexer backend (resolved once at startup).
     pub mux: Arc<dyn Multiplexer>,
+    /// Effective configuration captured before the guest starts.
+    pub config: Arc<Config>,
+    /// Host-only snapshot used by Workmux child commands.
+    pub frozen_config_path: PathBuf,
     /// Shared secret for authenticating RPC requests.
     pub token: String,
     /// Commands allowed for host-exec.
@@ -92,6 +253,9 @@ pub struct RpcContext {
     pub detected_toolchain: crate::sandbox::toolchain::DetectedToolchain,
     /// Whether to allow host-exec without bwrap on Linux.
     pub allow_unsandboxed_host_exec: bool,
+    /// Set when the supervisor runs on a remote node; [`on_node`] decides
+    /// how it answers each request.
+    pub node: Option<NodeWorkspace>,
 }
 
 /// TCP RPC server that accepts guest connections.
@@ -107,7 +271,13 @@ impl RpcServer {
     /// via `host.lima.internal`, which resolves to the host's gateway IP on
     /// the shared network interface, not the loopback address.
     pub fn bind() -> Result<Self> {
-        let listener = TcpListener::bind("0.0.0.0:0").context("Failed to bind RPC listener")?;
+        Self::bind_to(std::net::Ipv4Addr::UNSPECIFIED.into())
+    }
+
+    /// Listen on an ephemeral port of `ip` only.
+    pub fn bind_to(ip: std::net::IpAddr) -> Result<Self> {
+        let listener = TcpListener::bind((ip, 0))
+            .with_context(|| format!("Failed to bind RPC listener on {ip}"))?;
         let port = listener.local_addr()?.port();
         info!(port, "RPC server bound");
         Ok(Self { listener, port })
@@ -264,7 +434,23 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
         let request: RpcRequest = serde_json::from_str(line.trim())
             .with_context(|| format!("Failed to parse RPC request: {}", line.trim()))?;
 
-        info!(?request, "RPC request received");
+        info!(request = request.kind(), "RPC request received");
+
+        if let Some(response) = ctx
+            .node
+            .as_ref()
+            .and_then(|node| on_node(&request, node, &ctx.worktree_path))
+        {
+            write_response(&mut writer, &response)?;
+            continue;
+        }
+
+        if let Some(node) = &ctx.node
+            && let Some(operation) = laptop_operation(&request)
+        {
+            handle_node_operation(node, &ctx.worktree_path, operation, &mut writer)?;
+            continue;
+        }
 
         // Exec and Merge require streaming multiple responses, handle separately
         if let RpcRequest::Exec {
@@ -303,14 +489,14 @@ fn handle_connection(stream: TcpStream, ctx: &RpcContext) -> Result<()> {
                 keep,
                 cleanup,
                 notification,
-                &ctx.worktree_path,
+                ctx,
                 &mut writer,
             )?;
             continue;
         }
 
         if let RpcRequest::Close { ref name } = request {
-            handle_close(name, &ctx.worktree_path, &mut writer)?;
+            handle_close(name, ctx, &mut writer)?;
             continue;
         }
 
@@ -406,18 +592,15 @@ where
 fn dispatch_request(request: &RpcRequest, ctx: &RpcContext) -> RpcResponse {
     match request {
         RpcRequest::Heartbeat => RpcResponse::Ok,
-        RpcRequest::SetStatus { status } => handle_set_status(status, ctx),
+        RpcRequest::SetStatus { status, prompt } => {
+            handle_set_status(status, prompt.as_deref(), ctx)
+        }
         RpcRequest::SetTitle { title } => handle_set_title(title, ctx),
         RpcRequest::SpawnAgent {
             prompt,
             branch_name,
             background,
-        } => handle_spawn_agent(
-            prompt,
-            branch_name.as_deref(),
-            *background,
-            &ctx.worktree_path,
-        ),
+        } => handle_spawn_agent(prompt, branch_name.as_deref(), *background, ctx),
         RpcRequest::ClipboardRead { mime } => handle_clipboard_read(mime, &ctx.worktree_path),
         RpcRequest::Exec { .. } => {
             // Handled in handle_connection before dispatch
@@ -427,6 +610,10 @@ fn dispatch_request(request: &RpcRequest, ctx: &RpcContext) -> RpcResponse {
             // Handled in handle_connection before dispatch (needs streaming)
             unreachable!("Merge is handled directly in handle_connection")
         }
+        RpcRequest::Remove { name, .. } => RpcResponse::Error {
+            // pre_remove hooks run on the host, and `remove` cannot skip them.
+            message: format!("removing runs hooks on the host: run `workmux rm {name}` there"),
+        },
         RpcRequest::Close { .. } => {
             // Handled in handle_connection before dispatch
             unreachable!("Close is handled directly in handle_connection")
@@ -436,16 +623,8 @@ fn dispatch_request(request: &RpcRequest, ctx: &RpcContext) -> RpcResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────────
 
-fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
-    // Reuse the same logic as set_window_status command
-    let config = match Config::load(None) {
-        Ok(c) => c,
-        Err(e) => {
-            return RpcResponse::Error {
-                message: format!("Failed to load config: {}", e),
-            };
-        }
-    };
+fn handle_set_status(status: &str, prompt: Option<&str>, ctx: &RpcContext) -> RpcResponse {
+    let config = &ctx.config;
 
     let (agent_status, icon, auto_clear) = match status.to_lowercase().as_str() {
         "working" => (
@@ -463,12 +642,33 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
             config.status_icons.done().to_string(),
             true,
         ),
+        "register" => {
+            let _ = ctx.mux.clear_status(&ctx.pane_id);
+            crate::state::persist_agent_registration(
+                &*ctx.mux,
+                &ctx.pane_id,
+                None,
+                crate::command::set_window_status::prompt_update(
+                    config,
+                    AgentStatus::Working,
+                    prompt,
+                ),
+            );
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
+            return RpcResponse::Ok;
+        }
         "clear" => {
             if let Err(e) = ctx.mux.clear_status(&ctx.pane_id) {
                 return RpcResponse::Error {
                     message: format!("Failed to clear status: {}", e),
                 };
             }
+            crate::state::clear_agent_status(
+                &*ctx.mux,
+                &ctx.pane_id,
+                !config.prompt_capture_enabled(),
+            );
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             return RpcResponse::Ok;
         }
         _ => {
@@ -491,8 +691,11 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
                     &ctx.pane_id,
                     Some(agent_status),
                     None,
+                    None,
+                    crate::command::set_window_status::prompt_update(config, agent_status, prompt),
                 );
             }
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             RpcResponse::Ok
         }
         Err(e) => RpcResponse::Error {
@@ -502,13 +705,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
 }
 
 fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
-    // Use tmux rename-window via the Cmd helper (consistent with codebase patterns)
-    use crate::cmd::Cmd;
-
-    match Cmd::new("tmux")
-        .args(&["rename-window", "-t", &ctx.pane_id, title])
-        .run()
-    {
+    match ctx.mux.rename_window_at_pane(&ctx.pane_id, title) {
         Ok(_) => {
             // Persist title to StateStore so the dashboard sees it
             crate::state::persist_agent_update(
@@ -516,7 +713,10 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
                 &ctx.pane_id,
                 None,
                 Some(title.to_string()),
+                None,
+                crate::state::PromptUpdate::Keep,
             );
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             RpcResponse::Ok
         }
         Err(e) => RpcResponse::Error {
@@ -536,7 +736,7 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
 /// existing value. RPC-spawned commands should run in a minimal, known-safe
 /// configuration -- inheriting arbitrary env-injected git config from the host
 /// is not needed and could weaken the security boundary.
-fn disable_git_hooks(cmd: &mut std::process::Command) {
+pub(crate) fn disable_git_hooks(cmd: &mut std::process::Command) {
     cmd.env_remove("GIT_CONFIG_PARAMETERS")
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
@@ -563,14 +763,51 @@ fn handle_clipboard_read(mime: &str, worktree_path: &std::path::Path) -> RpcResp
     }
 }
 
-fn host_workmux_command() -> std::process::Command {
+fn host_workmux_command(ctx: &RpcContext) -> std::process::Command {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("workmux"));
     let mut cmd = std::process::Command::new(exe);
     cmd.env_remove("WM_SANDBOX_GUEST")
         .env_remove("WM_RPC_HOST")
         .env_remove("WM_RPC_PORT")
-        .env_remove("WM_RPC_TOKEN");
+        .env_remove("WM_RPC_TOKEN")
+        .env(
+            crate::frozen_config::FROZEN_CONFIG_ENV,
+            &ctx.frozen_config_path,
+        );
 
+    cmd
+}
+
+fn spawn_agent_command(
+    prompt: &str,
+    branch_name: Option<&str>,
+    background: Option<bool>,
+    ctx: &RpcContext,
+) -> std::process::Command {
+    let mut cmd = host_workmux_command(ctx);
+    // The guest runs on this host, so its siblings do too, whatever the
+    // configured placement.
+    cmd.args(["add", "--local"]);
+
+    if branch_name.is_none() {
+        cmd.arg("--auto-name");
+    }
+    if !prompt.is_empty() {
+        cmd.args(["--prompt", prompt]);
+    }
+    if background.unwrap_or(false) {
+        cmd.arg("--background");
+    }
+
+    // Workmux hooks can execute host commands. Git hook suppression keeps RPC
+    // children independent of repository Git policy across sandbox backends.
+    cmd.arg("--no-hooks");
+    disable_git_hooks(&mut cmd);
+
+    if let Some(name) = branch_name {
+        cmd.arg("--").arg(name);
+    }
+    cmd.current_dir(&ctx.worktree_path);
     cmd
 }
 
@@ -578,34 +815,9 @@ fn handle_spawn_agent(
     prompt: &str,
     branch_name: Option<&str>,
     background: Option<bool>,
-    worktree_path: &PathBuf,
+    ctx: &RpcContext,
 ) -> RpcResponse {
-    let mut cmd = host_workmux_command();
-    cmd.arg("add");
-
-    if let Some(name) = branch_name {
-        cmd.arg(name);
-    } else {
-        cmd.arg("--auto-name");
-    }
-
-    if !prompt.is_empty() {
-        cmd.args(["--prompt", prompt]);
-    }
-
-    if background.unwrap_or(false) {
-        cmd.arg("--background");
-    }
-
-    // SECURITY: Skip workmux hooks AND git native hooks when triggered via RPC.
-    // Workmux hooks are arbitrary shell commands from config that run unsandboxed
-    // on the host. Git native hooks (e.g. post-checkout from `git worktree add`)
-    // could be planted by a compromised guest in the bind-mounted .git/hooks/.
-    cmd.arg("--no-hooks");
-    disable_git_hooks(&mut cmd);
-
-    // Run from the worktree directory so config is found
-    cmd.current_dir(worktree_path);
+    let mut cmd = spawn_agent_command(prompt, branch_name, background, ctx);
 
     match cmd.output() {
         Ok(output) if output.status.success() => RpcResponse::Ok,
@@ -621,8 +833,64 @@ fn handle_spawn_agent(
     }
 }
 
+/// `node spawn` for the guest's workspace: the sibling is created and
+/// started on this node, and the laptop opens its window when it next
+/// looks at the node.
+fn node_spawn_command(root: &Path) -> std::process::Command {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("workmux"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["node", "spawn", "--json"])
+        .env(crate::remote::node::NODE_ROOT_ENV, root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env_remove(crate::frozen_config::FROZEN_CONFIG_ENV)
+        .env_remove("WM_SANDBOX_GUEST")
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    disable_git_hooks(&mut cmd);
+    cmd
+}
+
+fn handle_node_spawn(
+    node: &NodeWorkspace,
+    prompt: &str,
+    branch_name: Option<&str>,
+    background: Option<bool>,
+) -> RpcResponse {
+    let request = crate::remote::node::spawn::SpawnRequest {
+        parent: node.ws_id.clone(),
+        branch: branch_name.map(str::to_string),
+        prompt: (!prompt.is_empty()).then(|| prompt.to_string()),
+        background: background.unwrap_or(false),
+    };
+    let output = (|| -> Result<std::process::Output> {
+        let mut child = node_spawn_command(&node.root).spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        stdin.write_all(&serde_json::to_vec(&request)?)?;
+        drop(stdin);
+        Ok(child.wait_with_output()?)
+    })();
+    match output {
+        Ok(output) if output.status.success() => RpcResponse::Ok,
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let message =
+                serde_json::from_str::<crate::remote::protocol::ErrorEnvelope>(stdout.trim())
+                    .map(|envelope| envelope.error.message)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&output.stderr).trim().to_string());
+            RpcResponse::Error {
+                message: format!("workmux add failed: {message}"),
+            }
+        }
+        Err(e) => RpcResponse::Error {
+            message: format!("Failed to run workmux node spawn: {e:#}"),
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn handle_merge(
+fn merge_command(
     name: &str,
     into: Option<&str>,
     rebase: bool,
@@ -631,14 +899,10 @@ fn handle_merge(
     keep: bool,
     cleanup: bool,
     notification: bool,
-    worktree_path: &PathBuf,
-    writer: &mut impl Write,
-) -> Result<()> {
-    use std::process::Stdio;
-
-    let mut cmd = host_workmux_command();
+    ctx: &RpcContext,
+) -> std::process::Command {
+    let mut cmd = host_workmux_command(ctx);
     cmd.arg("merge");
-    cmd.arg(name);
 
     if let Some(target) = into {
         cmd.args(["--into", target]);
@@ -662,16 +926,41 @@ fn handle_merge(
         cmd.arg("--notification");
     }
 
-    // SECURITY: Skip workmux hooks AND git native hooks when triggered via RPC.
-    // --no-verify/--no-hooks skip workmux's own pre_merge hooks (arbitrary shell
-    // commands from config). disable_git_hooks() sets core.hooksPath=/dev/null to
-    // prevent git native hooks (post-merge, post-rewrite, post-checkout) that a
-    // compromised guest could plant in the bind-mounted .git/hooks/ directory.
+    // Workmux hooks can execute host commands. Git hook suppression keeps RPC
+    // children independent of repository Git policy across sandbox backends.
     cmd.args(["--no-verify", "--no-hooks"]);
     disable_git_hooks(&mut cmd);
+    cmd.arg("--").arg(name);
+    cmd.current_dir(&ctx.worktree_path);
+    cmd
+}
 
-    // Run from the worktree directory so config is found
-    cmd.current_dir(worktree_path);
+#[allow(clippy::too_many_arguments)]
+fn handle_merge(
+    name: &str,
+    into: Option<&str>,
+    rebase: bool,
+    squash: bool,
+    ignore_uncommitted: bool,
+    keep: bool,
+    cleanup: bool,
+    notification: bool,
+    ctx: &RpcContext,
+    writer: &mut impl Write,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    let mut cmd = merge_command(
+        name,
+        into,
+        rebase,
+        squash,
+        ignore_uncommitted,
+        keep,
+        cleanup,
+        notification,
+        ctx,
+    );
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -752,13 +1041,18 @@ fn sanitized_env() -> std::collections::HashMap<String, String> {
     envs
 }
 
-fn handle_close(name: &str, worktree_path: &PathBuf, writer: &mut impl Write) -> Result<()> {
+fn close_command(name: &str, ctx: &RpcContext) -> std::process::Command {
+    let mut cmd = host_workmux_command(ctx);
+    cmd.arg("close").arg("--").arg(name);
+    cmd.current_dir(&ctx.worktree_path);
+    cmd
+}
+
+fn handle_close(name: &str, ctx: &RpcContext, writer: &mut impl Write) -> Result<()> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut cmd = host_workmux_command();
-    cmd.arg("close").arg(name);
-    cmd.current_dir(worktree_path);
+    let mut cmd = close_command(name, ctx);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -978,6 +1272,81 @@ mod tests {
     use crate::multiplexer;
 
     #[test]
+    fn node_refusals_say_what_to_run_on_the_laptop() {
+        let worktree = Path::new("/node/projects/p1/worktrees/feat");
+        let node = NodeWorkspace {
+            root: PathBuf::from("/node"),
+            ws_id: "ws".into(),
+        };
+        let refusal = |request: &RpcRequest| match on_node(request, &node, worktree) {
+            Some(RpcResponse::Error { message }) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let merge: RpcRequest = serde_json::from_str(
+            r#"{"type":"Merge","name":"feat","into":null,"rebase":false,"squash":false,
+                "ignore_uncommitted":false,"keep":false,"no_verify":false,"no_hooks":false,
+                "notification":false}"#,
+        )
+        .unwrap();
+        assert!(on_node(&merge, &node, worktree).is_none());
+        assert!(matches!(
+            laptop_operation(&merge),
+            Some(crate::remote::node::operation::Operation::Merge { .. })
+        ));
+        let remove = RpcRequest::Remove {
+            name: "x".into(),
+            force: true,
+        };
+        assert!(on_node(&remove, &node, worktree).is_none());
+        assert_eq!(
+            laptop_operation(&remove),
+            Some(crate::remote::node::operation::Operation::Remove { force: true })
+        );
+        let paste = RpcRequest::ClipboardRead {
+            mime: "image/png".into(),
+        };
+        assert!(refusal(&paste).contains("clipboard is on the local machine"));
+        let close = RpcRequest::Close { name: "x".into() };
+        assert!(refusal(&close).contains("`workmux close feat`"));
+        assert!(on_node(&RpcRequest::Heartbeat, &node, worktree).is_none());
+    }
+
+    #[test]
+    fn local_remove_is_refused_because_hooks_run_on_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = RpcRequest::Remove {
+            name: "feat".into(),
+            force: false,
+        };
+        match dispatch_request(&request, &test_context(dir.path())) {
+            RpcResponse::Error { message } => assert!(message.contains("`workmux rm feat`")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    fn test_context(worktree_path: &std::path::Path) -> RpcContext {
+        RpcContext {
+            pane_id: "%0".to_string(),
+            worktree_path: worktree_path.to_path_buf(),
+            mux: multiplexer::create_backend(multiplexer::BackendType::Tmux),
+            config: Arc::new(Config::default()),
+            frozen_config_path: worktree_path.join("frozen-config.json"),
+            token: "test-token".to_string(),
+            allowed_commands: std::collections::HashSet::new(),
+            detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
+            allow_unsandboxed_host_exec: false,
+            node: None,
+        }
+    }
+
+    fn command_args(command: &std::process::Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
     fn test_request_serialization_heartbeat() {
         let req = RpcRequest::Heartbeat;
         let json = serde_json::to_string(&req).unwrap();
@@ -988,10 +1357,30 @@ mod tests {
     fn test_request_serialization_set_status() {
         let req = RpcRequest::SetStatus {
             status: "working".to_string(),
+            prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"type\":\"SetStatus\""));
         assert!(json.contains("\"status\":\"working\""));
+    }
+
+    #[test]
+    fn set_status_prompt_is_optional_on_the_wire() {
+        let legacy: RpcRequest =
+            serde_json::from_str(r#"{"type":"SetStatus","status":"working"}"#).unwrap();
+        assert!(matches!(legacy, RpcRequest::SetStatus { prompt: None, .. }));
+
+        let req = RpcRequest::SetStatus {
+            status: "working".to_string(),
+            prompt: Some("fix the bug".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RpcRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            RpcRequest::SetStatus { prompt: Some(ref prompt), .. } if prompt == "fix the bug"
+        ));
+        assert_eq!(req.kind(), "SetStatus");
     }
 
     #[test]
@@ -1217,10 +1606,13 @@ mod tests {
             pane_id: "%0".to_string(),
             worktree_path: tmp.path().to_path_buf(),
             mux,
+            config: Arc::new(Config::default()),
+            frozen_config_path: tmp.path().join("frozen-config.json"),
             token: token.clone(),
             allowed_commands: allowed.iter().map(|s| s.to_string()).collect(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: allow_unsandboxed,
+            node: None,
         });
 
         let handle = server.spawn(ctx);
@@ -1356,8 +1748,7 @@ mod tests {
             return;
         }
 
-        let (stdout, stderr, code) = exec_collect(&mut client, "ls", &[&ssh_dir]);
-        let _ = &stdout; // used conditionally per platform
+        let (_stdout, _stderr, code) = exec_collect(&mut client, "ls", &[&ssh_dir]);
 
         #[cfg(target_os = "macos")]
         {
@@ -1366,7 +1757,7 @@ mod tests {
                 code,
                 0,
                 "ls ~/.ssh should fail under sandbox-exec (stderr: {})",
-                stderr.trim()
+                _stderr.trim()
             );
         }
 
@@ -1375,9 +1766,9 @@ mod tests {
             // bwrap masks ~/.ssh with tmpfs so ls succeeds but sees nothing
             assert_eq!(code, 0);
             assert!(
-                stdout.trim().is_empty(),
+                _stdout.trim().is_empty(),
                 "~/.ssh should appear empty under bwrap, got: {}",
-                stdout.trim()
+                _stdout.trim()
             );
         }
     }
@@ -1519,50 +1910,73 @@ mod tests {
     }
 
     #[test]
-    fn test_spawn_agent_with_empty_prompt_omits_prompt_flag() {
-        // When prompt is empty, handle_spawn_agent should not pass --prompt
-        // This prevents creating blank prompt files on the host
+    fn test_spawn_agent_command_omits_empty_prompt() {
         let tmp = tempfile::tempdir().unwrap();
-        let resp = handle_spawn_agent("", Some("test-branch"), None, &tmp.path().to_path_buf());
-        // The handler will try to run workmux add, which will fail because
-        // we're not in a real environment, but the key assertion is that it
-        // doesn't hang or crash with empty prompt
-        match resp {
-            RpcResponse::Error { .. } => {} // Expected - no real workmux binary
-            RpcResponse::Ok => {}           // Would happen if workmux existed
-            other => panic!("Unexpected response: {:?}", other),
-        }
-    }
+        let ctx = test_context(tmp.path());
+        let cmd = spawn_agent_command("", Some("test-branch"), None, &ctx);
+        let args = command_args(&cmd);
 
-    #[test]
-    fn test_spawn_agent_with_background_flag() {
-        // Test that background flag is wired through (not ignored as _background)
-        let tmp = tempfile::tempdir().unwrap();
-        let resp = handle_spawn_agent(
-            "do stuff",
-            Some("bg-branch"),
-            Some(true),
-            &tmp.path().to_path_buf(),
+        assert!(!args.iter().any(|arg| arg == "--prompt"));
+        assert_eq!(
+            args,
+            ["add", "--local", "--no-hooks", "--", "test-branch"]
+                .map(str::to_string)
+                .to_vec()
         );
-        // The handler will fail to run workmux add, but we're testing that
-        // it doesn't crash when background is Some(true)
-        match resp {
-            RpcResponse::Error { .. } => {} // Expected - no real workmux binary
-            RpcResponse::Ok => {}
-            other => panic!("Unexpected response: {:?}", other),
-        }
     }
 
     #[test]
-    fn test_spawn_agent_auto_name_when_branch_is_none() {
-        // When branch_name is None, handler should pass --auto-name
+    fn test_spawn_agent_command_includes_background_and_prompt() {
         let tmp = tempfile::tempdir().unwrap();
-        let resp = handle_spawn_agent("fix bug", None, None, &tmp.path().to_path_buf());
-        match resp {
-            RpcResponse::Error { .. } => {} // Expected
-            RpcResponse::Ok => {}
-            other => panic!("Unexpected response: {:?}", other),
-        }
+        let ctx = test_context(tmp.path());
+        let cmd = spawn_agent_command("do stuff", Some("bg-branch"), Some(true), &ctx);
+
+        assert_eq!(
+            command_args(&cmd),
+            [
+                "add",
+                "--local",
+                "--prompt",
+                "do stuff",
+                "--background",
+                "--no-hooks",
+                "--",
+                "bg-branch",
+            ]
+            .map(str::to_string)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_spawn_agent_command_uses_auto_name_without_positional() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = spawn_agent_command("fix bug", None, None, &ctx);
+
+        assert_eq!(
+            command_args(&cmd),
+            [
+                "add",
+                "--local",
+                "--auto-name",
+                "--prompt",
+                "fix bug",
+                "--no-hooks"
+            ]
+            .map(str::to_string)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_spawn_agent_command_terminates_options_before_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = spawn_agent_command("", Some("--config=/tmp/guest.yaml"), None, &ctx);
+        let args = command_args(&cmd);
+
+        assert_eq!(args[args.len() - 2..], ["--", "--config=/tmp/guest.yaml"]);
     }
 
     #[test]
@@ -1601,10 +2015,12 @@ mod tests {
     // ── Git hook suppression tests ──────────────────────────────────────
 
     #[test]
-    fn test_host_workmux_command_clears_guest_rpc_env() {
+    fn test_host_workmux_command_sets_host_only_environment() {
         use std::ffi::OsStr;
 
-        let cmd = host_workmux_command();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = host_workmux_command(&ctx);
         let envs: std::collections::HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
 
         assert_eq!(
@@ -1626,6 +2042,11 @@ mod tests {
             envs.get(OsStr::new("WM_RPC_TOKEN")),
             Some(&None),
             "host workmux child must not inherit guest RPC token"
+        );
+        assert_eq!(
+            envs.get(OsStr::new(crate::frozen_config::FROZEN_CONFIG_ENV)),
+            Some(&Some(ctx.frozen_config_path.as_os_str())),
+            "host workmux child must use the supervisor snapshot"
         );
     }
 
@@ -1664,55 +2085,60 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_command_disables_git_hooks() {
-        // Verify that a merge triggered via RPC would have git hooks disabled.
-        // We can't inspect the Command directly from handle_merge (it spawns
-        // internally), so instead we replicate the command-building logic and
-        // assert the env vars are present via the shared disable_git_hooks helper.
+    fn test_merge_command_disables_hooks_and_terminates_options() {
         use std::ffi::OsStr;
-        use std::process::Command;
 
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("workmux"));
-        let mut cmd = Command::new(exe);
-        cmd.arg("merge").arg("test-branch");
-        cmd.args(["--no-verify", "--no-hooks"]);
-        disable_git_hooks(&mut cmd);
-
-        let envs: std::collections::HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
-        assert!(
-            envs.contains_key(OsStr::new("GIT_CONFIG_COUNT")),
-            "merge command should have GIT_CONFIG_COUNT set"
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = merge_command(
+            "--config=/tmp/guest.yaml",
+            Some("main"),
+            true,
+            false,
+            true,
+            false,
+            true,
+            true,
+            &ctx,
         );
+        let args = command_args(&cmd);
+        let envs: std::collections::HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
+
+        assert!(args.iter().any(|arg| arg == "--no-verify"));
+        assert!(args.iter().any(|arg| arg == "--no-hooks"));
+        assert_eq!(args[args.len() - 2..], ["--", "--config=/tmp/guest.yaml"]);
         assert_eq!(
             envs.get(OsStr::new("GIT_CONFIG_VALUE_0")),
-            Some(&Some(OsStr::new("/dev/null"))),
-            "merge command should point core.hooksPath to /dev/null"
+            Some(&Some(OsStr::new("/dev/null")))
         );
     }
 
     #[test]
     fn test_spawn_agent_command_disables_git_hooks() {
-        // Verify that a spawn-agent triggered via RPC would have git hooks
-        // disabled, preventing post-checkout hooks from firing during
-        // git worktree add.
         use std::ffi::OsStr;
-        use std::process::Command;
 
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("workmux"));
-        let mut cmd = Command::new(exe);
-        cmd.arg("add").arg("--auto-name");
-        cmd.arg("--no-hooks");
-        disable_git_hooks(&mut cmd);
-
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = spawn_agent_command("", None, None, &ctx);
         let envs: std::collections::HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
-        assert!(
-            envs.contains_key(OsStr::new("GIT_CONFIG_COUNT")),
-            "spawn-agent command should have GIT_CONFIG_COUNT set"
-        );
+
         assert_eq!(
             envs.get(OsStr::new("GIT_CONFIG_KEY_0")),
-            Some(&Some(OsStr::new("core.hooksPath"))),
-            "spawn-agent command should set core.hooksPath"
+            Some(&Some(OsStr::new("core.hooksPath")))
+        );
+    }
+
+    #[test]
+    fn test_close_command_terminates_options_before_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_context(tmp.path());
+        let cmd = close_command("--config=/tmp/guest.yaml", &ctx);
+
+        assert_eq!(
+            command_args(&cmd),
+            ["close", "--", "--config=/tmp/guest.yaml"]
+                .map(str::to_string)
+                .to_vec()
         );
     }
 
@@ -1762,10 +2188,13 @@ mod tests {
             pane_id: "%0".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
             mux,
+            config: Arc::new(Config::default()),
+            frozen_config_path: PathBuf::from("/tmp/frozen-config.json"),
             token: token.clone(),
             allowed_commands: std::collections::HashSet::new(),
             detected_toolchain: crate::sandbox::toolchain::DetectedToolchain::None,
             allow_unsandboxed_host_exec: false,
+            node: None,
         });
 
         let _handle = server.spawn(ctx);

@@ -49,6 +49,10 @@ build:
 install:
     cargo install --offline --path . --locked
 
+# Install release binary globally from GitHub Actions
+install-ci:
+    scripts/install-ci
+
 # Install release binary globally from GitHub releases
 install-release:
     #!/usr/bin/env bash
@@ -59,6 +63,10 @@ install-release:
 # Install debug binary globally via symlink
 install-dev:
     cargo build && ln -sf $(pwd)/target/debug/workmux ~/.cargo/bin/workmux
+
+# Build this tree on a Linux remote for `remotes.<name>.binary` (HANDLE: ~/src/HANDLE)
+remote-dev-binary host handle="dev":
+    scripts/remote-dev-binary "$1" "$2"
 
 # Run unit tests through checkle
 unit-tests:
@@ -79,6 +87,10 @@ docs-check:
 # Run the application
 run *ARGS:
     cargo run -- "$@"
+
+# Build and open the dashboard in a running CuaBot session
+cua-dashboard session:
+    scripts/cua-dashboard '{{session}}'
 
 # Run integration tests in parallel
 itest *ARGS:
@@ -107,11 +119,15 @@ test *ARGS:
 
 # Run docs dev server
 docs:
-    cd docs && npm install && npm run dev -- --open
+    cd docs && bun install && bun run dev -- --open
+
+# Build documentation
+docs-build:
+    cd docs && bun install --frozen-lockfile && bun run build
 
 # Format documentation files
 format-docs:
-    cd docs && npm run format
+    cd docs && bun run format
 
 # Release a new patch version
 release *ARGS:
@@ -119,4 +135,4 @@ release *ARGS:
 
 # Internal release helper
 _release bump *ARGS:
-    @cargo-release {{bump}} {{ARGS}}
+    @cargo-release --skip-publish {{bump}} {{ARGS}}

@@ -7,6 +7,19 @@ use super::cleanup::{self, get_worktree_mode};
 use super::context::WorkflowContext;
 use super::types::MergeResult;
 
+/// A merge that stopped on conflicts, left for the user to resolve in the
+/// source worktree. Found with `downcast_ref` on the error `merge` returns.
+#[derive(Debug)]
+pub struct MergeConflict(pub String);
+
+impl std::fmt::Display for MergeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MergeConflict {}
+
 /// Merge a branch into the target branch and clean up
 #[allow(clippy::too_many_arguments)]
 pub fn merge(
@@ -45,6 +58,16 @@ pub fn merge(
         )
     })?;
 
+    if context.is_main_worktree(&worktree_path) {
+        return Err(anyhow!(
+            "Cannot merge branch '{}' because it is checked out in the main worktree at '{}'. \
+            Create a linked worktree for '{}' first.",
+            branch_to_merge,
+            context.main_worktree_root.display(),
+            branch_to_merge
+        ));
+    }
+
     // The handle is the basename of the worktree directory (used for tmux operations)
     let handle = worktree_path
         .file_name()
@@ -56,8 +79,9 @@ pub fn merge(
             )
         })?;
 
-    // Capture mode BEFORE cleanup (cleanup removes the metadata)
+    // Capture metadata before cleanup removes it.
     let mode = get_worktree_mode(handle);
+    let attachment = git::get_worktree_attachment_in(handle, Some(&context.execution_dir));
 
     debug!(
         name = name,
@@ -225,8 +249,13 @@ pub fn merge(
         ];
 
         for command in hooks {
-            cmd::shell_command_with_env(command, &worktree_path, &hook_env)
-                .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
+            cmd::shell_command_with_env(
+                context.config.hook_shell.as_deref(),
+                command,
+                &worktree_path,
+                &hook_env,
+            )
+            .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
         }
     }
 
@@ -237,7 +266,7 @@ pub fn merge(
         } else {
             format!("workmux merge {}", branch)
         };
-        anyhow!(
+        anyhow::Error::new(MergeConflict(format!(
             "Merge failed due to conflicts. Target worktree kept clean.\n\n\
             To resolve, update your branch in worktree at {}:\n\
               git rebase {}  (recommended)\n\
@@ -248,7 +277,7 @@ pub fn merge(
             target_branch,
             target_branch,
             retry_cmd
-        )
+        )))
     };
 
     if rebase {
@@ -261,12 +290,12 @@ pub fn merge(
             "merge:rebase start"
         );
         git::rebase_branch_onto_base(&worktree_path, target_branch).with_context(|| {
-            format!(
+            MergeConflict(format!(
                 "Rebase failed, likely due to conflicts.\n\n\
                 Please resolve them manually inside the worktree at '{}'.\n\
                 Then, run 'git rebase --continue' to proceed or 'git rebase --abort' to cancel.",
                 worktree_path.display()
-            )
+            ))
         })?;
 
         // After a successful rebase, merge into target. This will be a fast-forward.
@@ -314,35 +343,59 @@ pub fn merge(
             branch_merged: branch_to_merge,
             main_branch: target_branch.to_string(),
             had_staged_changes,
+            cleanup_scheduled: false,
+            cleanup_error: None,
         });
     }
 
     // Always force cleanup after a successful merge
     info!(branch = %branch_to_merge, "merge:cleanup start");
-    let cleanup_result = cleanup::cleanup(
+    let cleanup_result = match cleanup::cleanup(
         context,
         &branch_to_merge,
         handle,
         &worktree_path,
-        true,
-        false, // keep_branch: always delete when merging
-        no_hooks,
-    )?;
+        cleanup::CleanupOptions {
+            force: true,
+            keep_branch: false,
+            no_hooks,
+            show_hook_output: true,
+        },
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(MergeResult {
+                branch_merged: branch_to_merge,
+                main_branch: target_branch.to_string(),
+                had_staged_changes,
+                cleanup_scheduled: false,
+                cleanup_error: Some(error),
+            });
+        }
+    };
 
-    // Navigate to the target branch window/session and close the source
-    cleanup::navigate_to_target_and_close(
-        context.mux.as_ref(),
-        &context.prefix,
-        &target_window_name,
-        handle,
-        &cleanup_result,
-        mode,
-    )?;
+    let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
+    let cleanup_error = if attachment.manages_mux() {
+        cleanup::navigate_to_target_and_close(
+            context.mux.as_ref(),
+            &context.prefix,
+            &target_window_name,
+            handle,
+            &cleanup_result,
+            mode,
+            context.config.default_session(),
+        )
+        .err()
+    } else {
+        None
+    };
 
     Ok(MergeResult {
         branch_merged: branch_to_merge,
         main_branch: target_branch.to_string(),
         had_staged_changes,
+        cleanup_scheduled,
+        cleanup_error,
     })
 }
 

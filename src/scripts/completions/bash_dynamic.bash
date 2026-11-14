@@ -63,6 +63,10 @@ _workmux_dynamic() {
             add)
                 # Handle flags that take specific argument types
                 case "$prev" in
+                    --forge|--pr)
+                        _workmux "$@"
+                        return
+                        ;;
                     --base|-b)
                         COMPREPLY=($(compgen -W "$(_workmux_git_branches)" -- "$cur"))
                         return

@@ -57,6 +57,44 @@ def test_open_recreates_tmux_window_for_existing_worktree(
     assert window_name in list_windows
 
 
+@pytest.mark.tmux_only
+def test_open_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-open"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    worktree_path = get_worktree_path(repo_path, branch_name)
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    result = run_workmux_open(env, workmux_exe_path, repo_path, branch_name)
+
+    assert "Switched to existing" in result.stdout
+    windows = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"]
+    ).stdout.splitlines()
+    matching_ids = [
+        line.split("\t", 1)[0] for line in windows if line.endswith(f"\t{window_name}")
+    ]
+    assert matching_ids == [restored_id]
+
+
 # WezTerm: get_current_window() returns None because WezTerm doesn't expose
 # session-level window focus via CLI - GUI focus is controlled by window manager.
 @pytest.mark.tmux_only
@@ -88,6 +126,48 @@ def test_open_switches_to_existing_window_by_default(
     assert active_window == target_window, (
         f"Expected active window to be '{target_window}', got '{active_window}'"
     )
+
+
+@pytest.mark.tmux_only
+@pytest.mark.parametrize("flag", ["-b", "--background"])
+@pytest.mark.parametrize("state", ["existing", "closed", "new", "session"])
+def test_open_background_preserves_focus(
+    mux_server: TmuxEnvironment,
+    workmux_exe_path: Path,
+    repo_path: Path,
+    flag: str,
+    state: str,
+):
+    env = mux_server
+    write_workmux_config(repo_path)
+    for name in ("background-one", "background-two"):
+        run_workmux_command(
+            env, workmux_exe_path, repo_path, f"add {name} --background"
+        )
+        if state in ("closed", "session"):
+            env.kill_window(get_window_name(name))
+
+    session = env.tmux(["display-message", "-p", "#{session_id}"]).stdout.strip()
+    active_window = ["display-message", "-p", "-t", session + ":", "#{window_id}"]
+    original = env.tmux(active_window).stdout.strip()
+    extra = {"new": "--new", "session": "--session"}.get(state, "")
+    for _ in range(2 if state == "session" else 1):
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"open background-one background-two {flag} {extra}",
+        )
+        assert env.tmux(active_window).stdout.strip() == original
+        assert "Switched" not in result.stdout
+
+    for name in ("background-one", "background-two"):
+        if state == "session":
+            assert_session_exists(env, get_session_name(name))
+        else:
+            assert get_window_name(name) in env.list_windows()
+            if state == "new":
+                assert get_window_name(name) + "-2" in env.list_windows()
 
 
 def test_open_with_new_flag_creates_duplicate_window(
@@ -478,8 +558,58 @@ def test_remove_closes_all_duplicate_windows(
     assert len(matching) == 0, f"All windows should be closed, but found: {matching}"
 
 
-# =============================================================================
-# Prompt support tests
+@pytest.mark.tmux_only
+def test_remove_closes_renamed_duplicates_without_killing_reused_name(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-remove-renamed-dups"
+    base_window = get_window_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    run_workmux_open(env, workmux_exe_path, repo_path, branch_name, new_window=True)
+    run_workmux_open(env, workmux_exe_path, repo_path, branch_name, new_window=True)
+
+    owned = []
+    for line in env.tmux(
+        [
+            "list-windows",
+            "-a",
+            "-F",
+            "#{window_id}\t#{window_name}\t#{@workmux_token}",
+        ]
+    ).stdout.splitlines():
+        window_id, window_name, token = line.split("\t")
+        if token:
+            owned.append((window_id, window_name))
+
+    assert len(owned) == 3
+    for index, (window_id, _) in enumerate(owned):
+        env.tmux(["rename-window", "-t", window_id, f"renamed-owned-{index}"])
+
+    replacement_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            base_window,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    run_workmux_remove(env, workmux_exe_path, repo_path, branch_name, force=True)
+
+    windows = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"]
+    ).stdout.splitlines()
+    owned_ids = {window_id for window_id, _ in owned}
+    assert all(line.split("\t", 1)[0] not in owned_ids for line in windows)
+    assert f"{replacement_id}\t{base_window}" in windows
+
+
 # =============================================================================
 
 
@@ -1011,18 +1141,20 @@ def test_open_target_name_owner_can_switch_existing_target(
 
 
 @pytest.mark.tmux_only
-def test_open_parent_session_routes_window_mode_window(
+def test_open_parent_session_preserves_exact_existing_session(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
-    """Verifies open can route a window-mode worktree into a named tmux session."""
     env = mux_server
     branch_name = "feature-open-parent-session"
-    session_name = "prs"
-    custom_window = f"{DEFAULT_WINDOW_PREFIX}review-open-session"
+    handle = slugify(branch_name)
+    session_name = "WalkingMateOpen"
+    target_name = "Review Open Session"
+    custom_window = f"{DEFAULT_WINDOW_PREFIX}{slugify(target_name)}"
 
     write_workmux_config(repo_path)
     run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
     env.kill_window(get_window_name(branch_name))
+    env.tmux(["new-session", "-d", "-s", session_name])
 
     run_workmux_open(
         env,
@@ -1030,14 +1162,27 @@ def test_open_parent_session_routes_window_mode_window(
         repo_path,
         branch_name,
         parent_session=session_name,
-        target_name="review-open-session",
+        target_name=target_name,
     )
 
     assert_session_exists(env, session_name)
+    assert_session_not_exists(env, session_name.lower())
     result = env.tmux(
         ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
     )
     assert custom_window in [w for w in result.stdout.strip().split("\n") if w]
+
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get",
+            f"workmux.worktree.{handle}.window-session",
+        ],
+        cwd=repo_path,
+    )
+    assert metadata.stdout.strip() == session_name
 
 
 @pytest.mark.tmux_only

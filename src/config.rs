@@ -2,10 +2,12 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::util::{PROJECT_PLACEHOLDER, expand_project_placeholder};
 use crate::{cmd, git, nerdfont};
 use which::{which, which_in};
 
@@ -13,6 +15,130 @@ use which::{which, which_in};
 /// This script moves node_modules to a temporary location and deletes them in the background,
 /// making the workmux remove command return almost instantly.
 const NODE_MODULES_CLEANUP_SCRIPT: &str = include_str!("scripts/cleanup_node_modules.sh");
+
+/// Placeholder usable in `pre_remove` that expands to the built-in
+/// node_modules cleanup script. Lets a project keep the fast cleanup alongside
+/// its own hooks, which would otherwise replace the automatic default.
+const CLEANUP_NODE_MODULES_PLACEHOLDER: &str = "<cleanup-node-modules>";
+
+/// Names of lockfiles that mark a directory as a Node.js package.
+const NODE_LOCKFILES: [&str; 3] = ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"];
+
+/// Default inactivity period before an agent is considered stale.
+pub const DEFAULT_STALE_AFTER_SECS: u64 = 60 * 60;
+
+fn parse_stale_after(value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    let digit_count = value.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return Err("expected seconds or a duration such as 90m or 5h".to_string());
+    }
+
+    let amount = value[..digit_count]
+        .parse::<u64>()
+        .map_err(|_| "duration is too large".to_string())?;
+    let multiplier = match value[digit_count..].trim().to_ascii_lowercase().as_str() {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err("duration unit must be s, m, h, or d".to_string()),
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_string())
+}
+
+fn deserialize_stale_after<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StaleAfterVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StaleAfterVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("seconds as an integer or a duration such as 90m or 5h")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u64::try_from(value)
+                .map(Some)
+                .map_err(|_| E::custom("stale_after cannot be negative"))
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            parse_stale_after(value).map(Some).map_err(E::custom)
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_str(&value)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StaleAfterVisitor)
+}
+
+/// Whether `root` or any of its immediate subdirectories contains a Node.js
+/// lockfile.
+///
+/// Monorepos often keep the lockfile in a package directory (`dashboard/`,
+/// `frontend/`) rather than at the root, so a root-only check would miss them.
+/// The search stops at depth 1 and skips hidden directories and `node_modules`
+/// to keep the cost to a handful of directory reads.
+fn has_node_lockfile(root: &Path) -> bool {
+    fn has_lockfile_in(dir: &Path) -> bool {
+        NODE_LOCKFILES.iter().any(|name| dir.join(name).is_file())
+    }
+
+    if has_lockfile_in(root) {
+        return true;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "node_modules" {
+            return false;
+        }
+        entry.file_type().is_ok_and(|t| t.is_dir()) && has_lockfile_in(&entry.path())
+    })
+}
 
 /// Configuration for file operations during worktree creation
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -73,9 +199,54 @@ pub struct AutoNameConfig {
     pub background: Option<bool>,
 }
 
+/// Key reserved for leaving dashboard input mode.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum InputExitKey {
+    #[default]
+    Escape,
+    Ctrl(char),
+}
+
+impl TryFrom<String> for InputExitKey {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let value = value.to_ascii_lowercase();
+        if value == "esc" {
+            return Ok(Self::Escape);
+        }
+        if let Some(letter) = value.strip_prefix("ctrl+")
+            && letter.len() == 1
+            && letter.as_bytes()[0].is_ascii_lowercase()
+        {
+            return Ok(Self::Ctrl(letter.as_bytes()[0] as char));
+        }
+        Err("input_exit_key must be Esc or Ctrl+<letter> (a-z)".into())
+    }
+}
+
+impl From<InputExitKey> for String {
+    fn from(key: InputExitKey) -> Self {
+        match key {
+            InputExitKey::Escape => "Esc".into(),
+            InputExitKey::Ctrl(letter) => format!("Ctrl+{letter}"),
+        }
+    }
+}
+
+impl fmt::Display for InputExitKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&String::from(*self))
+    }
+}
+
 /// Configuration for dashboard actions (commit, merge keybindings)
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct DashboardConfig {
+    /// Key that exits input mode. Default: Esc.
+    pub input_exit_key: Option<InputExitKey>,
+
     /// Text to send to agent for commit action (c key).
     /// Default: "Commit staged changes with a descriptive message"
     pub commit: Option<String>,
@@ -84,16 +255,142 @@ pub struct DashboardConfig {
     /// Default: "!workmux merge"
     pub merge: Option<String>,
 
-    /// Size of the preview pane as a percentage of terminal height (1-90).
+    /// Dashboard arrangement: stacked (default) or side_by_side.
+    pub layout: Option<DashboardLayout>,
+
+    /// Size of the preview pane as a percentage of content height or width (10-90).
     /// Default: 60 (60% for preview, 40% for table)
     pub preview_size: Option<u8>,
 
     /// Show check pass/total counts alongside check icon (default: false)
     #[serde(default)]
     pub show_check_counts: Option<bool>,
+
+    /// Columns of the agents table, in display order. Columns left out of the
+    /// list are not rendered.
+    /// Default: number, project, worktree, machine, git, pr, status, time, title.
+    pub agent_columns: Option<Vec<AgentColumn>>,
+
+    /// Columns of the worktree table, in display order. Omit a column to hide it.
+    /// Default: number, project, worktree, git, pr, mux, age, agent.
+    pub worktree_columns: Option<Vec<WorktreeColumn>>,
+
+    /// Default sort mode for the agent list: "priority", "project", "recency", "natural".
+    /// Used when the dashboard has no persisted sort preference.
+    /// Default: "priority"
+    #[serde(default)]
+    pub sort_mode: Option<String>,
+
+    /// Close the dashboard after jumping to an agent or worktree.
+    /// Default: true.
+    pub close_on_jump: Option<bool>,
+}
+
+/// Arrangement of the dashboard table and preview.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardLayout {
+    /// Table above the preview.
+    #[default]
+    Stacked,
+    /// Preview on the left, table on the right.
+    SideBySide,
+}
+
+/// A configurable column of the dashboard agents table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentColumn {
+    /// Jump key of the row, shown under the `#` header.
+    Number,
+    /// Project name.
+    Project,
+    /// Worktree name, with a pane suffix for multi-pane windows.
+    Worktree,
+    /// Remote the agent runs on, or `local`. Rendered only while at least one
+    /// agent is remote.
+    Machine,
+    /// Git status of the worktree.
+    Git,
+    /// Pull request and check status. Rendered only while at least one agent
+    /// has GitHub status to show.
+    Pr,
+    /// Pull request title.
+    PrTitle,
+    /// Issues GitHub reports as closed by the pull request.
+    PrIssues,
+    /// Multiplexer window index, as shown in the tmux status bar.
+    Window,
+    /// Agent status (icons).
+    Status,
+    /// Time elapsed in the current status.
+    Time,
+    /// Agent pane title.
+    Title,
+    /// Latest prompt the user sent to the agent.
+    Prompt,
+}
+
+/// Columns used when the config does not set `dashboard.agent_columns`.
+pub const DEFAULT_AGENT_COLUMNS: [AgentColumn; 9] = [
+    AgentColumn::Number,
+    AgentColumn::Project,
+    AgentColumn::Worktree,
+    AgentColumn::Machine,
+    AgentColumn::Git,
+    AgentColumn::Pr,
+    AgentColumn::Status,
+    AgentColumn::Time,
+    AgentColumn::Title,
+];
+
+/// A configurable column of the dashboard worktree table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeColumn {
+    Number,
+    Project,
+    Worktree,
+    Git,
+    Pr,
+    PrTitle,
+    PrIssues,
+    Mux,
+    Age,
+    Agent,
+}
+
+/// Columns used when the config does not set `dashboard.worktree_columns`.
+pub const DEFAULT_WORKTREE_COLUMNS: [WorktreeColumn; 8] = [
+    WorktreeColumn::Number,
+    WorktreeColumn::Project,
+    WorktreeColumn::Worktree,
+    WorktreeColumn::Git,
+    WorktreeColumn::Pr,
+    WorktreeColumn::Mux,
+    WorktreeColumn::Age,
+    WorktreeColumn::Agent,
+];
+
+fn columns_or_default<T: Copy + PartialEq>(configured: Option<&[T]>, defaults: &[T]) -> Vec<T> {
+    let mut columns = Vec::new();
+    for column in configured.unwrap_or(defaults) {
+        if !columns.contains(column) {
+            columns.push(*column);
+        }
+    }
+    if columns.is_empty() {
+        defaults.to_vec()
+    } else {
+        columns
+    }
 }
 
 impl DashboardConfig {
+    pub fn input_exit_key(&self) -> InputExitKey {
+        self.input_exit_key.unwrap_or_default()
+    }
+
     pub fn commit(&self) -> &str {
         self.commit
             .as_deref()
@@ -110,10 +407,30 @@ impl DashboardConfig {
         self.preview_size.unwrap_or(60).clamp(10, 90)
     }
 
+    /// Columns of the agents table, in display order. Duplicates are dropped so
+    /// a column is never rendered twice, and an empty or absent list falls back
+    /// to the default order.
+    pub fn agent_columns(&self) -> Vec<AgentColumn> {
+        columns_or_default(self.agent_columns.as_deref(), &DEFAULT_AGENT_COLUMNS)
+    }
+
+    /// Columns of the worktree table, in display order. Duplicates are dropped so
+    /// a column is never rendered twice, and an empty or absent list falls back
+    /// to the default order.
+    pub fn worktree_columns(&self) -> Vec<WorktreeColumn> {
+        columns_or_default(self.worktree_columns.as_deref(), &DEFAULT_WORKTREE_COLUMNS)
+    }
+
     /// Whether to show check pass/total counts alongside check icons.
     /// Default: false
     pub fn show_check_counts(&self) -> bool {
         self.show_check_counts.unwrap_or(false)
+    }
+
+    /// Whether the dashboard closes after jumping to an agent or worktree.
+    /// Default: true.
+    pub fn close_on_jump(&self) -> bool {
+        self.close_on_jump.unwrap_or(true)
     }
 }
 
@@ -127,6 +444,23 @@ pub struct TemplatesConfig {
     /// Multi-line templates for horizontal bar chips (one string per line).
     #[serde(alias = "top")]
     pub horizontal: Option<Vec<String>>,
+    /// Templates used instead of the ones above while grouping is on.
+    pub grouped: Option<GroupedTemplatesConfig>,
+}
+
+/// Templates for the grouped presentation. A section header carries the
+/// project or session name, so rows there can drop what the header already
+/// says. Anything left unset falls back to the ungrouped template of the same
+/// name, then to the built-in grouped default.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupedTemplatesConfig {
+    /// Single-line template for compact mode.
+    pub compact: Option<String>,
+    /// Multi-line templates for tile mode (one string per line).
+    pub tiles: Option<Vec<String>>,
+    /// Single-line template for group header rows.
+    pub header: Option<String>,
 }
 
 /// Detailed per-agent icon override: `{ icon, color }`.
@@ -193,9 +527,68 @@ impl HorizontalSidebarConfig {
     }
 }
 
+/// Action performed by Enter on a sidebar agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarEnterAction {
+    /// Switch to and focus the agent pane.
+    #[default]
+    Focus,
+    /// Show the agent's window while keeping focus in its sidebar.
+    Select,
+}
+
+/// A named sidebar scope. Lists and filter fields are combined with OR.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidebarView {
+    pub name: String,
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    #[serde(default)]
+    pub project_dirs: Vec<String>,
+    #[serde(default)]
+    pub other: bool,
+}
+
+pub fn validate_sidebar_views(views: &[SidebarView]) -> anyhow::Result<()> {
+    let mut names = std::collections::HashSet::new();
+    let mut other = false;
+    for view in views {
+        anyhow::ensure!(
+            !view.name.trim().is_empty()
+                && view.name == view.name.trim()
+                && !view.name.chars().any(char::is_control)
+                && view.name != "All"
+                && names.insert(&view.name),
+            "sidebar view names must be unique, nonempty, single-line, trimmed and not All"
+        );
+        let has_filters = !view.sessions.is_empty() || !view.project_dirs.is_empty();
+        anyhow::ensure!(
+            view.other != has_filters,
+            "sidebar view {:?}: use filters or other: true, exclusively",
+            view.name
+        );
+        anyhow::ensure!(
+            !view.other || !other,
+            "only one sidebar Other view is allowed"
+        );
+        other |= view.other;
+        for dir in &view.project_dirs {
+            anyhow::ensure!(
+                crate::util::expand_tilde(dir).is_absolute(),
+                "sidebar project_dirs must be absolute or start with ~/: {dir}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Configuration for the sidebar.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct SidebarConfig {
+    /// Named scopes, in cycle order. Global configuration only.
+    pub views: Option<Vec<SidebarView>>,
     /// Position of the sidebar pane. Default: left.
     pub position: Option<SidebarPosition>,
 
@@ -212,6 +605,10 @@ pub struct SidebarConfig {
     /// Layout mode: "compact" or "tiles". Default: "tiles"
     pub layout: Option<String>,
 
+    /// Action performed by Enter on an agent: "focus" or "select".
+    /// Default: "focus".
+    pub enter_action: Option<SidebarEnterAction>,
+
     /// Horizontal bar configuration.
     #[serde(default)]
     pub horizontal: HorizontalSidebarConfig,
@@ -219,8 +616,87 @@ pub struct SidebarConfig {
     /// Custom templates for sidebar rendering.
     pub templates: Option<TemplatesConfig>,
 
+    /// Collect Git status and GitHub pull request/check data for the sidebar.
+    /// This daemon-wide setting is read only from global config. Default: true.
+    pub git_status: Option<bool>,
+
     /// Per-agent icon overrides.
     pub agent_icons: Option<AgentIcons>,
+
+    /// Row ordering: "recency" (default), "priority" or "window".
+    pub sort: Option<SidebarSort>,
+
+    /// Group agents into labeled sections: "project" or "session". Unset or
+    /// "none" keeps one combined list.
+    pub group_by: Option<SidebarGroupBy>,
+
+    /// Dim agents whose sidebar activity state exceeds the stale threshold.
+    /// Default: true.
+    pub dim_stale: Option<bool>,
+
+    /// Fold stale agents behind their group's toggle, giving the ones on show
+    /// a single line instead of a full tile. Part of the grouped presentation,
+    /// so it has no effect while grouping is off. Default: true.
+    pub collapse_stale: Option<bool>,
+}
+
+impl SidebarConfig {
+    pub fn enter_action(&self) -> SidebarEnterAction {
+        self.enter_action.unwrap_or_default()
+    }
+
+    pub fn git_status(&self) -> bool {
+        self.git_status.unwrap_or(true)
+    }
+
+    pub fn dim_stale(&self) -> bool {
+        self.dim_stale.unwrap_or(true)
+    }
+
+    /// Whether stale agents fold behind their group's toggle. Folding belongs
+    /// to the grouped presentation, so callers apply this only once grouping
+    /// is on.
+    pub fn collapse_stale(&self) -> bool {
+        self.collapse_stale.unwrap_or(true)
+    }
+
+    /// Grouping asked for by config, with `none` resolved. Grouping is opt in:
+    /// an unset value keeps the single flat list.
+    pub fn group_by(&self) -> Option<SidebarGroupBy> {
+        match self.group_by? {
+            SidebarGroupBy::None => None,
+            mode => Some(mode),
+        }
+    }
+}
+
+/// Sidebar row ordering within a group, or within the whole list when
+/// grouping is not configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSort {
+    /// Most recent status change first, sleeping agents last.
+    #[default]
+    Recency,
+    /// Agents needing attention first: waiting, done, working, unknown,
+    /// stale or interrupted, sleeping. Recent activity breaks ties.
+    Priority,
+    /// Multiplexer window order (session name, then window index). Keeps
+    /// rows stable while agents work, matching the tmux window list.
+    Window,
+}
+
+/// Sidebar grouping: how agents are divided into labeled sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarGroupBy {
+    /// One combined list with no sections.
+    #[serde(alias = "off")]
+    None,
+    /// One section per repository.
+    Project,
+    /// One section per multiplexer session.
+    Session,
 }
 
 /// Sidebar pane position.
@@ -325,6 +801,17 @@ impl_dimension_deserialize!(
     "a number (columns) or a string like \"15%\""
 );
 
+impl std::str::FromStr for SidebarWidth {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_sidebar_dimension(value, "width").map(|value| match value {
+            SidebarDimension::Absolute(value) => Self::Absolute(value),
+            SidebarDimension::Percent(value) => Self::Percent(value),
+        })
+    }
+}
+
 /// Sidebar height: either absolute rows or a percentage of terminal height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHeight {
@@ -357,6 +844,42 @@ impl_dimension_deserialize!(
     "a number (rows) or a string like \"10%\""
 );
 
+impl std::str::FromStr for SidebarHeight {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_sidebar_dimension(value, "height").map(|value| match value {
+            SidebarDimension::Absolute(value) => Self::Absolute(value),
+            SidebarDimension::Percent(value) => Self::Percent(value),
+        })
+    }
+}
+
+/// Shared parser for command-line sidebar dimensions.
+fn parse_sidebar_dimension(value: &str, name: &str) -> Result<SidebarDimension, String> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let percent = percent
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("invalid {name} percentage"))?;
+        if percent == 0 || percent > 100 {
+            return Err(format!("{name} percentage must be 1-100"));
+        }
+        Ok(SidebarDimension::Percent(percent))
+    } else {
+        let value = value
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("invalid {name}"))?;
+        Ok(SidebarDimension::Absolute(value))
+    }
+}
+
+enum SidebarDimension {
+    Absolute(u16),
+    Percent(u16),
+}
+
 /// Configuration for a single window within a session (session mode only)
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WindowConfig {
@@ -377,6 +900,7 @@ pub struct Config {
     pub main_branch: Option<String>,
 
     /// Default base branch/commit to branch from when creating new worktrees.
+    /// The value "auto" uses the effective main branch.
     /// Used as fallback when --base is not passed to `workmux add`.
     #[serde(default)]
     pub base_branch: Option<String>,
@@ -387,6 +911,7 @@ pub struct Config {
     pub worktree_dir: Option<String>,
 
     /// Prefix for tmux window names (optional, defaults to "wm-")
+    /// Supports a `{project}` placeholder for the repository's configuration name.
     #[serde(default)]
     pub window_prefix: Option<String>,
 
@@ -401,6 +926,11 @@ pub struct Config {
     /// Multiple window configuration (session mode only, mutually exclusive with `panes`)
     #[serde(default)]
     pub windows: Option<Vec<WindowConfig>>,
+
+    /// Executable and arguments used to run lifecycle hook commands.
+    /// The hook command is appended as the final argument.
+    #[serde(default)]
+    pub hook_shell: Option<Vec<String>>,
 
     /// Commands to run after creating the worktree
     #[serde(default)]
@@ -426,6 +956,11 @@ pub struct Config {
     #[serde(default)]
     pub merge_keep: Option<bool>,
 
+    /// Confirm before deleting branches with commits not merged into their base.
+    /// Default: true.
+    #[serde(default)]
+    pub confirm_unmerged_removal: Option<bool>,
+
     /// Strategy for deriving worktree/window names from branch names
     #[serde(default)]
     pub worktree_naming: WorktreeNaming,
@@ -434,9 +969,13 @@ pub struct Config {
     #[serde(default)]
     pub worktree_prefix: Option<String>,
 
-    /// File operations to perform after creating the worktree
+    /// File operations to perform after creating a local worktree
     #[serde(default)]
     pub files: FileConfig,
+
+    /// Supplemental files to transfer when creating a remote workspace.
+    #[serde(default)]
+    pub remote_files: FileConfig,
 
     /// Whether to auto-apply workmux status to tmux window format.
     /// Default: true
@@ -463,14 +1002,29 @@ pub struct Config {
     #[serde(default)]
     pub nerdfont: Option<bool>,
 
+    /// Inactivity period before an agent is considered stale, in seconds.
+    /// Accepts integer seconds or a duration string such as `90m` or `5h`.
+    #[serde(
+        default,
+        rename = "stale_after",
+        deserialize_with = "deserialize_stale_after"
+    )]
+    pub stale_after_secs: Option<u64>,
+
     /// Color theme for the dashboard
     #[serde(default)]
     pub theme: ThemeConfig,
 
     /// Mode for tmux operations: window (default) or session
-    /// None means "use default" (Window), Some means explicitly set
     #[serde(default)]
+    /// None means "use default" (Window), Some means explicitly set
     pub mode: Option<MuxMode>,
+
+    /// Session mode only. Session to return to when a workmux-managed session
+    /// closes. Not prefixed with `window_prefix`, so it can name a session
+    /// workmux does not manage.
+    #[serde(default)]
+    pub default_session: Option<String>,
 
     /// Placement for new tmux windows in window mode.
     #[serde(default)]
@@ -503,6 +1057,15 @@ pub struct Config {
     /// Container sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+
+    /// SSH remotes that can run agents, keyed by remote name. Global-only:
+    /// a project config must not be able to point workmux at a host.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, RemoteConfig>,
+
+    /// Where new agents run: `local` (default) or a remote name.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 /// A named agent environment value.
@@ -525,7 +1088,7 @@ impl AgentEnvValue {
     }
 }
 
-fn is_valid_env_name(name: &str) -> bool {
+pub(crate) fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -624,9 +1187,15 @@ impl<'de> Deserialize<'de> for AgentEntry {
     }
 }
 
-/// Configuration for a single tmux pane
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+/// Configuration for a single multiplexer pane
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub struct PaneConfig {
+    /// Optional display name for the pane.
+    ///
+    /// Supported by the Zellij backend. Other backends may ignore this value.
+    #[serde(default)]
+    pub name: Option<String>,
+
     /// A command to run when the pane is created. The pane will remain open
     /// with an interactive shell after the command completes. If not provided,
     /// the pane will start with the default shell.
@@ -637,7 +1206,10 @@ pub struct PaneConfig {
     #[serde(default)]
     pub focus: bool,
 
-    /// Split direction from the previous pane (horizontal or vertical)
+    /// Split direction for the new pane (horizontal, vertical, or Zellij-only stacked).
+    ///
+    /// The pane splits from `target` when specified, otherwise from the most
+    /// recently created pane.
     #[serde(default)]
     pub split: Option<SplitDirection>,
 
@@ -670,11 +1242,12 @@ pub struct LayoutConfig {
     pub panes: Vec<PaneConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
     Horizontal,
     Vertical,
+    Stacked,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Default)]
@@ -706,7 +1279,7 @@ impl<'de> serde::Deserialize<'de> for ThemeMode {
 }
 
 /// Named color scheme for the dashboard
-#[derive(Debug, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeScheme {
     #[default]
     Default,
@@ -784,6 +1357,12 @@ impl ThemeScheme {
     }
 }
 
+impl serde::Serialize for ThemeScheme {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.slug())
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for ThemeScheme {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
@@ -838,6 +1417,7 @@ pub struct CustomThemeColors {
 pub struct ThemeConfig {
     pub scheme: ThemeScheme,
     /// None = auto-detect from terminal background
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<ThemeMode>,
     /// Custom color overrides applied on top of the base scheme
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -924,6 +1504,35 @@ pub enum WindowPlacement {
     AfterCurrent,
     /// Place the new window after the rightmost window in the current session.
     Rightmost,
+}
+
+/// An SSH-reachable host that can run agents, defined under `remotes:` in the
+/// global config.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// SSH destination: an alias from `~/.ssh/config` or `user@host`.
+    pub host: String,
+    /// Node root on the remote (default: `~/.workmux-node`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Override sandbox.enabled for this remote; unset follows the effective sandbox setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<RemoteIsolation>,
+    /// Local path of a Linux workmux binary to upload instead of downloading
+    /// the release matching this workmux version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteIsolation {
+    /// Run agents in a docker container on the remote.
+    Container,
+    /// Run agents directly on the remote host.
+    #[default]
+    None,
 }
 
 /// Mode for multiplexer operations: create windows within the current session or create new sessions
@@ -1231,6 +1840,10 @@ pub struct LimaConfig {
     /// Custom `provision` script still runs if specified.
     #[serde(default)]
     pub skip_default_provision: Option<bool>,
+
+    /// Accept Lima's reduced Git metadata isolation without an interactive prompt.
+    #[serde(default)]
+    pub accept_reduced_git_metadata_isolation: Option<bool>,
 }
 
 impl LimaConfig {
@@ -1258,6 +1871,10 @@ impl LimaConfig {
         self.skip_default_provision.unwrap_or(false)
     }
 
+    pub fn accepts_reduced_git_metadata_isolation(&self) -> bool {
+        self.accept_reduced_git_metadata_isolation.unwrap_or(false)
+    }
+
     /// Merge: project overrides global, per-field.
     fn merge(global: Self, project: Self) -> Self {
         Self {
@@ -1270,6 +1887,9 @@ impl LimaConfig {
             skip_default_provision: project
                 .skip_default_provision
                 .or(global.skip_default_provision),
+            accept_reduced_git_metadata_isolation: project
+                .accept_reduced_git_metadata_isolation
+                .or(global.accept_reduced_git_metadata_isolation),
         }
     }
 }
@@ -1454,11 +2074,46 @@ pub struct ContainerConfig {
     /// (Apple Container).
     #[serde(default)]
     pub excluded_files: Option<Vec<String>>,
+
+    /// OCI runtime to run the container under (docker/local Podman `--runtime`).
+    /// When unset, workmux omits `--runtime` and the engine uses its configured
+    /// default. Set to e.g. "kata" to run the container under a VM-based OCI
+    /// runtime for stronger isolation. The named runtime must be installed and
+    /// registered with the container runtime. Global-only: ignored in project
+    /// config, since it changes the isolation boundary.
+    #[serde(default)]
+    pub oci_runtime: Option<String>,
+
+    /// Extra Linux capabilities to grant the container (docker/podman
+    /// `--cap-add`). Each entry is passed verbatim, e.g. "ALL" or "SYS_ADMIN".
+    /// Global-only: ignored in project config, since capabilities relax the
+    /// isolation boundary. Empty by default.
+    ///
+    /// Needed for docker-in-docker under a VM runtime (`oci_runtime: kata`),
+    /// where `--privileged` is not usable (it injects host device nodes that
+    /// collide with the guest's, failing to boot). Granting capabilities +
+    /// security_opt instead boots cleanly, and the daemon stays confined to
+    /// the guest VM.
+    #[serde(default)]
+    pub cap_add: Option<Vec<String>>,
+
+    /// Extra security options for the container (docker/podman
+    /// `--security-opt`). Each entry is passed verbatim, e.g.
+    /// "seccomp=unconfined" or "systempaths=unconfined". Global-only: ignored
+    /// in project config, since these options control the isolation boundary.
+    /// Empty by default. See `cap_add` for the docker-in-docker rationale.
+    #[serde(default)]
+    pub security_opt: Option<Vec<String>>,
 }
 
 impl ContainerConfig {
     pub fn runtime(&self) -> SandboxRuntime {
         self.runtime.unwrap_or_else(SandboxRuntime::detect)
+    }
+
+    /// OCI runtime name to pass to `docker/podman run --runtime`, if configured.
+    pub fn oci_runtime(&self) -> Option<&str> {
+        self.oci_runtime.as_deref()
     }
 
     pub fn devices(&self) -> &[ContainerDevice] {
@@ -1467,6 +2122,18 @@ impl ContainerConfig {
 
     pub fn group_add(&self) -> &[String] {
         self.group_add.as_deref().unwrap_or(&[])
+    }
+
+    /// Extra capabilities to pass to `docker/podman run --cap-add`.
+    /// Returns empty slice when unset.
+    pub fn cap_add(&self) -> &[String] {
+        self.cap_add.as_deref().unwrap_or(&[])
+    }
+
+    /// Extra security options to pass to `docker/podman run --security-opt`.
+    /// Returns empty slice when unset.
+    pub fn security_opt(&self) -> &[String] {
+        self.security_opt.as_deref().unwrap_or(&[])
     }
 
     /// Files to mask out of the worktree bind mount (relative to worktree root).
@@ -1486,10 +2153,10 @@ impl ContainerConfig {
         Ok(())
     }
 
-    /// Merge: project overrides global, per-field, EXCEPT for `devices` and
-    /// `group_add` which are security-sensitive and global-only. Warnings for
-    /// project-level attempts are emitted in `Config::merge` where both values
-    /// are visible.
+    /// Merge: project overrides global, per-field, EXCEPT for `devices`,
+    /// `group_add`, `oci_runtime`, `cap_add` and `security_opt` which are
+    /// security-sensitive and global-only. Warnings for project-level attempts
+    /// are emitted in `Config::merge` where both values are visible.
     fn merge(global: Self, project: Self) -> Self {
         // Security: excluded_files is global-only. Project config cannot set it --
         // otherwise a repo's .workmux.yaml could delete user-level secret
@@ -1507,6 +2174,9 @@ impl ContainerConfig {
             devices: global.devices,
             group_add: global.group_add,
             excluded_files: global.excluded_files,
+            oci_runtime: global.oci_runtime,
+            cap_add: global.cap_add,
+            security_opt: global.security_opt,
         }
     }
 }
@@ -1563,6 +2233,9 @@ pub struct AllowedDomainRule {
     pub allow_private_ips: bool,
 }
 
+pub const DEFAULT_NETWORK_MAX_CONNECTIONS: usize = 128;
+pub const MAX_NETWORK_MAX_CONNECTIONS: usize = 1024;
+
 /// Network restriction configuration for the container sandbox.
 ///
 /// When `policy` is `deny`, all outbound connections are blocked except those
@@ -1581,6 +2254,10 @@ pub struct NetworkConfig {
     /// The host RPC endpoint is always allowed regardless of this list.
     #[serde(default)]
     pub allowed_domains: Option<Vec<AllowedDomainEntry>>,
+
+    /// Maximum number of concurrent CONNECT proxy connections.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
 }
 
 impl NetworkConfig {
@@ -1592,6 +2269,12 @@ impl NetworkConfig {
     /// Get the allowed domains list (empty if not set).
     pub fn allowed_domains(&self) -> &[AllowedDomainEntry] {
         self.allowed_domains.as_deref().unwrap_or(&[])
+    }
+
+    /// Get the maximum number of concurrent proxy connections.
+    pub fn max_connections(&self) -> usize {
+        self.max_connections
+            .unwrap_or(DEFAULT_NETWORK_MAX_CONNECTIONS)
     }
 
     /// Get normalized allowed domain rules.
@@ -1607,6 +2290,15 @@ impl NetworkConfig {
 
     /// Validate all domain entries. Called at config load time.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(max_connections) = self.max_connections
+            && !(1..=MAX_NETWORK_MAX_CONNECTIONS).contains(&max_connections)
+        {
+            anyhow::bail!(
+                "network.max_connections must be between 1 and {}",
+                MAX_NETWORK_MAX_CONNECTIONS
+            );
+        }
+
         for entry in self.allowed_domains() {
             let host = entry.host();
             validate_domain(host)?;
@@ -1818,6 +2510,7 @@ impl SandboxConfig {
                 "claude" => Some(home.join(".claude")),
                 "copilot" => Some(home.join(".copilot")),
                 "gemini" => Some(home.join(".gemini")),
+                "agy" => Some(home.join(".gemini/antigravity-cli")),
                 "codex" => Some(home.join(".codex")),
                 "opencode" => Some(home.join(".local/share/opencode")),
                 "pi" => Some(home.join(".pi/agent")),
@@ -1831,7 +2524,7 @@ impl SandboxConfig {
 }
 
 /// Result of config discovery, including the relative path from repo root
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigLocation {
     /// Absolute path to the config file
     pub config_path: PathBuf,
@@ -1845,72 +2538,113 @@ pub struct ConfigLocation {
 /// Find the nearest .workmux.yaml by walking up from start_dir to repo root.
 /// Returns ConfigLocation with the relative path computed at discovery time.
 pub fn find_project_config(start_dir: &Path) -> anyhow::Result<Option<ConfigLocation>> {
+    match discover_project_config(start_dir) {
+        Ok(discovery) => Ok(discovery.location),
+        Err(error) => {
+            debug!(%error, "config:project discovery failed");
+            Ok(None)
+        }
+    }
+}
+
+/// A successful observation includes repository identity even when no config exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectConfigDiscovery {
+    pub location: Option<ConfigLocation>,
+    repository: Option<git::RepositoryIdentity>,
+    main_root: Option<PathBuf>,
+    repository_stamps: Vec<(u64, u64)>,
+    config_stamp: Option<(u64, u64, u64, i64, i64, i64, i64)>,
+}
+
+impl ProjectConfigDiscovery {
+    fn with_location(mut self, location: ConfigLocation) -> anyhow::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&location.config_path)?;
+        self.config_stamp = Some((
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ));
+        self.location = Some(location);
+        Ok(self)
+    }
+}
+
+/// Discover without converting failed probes into confirmed absence.
+pub(crate) fn discover_project_config(start_dir: &Path) -> anyhow::Result<ProjectConfigDiscovery> {
     let config_names = [".workmux.yaml", ".workmux.yml"];
-
-    let repo_root = match git::get_repo_root_for(start_dir) {
-        Ok(root) => root,
-        Err(_) => return Ok(None),
+    let mut discovery = ProjectConfigDiscovery {
+        location: None,
+        repository: None,
+        main_root: None,
+        repository_stamps: Vec::new(),
+        config_stamp: None,
     };
+    let Some(repo_root) = git::worktree_root_if_present(start_dir)? else {
+        return Ok(discovery);
+    };
+    let repo_root = repo_root.canonicalize()?;
+    let mut dir = start_dir.canonicalize()?;
+    let repository = git::RepositoryIdentity::discover(&repo_root)?;
+    let linked = repository.admin_dir != repository.common_dir;
+    use std::os::unix::fs::MetadataExt;
+    for path in [
+        &repository.worktree,
+        &repository.dot_git,
+        &repository.admin_dir,
+        &repository.common_dir,
+    ] {
+        let metadata = std::fs::metadata(path)?;
+        discovery
+            .repository_stamps
+            .push((metadata.dev(), metadata.ino()));
+    }
+    discovery.repository = Some(repository);
 
-    // Canonicalize both paths to handle symlinks and ensure consistent comparison
-    let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
-    let mut dir = start_dir
-        .canonicalize()
-        .unwrap_or_else(|_| start_dir.to_path_buf());
-
-    // Safety: ensure we're inside the repo
     if !dir.starts_with(&repo_root) {
-        return Ok(None);
+        return Ok(discovery);
     }
 
-    // Walk upward from start_dir to repo_root (inclusive)
     loop {
         for name in &config_names {
             let candidate = dir.join(name);
-            if candidate.exists() {
-                let rel_dir = dir
-                    .strip_prefix(&repo_root)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_default();
-                debug!(
-                    path = %candidate.display(),
-                    rel_dir = %rel_dir.display(),
-                    "config:found project config"
-                );
-                return Ok(Some(ConfigLocation {
+            if candidate.try_exists()? {
+                let rel_dir = dir.strip_prefix(&repo_root)?.to_path_buf();
+                return discovery.with_location(ConfigLocation {
                     config_path: candidate,
                     config_dir: dir,
                     rel_dir,
-                }));
+                });
             }
         }
-        if dir == repo_root {
-            break;
-        }
-        if !dir.pop() {
+        if dir == repo_root || !dir.pop() {
             break;
         }
     }
 
-    // Fallback: check main worktree root (preserves existing behavior for linked worktrees)
-    if let Ok(main_root) = git::get_main_worktree_root() {
-        let main_root = main_root.canonicalize().unwrap_or(main_root);
+    // A regular main worktree cannot fall back to a different main worktree.
+    if linked {
+        let main_root = git::get_main_worktree_root_in(Some(&repo_root))?.canonicalize()?;
+        discovery.main_root = Some(main_root.clone());
         if main_root != repo_root {
             for name in &config_names {
                 let candidate = main_root.join(name);
-                if candidate.exists() {
-                    debug!(path = %candidate.display(), "config:found main-worktree config");
-                    return Ok(Some(ConfigLocation {
+                if candidate.try_exists()? {
+                    return discovery.with_location(ConfigLocation {
                         config_path: candidate,
-                        config_dir: main_root.clone(),
-                        rel_dir: PathBuf::new(), // Main worktree root = empty rel_dir
-                    }));
+                        config_dir: main_root,
+                        rel_dir: PathBuf::new(),
+                    });
                 }
             }
         }
     }
-
-    Ok(None)
+    Ok(discovery)
 }
 
 impl WorktreeNaming {
@@ -1926,6 +2660,17 @@ impl WorktreeNaming {
                 .to_string(),
         }
     }
+}
+
+fn validate_hook_shell(hook_shell: Option<&[String]>) -> anyhow::Result<()> {
+    let hook_shell = hook_shell.expect("hook_shell default is applied before validation");
+    if hook_shell.is_empty() {
+        anyhow::bail!("'hook_shell' must contain an executable");
+    }
+    if hook_shell[0].trim().is_empty() {
+        anyhow::bail!("'hook_shell' executable must not be empty");
+    }
+    Ok(())
 }
 
 /// Validate windows configuration
@@ -1951,6 +2696,12 @@ pub fn validate_windows_config(windows: &[WindowConfig]) -> anyhow::Result<()> {
 /// Validate pane configuration
 pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
     for (i, pane) in panes.iter().enumerate() {
+        if let Some(name) = pane.name.as_deref()
+            && name.trim().is_empty()
+        {
+            anyhow::bail!("Pane {} has an empty 'name'.", i);
+        }
+
         if i == 0 {
             // First pane cannot have a split or size
             if pane.split.is_some() {
@@ -1982,6 +2733,15 @@ pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
                 "Pane {} has invalid percentage {}. Must be between 1 and 100.",
                 i,
                 p
+            );
+        }
+
+        if matches!(pane.split, Some(SplitDirection::Stacked))
+            && (pane.size.is_some() || pane.percentage.is_some())
+        {
+            anyhow::bail!(
+                "Pane {} with 'split: stacked' cannot have 'size' or 'percentage' specified.",
+                i
             );
         }
 
@@ -2058,7 +2818,56 @@ pub fn global_config_path() -> Option<PathBuf> {
     Some(yaml)
 }
 
+/// Merge sidebar templates field by field so a project override that sets one
+/// template keeps inheriting the others.
+fn merge_sidebar_templates(
+    global: Option<&TemplatesConfig>,
+    project: Option<&TemplatesConfig>,
+) -> Option<TemplatesConfig> {
+    match (global, project) {
+        (None, None) => None,
+        (Some(g), None) => Some(g.clone()),
+        (None, Some(p)) => Some(p.clone()),
+        (Some(g), Some(p)) => Some(TemplatesConfig {
+            compact: p.compact.clone().or_else(|| g.compact.clone()),
+            tiles: p.tiles.clone().or_else(|| g.tiles.clone()),
+            horizontal: p.horizontal.clone().or_else(|| g.horizontal.clone()),
+            grouped: merge_grouped_templates(g.grouped.as_ref(), p.grouped.as_ref()),
+        }),
+    }
+}
+
+/// Merge the grouped templates field by field, like their ungrouped peers.
+fn merge_grouped_templates(
+    global: Option<&GroupedTemplatesConfig>,
+    project: Option<&GroupedTemplatesConfig>,
+) -> Option<GroupedTemplatesConfig> {
+    match (global, project) {
+        (None, None) => None,
+        (Some(g), None) => Some(g.clone()),
+        (None, Some(p)) => Some(p.clone()),
+        (Some(g), Some(p)) => Some(GroupedTemplatesConfig {
+            compact: p.compact.clone().or_else(|| g.compact.clone()),
+            tiles: p.tiles.clone().or_else(|| g.tiles.clone()),
+            header: p.header.clone().or_else(|| g.header.clone()),
+        }),
+    }
+}
+
 impl Config {
+    /// Whether status hooks store the latest user prompt. Prompts are kept
+    /// only while the dashboard or sidebar is configured to show them.
+    pub fn prompt_capture_enabled(&self) -> bool {
+        self.dashboard
+            .agent_columns()
+            .contains(&AgentColumn::Prompt)
+            || self
+                .sidebar
+                .templates
+                .as_ref()
+                .is_some_and(crate::command::sidebar::templates_use_prompt)
+    }
+
     /// Load and merge global and project configurations.
     pub fn load(cli_agent: Option<&str>) -> anyhow::Result<Self> {
         Self::load_with_override(cli_agent, None)
@@ -2095,6 +2904,33 @@ impl Config {
         cli_agent: Option<&str>,
         config_override: Option<&Path>,
     ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
+        let frozen_path = std::env::var_os(crate::frozen_config::FROZEN_CONFIG_ENV);
+        Self::load_with_location_from_sources(
+            start_dir,
+            cli_agent,
+            config_override,
+            frozen_path.as_deref().map(Path::new),
+            crate::sandbox::guest::is_sandbox_guest(),
+        )
+    }
+
+    fn load_with_location_from_sources(
+        start_dir: &std::path::Path,
+        cli_agent: Option<&str>,
+        config_override: Option<&Path>,
+        frozen_path: Option<&Path>,
+        is_sandbox_guest: bool,
+    ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
+        if let Some(path) = frozen_path {
+            if is_sandbox_guest {
+                anyhow::bail!("Frozen configuration is only valid for host commands");
+            }
+            if config_override.is_some() {
+                anyhow::bail!("Frozen configuration cannot be combined with --config");
+            }
+            return crate::frozen_config::load(path);
+        }
+
         debug!(start_dir = %start_dir.display(), "config:loading with location from");
         let global_config = Self::load_global()?.unwrap_or_default();
 
@@ -2148,12 +2984,22 @@ impl Config {
             .or_else(|| git::get_repo_root_for(start_dir).ok())
             .unwrap_or_else(|| start_dir.to_path_buf());
 
-        let config = Self::merge_and_apply_defaults(
+        let mut config = Self::merge_and_apply_defaults(
             global_config,
             project_config,
             cli_agent,
             &defaults_root,
         )?;
+
+        // Resolve `{project}` consistently so every worktree of a
+        // repository resolves the same prefix, whatever directory it runs from.
+        // Outside a repository there is no project, so the template stands.
+        if let Some(prefix) = config.window_prefix.as_deref()
+            && prefix.contains(PROJECT_PLACEHOLDER)
+            && let Ok(project_name) = git::config_project_name_in(Some(start_dir))
+        {
+            config.window_prefix = Some(expand_project_placeholder(prefix, &project_name));
+        }
 
         debug!(
             agent = ?config.agent,
@@ -2192,9 +3038,7 @@ impl Config {
         }
 
         if !defaults_root.as_os_str().is_empty() {
-            let has_node_modules = defaults_root.join("pnpm-lock.yaml").exists()
-                || defaults_root.join("package-lock.json").exists()
-                || defaults_root.join("yarn.lock").exists();
+            let has_node_modules = has_node_lockfile(defaults_root);
 
             if config.panes.is_none() && config.windows.is_none() {
                 if defaults_root.join("CLAUDE.md").exists() || has_explicit_agent {
@@ -2214,6 +3058,22 @@ impl Config {
                 config.panes = Some(Self::default_panes());
             }
         }
+
+        // Runs after the merge so the placeholder is expanded wherever it came
+        // from, including entries spliced in from the global config.
+        if let Some(hooks) = config.pre_remove.as_mut() {
+            for hook in hooks.iter_mut() {
+                if hook.trim() == CLEANUP_NODE_MODULES_PLACEHOLDER {
+                    *hook = NODE_MODULES_CLEANUP_SCRIPT.to_string();
+                }
+            }
+        }
+
+        if config.hook_shell.is_none() {
+            config.hook_shell = Some(vec!["bash".to_string(), "-c".to_string()]);
+        }
+        validate_sidebar_views(config.sidebar.views.as_deref().unwrap_or_default())?;
+        validate_hook_shell(config.hook_shell.as_deref())?;
 
         config
             .sandbox
@@ -2263,10 +3123,11 @@ impl Config {
             global: Option<Vec<String>>,
             project: Option<Vec<String>>,
         ) -> Option<Vec<String>> {
-            match (global, project) {
-                (Some(global_items), Some(project_items)) => {
+            match project {
+                Some(project_items) => {
                     let has_placeholder = project_items.iter().any(|s| s == "<global>");
                     if has_placeholder {
+                        let global_items = global.unwrap_or_default();
                         let mut result = Vec::new();
                         for item in project_items {
                             if item == "<global>" {
@@ -2280,7 +3141,7 @@ impl Config {
                         Some(project_items)
                     }
                 }
-                (global, project) => project.or(global),
+                None => global,
             }
         }
 
@@ -2306,9 +3167,11 @@ impl Config {
             base_branch,
             worktree_dir,
             window_prefix,
+            hook_shell,
             agent,
             merge_strategy,
             merge_keep,
+            confirm_unmerged_removal,
             worktree_prefix,
             panes,
             windows,
@@ -2316,6 +3179,8 @@ impl Config {
             nerdfont,
             auto_update_check,
             prompt_file_only,
+            stale_after_secs,
+            placement,
         );
 
         // Layouts: merge maps by key so project layouts extend global ones
@@ -2394,6 +3259,9 @@ impl Config {
         // Special case: mode (project wins if explicitly set)
         merged.mode = project.mode.or(self.mode);
 
+        // Special case: default_session (project wins if explicitly set)
+        merged.default_session = project.default_session.or(self.default_session);
+
         // Special case: window_placement (project wins if explicitly set)
         merged.window_placement = project.window_placement.or(self.window_placement);
 
@@ -2408,6 +3276,14 @@ impl Config {
             symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
         };
 
+        merged.remote_files = FileConfig {
+            copy: merge_vec_with_placeholder(self.remote_files.copy, project.remote_files.copy),
+            symlink: merge_vec_with_placeholder(
+                self.remote_files.symlink,
+                project.remote_files.symlink,
+            ),
+        };
+
         // Status icons: per-field override
         merged.status_icons = StatusIcons {
             working: project.status_icons.working.or(self.status_icons.working),
@@ -2417,8 +3293,13 @@ impl Config {
 
         // Dashboard actions: per-field override
         merged.dashboard = DashboardConfig {
+            input_exit_key: project
+                .dashboard
+                .input_exit_key
+                .or(self.dashboard.input_exit_key),
             commit: project.dashboard.commit.or(self.dashboard.commit),
             merge: project.dashboard.merge.or(self.dashboard.merge),
+            layout: project.dashboard.layout.or(self.dashboard.layout),
             preview_size: project
                 .dashboard
                 .preview_size
@@ -2427,14 +3308,29 @@ impl Config {
                 .dashboard
                 .show_check_counts
                 .or(self.dashboard.show_check_counts),
+            agent_columns: project
+                .dashboard
+                .agent_columns
+                .or(self.dashboard.agent_columns),
+            worktree_columns: project
+                .dashboard
+                .worktree_columns
+                .or(self.dashboard.worktree_columns),
+            sort_mode: project.dashboard.sort_mode.or(self.dashboard.sort_mode),
+            close_on_jump: project
+                .dashboard
+                .close_on_jump
+                .or(self.dashboard.close_on_jump),
         };
 
         // Sidebar config: per-field override
         merged.sidebar = SidebarConfig {
+            views: self.sidebar.views.clone(),
             position: project.sidebar.position.or(self.sidebar.position),
             width: project.sidebar.width.or(self.sidebar.width),
             height: project.sidebar.height.or(self.sidebar.height),
             layout: project.sidebar.layout.or(self.sidebar.layout),
+            enter_action: project.sidebar.enter_action.or(self.sidebar.enter_action),
             horizontal: HorizontalSidebarConfig {
                 item_width: project
                     .sidebar
@@ -2442,11 +3338,11 @@ impl Config {
                     .item_width
                     .or(self.sidebar.horizontal.item_width),
             },
-            templates: project
-                .sidebar
-                .templates
-                .clone()
-                .or(self.sidebar.templates.clone()),
+            templates: merge_sidebar_templates(
+                self.sidebar.templates.as_ref(),
+                project.sidebar.templates.as_ref(),
+            ),
+            git_status: self.sidebar.git_status,
             agent_icons: match (
                 self.sidebar.agent_icons.clone(),
                 project.sidebar.agent_icons.clone(),
@@ -2457,6 +3353,13 @@ impl Config {
                 }
                 (g, p) => p.or(g),
             },
+            sort: project.sidebar.sort.or(self.sidebar.sort),
+            group_by: project.sidebar.group_by.or(self.sidebar.group_by),
+            dim_stale: project.sidebar.dim_stale.or(self.sidebar.dim_stale),
+            collapse_stale: project
+                .sidebar
+                .collapse_stale
+                .or(self.sidebar.collapse_stale),
         };
 
         // Sandbox config: per-field override with nested struct merging
@@ -2550,10 +3453,14 @@ impl Config {
                 self.sandbox.agent_config_dir.clone()
             },
             lima: LimaConfig::merge(self.sandbox.lima, project.sandbox.lima),
-            // Security: sandbox.container.devices and sandbox.container.group_add
-            // are global-only. They expose host hardware and can expand
-            // filesystem access via supplementary groups, so a malicious repo
-            // must not be able to enable them via .workmux.yaml.
+            // Security: sandbox.container.devices, group_add, oci_runtime,
+            // cap_add and security_opt are global-only. devices/group_add
+            // expose host hardware and can expand filesystem access via
+            // supplementary groups; oci_runtime changes the isolation boundary
+            // (e.g. a VM runtime vs runc); cap_add/security_opt control the
+            // container's capability/seccomp/apparmor confinement, and permissive
+            // values relax it. A malicious repo must not be able to set them via
+            // .workmux.yaml.
             container: {
                 if project.sandbox.container.devices.is_some() {
                     tracing::warn!(
@@ -2567,6 +3474,24 @@ impl Config {
                         move it to your global config (~/.config/workmux/config.yaml)"
                     );
                 }
+                if project.sandbox.container.oci_runtime.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.oci_runtime in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                if project.sandbox.container.cap_add.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.cap_add in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
+                if project.sandbox.container.security_opt.is_some() {
+                    tracing::warn!(
+                        "sandbox.container.security_opt in project config (.workmux.yaml) is ignored -- \
+                        move it to your global config (~/.config/workmux/config.yaml)"
+                    );
+                }
                 ContainerConfig::merge(self.sandbox.container, project.sandbox.container)
             },
             // Security: network is global-only. Project config cannot
@@ -2575,6 +3500,7 @@ impl Config {
             network: {
                 if project.sandbox.network.policy.is_some()
                     || project.sandbox.network.allowed_domains.is_some()
+                    || project.sandbox.network.max_connections.is_some()
                 {
                     tracing::warn!(
                         "network in project config (.workmux.yaml) is ignored -- \
@@ -2601,6 +3527,17 @@ impl Config {
         } else {
             self.agents
         };
+
+        // Security: remotes is global-only. Project config cannot define
+        // hosts -- this prevents a malicious repo from pointing workmux at
+        // an attacker-controlled SSH destination via .workmux.yaml.
+        if !project.remotes.is_empty() {
+            tracing::warn!(
+                "remotes in project config (.workmux.yaml) is ignored -- \
+                move it to your global config (~/.config/workmux/config.yaml)"
+            );
+        }
+        merged.remotes = self.remotes;
 
         merged
     }
@@ -2631,6 +3568,11 @@ impl Config {
         Self::default_panes_with_primary(Some("<agent>"))
     }
 
+    /// Resolve the stale-agent timeout, defaulting to one hour.
+    pub fn stale_after_secs(&self) -> u64 {
+        self.stale_after_secs.unwrap_or(DEFAULT_STALE_AFTER_SECS)
+    }
+
     /// Get the window prefix to use.
     /// Priority: explicit window_prefix config > nerdfont icon > "wm-"
     pub fn window_prefix(&self) -> &str {
@@ -2647,6 +3589,15 @@ impl Config {
     /// Returns the configured value or defaults to Window.
     pub fn mode(&self) -> MuxMode {
         self.mode.unwrap_or(MuxMode::Window)
+    }
+
+    /// Session to return to when a workmux-managed session closes.
+    /// Blank values are treated as unset.
+    pub fn default_session(&self) -> Option<&str> {
+        self.default_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
 
     /// Get the window placement strategy.
@@ -2711,9 +3662,10 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # main_branch: main
 
 # Default base branch/commit to branch from when creating new worktrees.
+# Use "auto" to branch from main_branch or the locally detected main/master branch.
 # The --base CLI flag always overrides this.
 # Default: The currently checked out branch.
-# base_branch: main
+# base_branch: auto
 
 # Default merge strategy for `workmux merge`.
 # Options: merge (default), rebase, squash
@@ -2724,14 +3676,22 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Keep and cleanup CLI flags always override this.
 # merge_keep: true
 
+# Confirm before deleting a branch with commits not merged into its base.
+# Set to false to remove unmerged branches while still protecting uncommitted changes.
+# Default: true.
+# confirm_unmerged_removal: false
+
 #-------------------------------------------------------------------------------
 # Naming & Paths
 #-------------------------------------------------------------------------------
 
 # Directory where worktrees are created.
 # Can be relative to repo root or absolute. Supports `~` for home directory
-# and `{project}` for the main worktree's directory name, so a global config
-# can namespace each repo, e.g. `~/.workmux/{project}`.
+# and `{project}` for the project name, e.g. `~/.workmux/{project}`.
+# Regular checkouts use the main directory name. Bare repositories use the
+# parent name for dot-prefixed directories, otherwise strip one trailing `.git`.
+# Relative paths use Git's main worktree anchor: the bare directory itself,
+# except a bare `.git` directory uses its parent. Naming does not change this base.
 # Default: Sibling directory '<project>__worktrees'.
 # worktree_dir: .worktrees
 
@@ -2742,7 +3702,8 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Prefix added to worktree directories and tmux window names.
 # worktree_prefix: ""
 
-# Prefix for tmux window names.
+# Prefix for tmux window and session names. Supports the same `{project}` name
+# as worktree_dir, e.g. `{project} ` to scope session names by repo.
 # Default: "wm-"
 # window_prefix: "wm-"
 
@@ -2755,6 +3716,11 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # - session: Create tmux sessions for each worktree
 # mode: session
 
+# Session mode only. Session to return to when a workmux session is closed or
+# removed, instead of whichever session the client was in previously.
+# Not prefixed with window_prefix. Default: the client's previous session.
+# default_session: main
+
 # Placement for new tmux windows in window mode.
 # Options: after_current (default), rightmost
 # window_placement: rightmost
@@ -2763,11 +3729,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Default: Two-pane layout with shell and clear command.
 # panes:
 #   - command: pnpm install
+#     name: deps
 #     focus: true
 #   - split: horizontal
 #   - command: clear
 #     split: vertical
 #     size: 5
+#   - command: just test --watch
+#     split: stacked  # Zellij only
 
 # Multiple windows per session (session mode only, mutually exclusive with 'panes').
 # Each window can have its own pane layout. Unnamed windows get tmux's
@@ -2813,6 +3782,12 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Hooks
 #-------------------------------------------------------------------------------
 
+# Executable and arguments used to run lifecycle hooks. The hook command is
+# appended as the final argument. Configure machine-specific paths globally;
+# project configuration may override the complete argv.
+# Default: ["bash", "-c"]
+# hook_shell: ["/opt/homebrew/bin/bash", "-c"]
+
 # Commands to run in new worktree before tmux window opens.
 # These block window creation - use for short tasks only.
 # Use "<global>" to inherit from global config.
@@ -2838,20 +3813,26 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Commands to run before worktree removal (during merge or remove).
 # Useful for backing up gitignored files before cleanup.
 # Default: Auto-detects Node.js projects and fast-deletes node_modules.
+# Detection looks for a lockfile at the project root or in a direct subdirectory.
+# Defining any command here replaces that default; use "<cleanup-node-modules>"
+# to keep the fast cleanup alongside your own commands.
+# Use "<global>" to inherit from global config.
 # Set to empty list to disable: `pre_remove: []`
 # Environment variables available:
 #   - WM_HANDLE: The worktree handle (directory name)
 #   - WM_WORKTREE_PATH: Absolute path of the worktree being deleted
 #   - WM_PROJECT_ROOT: Absolute path of the main project directory
 # pre_remove:
+#   - "<global>"
 #   - mkdir -p "$WM_PROJECT_ROOT/artifacts/$WM_HANDLE"
 #   - cp -r test-results/ "$WM_PROJECT_ROOT/artifacts/$WM_HANDLE/"
+#   - "<cleanup-node-modules>"
 
 #-------------------------------------------------------------------------------
 # Files
 #-------------------------------------------------------------------------------
 
-# File operations when creating a worktree.
+# File operations when creating a local worktree.
 # files:
 #   # Files to copy (useful for .env files that need to be unique).
 #   copy:
@@ -2864,17 +3845,41 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #     - "<global>"
 #     - node_modules
 
+# Supplemental uploads for remote workspaces. No files are sent by default.
+# Uses the same glob and "<global>" conventions as files, independently.
+# remote_files:
+#   copy:
+#     - CLAUDE.local.md
+#   # Sources are seeded once and shared remotely, not synchronized.
+#   symlink:
+#     - shared-data
+
 #-------------------------------------------------------------------------------
 # Dashboard
 #-------------------------------------------------------------------------------
 
+# Inactivity period before agents count as stale in the dashboard and sidebar.
+# Defaults to one hour. Accepts integer seconds or a duration such as 90m or 5h.
+# stale_after: 5h
+
 # Actions for dashboard keybindings (c = commit, m = merge).
 # Values are sent to the agent's pane. Use ! prefix for shell commands.
 # Preview size (10-90): larger = more preview, less table. Use +/- keys to adjust.
+# Columns of the agents table, in display order. Omit a column to hide it:
+# number, project, worktree, git, pr, status, time, title.
+# Worktree columns: number, project, worktree, git, pr, mux, age, agent.
+# Default sort mode for the agent list: priority (default), project, recency, natural.
+# Used only when no sort preference has been persisted in the dashboard.
 # dashboard:
 #   commit: "Commit staged changes with a descriptive message"
 #   merge: "!workmux merge"
+#   layout: stacked # or side_by_side (preview left, table right)
 #   preview_size: 60
+#   agent_columns: [number, project, worktree, git, pr, status, time, title]
+#   worktree_columns: [number, project, worktree, git, pr, mux, age, agent]
+#   sort_mode: priority
+#   close_on_jump: true
+#   input_exit_key: Esc # Esc or Ctrl+<letter> (a-z)
 
 #-------------------------------------------------------------------------------
 # Sidebar
@@ -2897,6 +3902,25 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Default: "tiles". Can be toggled at runtime with 'v' key.
 #   layout: tiles
 #
+#   # Enter action: "focus" (default) focuses the agent pane; "select" shows
+#   # its window while keeping focus in the sidebar. Press 'o' to focus the pane.
+#   enter_action: focus
+#
+#   # Row ordering: "recency" (default), "priority" or "window".
+#   sort: recency
+#
+#   # Group agents into labeled sections: "project" or "session". Unset keeps
+#   # one flat list; the 't' key switches at runtime. Headers are rendered only
+#   # in left sidebars.
+#   group_by: project
+#
+#   # Dim agents classified as stale using `stale_after`. Default: true.
+#   dim_stale: true
+#
+#   # While grouped, fold each group's stale agents behind a toggle and move
+#   # groups holding nothing but stale agents below the rest. Default: true.
+#   collapse_stale: true
+#
 #   horizontal:
 #     item_width: 24  # horizontal chip width in columns, clamped 12-80
 #
@@ -2905,6 +3929,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #       - "{status_icon} {primary} {pane_suffix} {fill} {elapsed}"
 #       - "{secondary} {fill} {git_stats}"
 #       - "{pane_title}"
+#     # Used while grouping is on. Anything left out falls back to the template
+#     # above it, then to the built-in grouped default.
+#     grouped:
+#       # Group header row; accepts {group}, {group_count}, {fill} and #[...].
+#       header: "{group} {fill} {group_count}"
+#       tiles:
+#         - "{primary} {pane_suffix} {fill} {pr_number} {pr_checks} {elapsed}"
+#         - "{pane_title} {fill} {git_stats}"
 
 #-------------------------------------------------------------------------------
 # Sandbox
@@ -2918,6 +3950,17 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   #   runtime: docker          # docker | podman | apple-container
 #   #   # memory: 16G            # VM memory limit (apple-container default: 16G)
 #   #   # cpus: 4                # VM CPU count (only passed when set)
+#   #   # OCI runtime to run under (docker/local Podman --runtime). Unset omits
+#   #   # the flag and uses the engine's configured default.
+#   #   # Set to e.g. "kata" for VM-based isolation (runtime must be installed
+#   #   # and registered). GLOBAL-ONLY: ignored in a project .workmux.yaml.
+#   #   # oci_runtime: kata
+#   #   # Extra capabilities / security options (docker/podman --cap-add /
+#   #   # --security-opt). Empty by default and GLOBAL-ONLY. Permissive values
+#   #   # weaken host-kernel container isolation unless paired with a VM runtime.
+#   #   # Main use: docker-in-docker under oci_runtime: kata.
+#   #   # cap_add: [ALL]
+#   #   # security_opt: [seccomp=unconfined, apparmor=unconfined, systempaths=unconfined]
 #   #   # Mask files out of the worktree bind mounts (paths relative to the
 #   #   # worktree root). Each listed file is shadowed by /dev/null so the
 #   #   # sandboxed agent cannot read it. Missing files are skipped.
@@ -3029,15 +4072,402 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails, AllowedDomainEntry,
-        Config, ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig, LimaConfig,
+        AgentColumn, AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails,
+        AllowedDomainEntry, CLEANUP_NODE_MODULES_PLACEHOLDER, Config, ContainerConfig,
+        ContainerDevice, DEFAULT_AGENT_COLUMNS, DEFAULT_WORKTREE_COLUMNS, DashboardLayout,
+        ExtraMount, FileConfig, LayoutConfig, LimaConfig, NODE_MODULES_CLEANUP_SCRIPT,
         NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
-        SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
-        WindowPlacement, is_agent_command, validate_domain, validate_group_add_entry,
-        validate_layouts_config,
+        SidebarEnterAction, SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection,
+        ToolchainMode, WindowPlacement, WorktreeColumn, is_agent_command, validate_domain,
+        validate_group_add_entry, validate_layouts_config,
     };
+    use super::{DashboardConfig, InputExitKey, RemoteConfig, RemoteIsolation};
     use crate::test_support;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_session_is_none_by_default() {
+        assert_eq!(Config::default().default_session(), None);
+    }
+
+    #[test]
+    fn default_session_parses_from_config() {
+        let config: Config =
+            serde_yaml::from_str("default_session: main\n").expect("config parses");
+        assert_eq!(config.default_session(), Some("main"));
+    }
+
+    #[test]
+    fn default_session_treats_blank_value_as_unset() {
+        let config: Config =
+            serde_yaml::from_str("default_session: \"   \"\n").expect("config parses");
+        assert_eq!(config.default_session(), None);
+    }
+
+    #[test]
+    fn default_session_trims_surrounding_whitespace() {
+        let config: Config =
+            serde_yaml::from_str("default_session: \" my main \"\n").expect("config parses");
+        assert_eq!(config.default_session(), Some("my main"));
+    }
+
+    #[test]
+    fn default_session_project_value_overrides_global() {
+        let global: Config =
+            serde_yaml::from_str("default_session: global-main\n").expect("global config parses");
+        let project: Config =
+            serde_yaml::from_str("default_session: project-main\n").expect("project config parses");
+        assert_eq!(
+            global.merge(project).default_session(),
+            Some("project-main")
+        );
+    }
+
+    #[test]
+    fn default_session_inherits_global_value() {
+        let global: Config =
+            serde_yaml::from_str("default_session: global-main\n").expect("global config parses");
+        assert_eq!(
+            global.merge(Config::default()).default_session(),
+            Some("global-main")
+        );
+    }
+
+    #[test]
+    fn dashboard_input_exit_key_defaults_to_escape() {
+        assert_eq!(
+            Config::default().dashboard.input_exit_key(),
+            InputExitKey::Escape
+        );
+    }
+
+    #[test]
+    fn dashboard_input_exit_key_parses_and_round_trips() {
+        for (value, expected) in [
+            ("Esc", InputExitKey::Escape),
+            ("esc", InputExitKey::Escape),
+            ("Ctrl+q", InputExitKey::Ctrl('q')),
+            ("CTRL+Z", InputExitKey::Ctrl('z')),
+        ] {
+            let config: Config =
+                serde_yaml::from_str(&format!("dashboard:\n  input_exit_key: {value}\n")).unwrap();
+            assert_eq!(config.dashboard.input_exit_key(), expected);
+            let serialized = serde_yaml::to_string(&config.dashboard).unwrap();
+            let round_trip: DashboardConfig = serde_yaml::from_str(&serialized).unwrap();
+            assert_eq!(round_trip.input_exit_key(), expected);
+        }
+    }
+
+    #[test]
+    fn dashboard_input_exit_key_rejects_invalid_values() {
+        for value in ["", "q", "Ctrl+", "Ctrl+qq", "Ctrl+1", "Alt+q", "Ctrl+é"] {
+            let error = serde_yaml::from_str::<Config>(&format!(
+                "dashboard:\n  input_exit_key: '{value}'\n"
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("input_exit_key must be"));
+        }
+    }
+
+    #[test]
+    fn dashboard_input_exit_key_inherits_and_overrides_global() {
+        let global: Config =
+            serde_yaml::from_str("dashboard:\n  input_exit_key: Ctrl+q\n").unwrap();
+        assert_eq!(
+            global
+                .clone()
+                .merge(Config::default())
+                .dashboard
+                .input_exit_key(),
+            InputExitKey::Ctrl('q')
+        );
+        let project: Config = serde_yaml::from_str("dashboard:\n  input_exit_key: Esc\n").unwrap();
+        assert_eq!(
+            global.merge(project).dashboard.input_exit_key(),
+            InputExitKey::Escape
+        );
+    }
+
+    #[test]
+    fn dashboard_layout_defaults_to_stacked() {
+        assert_eq!(
+            Config::default().dashboard.layout.unwrap_or_default(),
+            DashboardLayout::Stacked
+        );
+    }
+
+    #[test]
+    fn dashboard_layout_parses_and_merges() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  layout: side_by_side\n").unwrap();
+        assert_eq!(
+            global.clone().merge(Config::default()).dashboard.layout,
+            Some(DashboardLayout::SideBySide)
+        );
+        let project: Config = serde_yaml::from_str("dashboard:\n  layout: stacked\n").unwrap();
+        assert_eq!(
+            global.merge(project).dashboard.layout,
+            Some(DashboardLayout::Stacked)
+        );
+        let project: Config = serde_yaml::from_str("dashboard:\n  layout: side_by_side\n").unwrap();
+        assert_eq!(
+            Config::default().merge(project).dashboard.layout,
+            Some(DashboardLayout::SideBySide)
+        );
+        assert!(serde_yaml::from_str::<Config>("dashboard:\n  layout: sideways\n").is_err());
+    }
+
+    #[test]
+    fn dashboard_closes_on_jump_by_default() {
+        assert!(Config::default().dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_can_be_disabled() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  close_on_jump: false\n").expect("config parses");
+        assert!(!config.dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_project_value_overrides_global() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: false\n")
+            .expect("global config parses");
+        let project: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: true\n")
+            .expect("project config parses");
+        assert!(global.merge(project).dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn dashboard_close_on_jump_inherits_global_value() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  close_on_jump: false\n")
+            .expect("global config parses");
+        assert!(!global.merge(Config::default()).dashboard.close_on_jump());
+    }
+
+    #[test]
+    fn agent_columns_default_when_unset() {
+        let config = Config::default();
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![
+                AgentColumn::Number,
+                AgentColumn::Project,
+                AgentColumn::Worktree,
+                AgentColumn::Machine,
+                AgentColumn::Git,
+                AgentColumn::Pr,
+                AgentColumn::Status,
+                AgentColumn::Time,
+                AgentColumn::Title
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_columns_follow_configured_order() {
+        let config: Config = serde_yaml::from_str(
+            "dashboard:\n  agent_columns: [title, pr_title, pr_issues, status, number, worktree, git, pr, window, project, time]\n",
+        )
+        .expect("config parses");
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![
+                AgentColumn::Title,
+                AgentColumn::PrTitle,
+                AgentColumn::PrIssues,
+                AgentColumn::Status,
+                AgentColumn::Number,
+                AgentColumn::Worktree,
+                AgentColumn::Git,
+                AgentColumn::Pr,
+                AgentColumn::Window,
+                AgentColumn::Project,
+                AgentColumn::Time
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_columns_drop_duplicates_and_allow_omitting() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: [title, title, status]\n")
+                .expect("config parses");
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![AgentColumn::Title, AgentColumn::Status]
+        );
+    }
+
+    #[test]
+    fn agent_columns_empty_list_falls_back_to_default() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: []\n").expect("config parses");
+        assert_eq!(config.dashboard.agent_columns(), DEFAULT_AGENT_COLUMNS);
+    }
+
+    #[test]
+    fn agent_columns_project_overrides_global() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  agent_columns: [status, title]\n")
+            .expect("config parses");
+        let project: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: [title, status]\n")
+                .expect("config parses");
+        assert_eq!(
+            global.merge(project).dashboard.agent_columns(),
+            vec![AgentColumn::Title, AgentColumn::Status]
+        );
+    }
+
+    #[test]
+    fn prompt_capture_follows_prompt_display() {
+        let enabled = |yaml: &str| {
+            serde_yaml::from_str::<Config>(yaml)
+                .expect("config parses")
+                .prompt_capture_enabled()
+        };
+
+        assert!(!Config::default().prompt_capture_enabled());
+        assert!(enabled("dashboard:\n  agent_columns: [title, prompt]\n"));
+        assert!(!enabled("dashboard:\n  agent_columns: [title]\n"));
+        assert!(enabled(
+            "sidebar:\n  templates:\n    compact: '{primary} {prompt}'\n"
+        ));
+        assert!(enabled(
+            "sidebar:\n  templates:\n    horizontal: ['{primary}', '{prompt}']\n"
+        ));
+        assert!(enabled(
+            "sidebar:\n  templates:\n    grouped:\n      tiles: ['{primary}', '{prompt}']\n"
+        ));
+        assert!(enabled(
+            "sidebar:\n  templates:\n    grouped:\n      compact: '{prompt}'\n"
+        ));
+        // Escaped braces render literal text.
+        assert!(!enabled(
+            "sidebar:\n  templates:\n    compact: '{{prompt}}'\n"
+        ));
+        // Group headers cannot render agent tokens.
+        assert!(!enabled(
+            "sidebar:\n  templates:\n    grouped:\n      header: '{group} {prompt}'\n"
+        ));
+        // An invalid line makes the sidebar fall back to the default tiles.
+        assert!(!enabled(
+            "sidebar:\n  templates:\n    tiles: ['{prompt}', '{unclosed']\n"
+        ));
+    }
+
+    #[test]
+    fn agent_columns_inherit_global_when_project_unset() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  agent_columns: [status, title]\n")
+            .expect("config parses");
+        assert_eq!(
+            global.merge(Config::default()).dashboard.agent_columns(),
+            vec![AgentColumn::Status, AgentColumn::Title]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_default_when_unset() {
+        let config = Config::default();
+        assert_eq!(
+            config.dashboard.worktree_columns(),
+            vec![
+                WorktreeColumn::Number,
+                WorktreeColumn::Project,
+                WorktreeColumn::Worktree,
+                WorktreeColumn::Git,
+                WorktreeColumn::Pr,
+                WorktreeColumn::Mux,
+                WorktreeColumn::Age,
+                WorktreeColumn::Agent
+            ]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_follow_configured_order() {
+        let config: Config = serde_yaml::from_str(
+            "dashboard:\n  worktree_columns: [agent, pr_title, pr_issues, mux, number, worktree, git, pr, project, age]\n",
+        )
+        .expect("config parses");
+        assert_eq!(
+            config.dashboard.worktree_columns(),
+            vec![
+                WorktreeColumn::Agent,
+                WorktreeColumn::PrTitle,
+                WorktreeColumn::PrIssues,
+                WorktreeColumn::Mux,
+                WorktreeColumn::Number,
+                WorktreeColumn::Worktree,
+                WorktreeColumn::Git,
+                WorktreeColumn::Pr,
+                WorktreeColumn::Project,
+                WorktreeColumn::Age
+            ]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_drop_duplicates_and_allow_omitting() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  worktree_columns: [agent, agent, mux]\n")
+                .expect("config parses");
+        assert_eq!(
+            config.dashboard.worktree_columns(),
+            vec![WorktreeColumn::Agent, WorktreeColumn::Mux]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_empty_list_falls_back_to_default() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  worktree_columns: []\n").expect("config parses");
+        assert_eq!(
+            config.dashboard.worktree_columns(),
+            DEFAULT_WORKTREE_COLUMNS
+        );
+    }
+
+    #[test]
+    fn worktree_columns_project_overrides_global() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  worktree_columns: [mux, agent]\n")
+            .expect("config parses");
+        let project: Config =
+            serde_yaml::from_str("dashboard:\n  worktree_columns: [agent, mux]\n")
+                .expect("config parses");
+        assert_eq!(
+            global.merge(project).dashboard.worktree_columns(),
+            vec![WorktreeColumn::Agent, WorktreeColumn::Mux]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_inherit_global_when_project_unset() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  worktree_columns: [mux, agent]\n")
+            .expect("config parses");
+        assert_eq!(
+            global.merge(Config::default()).dashboard.worktree_columns(),
+            vec![WorktreeColumn::Mux, WorktreeColumn::Agent]
+        );
+    }
+
+    #[test]
+    fn worktree_columns_reject_unknown_names() {
+        let error = serde_yaml::from_str::<Config>("dashboard:\n  worktree_columns: [title]\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown variant `title`"));
+    }
+
+    #[test]
+    fn worktree_columns_empty_project_list_resets_global_to_defaults() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  worktree_columns: [agent]\n")
+            .expect("global config parses");
+        let project: Config = serde_yaml::from_str("dashboard:\n  worktree_columns: []\n")
+            .expect("project config parses");
+        assert_eq!(
+            global.merge(project).dashboard.worktree_columns(),
+            DEFAULT_WORKTREE_COLUMNS
+        );
+    }
 
     fn cfg(edit: impl FnOnce(&mut Config)) -> Config {
         let mut config = Config::default();
@@ -3055,6 +4485,150 @@ mod tests {
 
     fn container_cfg(edit: impl FnOnce(&mut ContainerConfig)) -> Config {
         sandbox_cfg(|sandbox| edit(&mut sandbox.container))
+    }
+
+    #[test]
+    fn frozen_source_bypasses_live_config_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".workmux.yaml"),
+            "status_icons:\n  working: hostile\n",
+        )
+        .unwrap();
+
+        let trusted = Config {
+            selected_agent: Some("trusted-agent".to_string()),
+            agent_type: Some("claude".to_string()),
+            status_icons: super::StatusIcons {
+                working: Some("trusted".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot =
+            crate::frozen_config::FrozenConfigGuard::capture_in(&trusted, None, root.path())
+                .unwrap();
+
+        let (loaded, location) = Config::load_with_location_from_sources(
+            root.path(),
+            Some("guest-agent"),
+            None,
+            Some(snapshot.path()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.status_icons.working.as_deref(), Some("trusted"));
+        assert_eq!(loaded.selected_agent.as_deref(), Some("trusted-agent"));
+        assert_eq!(loaded.agent_type.as_deref(), Some("claude"));
+        assert!(location.is_none());
+    }
+
+    #[test]
+    fn frozen_source_rejects_config_override() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = crate::frozen_config::FrozenConfigGuard::capture_in(
+            &Config::default(),
+            None,
+            root.path(),
+        )
+        .unwrap();
+        let override_path = root.path().join("other.yaml");
+        std::fs::write(&override_path, "{}").unwrap();
+
+        let error = Config::load_with_location_from_sources(
+            root.path(),
+            None,
+            Some(&override_path),
+            Some(snapshot.path()),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn frozen_source_rejects_guest_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = crate::frozen_config::FrozenConfigGuard::capture_in(
+            &Config::default(),
+            None,
+            root.path(),
+        )
+        .unwrap();
+
+        let error = Config::load_with_location_from_sources(
+            root.path(),
+            None,
+            None,
+            Some(snapshot.path()),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("only valid for host commands"));
+    }
+
+    #[test]
+    fn frozen_source_env_is_authoritative_in_child_process() {
+        const OUTPUT_ENV: &str = "WORKMUX_FROZEN_CONFIG_TEST_OUTPUT";
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".workmux.yaml"),
+            "status_icons:\n  working: hostile\n",
+        )
+        .unwrap();
+        let trusted = Config {
+            status_icons: super::StatusIcons {
+                working: Some("trusted".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot =
+            crate::frozen_config::FrozenConfigGuard::capture_in(&trusted, None, root.path())
+                .unwrap();
+        let output_path = root.path().join("loaded-icon");
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::frozen_source_env_subprocess_helper",
+                "--nocapture",
+            ])
+            .env(crate::frozen_config::FROZEN_CONFIG_ENV, snapshot.path())
+            .env(OUTPUT_ENV, &output_path)
+            .env_remove("WM_SANDBOX_GUEST")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(output_path).unwrap(), "trusted");
+    }
+
+    #[test]
+    fn frozen_source_env_subprocess_helper() {
+        const OUTPUT_ENV: &str = "WORKMUX_FROZEN_CONFIG_TEST_OUTPUT";
+        let Some(output_path) = std::env::var_os(OUTPUT_ENV) else {
+            return;
+        };
+
+        let config = Config::load(None).unwrap();
+        std::fs::write(
+            output_path,
+            config
+                .status_icons
+                .working
+                .expect("working icon in snapshot"),
+        )
+        .unwrap();
     }
 
     fn sandbox_extra_mounts(paths: &[&str]) -> Config {
@@ -3086,6 +4660,7 @@ mod tests {
                             .collect(),
                     )
                 },
+                ..Default::default()
             };
         })
     }
@@ -3131,6 +4706,219 @@ mod tests {
     }
 
     #[test]
+    fn confirm_unmerged_removal_parses_boolean_values() {
+        let enabled: Config = serde_yaml::from_str("confirm_unmerged_removal: true").unwrap();
+        assert_eq!(enabled.confirm_unmerged_removal, Some(true));
+
+        let disabled: Config = serde_yaml::from_str("confirm_unmerged_removal: false").unwrap();
+        assert_eq!(disabled.confirm_unmerged_removal, Some(false));
+    }
+
+    fn pre_remove_default_for_root(root: &std::path::Path) -> Option<Vec<String>> {
+        Config::merge_and_apply_defaults(Config::default(), Config::default(), None, root)
+            .unwrap()
+            .pre_remove
+    }
+
+    #[test]
+    fn node_modules_cleanup_detects_lockfile_at_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "").unwrap();
+
+        assert_eq!(
+            pre_remove_default_for_root(root.path()),
+            Some(vec![NODE_MODULES_CLEANUP_SCRIPT.to_string()])
+        );
+    }
+
+    #[test]
+    fn node_modules_cleanup_detects_lockfile_in_subdirectory() {
+        let root = tempfile::tempdir().unwrap();
+        let dashboard = root.path().join("dashboard");
+        std::fs::create_dir(&dashboard).unwrap();
+        std::fs::write(dashboard.join("pnpm-lock.yaml"), "").unwrap();
+
+        assert_eq!(
+            pre_remove_default_for_root(root.path()),
+            Some(vec![NODE_MODULES_CLEANUP_SCRIPT.to_string()])
+        );
+    }
+
+    #[test]
+    fn node_modules_cleanup_ignores_lockfiles_below_depth_one() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("yarn.lock"), "").unwrap();
+
+        assert_eq!(pre_remove_default_for_root(root.path()), None);
+    }
+
+    #[test]
+    fn node_modules_cleanup_ignores_lockfiles_in_hidden_dirs_and_node_modules() {
+        let root = tempfile::tempdir().unwrap();
+        for dir in [".cache", "node_modules"] {
+            let dir = root.path().join(dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("package-lock.json"), "").unwrap();
+        }
+
+        assert_eq!(pre_remove_default_for_root(root.path()), None);
+    }
+
+    #[test]
+    fn node_modules_cleanup_does_not_override_configured_pre_remove() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("yarn.lock"), "").unwrap();
+        let project = Config {
+            pre_remove: Some(vec![]),
+            ..Default::default()
+        };
+
+        let config =
+            Config::merge_and_apply_defaults(Config::default(), project, None, root.path())
+                .unwrap();
+
+        assert_eq!(config.pre_remove, Some(vec![]));
+    }
+
+    #[test]
+    fn cleanup_node_modules_placeholder_expands_to_builtin_script() {
+        let root = tempfile::tempdir().unwrap();
+        let project = Config {
+            pre_remove: Some(vec![
+                "cp -r test-results/ /tmp/out".to_string(),
+                CLEANUP_NODE_MODULES_PLACEHOLDER.to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let config =
+            Config::merge_and_apply_defaults(Config::default(), project, None, root.path())
+                .unwrap();
+
+        assert_eq!(
+            config.pre_remove,
+            Some(vec![
+                "cp -r test-results/ /tmp/out".to_string(),
+                NODE_MODULES_CLEANUP_SCRIPT.to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn cleanup_node_modules_placeholder_expands_when_inherited_from_global() {
+        let root = tempfile::tempdir().unwrap();
+        let global = Config {
+            pre_remove: Some(vec![CLEANUP_NODE_MODULES_PLACEHOLDER.to_string()]),
+            ..Default::default()
+        };
+        let project = Config {
+            pre_remove: Some(vec!["<global>".to_string(), "echo done".to_string()]),
+            ..Default::default()
+        };
+
+        let config = Config::merge_and_apply_defaults(global, project, None, root.path()).unwrap();
+
+        assert_eq!(
+            config.pre_remove,
+            Some(vec![
+                NODE_MODULES_CLEANUP_SCRIPT.to_string(),
+                "echo done".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn hook_shell_defaults_to_bash_c() {
+        let config = Config::merge_and_apply_defaults(
+            Config::default(),
+            Config::default(),
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.hook_shell,
+            Some(vec!["bash".to_string(), "-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn project_hook_shell_overrides_or_inherits_global_value() {
+        let global = Config {
+            hook_shell: Some(vec!["/global/bash".to_string(), "-c".to_string()]),
+            ..Default::default()
+        };
+        let inherited = global.clone().merge(Config::default());
+        assert_eq!(inherited.hook_shell, global.hook_shell);
+
+        let project_shell = vec!["/project/sh".to_string(), "-c".to_string()];
+        let project = Config {
+            hook_shell: Some(project_shell.clone()),
+            ..Default::default()
+        };
+        let overridden = global.merge(project);
+        assert_eq!(overridden.hook_shell, Some(project_shell));
+    }
+
+    #[test]
+    fn hook_shell_rejects_missing_or_empty_executable() {
+        let empty: Config = serde_yaml::from_str("hook_shell: []").unwrap();
+        let empty_error = Config::merge_and_apply_defaults(
+            Config::default(),
+            empty,
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty_error.contains("must contain an executable"));
+
+        let blank: Config = serde_yaml::from_str("hook_shell: ['  ', '-c']").unwrap();
+        let blank_error = Config::merge_and_apply_defaults(
+            Config::default(),
+            blank,
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(blank_error.contains("executable must not be empty"));
+    }
+
+    #[test]
+    fn remote_files_merge_independently() {
+        let global: Config = serde_yaml::from_str(
+            "files: {symlink: [local-cache]}\nremote_files: {copy: [global-copy], symlink: [global-seed]}",
+        ).unwrap();
+        for yaml in ["{}", "remote_files: {}"] {
+            let merged = global.clone().merge(serde_yaml::from_str(yaml).unwrap());
+            assert_eq!(merged.remote_files.copy.unwrap(), ["global-copy"]);
+            assert_eq!(merged.remote_files.symlink.unwrap(), ["global-seed"]);
+        }
+        let project =
+            serde_yaml::from_str("remote_files: {copy: [before, '<global>', after], symlink: []}")
+                .unwrap();
+        let merged = global.clone().merge(project);
+        assert_eq!(
+            merged.remote_files.copy.unwrap(),
+            ["before", "global-copy", "after"]
+        );
+        assert!(merged.remote_files.symlink.unwrap().is_empty());
+        assert_eq!(merged.files.symlink.unwrap(), ["local-cache"]);
+        let project = serde_yaml::from_str("remote_files: {copy: [project-copy]}").unwrap();
+        assert_eq!(
+            global.merge(project).remote_files.copy.unwrap(),
+            ["project-copy"]
+        );
+        let local: Config = serde_yaml::from_str("files: {copy: [local]}").unwrap();
+        assert!(local.remote_files.copy.is_none());
+        assert!(local.remote_files.symlink.is_none());
+    }
+
+    #[test]
     fn window_placement_parses_values() {
         let after_current: Config =
             serde_yaml::from_str("window_placement: after_current").unwrap();
@@ -3141,6 +4929,55 @@ mod tests {
 
         let rightmost: Config = serde_yaml::from_str("window_placement: rightmost").unwrap();
         assert_eq!(rightmost.window_placement(), WindowPlacement::Rightmost);
+    }
+
+    #[test]
+    fn missing_global_lists_expand_placeholder_to_empty() {
+        let project = Config {
+            post_create: Some(vec![
+                "post-before".to_string(),
+                "<global>".to_string(),
+                "post-after".to_string(),
+            ]),
+            pre_merge: Some(vec!["<global>".to_string()]),
+            pre_remove: Some(vec![
+                "remove-before".to_string(),
+                "<global>".to_string(),
+                "remove-after".to_string(),
+            ]),
+            files: FileConfig {
+                copy: Some(vec!["<global>".to_string()]),
+                symlink: Some(vec![
+                    "symlink-before".to_string(),
+                    "<global>".to_string(),
+                    "symlink-after".to_string(),
+                ]),
+            },
+            ..Default::default()
+        };
+
+        let merged = Config::default().merge(project);
+
+        assert_eq!(
+            merged.post_create,
+            Some(vec!["post-before".to_string(), "post-after".to_string()])
+        );
+        assert_eq!(merged.pre_merge, Some(vec![]));
+        assert_eq!(
+            merged.pre_remove,
+            Some(vec![
+                "remove-before".to_string(),
+                "remove-after".to_string()
+            ])
+        );
+        assert_eq!(merged.files.copy, Some(vec![]));
+        assert_eq!(
+            merged.files.symlink,
+            Some(vec![
+                "symlink-before".to_string(),
+                "symlink-after".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -3171,6 +5008,21 @@ mod tests {
 
         let merged = global.merge(project);
         assert_eq!(merged.merge_keep, Some(false));
+    }
+
+    #[test]
+    fn confirm_unmerged_removal_project_overrides_global() {
+        let global = Config {
+            confirm_unmerged_removal: Some(true),
+            ..Default::default()
+        };
+        let project = Config {
+            confirm_unmerged_removal: Some(false),
+            ..Default::default()
+        };
+
+        let merged = global.merge(project);
+        assert_eq!(merged.confirm_unmerged_removal, Some(false));
     }
 
     #[test]
@@ -3260,6 +5112,17 @@ sidebar:
     }
 
     #[test]
+    fn project_configuration_cannot_replace_global_views() {
+        let global: Config =
+            serde_yaml::from_str("sidebar:\n  views:\n    - {name: Global, sessions: [foo]}\n")
+                .unwrap();
+        let local: Config =
+            serde_yaml::from_str("sidebar:\n  views:\n    - {name: Local, sessions: [bar]}\n")
+                .unwrap();
+        assert_eq!(global.merge(local).sidebar.views.unwrap()[0].name, "Global");
+    }
+
+    #[test]
     fn sidebar_position_and_height_parse() {
         let yaml = r#"
 sidebar:
@@ -3274,6 +5137,33 @@ sidebar:
         assert_eq!(config.sidebar.height, Some(SidebarHeight::Percent(10)));
         assert_eq!(config.sidebar.horizontal.item_width, Some(32));
         assert_eq!(config.sidebar.horizontal.item_width(), 32);
+    }
+
+    #[test]
+    fn sidebar_enter_action_defaults_parses_and_merges() {
+        assert_eq!(
+            Config::default().sidebar.enter_action(),
+            SidebarEnterAction::Focus
+        );
+
+        let global: Config = serde_yaml::from_str("sidebar:\n  enter_action: select\n").unwrap();
+        assert_eq!(global.sidebar.enter_action(), SidebarEnterAction::Select);
+        assert_eq!(
+            global
+                .clone()
+                .merge(Config::default())
+                .sidebar
+                .enter_action(),
+            SidebarEnterAction::Select
+        );
+
+        let project: Config = serde_yaml::from_str("sidebar:\n  enter_action: focus\n").unwrap();
+        assert_eq!(
+            global.merge(project).sidebar.enter_action(),
+            SidebarEnterAction::Focus
+        );
+
+        assert!(serde_yaml::from_str::<Config>("sidebar:\n  enter_action: preview\n").is_err());
     }
 
     #[test]
@@ -3303,6 +5193,122 @@ sidebar:
         assert_eq!(merged.sidebar.width, Some(SidebarWidth::Absolute(40)));
         assert_eq!(merged.sidebar.height, Some(SidebarHeight::Absolute(4)));
         assert_eq!(merged.sidebar.horizontal.item_width, Some(36));
+    }
+
+    #[test]
+    fn sidebar_grouping_is_opt_in_and_brings_folding_with_it() {
+        let default_config = Config::default();
+        assert_eq!(default_config.sidebar.group_by(), None);
+
+        let grouped: Config = serde_yaml::from_str("sidebar:\n  group_by: project\n").unwrap();
+        assert_eq!(
+            grouped.sidebar.group_by(),
+            Some(super::SidebarGroupBy::Project)
+        );
+        assert!(grouped.sidebar.collapse_stale());
+
+        let unfolded: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  group_by: session
+  collapse_stale: false
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unfolded.sidebar.group_by(),
+            Some(super::SidebarGroupBy::Session)
+        );
+        assert!(!unfolded.sidebar.collapse_stale());
+
+        for raw in [
+            "sidebar:\n  group_by: none\n",
+            "sidebar:\n  group_by: off\n",
+        ] {
+            let off: Config = serde_yaml::from_str(raw).unwrap();
+            assert_eq!(off.sidebar.group_by(), None);
+        }
+    }
+
+    #[test]
+    fn stale_after_accepts_seconds_and_duration_strings() {
+        assert_eq!(Config::default().stale_after_secs(), 60 * 60);
+        for (raw, expected) in [
+            ("stale_after: 900", 900),
+            ("stale_after: 90s", 90),
+            ("stale_after: 90m", 90 * 60),
+            ("stale_after: 5h", 5 * 60 * 60),
+            ("stale_after: 2d", 2 * 24 * 60 * 60),
+        ] {
+            let config: Config = serde_yaml::from_str(raw).unwrap();
+            assert_eq!(config.stale_after_secs(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn stale_after_rejects_negative_invalid_and_overflow_values() {
+        for raw in [
+            "stale_after: -1",
+            "stale_after: 1w",
+            "stale_after: 18446744073709551615h",
+        ] {
+            assert!(serde_yaml::from_str::<Config>(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn stale_after_project_value_overrides_global_value() {
+        let global: Config = serde_yaml::from_str("stale_after: 5h\n").unwrap();
+        let project: Config = serde_yaml::from_str("stale_after: 90m\n").unwrap();
+        assert_eq!(global.merge(project).stale_after_secs(), 90 * 60);
+
+        let global: Config = serde_yaml::from_str("stale_after: 5h\n").unwrap();
+        let project: Config = serde_yaml::from_str("{}\n").unwrap();
+        assert_eq!(global.merge(project).stale_after_secs(), 5 * 60 * 60);
+    }
+
+    #[test]
+    fn sidebar_git_status_defaults_true_and_ignores_project_override() {
+        let default_config = Config::default();
+        assert!(default_config.sidebar.git_status());
+
+        let global: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  git_status: false
+"#,
+        )
+        .unwrap();
+        let project: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  git_status: true
+"#,
+        )
+        .unwrap();
+        let merged = global.merge(project);
+
+        assert_eq!(merged.sidebar.git_status, Some(false));
+        assert!(!merged.sidebar.git_status());
+    }
+
+    #[test]
+    fn sidebar_dim_stale_defaults_true_and_merges_per_field() {
+        let default_config = Config::default();
+        assert!(default_config.sidebar.dim_stale());
+
+        let global: Config = serde_yaml::from_str(
+            r#"
+sidebar:
+  dim_stale: false
+"#,
+        )
+        .unwrap();
+        let project: Config = serde_yaml::from_str("sidebar: {}\n").unwrap();
+        let merged = global.merge(project);
+
+        assert_eq!(merged.sidebar.dim_stale, Some(false));
+        assert!(!merged.sidebar.dim_stale());
     }
 
     #[test]
@@ -3456,6 +5462,92 @@ agents:
 
     use super::find_project_config;
     use std::fs;
+
+    #[test]
+    fn project_discovery_repository_fallback_is_isolated() {
+        const TEST: &str = "config::tests::project_discovery_repository_fallback_is_isolated";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let cwd = git_tempdir();
+            fs::write(cwd.path().join(".workmux.yaml"), "agent: unrelated").unwrap();
+            crate::test_support::run_isolated_test(TEST, cwd.path(), &[]);
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap();
+        crate::test_support::init_repo(repo.path());
+        assert!(
+            super::discover_project_config(repo.path())
+                .unwrap()
+                .location
+                .is_none()
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            super::discover_project_config(outside.path())
+                .unwrap()
+                .location
+                .is_none()
+        );
+        let linked = outside.path().join("linked");
+        crate::test_support::run_git(
+            repo.path(),
+            &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+        );
+        fs::write(repo.path().join(".workmux.yml"), "agent: main").unwrap();
+        let fallback = find_project_config(&linked).unwrap().unwrap();
+        assert_eq!(fallback.config_dir, repo.path().canonicalize().unwrap());
+        assert!(fallback.rel_dir.as_os_str().is_empty());
+        fs::write(linked.join(".workmux.yaml"), "agent: linked").unwrap();
+        assert_eq!(
+            find_project_config(&linked).unwrap().unwrap().config_dir,
+            linked.canonicalize().unwrap()
+        );
+        fs::remove_file(linked.join(".workmux.yaml")).unwrap();
+        fs::remove_file(repo.path().join(".workmux.yml")).unwrap();
+        assert!(find_project_config(&linked).unwrap().is_none());
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
+    }
+
+    #[test]
+    fn project_discovery_distinguishes_errors_and_preserves_public_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(".git"),
+            "gitdir: /missing/workmux-test-gitdir",
+        )
+        .unwrap();
+        assert!(super::discover_project_config(temp.path()).is_err());
+        assert!(find_project_config(temp.path()).unwrap().is_none());
+        fs::remove_file(temp.path().join(".git")).unwrap();
+        assert!(
+            super::discover_project_config(temp.path())
+                .unwrap()
+                .location
+                .is_none()
+        );
+        crate::test_support::init_repo(temp.path());
+        std::os::unix::fs::symlink(".workmux.yaml", temp.path().join(".workmux.yaml")).unwrap();
+        assert!(super::discover_project_config(temp.path()).is_err());
+        fs::remove_file(temp.path().join(".workmux.yaml")).unwrap();
+        fs::write(temp.path().join(".workmux.yaml"), "agent: recovered").unwrap();
+        assert!(
+            super::discover_project_config(temp.path())
+                .unwrap()
+                .location
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn project_discovery_git_spawn_failure_is_not_absence() {
+        const TEST: &str = "config::tests::project_discovery_git_spawn_failure_is_not_absence";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let temp = tempfile::tempdir().unwrap();
+            crate::test_support::run_isolated_test(TEST, temp.path(), &[("PATH", temp.path())]);
+            return;
+        }
+        assert!(super::discover_project_config(&std::env::current_dir().unwrap()).is_err());
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
+    }
 
     #[test]
     fn find_project_config_from_subdir() {
@@ -3698,6 +5790,82 @@ agents:
     }
 
     #[test]
+    fn remotes_parse_from_yaml() {
+        let config: Config = serde_yaml::from_str(
+            "remotes:\n  hetzner:\n    host: wm-remote-test\n    path: ~/.workmux-node-x\n    \
+             isolation: none\n    binary: /tmp/workmux\n  box:\n    host: dev@box\nplacement: hetzner\n",
+        )
+        .unwrap();
+        let hetzner = &config.remotes["hetzner"];
+        assert_eq!(hetzner.host, "wm-remote-test");
+        assert_eq!(hetzner.path.as_deref(), Some("~/.workmux-node-x"));
+        assert_eq!(hetzner.isolation, Some(RemoteIsolation::None));
+        assert_eq!(hetzner.binary.as_deref(), Some("/tmp/workmux"));
+        assert_eq!(config.remotes["box"].isolation, None);
+        assert_eq!(config.placement.as_deref(), Some("hetzner"));
+    }
+
+    #[test]
+    fn remotes_reject_unknown_keys_and_isolation() {
+        assert!(
+            serde_yaml::from_str::<Config>("remotes:\n  r:\n    host: h\n    hots: x\n").is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<Config>("remotes:\n  r:\n    host: h\n    isolation: vm\n")
+                .is_err()
+        );
+        assert!(serde_yaml::from_str::<Config>("remotes:\n  r:\n    path: ~/n\n").is_err());
+    }
+
+    #[test]
+    fn remotes_are_global_only() {
+        let remote = |host: &str| RemoteConfig {
+            host: host.into(),
+            path: None,
+            isolation: None,
+            binary: None,
+        };
+        let global = Config {
+            remotes: [("hetzner".to_string(), remote("trusted"))]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let project = Config {
+            remotes: [
+                ("hetzner".to_string(), remote("attacker")),
+                ("evil".to_string(), remote("attacker")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(merged.remotes.len(), 1);
+        assert_eq!(merged.remotes["hetzner"].host, "trusted");
+    }
+
+    #[test]
+    fn placement_project_overrides_global() {
+        let global = Config {
+            placement: Some("hetzner".into()),
+            ..Config::default()
+        };
+        let project = Config {
+            placement: Some("local".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            global.clone().merge(project).placement.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            global.merge(Config::default()).placement.as_deref(),
+            Some("hetzner")
+        );
+    }
+
+    #[test]
     fn test_sandbox_host_commands_global_only() {
         // Project config is ignored -- only global matters
         let global = sandbox_cfg(|sandbox| {
@@ -3727,6 +5895,61 @@ agents:
         let project = Config::default();
         let merged = global.merge(project);
         assert_eq!(merged.sandbox.host_commands(), &["just".to_string()]);
+    }
+
+    #[test]
+    fn container_oci_runtime_is_global_only() {
+        // oci_runtime changes the isolation boundary, so a project .workmux.yaml
+        // must not be able to override the global value.
+        let global = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let project = container_cfg(|c| c.oci_runtime = Some("runc".into()));
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), Some("kata"));
+    }
+
+    #[test]
+    fn container_cap_add_and_security_opt_are_global_only() {
+        // Capabilities / security options relax confinement, so a project
+        // .workmux.yaml must not be able to override the global values.
+        let global = container_cfg(|c| {
+            c.cap_add = Some(vec!["ALL".into()]);
+            c.security_opt = Some(vec!["seccomp=unconfined".into()]);
+        });
+        let project = container_cfg(|c| {
+            c.cap_add = Some(vec!["NET_ADMIN".into()]);
+            c.security_opt = Some(vec!["seccomp=default".into()]);
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.cap_add(), &["ALL".to_string()]);
+        assert_eq!(
+            merged.sandbox.container.security_opt(),
+            &["seccomp=unconfined".to_string()]
+        );
+    }
+
+    #[test]
+    fn container_cap_add_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = container_cfg(|c| c.cap_add = Some(vec!["ALL".into()]));
+        let merged = global.merge(project);
+        assert!(merged.sandbox.container.cap_add().is_empty());
+        assert!(merged.sandbox.container.security_opt().is_empty());
+    }
+
+    #[test]
+    fn container_oci_runtime_project_ignored_when_no_global() {
+        let global = Config::default();
+        let project = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), None);
+    }
+
+    #[test]
+    fn container_oci_runtime_uses_global() {
+        let global = container_cfg(|c| c.oci_runtime = Some("kata".into()));
+        let project = Config::default();
+        let merged = global.merge(project);
+        assert_eq!(merged.sandbox.container.oci_runtime(), Some("kata"));
     }
 
     #[test]
@@ -3863,6 +6086,33 @@ agents:
             merged.sandbox.container.excluded_files,
             Some(vec![".env".into()])
         );
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_project_overrides_global() {
+        let global = cfg(|config| {
+            config.dashboard.sort_mode = Some("priority".into());
+        });
+        let project = cfg(|config| {
+            config.dashboard.sort_mode = Some("recency".into());
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.dashboard.sort_mode.as_deref(), Some("recency"));
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_project_only_inherited() {
+        let global = Config::default();
+        let project = cfg(|config| {
+            config.dashboard.sort_mode = Some("recency".into());
+        });
+        let merged = global.merge(project);
+        assert_eq!(merged.dashboard.sort_mode.as_deref(), Some("recency"));
+    }
+
+    #[test]
+    fn test_dashboard_sort_mode_defaults_none() {
+        assert_eq!(Config::default().dashboard.sort_mode, None);
     }
 
     #[test]
@@ -4100,6 +6350,10 @@ extra_mounts:
         let home = home::home_dir().unwrap();
         assert_eq!(dir, home.join(".claude"));
         let dir = config
+            .resolved_agent_config_dir_with_env("agy", |_| None)
+            .unwrap();
+        assert_eq!(dir, home.join(".gemini/antigravity-cli"));
+        let dir = config
             .resolved_agent_config_dir_with_env("omp", |_| None)
             .unwrap();
         assert_eq!(dir, home.join(".omp/agent"));
@@ -4200,6 +6454,7 @@ container:
     fn sandbox_lima_config_merge() {
         let global = LimaConfig {
             isolation: Some(super::IsolationLevel::Shared),
+            accept_reduced_git_metadata_isolation: Some(true),
             cpus: Some(4),
             memory: Some("4GiB".to_string()),
             ..Default::default()
@@ -4217,6 +6472,17 @@ container:
         // Global fallback
         assert_eq!(merged.isolation(), super::IsolationLevel::Shared);
         assert_eq!(merged.memory(), "4GiB");
+        assert!(merged.accepts_reduced_git_metadata_isolation());
+    }
+
+    #[test]
+    fn lima_reduced_git_metadata_acceptance_defaults_to_false() {
+        let default = LimaConfig::default();
+        assert!(!default.accepts_reduced_git_metadata_isolation());
+
+        let accepted: LimaConfig =
+            serde_yaml::from_str("accept_reduced_git_metadata_isolation: true\n").unwrap();
+        assert!(accepted.accepts_reduced_git_metadata_isolation());
     }
 
     #[test]
@@ -4263,13 +6529,44 @@ container:
     }
 
     #[test]
+    fn network_max_connections_has_bounded_default() {
+        let config = NetworkConfig::default();
+        assert_eq!(
+            config.max_connections(),
+            super::DEFAULT_NETWORK_MAX_CONNECTIONS
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn network_max_connections_validation() {
+        for max_connections in [0, super::MAX_NETWORK_MAX_CONNECTIONS + 1] {
+            let config = NetworkConfig {
+                max_connections: Some(max_connections),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err());
+        }
+
+        let config = NetworkConfig {
+            max_connections: Some(64),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(config.max_connections(), 64);
+    }
+
+    #[test]
     fn network_config_global_only() {
-        let global = sandbox_network(NetworkPolicy::Deny, &["api.anthropic.com"]);
-        let project = sandbox_network(NetworkPolicy::Allow, &["evil.com"]);
+        let mut global = sandbox_network(NetworkPolicy::Deny, &["api.anthropic.com"]);
+        global.sandbox.network.max_connections = Some(64);
+        let mut project = sandbox_network(NetworkPolicy::Allow, &["evil.com"]);
+        project.sandbox.network.max_connections = Some(32);
 
         let merged = global.merge(project);
         // Global value should win
         assert_eq!(merged.sandbox.network.policy(), NetworkPolicy::Deny);
+        assert_eq!(merged.sandbox.network.max_connections(), 64);
         assert_eq!(
             merged.sandbox.network.allowed_domains(),
             &[AllowedDomainEntry::Plain("api.anthropic.com".to_string())]
@@ -4338,6 +6635,7 @@ container:
                 AllowedDomainEntry::Plain("good.com".to_string()),
                 AllowedDomainEntry::Plain("192.168.1.1".to_string()),
             ]),
+            ..Default::default()
         };
         assert!(config.validate().is_err());
     }
@@ -4351,6 +6649,7 @@ container:
                 AllowedDomainEntry::Plain("*.github.com".to_string()),
                 AllowedDomainEntry::Plain("registry.npmjs.org".to_string()),
             ]),
+            ..Default::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -4363,10 +6662,12 @@ network:
   allowed_domains:
     - api.anthropic.com
     - "*.github.com"
+  max_connections: 64
 "#;
         let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.network.policy(), NetworkPolicy::Deny);
         assert_eq!(config.network.allowed_domains().len(), 2);
+        assert_eq!(config.network.max_connections(), 64);
         assert_eq!(
             config.network.allowed_domain_rules(),
             vec![
@@ -4421,6 +6722,7 @@ network:
                 host: "*.example.com".to_string(),
                 allow_private_ips: true,
             })]),
+            ..Default::default()
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("allow_private_ips"));
@@ -4438,6 +6740,7 @@ network:
                             allow_private_ips: true,
                         },
                     )]),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -5130,6 +7433,74 @@ layouts:
     }
 
     #[test]
+    fn validate_panes_stacked_split_ok() {
+        let panes = vec![
+            pane("vim"),
+            PaneConfig {
+                command: Some("tail -f app.log".into()),
+                split: Some(SplitDirection::Stacked),
+                ..Default::default()
+            },
+        ];
+        assert!(super::validate_panes_config(&panes).is_ok());
+    }
+
+    #[test]
+    fn validate_panes_stacked_split_rejects_size() {
+        let panes = vec![
+            pane("vim"),
+            PaneConfig {
+                command: Some("tail -f app.log".into()),
+                split: Some(SplitDirection::Stacked),
+                size: Some(10),
+                ..Default::default()
+            },
+        ];
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("split: stacked"));
+    }
+
+    #[test]
+    fn validate_panes_empty_name_fails() {
+        let panes = vec![PaneConfig {
+            name: Some("  ".into()),
+            ..pane("vim")
+        }];
+
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("empty 'name'"));
+    }
+
+    #[test]
+    fn stacked_split_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+  - command: tail -f app.log
+    split: stacked
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[1].split, Some(SplitDirection::Stacked));
+    }
+
+    #[test]
+    fn pane_name_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+    name: editor
+  - command: tail -f app.log
+    name: logs
+    split: horizontal
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[0].name.as_deref(), Some("editor"));
+        assert_eq!(panes[1].name.as_deref(), Some("logs"));
+    }
+
+    #[test]
     fn zoom_deserializes_from_yaml() {
         let yaml = r#"
 panes:
@@ -5142,6 +7513,70 @@ panes:
         let panes = config.panes.unwrap();
         assert!(panes[0].zoom);
         assert!(!panes[1].zoom);
+    }
+
+    #[test]
+    fn target_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+    focus: true
+  - command: pnpm install
+    split: vertical
+    size: 15
+  - command: echo hi
+    split: horizontal
+    target: 0
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[1].size, Some(15));
+        assert_eq!(panes[2].target, Some(0));
+        assert_eq!(panes[2].size, None);
+    }
+
+    #[test]
+    fn validate_panes_target_can_reference_previous_pane() {
+        let panes = vec![
+            PaneConfig {
+                command: Some("vim".to_string()),
+                focus: true,
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("hi".to_string()),
+                split: Some(SplitDirection::Horizontal),
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("pnpm install".to_string()),
+                split: Some(SplitDirection::Vertical),
+                size: Some(15),
+                target: Some(0),
+                ..Default::default()
+            },
+        ];
+
+        assert!(super::validate_panes_config(&panes).is_ok());
+    }
+
+    #[test]
+    fn validate_panes_target_must_reference_existing_pane() {
+        let panes = vec![
+            PaneConfig {
+                command: Some("nvim".to_string()),
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some("make install".to_string()),
+                split: Some(SplitDirection::Vertical),
+                target: Some(1),
+                ..Default::default()
+            },
+        ];
+
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("invalid target 1"));
     }
 
     #[test]
@@ -5162,6 +7597,48 @@ panes:
             "error should mention layout name: {}",
             err
         );
+    }
+
+    #[test]
+    fn merge_sidebar_templates_inherits_unset_fields() {
+        let mut global = Config::default();
+        global.sidebar.templates = Some(crate::config::TemplatesConfig {
+            compact: Some("{primary}".into()),
+            tiles: Some(vec!["{primary}".into()]),
+            horizontal: Some(vec!["{secondary}".into()]),
+            grouped: Some(crate::config::GroupedTemplatesConfig {
+                header: Some("{group}".into()),
+                tiles: Some(vec!["{primary}".into()]),
+                ..Default::default()
+            }),
+        });
+        let mut project = Config::default();
+        project.sidebar.templates = Some(crate::config::TemplatesConfig {
+            grouped: Some(crate::config::GroupedTemplatesConfig {
+                tiles: Some(vec!["{pane_title}".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let templates = global.merge(project).sidebar.templates.unwrap();
+        assert_eq!(templates.compact.as_deref(), Some("{primary}"));
+        assert_eq!(templates.tiles, Some(vec!["{primary}".to_string()]));
+        assert_eq!(templates.horizontal, Some(vec!["{secondary}".to_string()]));
+
+        // The grouped block merges per field too, so overriding its rows keeps
+        // the inherited header.
+        let grouped = templates.grouped.unwrap();
+        assert_eq!(grouped.header.as_deref(), Some("{group}"));
+        assert_eq!(grouped.tiles, Some(vec!["{pane_title}".to_string()]));
+    }
+
+    #[test]
+    fn sidebar_grouping_and_sort_reject_unknown_values() {
+        let error = serde_yaml::from_str::<Config>("sidebar:\n  group_by: proj\n").unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+        let error = serde_yaml::from_str::<Config>("sidebar:\n  sort: urgency\n").unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

@@ -1,0 +1,43 @@
+---
+import DefaultPageTitle from '@astrojs/starlight/components/PageTitle.astro';
+import CopyPageButton from './CopyPageButton.astro';
+const isHomepage = Astro.url.pathname === '/';
+const isNotFound = Astro.locals.starlightRoute.entry.id.endsWith('404');
+---
+
+{
+  !isHomepage && (
+    <div class="page-title-row">
+      <DefaultPageTitle />
+      {!isNotFound && <CopyPageButton />}
+    </div>
+  )
+}
+
+<style>
+  .page-title-row {
+    display: flex;
+    gap: 1rem;
+    align-items: start;
+    justify-content: space-between;
+  }
+
+  .page-title-row :global(h1) {
+    min-width: 0;
+  }
+
+  .page-title-row :global(.copy-page) {
+    flex: 0 0 auto;
+    margin-top: 1.2rem;
+  }
+
+  @media (max-width: 30rem) {
+    .page-title-row {
+      display: block;
+    }
+
+    .page-title-row :global(.copy-page) {
+      margin-top: 0.75rem;
+    }
+  }
+</style>

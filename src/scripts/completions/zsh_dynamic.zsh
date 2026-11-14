@@ -61,6 +61,7 @@ _workmux() {
                 --foreach
                 --branch-template
                 --pr
+                --forge
                 # Note: --base is excluded because it needs dynamic completion
             )
             ;;

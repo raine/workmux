@@ -1,0 +1,57 @@
+.expressive-code {
+  --ec-brdRad: 0.6rem;
+  --ec-codeFontSize: 0.9rem;
+  --ec-codeLineHt: 1.6;
+  --ec-codePadBlk: 0.8rem;
+  --ec-codePadInl: 0.95rem;
+  --ec-frm-frameBoxShdCssVal: none;
+  margin-block: 1rem;
+}
+
+.expressive-code .frame {
+  border-radius: var(--ec-brdRad) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .expressive-code .frame pre {
+  border: 1px solid color-mix(in srgb, var(--sl-color-gray-5) 72%, transparent) !important;
+  border-radius: var(--ec-brdRad) !important;
+  background: color-mix(
+    in srgb,
+    var(--sl-color-gray-7) 88%,
+    var(--sl-color-bg)
+  ) !important;
+}
+
+.expressive-code .frame.is-terminal .header {
+  display: none !important;
+}
+
+:root[data-theme="dark"] .expressive-code .frame pre {
+  border: 1px solid #27564f !important;
+  border-radius: var(--ec-brdRad) !important;
+  background: #101b1d !important;
+  overflow-x: auto !important;
+  scrollbar-width: thin;
+}
+
+.expressive-code .frame.is-terminal pre code {
+  border-radius: inherit !important;
+}
+
+.expressive-code .ec-line .code {
+  padding-inline-start: calc(
+    var(--ecIndent, 0ch) + var(--ec-codePadInl) - var(--ecGtrBrdWd)
+  );
+  overflow-wrap: normal !important;
+  white-space: pre !important;
+}
+
+.expressive-code .copy {
+  inset-block-start: 0.45rem !important;
+  inset-inline-end: 0.45rem !important;
+}
+
+.expressive-code .copy button {
+  border-radius: 0.4rem !important;
+}

@@ -35,8 +35,11 @@ For each task:
 The prompt file should:
 
 - Include the full task description
-- Use RELATIVE paths only (never absolute paths, since each worktree has its own
-  root directory)
+- Use relative paths for files inside the repository, since each worktree has
+  its own root directory
+- Preserve user-provided attachment paths verbatim, including absolute paths to
+  screenshots or other files outside the repository, and tell the agent to
+  inspect them
 - Be specific about what the agent should accomplish
 
 ## Skill delegation
@@ -59,6 +62,17 @@ Do NOT write detailed implementation steps when a skill is specified — the ski
 handles that.
 
 ## Flags
+
+**`-a <model>` / `--agent <model>`**: Select the agent for the worktree. Remove
+this flag and its value from the task description, and pass them to every
+`workmux add` command as `--agent <model>`. This flag configures workmux and must
+not appear in the implementation prompt.
+
+For example, `/skill:worktree -a gemini implement feature X` runs:
+
+```bash
+workmux add feature-x -b -P <prompt-file> --agent gemini
+```
 
 **`--merge`**: When passed, add instruction to use `/merge` skill at the end to
 commit, rebase, and merge the branch.
@@ -97,19 +111,17 @@ For each target project:
 
 1. Use the project path provided by the user, or the project path already present
    in the conversation. Do not explore that repository.
-2. Derive the default tmux session name from the repository directory basename.
+2. Derive the parent tmux session name from the repository directory basename.
    For `/Users/me/code/api-server`, use `api-server`.
-3. Check whether a tmux session already exists for that project with
-   `tmux list-sessions -F '#{session_name} #{session_path}'`. Prefer a session
-   whose path matches the target project. Otherwise use the derived session name.
-4. If no session exists, create one with `tmux new-session -d -s <session> -c
-   <project-path>`.
-5. Run `workmux add` from that project's tmux session by creating a window rooted
-   at the project path:
+3. Run `workmux add` with its working directory set to the target project and
+   pass `--parent-session <session>`. Workmux creates that parent session when it
+   does not exist, so do not bootstrap dispatch with `tmux new-window` or
+   `tmux new-session`.
 
 ```bash
-tmux new-window -t <session> -c <project-path> \
-  "workmux add <worktree-name> -b -P <prompt-file>; exit"
+# Run with the command working directory set to <project-path>
+workmux add <worktree-name> -b -P <prompt-file> \
+  --parent-session <session>
 ```
 
 If a task touches both the current repository and another repository, create one
@@ -127,9 +139,12 @@ Write ALL temp files first, THEN run all workmux commands.
 
 **IMPORTANT:** For same-repository tasks, run `workmux add` from the CURRENT
 directory. Do NOT `cd` to the main repo or any other directory. The new worktree
-branches from whatever branch is checked out in the current directory. For
-cross-project tasks, run `workmux add` inside the target project's tmux session
-as described above.
+branches from whatever branch is checked out in the current directory. The
+working directory and tmux session are independent. Background and agent tool
+invocations can omit `$TMUX_PANE`, so pass `--parent-session` whenever dispatch
+must land in a specific session. For cross-project tasks, set the command working
+directory to the target project and pass its session with `--parent-session` as
+described above.
 
 Step 1 - Write all prompt files (in parallel):
 

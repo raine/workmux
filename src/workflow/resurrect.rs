@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tracing::info;
 
-use crate::agent_identity::AgentKind;
 use crate::config::{self, MuxMode};
 use crate::git;
-use crate::multiplexer::{self, Multiplexer};
-use crate::state::{AgentState, PaneKey, StateStore};
+use crate::multiplexer::Multiplexer;
+#[cfg(test)]
+use crate::state::PaneKey;
+use crate::state::store::RecoveryAgentChoice;
+use crate::state::{AgentState, AgentStateSource, ResurrectionAgentState, StateStore};
 use crate::util::canon_or_self;
 
 #[derive(Debug)]
@@ -22,53 +24,39 @@ pub enum ResurrectAction {
 pub struct ResurrectCandidate {
     pub handle: String,
     pub action: ResurrectAction,
-    pub stale_pane_keys: Vec<PaneKey>,
+    pub stale_sources: Vec<AgentStateSource>,
     pub mode: MuxMode,
     pub agent: Option<String>,
 }
 
+/// A remote workspace whose local window the previous server had.
+#[derive(Debug)]
+pub struct RemoteResurrectCandidate {
+    pub record: crate::remote::cache::WorkspaceRecord,
+    pub action: ResurrectAction,
+    pub stale_sources: Vec<AgentStateSource>,
+}
+
 pub struct ResurrectPlan {
     pub candidates: Vec<ResurrectCandidate>,
+    pub remote: Vec<RemoteResurrectCandidate>,
+    /// Sources of panes that relayed remote workspaces which no longer
+    /// exist; nothing restores them.
+    pub forgotten_remote_sources: Vec<AgentStateSource>,
     pub unmatched_states: usize,
 }
 
-type ResurrectAgentChoice = (String, u64, u8);
-type ResurrectHandleState = (MuxMode, Option<ResurrectAgentChoice>, Vec<PaneKey>);
+type ResurrectHandleState = (MuxMode, Option<RecoveryAgentChoice>, Vec<AgentStateSource>);
 
-fn resurrect_agent(agent: &AgentState) -> Option<(String, u8)> {
-    if let Some(kind) = agent.agent_kind.as_deref()
-        && AgentKind::from_str(kind).is_some()
-    {
-        return Some((kind.to_string(), 1));
-    }
-
-    let profile = multiplexer::agent::resolve_profile(Some(&agent.command));
-    if profile.name() != "default" {
-        return Some((profile.name().to_string(), 0));
-    }
-
-    None
-}
-
-fn update_selected_agent(selected: &mut Option<ResurrectAgentChoice>, agent: &AgentState) {
-    let Some((command, source_rank)) = resurrect_agent(agent) else {
+fn update_selected_agent(selected: &mut Option<RecoveryAgentChoice>, agent: &AgentState) {
+    let Some(candidate) = RecoveryAgentChoice::from_state(agent) else {
         return;
     };
-    let restored_agent = (command, agent.updated_ts, source_rank);
-
-    let should_replace = match selected.as_ref() {
-        None => true,
-        Some((selected_command, selected_ts, selected_rank)) => {
-            restored_agent.1 > *selected_ts
-                || (restored_agent.1 == *selected_ts
-                    && (restored_agent.2 > *selected_rank
-                        || (restored_agent.2 == *selected_rank
-                            && restored_agent.0 < *selected_command)))
-        }
-    };
-
-    if should_replace {
-        *selected = Some(restored_agent);
+    if selected
+        .as_ref()
+        .is_none_or(|current| candidate.preferred_over(current))
+    {
+        *selected = Some(candidate);
     }
 }
 
@@ -78,24 +66,13 @@ fn update_selected_agent(selected: &mut Option<ResurrectAgentChoice>, agent: &Ag
 /// existing git worktrees and live multiplexer state to determine which
 /// worktrees need restoration.
 pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> {
-    let all_agents = store.list_all_agents()?;
     let backend = mux.name();
     let instance = mux.instance_id();
-
-    info!(
-        total_state_files = all_agents.len(),
-        backend, instance, "resurrect:plan loading agent state files"
-    );
-
-    // Filter to current backend/instance
-    let relevant: Vec<_> = all_agents
-        .into_iter()
-        .filter(|a| a.pane_key.backend == backend && a.pane_key.instance == instance)
-        .collect();
+    let relevant = store.resurrection_snapshot(backend, &instance)?;
 
     info!(
         relevant_count = relevant.len(),
-        "resurrect:plan filtered to current backend/instance"
+        backend, instance, "resurrect:plan loading agent state"
     );
 
     // Get worktrees for current repo
@@ -128,9 +105,24 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
 
     // Group agent states by matched worktree handle
     let mut by_handle: HashMap<String, ResurrectHandleState> = HashMap::new();
+    let mut by_workspace: HashMap<(String, String), Vec<AgentStateSource>> = HashMap::new();
     let mut unmatched_states = 0usize;
 
-    for agent in relevant {
+    for stored in relevant {
+        let ResurrectionAgentState {
+            state: agent,
+            source,
+            represented_count,
+        } = stored;
+        // Panes relaying a remote workspace come back as attach windows, not
+        // through local worktrees.
+        if let Some(at) = &agent.remote {
+            by_workspace
+                .entry((at.remote.clone(), at.ws_id.clone()))
+                .or_default()
+                .push(source);
+            continue;
+        }
         let canon_agent = canon_or_self(&agent.workdir);
 
         // Find matching worktree using descendant path matching
@@ -140,6 +132,9 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
             .find(|(canon_wt, _)| canon_agent == *canon_wt || canon_agent.starts_with(canon_wt));
 
         match matched {
+            Some((_canon_wt, handle)) if !git::get_worktree_attachment(handle).manages_mux() => {
+                unmatched_states += 1;
+            }
             Some((_canon_wt, handle)) => {
                 info!(
                     pane_id = %agent.pane_key.pane_id,
@@ -154,7 +149,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
                     .entry(handle.clone())
                     .or_insert_with(|| (mode, None, Vec::new()));
                 update_selected_agent(&mut entry.1, &agent);
-                entry.2.push(agent.pane_key);
+                entry.2.push(source);
             }
             None => {
                 info!(
@@ -162,7 +157,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
                     workdir = %agent.workdir.display(),
                     "resurrect:plan no matching worktree (other project or removed)"
                 );
-                unmatched_states += 1;
+                unmatched_states = unmatched_states.saturating_add(represented_count);
             }
         }
     }
@@ -179,9 +174,26 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
         let action = if canon_wt == canon_main {
             ResurrectAction::SkipMain
         } else {
-            let prefixed = crate::multiplexer::util::prefixed(prefix, &handle);
+            let target_name = if mode == MuxMode::Session {
+                git::get_worktree_target_session(&handle).unwrap_or_else(|| handle.clone())
+            } else {
+                git::get_worktree_target_window(&handle).unwrap_or_else(|| handle.clone())
+            };
+            let prefixed = crate::multiplexer::util::prefixed(prefix, &target_name);
             let is_open = if mode == MuxMode::Session {
                 mux_sessions.contains(&prefixed)
+            } else if mux.supports_window_ownership() {
+                match git::get_worktree_window_token(&handle) {
+                    Some(token) => !mux
+                        .resolve_owned_window_targets(
+                            &token,
+                            &prefixed,
+                            git::get_worktree_window_session(&handle).as_deref(),
+                            &canon_wt,
+                        )?
+                        .is_empty(),
+                    None => mux_windows.contains(&prefixed),
+                }
             } else {
                 mux_windows.contains(&prefixed)
             };
@@ -192,7 +204,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
             }
         };
 
-        let agent = agent.map(|(command, _updated_ts, _source_rank)| command);
+        let agent = agent.map(|choice| choice.command);
 
         info!(
             handle,
@@ -206,7 +218,7 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
         candidates.push(ResurrectCandidate {
             handle,
             action,
-            stale_pane_keys: pane_keys,
+            stale_sources: pane_keys,
             mode,
             agent,
         });
@@ -215,10 +227,57 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
     // Sort by handle for deterministic output
     candidates.sort_by(|a, b| a.handle.cmp(&b.handle));
 
+    let (remote, forgotten_remote_sources) = plan_remote(by_workspace, &canon_main, mux)?;
+
     Ok(ResurrectPlan {
         candidates,
+        remote,
+        forgotten_remote_sources,
         unmatched_states,
     })
+}
+
+/// Attach windows to recreate for this repository's remote workspaces,
+/// from the cache alone: the node is not asked, so nothing restarts.
+fn plan_remote(
+    by_workspace: HashMap<(String, String), Vec<AgentStateSource>>,
+    canon_main: &std::path::Path,
+    mux: &dyn Multiplexer,
+) -> Result<(Vec<RemoteResurrectCandidate>, Vec<AgentStateSource>)> {
+    if by_workspace.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let records = crate::remote::cache::all();
+    let mut candidates = Vec::new();
+    let mut forgotten = Vec::new();
+    for ((remote, ws_id), sources) in by_workspace {
+        let record = records
+            .iter()
+            .find(|record| record.remote == remote && record.ws_id == ws_id);
+        let Some(record) = record else {
+            forgotten.extend(sources);
+            continue;
+        };
+        if canon_or_self(&record.project_root) != canon_main {
+            continue;
+        }
+        if record.execution.is_none() {
+            forgotten.extend(sources);
+            continue;
+        }
+        let action = if crate::remote::lifecycle::window_target(mux, record)?.is_some() {
+            ResurrectAction::SkipAlreadyOpen
+        } else {
+            ResurrectAction::Restore
+        };
+        candidates.push(RemoteResurrectCandidate {
+            record: record.clone(),
+            action,
+            stale_sources: sources,
+        });
+    }
+    candidates.sort_by(|a, b| a.record.handle.cmp(&b.record.handle));
+    Ok((candidates, forgotten))
 }
 
 #[cfg(test)]
@@ -235,6 +294,7 @@ mod tests {
             workdir: PathBuf::from("/repo/worktree"),
             status: None,
             status_ts: None,
+            activity_ts: Some(updated_ts),
             pane_title: None,
             pane_pid: 12345,
             command: command.to_string(),
@@ -243,6 +303,9 @@ mod tests {
             session_name: None,
             boot_id: None,
             agent_kind: agent_kind.map(|kind| kind.to_string()),
+            agent_session_id: None,
+            prompt: None,
+            remote: None,
         }
     }
 
@@ -250,21 +313,27 @@ mod tests {
     fn resurrect_agent_prefers_valid_agent_kind() {
         let state = test_agent_state("node", Some("codex"), 1);
 
-        assert_eq!(resurrect_agent(&state), Some(("codex".to_string(), 1)));
+        assert_eq!(
+            RecoveryAgentChoice::from_state(&state).map(|choice| choice.command),
+            Some("codex".to_string())
+        );
     }
 
     #[test]
     fn resurrect_agent_uses_known_foreground_command() {
         let state = test_agent_state("codex --yolo", None, 1);
 
-        assert_eq!(resurrect_agent(&state), Some(("codex".to_string(), 0)));
+        assert_eq!(
+            RecoveryAgentChoice::from_state(&state).map(|choice| choice.command),
+            Some("codex".to_string())
+        );
     }
 
     #[test]
     fn resurrect_agent_ignores_unknown_foreground_command() {
         let state = test_agent_state("node", None, 1);
 
-        assert_eq!(resurrect_agent(&state), None);
+        assert_eq!(RecoveryAgentChoice::from_state(&state), None);
     }
 
     #[test]
@@ -278,18 +347,24 @@ mod tests {
         update_selected_agent(&mut selected, &newer_invalid);
         update_selected_agent(&mut selected, &newer);
 
-        assert_eq!(selected, Some(("codex".to_string(), 20, 0)));
+        assert_eq!(
+            selected.map(|choice| choice.command),
+            Some("codex".to_string())
+        );
     }
 
     #[test]
     fn update_selected_agent_breaks_ties_deterministically() {
         let command_state = test_agent_state("codex", None, 10);
-        let kind_state = test_agent_state("node", Some("claude"), 10);
+        let kind_state = test_agent_state("node", Some("pi"), 10);
         let mut selected = None;
 
         update_selected_agent(&mut selected, &command_state);
         update_selected_agent(&mut selected, &kind_state);
 
-        assert_eq!(selected, Some(("claude".to_string(), 10, 1)));
+        assert_eq!(
+            selected.map(|choice| choice.command),
+            Some("pi".to_string())
+        );
     }
 }

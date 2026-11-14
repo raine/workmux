@@ -5,9 +5,9 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
 use crate::agent_setup::hooks;
 use crate::agent_setup::json_config::{
     self, EmptyJsonRoot, JsonHookInstallSpec, JsonHookUninstallSpec,
@@ -43,14 +43,18 @@ pub fn detect() -> Option<&'static str> {
 /// Check if workmux hooks are installed in Claude Code settings.
 ///
 /// Checks two paths:
-/// 1. Plugin: `enabledPlugins` has a key starting with `workmux-status@`
-///    (regardless of enabled/disabled -- user knows about it)
-/// 2. Manual hooks: `hooks` object contains a command with `workmux set-window-status`
+/// 1. Plugin: `enabledPlugins` has an enabled key starting with `workmux-status@`
+/// 2. Manual hooks: `hooks` contains the complete workmux integration
 pub fn check() -> Result<StatusCheck> {
-    let Some(path) = settings_path() else {
+    let Some(dir) = claude_dir() else {
         return Ok(StatusCheck::NotInstalled);
     };
+    check_dir(&dir)
+}
 
+/// [`check`] for the Claude config directory `dir`.
+pub(crate) fn check_dir(dir: &Path) -> Result<StatusCheck> {
+    let path = dir.join("settings.json");
     if !path.exists() {
         return Ok(StatusCheck::NotInstalled);
     }
@@ -68,14 +72,20 @@ pub fn check() -> Result<StatusCheck> {
 fn check_settings(settings: &Value) -> StatusCheck {
     // Check for plugin installation
     if let Some(plugins) = settings.get("enabledPlugins").and_then(|v| v.as_object())
-        && plugins.keys().any(|k| k.starts_with("workmux-status@"))
+        && plugins
+            .iter()
+            .any(|(key, enabled)| key.starts_with("workmux-status@") && enabled == true)
     {
         return StatusCheck::Installed;
     }
 
-    // Check for manual hooks by traversing the hooks structure
-    if hooks::has_workmux_hooks(settings) {
+    // Manual installations must contain every bundled command in its event and matcher scope.
+    let required_hooks = load_hooks_from_plugin().expect("embedded Claude hooks are valid");
+    if hooks::has_required_hook_commands(settings, &required_hooks) {
         return StatusCheck::Installed;
+    }
+    if hooks::has_workmux_hooks(settings) {
+        return StatusCheck::UpdateAvailable;
     }
 
     StatusCheck::NotInstalled
@@ -114,15 +124,37 @@ fn load_hooks_from_plugin() -> Result<Value> {
     json_config::hooks_from_embedded(PLUGIN_JSON, "plugin.json missing hooks key")
 }
 
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = settings_path().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let content =
+        std::fs::read_to_string(&path).context("Failed to read ~/.claude/settings.json")?;
+    let installed: Value =
+        serde_json::from_str(&content).context("~/.claude/settings.json is not valid JSON")?;
+    let mut bundled = installed.clone();
+    hooks::merge_missing_hook_commands(&mut bundled, &load_hooks_from_plugin()?)?;
+
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: serde_json::to_string_pretty(&installed)? + "\n",
+        bundled: serde_json::to_string_pretty(&bundled)? + "\n",
+    }))
+}
+
 /// Install workmux hooks into `~/.claude/settings.json`.
 ///
 /// Merges hook groups into existing hooks without clobbering or creating
 /// duplicates. Returns a description of what was done.
 pub fn install() -> Result<String> {
-    let path =
-        settings_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let dir = claude_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    install_dir(&dir)
+}
 
-    json_config::json_hook_install(
+/// [`install`] into the Claude config directory `dir`.
+pub(crate) fn install_dir(dir: &Path) -> Result<String> {
+    let path = dir.join("settings.json");
+    json_config::json_hook_install_with(
         &path,
         &load_hooks_from_plugin()?,
         &JsonHookInstallSpec {
@@ -132,6 +164,7 @@ pub fn install() -> Result<String> {
             mkdir_context: "Failed to create ~/.claude/ directory",
             empty_root: EmptyJsonRoot::Object,
         },
+        hooks::merge_missing_hook_commands,
     )?;
 
     Ok(format!("Installed hooks to {}", path.display()))
@@ -146,6 +179,11 @@ mod tests {
     fn test_load_hooks_from_plugin() {
         let hooks = load_hooks_from_plugin().unwrap();
         let obj = hooks.as_object().unwrap();
+        assert!(obj.contains_key("SessionStart"));
+        assert_eq!(
+            obj["SessionStart"][0]["matcher"],
+            "startup|resume|clear|fork"
+        );
         assert!(obj.contains_key("UserPromptSubmit"));
         assert!(obj.contains_key("Notification"));
         assert!(obj.contains_key("PostToolUse"));
@@ -193,7 +231,10 @@ mod tests {
                 "workmux-status@workmux": false
             }
         });
-        assert!(matches!(check_settings(&settings), StatusCheck::Installed));
+        assert!(matches!(
+            check_settings(&settings),
+            StatusCheck::NotInstalled
+        ));
     }
 
     #[test]
@@ -220,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_settings_hooks_installed() {
+    fn test_check_settings_status_hooks_without_registration_need_upgrade() {
         let settings = json!({
             "hooks": {
                 "Stop": [{
@@ -231,7 +272,63 @@ mod tests {
                 }]
             }
         });
+        assert!(matches!(
+            check_settings(&settings),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn test_check_settings_incomplete_hooks_need_upgrade() {
+        let settings = json!({
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "workmux register-agent"
+                    }]
+                }],
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "workmux set-window-status done"
+                    }]
+                }]
+            }
+        });
+        assert!(matches!(
+            check_settings(&settings),
+            StatusCheck::UpdateAvailable
+        ));
+    }
+
+    #[test]
+    fn test_check_settings_complete_hooks_installed_with_user_hooks() {
+        let required = load_hooks_from_plugin().unwrap();
+        let mut settings = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "afplay /System/Library/Sounds/Glass.aiff"
+                    }]
+                }]
+            }
+        });
+        hooks::merge_missing_hook_commands(&mut settings, &required).unwrap();
+
+        let workmux_stop = settings["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .pop()
+            .unwrap();
+        settings["hooks"]["Stop"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(workmux_stop["hooks"][0].clone());
+
         assert!(matches!(check_settings(&settings), StatusCheck::Installed));
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -26,11 +26,13 @@ pub enum AgentKind {
     Codex,
     OpenCode,
     Gemini,
+    Antigravity,
     Pi,
     Omp,
     KiroCli,
     Vibe,
     Copilot,
+    Grok,
 }
 
 impl AgentKind {
@@ -42,11 +44,13 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::OpenCode => "opencode",
             AgentKind::Gemini => "gemini",
+            AgentKind::Antigravity => "agy",
             AgentKind::Pi => "pi",
             AgentKind::Omp => "omp",
             AgentKind::KiroCli => "kiro-cli",
             AgentKind::Vibe => "vibe",
             AgentKind::Copilot => "copilot",
+            AgentKind::Grok => "grok",
         }
     }
 
@@ -57,11 +61,13 @@ impl AgentKind {
             "codex" => Some(AgentKind::Codex),
             "opencode" => Some(AgentKind::OpenCode),
             "gemini" => Some(AgentKind::Gemini),
+            "agy" => Some(AgentKind::Antigravity),
             "pi" => Some(AgentKind::Pi),
             "omp" => Some(AgentKind::Omp),
             "kiro-cli" => Some(AgentKind::KiroCli),
             "vibe" => Some(AgentKind::Vibe),
             "copilot" => Some(AgentKind::Copilot),
+            "grok" => Some(AgentKind::Grok),
             _ => None,
         }
     }
@@ -74,11 +80,13 @@ impl AgentKind {
             AgentKind::Codex => "CX",
             AgentKind::OpenCode => "OC",
             AgentKind::Gemini => "G",
+            AgentKind::Antigravity => "⋂",
             AgentKind::Pi => "π",
             AgentKind::Omp => "⌥",
             AgentKind::KiroCli => "K",
             AgentKind::Vibe => "V",
             AgentKind::Copilot => "CP",
+            AgentKind::Grok => "GK",
         }
     }
 
@@ -90,11 +98,13 @@ impl AgentKind {
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Gemini => "Gemini",
+            AgentKind::Antigravity => "Antigravity",
             AgentKind::Pi => "Pi",
             AgentKind::Omp => "Oh My Pi",
             AgentKind::KiroCli => "Kiro",
             AgentKind::Vibe => "Vibe",
             AgentKind::Copilot => "Copilot",
+            AgentKind::Grok => "Grok",
         }
     }
 
@@ -109,12 +119,14 @@ impl AgentKind {
             AgentKind::Claude => Color::Rgb(0xd9, 0x77, 0x57),
             AgentKind::Codex => Color::Rgb(0x10, 0xa3, 0x7f),
             AgentKind::Gemini => Color::Rgb(0x07, 0x8e, 0xfa),
+            AgentKind::Antigravity => Color::Rgb(0x89, 0x57, 0xe5),
             AgentKind::Copilot => Color::Rgb(0x89, 0x57, 0xe5),
             AgentKind::Vibe => Color::Rgb(0xff, 0x82, 0x05),
             AgentKind::Pi => Color::Rgb(0x96, 0xbb, 0xb5),
             AgentKind::Omp => Color::Rgb(0xe0, 0x57, 0x35),
             AgentKind::OpenCode => Color::Blue,
             AgentKind::KiroCli => return None,
+            AgentKind::Grok => Color::Rgb(0x1d, 0x9b, 0xf0),
         })
     }
 }
@@ -258,17 +270,29 @@ mod tests {
     }
 
     #[test]
+    fn grok_command_matches() {
+        assert_eq!(classify("grok", ""), Some("grok".into()));
+        assert_eq!(classify("/usr/local/bin/grok", ""), Some("grok".into()));
+        assert_eq!(classify("grok", "anything"), Some("grok".into()));
+        assert_eq!(classify("grok-build", ""), None);
+        assert_eq!(classify("grokster", ""), None);
+    }
+
+    #[test]
     fn direct_stem_matches_for_known_binaries() {
         assert_eq!(classify("claude", ""), Some("claude".into()));
         assert_eq!(classify("gemini", ""), Some("gemini".into()));
+        assert_eq!(classify("agy", ""), Some("agy".into()));
         assert_eq!(classify("pi", ""), Some("pi".into()));
         assert_eq!(classify("omp", ""), Some("omp".into()));
         assert_eq!(classify("vibe", ""), Some("vibe".into()));
+        assert_eq!(classify("grok", ""), Some("grok".into()));
     }
 
     #[test]
     fn absolute_path_is_normalized() {
         assert_eq!(classify("/usr/local/bin/claude", ""), Some("claude".into()));
+        assert_eq!(classify("/usr/bin/agy", ""), Some("agy".into()));
         assert_eq!(classify("/opt/codex-aarch64-a", ""), Some("codex".into()));
     }
 
@@ -376,6 +400,7 @@ mod tests {
             AgentKind::KiroCli,
             AgentKind::Vibe,
             AgentKind::Copilot,
+            AgentKind::Grok,
         ];
         for kind in all {
             assert!(!kind.default_icon().is_empty(), "{:?} icon empty", kind);

@@ -4,11 +4,13 @@
 //! hooks are installed, and offers to install them. Used by both the
 //! `workmux setup` command and the first-run wizard.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod extension_file;
 pub mod gemini;
+pub mod grok;
 pub mod hooks;
 pub mod json_config;
 pub mod omp;
@@ -18,21 +20,25 @@ pub mod pi;
 use anyhow::{Context, Result};
 use console::style;
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
 use std::fs;
 
 use crate::ui::confirm::{self, ConfirmDefault};
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// An agent that supports status tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
+    #[serde(rename = "agy")]
+    Antigravity,
     Claude,
     Codex,
     Copilot,
     Gemini,
+    Grok,
     OpenCode,
     Pi,
     #[serde(rename = "omp")]
@@ -42,10 +48,12 @@ pub enum Agent {
 impl Agent {
     pub fn name(&self) -> &'static str {
         match self {
+            Agent::Antigravity => "Antigravity CLI",
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Copilot => "Copilot CLI",
             Agent::Gemini => "Gemini CLI",
+            Agent::Grok => "Grok",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "pi",
             Agent::Omp => "Oh My Pi",
@@ -56,10 +64,12 @@ impl Agent {
     /// even when the agent CLI is no longer detected.
     pub fn all() -> Vec<Agent> {
         vec![
+            Agent::Antigravity,
             Agent::Claude,
             Agent::Codex,
             Agent::Copilot,
             Agent::Gemini,
+            Agent::Grok,
             Agent::OpenCode,
             Agent::Pi,
             Agent::Omp,
@@ -72,6 +82,8 @@ impl Agent {
 pub enum StatusCheck {
     /// Hooks are installed and working.
     Installed,
+    /// Hooks are installed but differ from the bundled integration.
+    UpdateAvailable,
     /// Hooks are not installed.
     NotInstalled,
     /// Could not determine status (e.g., invalid JSON in settings file).
@@ -86,10 +98,164 @@ pub struct AgentCheck {
     pub status: StatusCheck,
 }
 
+pub(crate) struct UpdatePreview {
+    pub label: String,
+    pub installed: String,
+    pub bundled: String,
+}
+
+pub(crate) fn print_update_diff(agent: Agent) {
+    let preview = match agent {
+        Agent::Antigravity => antigravity::update_preview(),
+        Agent::Claude => claude::update_preview(),
+        Agent::Codex => codex::update_preview(),
+        Agent::Copilot => copilot::update_preview(),
+        Agent::Gemini => gemini::update_preview(),
+        Agent::Grok => grok::update_preview(),
+        Agent::OpenCode => opencode::update_preview(),
+        Agent::Pi => pi::update_preview(),
+        Agent::Omp => omp::update_preview(),
+    };
+    let Ok(Some(preview)) = preview else {
+        return;
+    };
+
+    let diff = TextDiff::from_lines(&preview.installed, &preview.bundled);
+    let additions = diff
+        .iter_all_changes()
+        .filter(|change| change.tag() == ChangeTag::Insert)
+        .count();
+    let deletions = diff
+        .iter_all_changes()
+        .filter(|change| change.tag() == ChangeTag::Delete)
+        .count();
+    let line_number_width = preview
+        .installed
+        .lines()
+        .count()
+        .max(preview.bundled.lines().count())
+        .to_string()
+        .len();
+
+    let groups = diff.grouped_ops(3);
+    let first_changed_line = groups
+        .first()
+        .into_iter()
+        .flat_map(|group| group.iter())
+        .flat_map(|op| diff.iter_changes(op))
+        .find(|change| change.tag() != ChangeTag::Equal)
+        .and_then(|change| change.new_index().or_else(|| change.old_index()))
+        .map(|index| index + 1)
+        .unwrap_or(1);
+
+    println!();
+    println!(
+        "  {} {} {}",
+        style("●").yellow(),
+        style("Update").bold(),
+        style(&preview.label).cyan()
+    );
+    println!(
+        "  {} {} {} [{}{}] {}",
+        style("├─").dim(),
+        style(format!("+{additions}")).green(),
+        style(format!("-{deletions}")).red(),
+        style("━".repeat(additions.min(12))).green(),
+        style("━".repeat(deletions.min(12))).red(),
+        style(format!("at line {first_changed_line}")).dim(),
+    );
+    println!("  {}", style("│").dim());
+
+    for (group_index, group) in groups.iter().enumerate() {
+        if group_index > 0 {
+            let first_changed_line = group
+                .iter()
+                .flat_map(|op| diff.iter_changes(op))
+                .find(|change| change.tag() != ChangeTag::Equal)
+                .and_then(|change| change.new_index().or_else(|| change.old_index()))
+                .map(|index| index + 1)
+                .unwrap_or(1);
+            println!("  {}", style("│").dim());
+            println!(
+                "  {} {}",
+                style("├─").dim(),
+                style(format!("at line {first_changed_line}")).dim()
+            );
+            println!("  {}", style("│").dim());
+        }
+
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let line = change.value().trim_end_matches('\n');
+                let line_number = change
+                    .new_index()
+                    .or_else(|| change.old_index())
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let prefix = match change.tag() {
+                    ChangeTag::Insert => format!("{line_number:>line_number_width$}+"),
+                    ChangeTag::Delete => format!("{line_number:>line_number_width$}-"),
+                    ChangeTag::Equal => format!("{line_number:>line_number_width$} "),
+                };
+                match change.tag() {
+                    ChangeTag::Insert => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).green(),
+                        style(format!(" {line}"))
+                            .color256(252)
+                            .on_true_color(0, 48, 0)
+                    ),
+                    ChangeTag::Delete => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).red(),
+                        style(format!(" {line}"))
+                            .color256(252)
+                            .on_true_color(64, 16, 16)
+                    ),
+                    ChangeTag::Equal => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).dim(),
+                        style(line).dim()
+                    ),
+                }
+            }
+        }
+    }
+    println!("  {}", style("└─").dim());
+    println!();
+}
+
+fn resolved_install_target(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
+}
+
+fn same_install_target(first: Option<&Path>, second: Option<&Path>) -> bool {
+    first.zip(second).is_some_and(|(first, second)| {
+        resolved_install_target(first) == resolved_install_target(second)
+    })
+}
+
 /// Detect all known agents and check their status tracking.
 ///
 /// Never fails globally -- per-agent errors are captured in `StatusCheck::Error`.
 pub fn check_all() -> Vec<AgentCheck> {
+    check_all_with_opencode_check(opencode::check)
+}
+
+/// Check integrations for explicit setup, including OpenCode version detection.
+pub fn check_all_for_setup() -> Vec<AgentCheck> {
+    check_all_with_opencode_check(opencode::check_for_setup)
+}
+
+fn check_all_with_opencode_check(check_opencode: fn() -> Result<StatusCheck>) -> Vec<AgentCheck> {
     let mut results = Vec::new();
 
     if let Some(reason) = claude::detect() {
@@ -99,6 +265,18 @@ pub fn check_all() -> Vec<AgentCheck> {
         };
         results.push(AgentCheck {
             agent: Agent::Claude,
+            reason,
+            status,
+        });
+    }
+
+    if let Some(reason) = antigravity::detect() {
+        let status = match antigravity::check() {
+            Ok(s) => s,
+            Err(e) => StatusCheck::Error(e.to_string()),
+        };
+        results.push(AgentCheck {
+            agent: Agent::Antigravity,
             reason,
             status,
         });
@@ -140,7 +318,20 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
-    if let Some(reason) = pi::detect() {
+    if let Some(reason) = grok::detect() {
+        let status = match grok::check() {
+            Ok(s) => s,
+            Err(e) => StatusCheck::Error(e.to_string()),
+        };
+        results.push(AgentCheck {
+            agent: Agent::Grok,
+            reason,
+            status,
+        });
+    }
+
+    let pi_detected = pi::detect();
+    if let Some(reason) = pi_detected {
         let status = match pi::check() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
@@ -152,7 +343,13 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
-    if let Some(reason) = omp::detect() {
+    if let Some(reason) = omp::detect()
+        && !(pi_detected.is_some()
+            && same_install_target(
+                pi::extension_path().as_deref(),
+                omp::extension_path().as_deref(),
+            ))
+    {
         let status = match omp::check() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
@@ -165,7 +362,7 @@ pub fn check_all() -> Vec<AgentCheck> {
     }
 
     if let Some(reason) = opencode::detect() {
-        let status = match opencode::check() {
+        let status = match check_opencode() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
         };
@@ -182,23 +379,58 @@ pub fn check_all() -> Vec<AgentCheck> {
 /// Install status tracking for the given agent.
 pub fn install(agent: Agent) -> Result<String> {
     match agent {
+        Agent::Antigravity => antigravity::install(),
         Agent::Claude => claude::install(),
         Agent::Codex => codex::install(),
         Agent::Copilot => copilot::install(),
         Agent::Gemini => gemini::install(),
+        Agent::Grok => grok::install(),
         Agent::OpenCode => opencode::install(),
         Agent::Pi => pi::install(),
         Agent::Omp => omp::install(),
     }
 }
 
+/// Check status tracking for `agent` in `dir`, its config or agent
+/// directory, instead of the one its environment selects. OpenCode's plugin
+/// layout depends on its version, so it is checked with
+/// `opencode::check_dir_for`.
+pub fn check_in(agent: Agent, dir: &Path) -> Result<StatusCheck> {
+    match agent {
+        Agent::Claude => claude::check_dir(dir),
+        Agent::Codex => codex::check_dir(dir),
+        Agent::Gemini => gemini::check_dir(dir),
+        Agent::Pi => pi::check_dir(dir),
+        Agent::Omp => omp::check_dir(dir),
+        Agent::Antigravity | Agent::Copilot | Agent::Grok | Agent::OpenCode => {
+            anyhow::bail!("{} cannot be set up in a given directory", agent.name())
+        }
+    }
+}
+
+/// Install status tracking for `agent` in `dir`; see [`check_in`].
+pub fn install_in(agent: Agent, dir: &Path) -> Result<String> {
+    match agent {
+        Agent::Claude => claude::install_dir(dir),
+        Agent::Codex => codex::install_dir(dir),
+        Agent::Gemini => gemini::install_dir(dir),
+        Agent::Pi => pi::install_dir(dir),
+        Agent::Omp => omp::install_dir(dir),
+        Agent::Antigravity | Agent::Copilot | Agent::Grok | Agent::OpenCode => {
+            anyhow::bail!("{} cannot be set up in a given directory", agent.name())
+        }
+    }
+}
+
 /// Remove status tracking hooks for the given agent.
 pub fn uninstall_one(agent: Agent) -> Result<String> {
     match agent {
+        Agent::Antigravity => antigravity::uninstall(),
         Agent::Claude => claude::uninstall(),
         Agent::Codex => codex::uninstall(),
         Agent::Copilot => copilot::uninstall(),
         Agent::Gemini => gemini::uninstall(),
+        Agent::Grok => grok::uninstall(),
         Agent::OpenCode => opencode::uninstall(),
         Agent::Pi => pi::uninstall(),
         Agent::Omp => omp::uninstall(),
@@ -278,7 +510,7 @@ pub(crate) fn print_description(prefix: &str) {
     println!("{prefix}  🤖 = working  💬 = waiting for input  ✅ = done");
     println!(
         "{prefix}  {}",
-        style("https://workmux.raine.dev/guide/status-tracking").dim()
+        style("https://workmux.dev/guide/status-tracking").dim()
     );
 }
 
@@ -314,7 +546,12 @@ pub fn prompt_wizard() -> Result<()> {
     let checks = check_all();
     let needs_hooks: Vec<_> = checks
         .iter()
-        .filter(|c| matches!(c.status, StatusCheck::NotInstalled))
+        .filter(|c| {
+            matches!(
+                c.status,
+                StatusCheck::NotInstalled | StatusCheck::UpdateAvailable
+            )
+        })
         .filter(|c| !is_declined(c.agent))
         .collect();
 
@@ -332,12 +569,28 @@ pub fn prompt_wizard() -> Result<()> {
         println!("{}", dim);
 
         for check in &needs_hooks {
+            let detail = match check.status {
+                StatusCheck::UpdateAvailable => {
+                    format!("{}; status tracking update available", check.reason)
+                }
+                _ => check.reason.to_string(),
+            };
             println!(
                 "{}  Detected {} ({})",
                 dim,
                 style(check.agent.name()).bold(),
-                check.reason
+                detail
             );
+        }
+
+        for check in &needs_hooks {
+            // OpenCode's preview needs a version probe; only explicit setup or
+            // an accepted installation may start the agent CLI.
+            if check.agent != Agent::OpenCode
+                && matches!(check.status, StatusCheck::UpdateAvailable)
+            {
+                print_update_diff(check.agent);
+            }
         }
 
         println!("{}", dim);
@@ -345,7 +598,10 @@ pub fn prompt_wizard() -> Result<()> {
         print_description(&dim_str);
         println!("{}", dim);
 
-        if confirm::confirm("Install status tracking hooks?", ConfirmDefault::Yes)? {
+        if confirm::confirm(
+            "Install or update status tracking hooks?",
+            ConfirmDefault::Yes,
+        )? {
             install_agents(&needs_hooks);
         } else {
             let agents: Vec<_> = needs_hooks.iter().map(|c| c.agent).collect();
@@ -380,7 +636,7 @@ pub fn prompt_wizard() -> Result<()> {
             println!(
                 "{}  Learn more: {}",
                 dim,
-                style("https://workmux.raine.dev/guide/skills").dim()
+                style("https://workmux.dev/guide/skills").dim()
             );
             println!("{}", dim);
 
@@ -406,11 +662,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_shared_install_target_is_detected() {
+        let path = Path::new("/home/test/.pi/agent/extensions/workmux-status.ts");
+        assert!(same_install_target(Some(path), Some(path)));
+        assert!(!same_install_target(
+            Some(path),
+            Some(Path::new(
+                "/home/test/.omp/agent/extensions/workmux-status.ts",
+            )),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_install_target_is_detected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let extensions = temp.path().join("extensions");
+        std::fs::create_dir(&extensions).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&extensions, &alias).unwrap();
+
+        assert!(same_install_target(
+            Some(&extensions.join("workmux-status.ts")),
+            Some(&alias.join("workmux-status.ts")),
+        ));
+    }
+
+    #[test]
     fn test_agent_name() {
+        assert_eq!(Agent::Antigravity.name(), "Antigravity CLI");
         assert_eq!(Agent::Claude.name(), "Claude Code");
         assert_eq!(Agent::Codex.name(), "Codex");
         assert_eq!(Agent::Copilot.name(), "Copilot CLI");
         assert_eq!(Agent::Gemini.name(), "Gemini CLI");
+        assert_eq!(Agent::Grok.name(), "Grok");
         assert_eq!(Agent::OpenCode.name(), "OpenCode");
         assert_eq!(Agent::Pi.name(), "pi");
         assert_eq!(Agent::Omp.name(), "Oh My Pi");
@@ -418,6 +705,10 @@ mod tests {
 
     #[test]
     fn test_agent_serialization() {
+        assert_eq!(
+            serde_json::to_string(&Agent::Antigravity).unwrap(),
+            "\"agy\""
+        );
         assert_eq!(serde_json::to_string(&Agent::Claude).unwrap(), "\"claude\"");
         assert_eq!(serde_json::to_string(&Agent::Codex).unwrap(), "\"codex\"");
         assert_eq!(
@@ -425,6 +716,7 @@ mod tests {
             "\"copilot\""
         );
         assert_eq!(serde_json::to_string(&Agent::Gemini).unwrap(), "\"gemini\"");
+        assert_eq!(serde_json::to_string(&Agent::Grok).unwrap(), "\"grok\"");
         assert_eq!(
             serde_json::to_string(&Agent::OpenCode).unwrap(),
             "\"opencode\""
@@ -435,6 +727,8 @@ mod tests {
 
     #[test]
     fn test_agent_deserialization() {
+        let agent: Agent = serde_json::from_str("\"agy\"").unwrap();
+        assert_eq!(agent, Agent::Antigravity);
         let agent: Agent = serde_json::from_str("\"claude\"").unwrap();
         assert_eq!(agent, Agent::Claude);
         let agent: Agent = serde_json::from_str("\"codex\"").unwrap();
@@ -443,6 +737,8 @@ mod tests {
         assert_eq!(agent, Agent::Copilot);
         let agent: Agent = serde_json::from_str("\"gemini\"").unwrap();
         assert_eq!(agent, Agent::Gemini);
+        let agent: Agent = serde_json::from_str("\"grok\"").unwrap();
+        assert_eq!(agent, Agent::Grok);
         let agent: Agent = serde_json::from_str("\"opencode\"").unwrap();
         assert_eq!(agent, Agent::OpenCode);
         let agent: Agent = serde_json::from_str("\"pi\"").unwrap();

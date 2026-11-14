@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # util-linux provides `setpriv`, which we use to drop privileges in deny mode.
 # Unlike `gosu`, setpriv lets us explicitly set supplementary groups so that
@@ -34,10 +34,11 @@ if [ -n "${WM_PROXY_HOST:-}" ] && [ -n "${WM_PROXY_PORT:-}" ]; then
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-    # Allow DNS (UDP/TCP 53) to configured nameservers.
-    # Without this, any hostname resolution hangs until timeout.
+    # Allow IPv4 DNS (UDP/TCP 53) to configured nameservers.
+    # IPv6 egress is blocked below, so IPv6 nameservers cannot be used here.
     if [ -f /etc/resolv.conf ]; then
         grep '^nameserver' /etc/resolv.conf | awk '{print $2}' | while read -r ns; do
+            case "$ns" in *:*) continue ;; esac
             iptables -A OUTPUT -d "$ns" -p udp --dport 53 -j ACCEPT
             iptables -A OUTPUT -d "$ns" -p tcp --dport 53 -j ACCEPT
         done

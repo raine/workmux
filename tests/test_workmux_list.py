@@ -1,18 +1,24 @@
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Dict, List
 
+import pytest
+
 from .conftest import (
     MuxEnvironment,
+    TmuxEnvironment,
     create_commit,
     get_window_name,
     get_worktree_path,
     run_workmux_add,
     run_workmux_command,
+    setup_git_repo,
     write_workmux_config,
 )
+from .support.agent_state import stabilize_tmux_agent, start_active_agent
 
 
 def run_workmux_list(
@@ -78,7 +84,8 @@ def install_fake_gh_pr_list_retry(env: MuxEnvironment, branch_name: str) -> None
             }
         ]
     )
-    gh_path.write_text(
+    env.install_script(
+        gh_path,
         f"""#!/usr/bin/env python3
 import sys
 
@@ -91,9 +98,8 @@ if sys.argv[1:3] == ["pr", "list"]:
 
 print("unexpected gh command: " + " ".join(sys.argv[1:]), file=sys.stderr)
 sys.exit(1)
-"""
+""",
     )
-    gh_path.chmod(0o755)
 
 
 def write_agent_state_file(env: MuxEnvironment, worktree_path: Path, status: str):
@@ -128,6 +134,52 @@ def write_agent_state_file(env: MuxEnvironment, worktree_path: Path, status: str
     state_file = state_dir / filename
     state_file.write_text(json.dumps(state))
     return state_file
+
+
+@pytest.mark.tmux_only
+def test_list_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-list"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    expected_token = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get",
+            f"workmux.worktree.{branch_name}.window-token",
+        ],
+        cwd=mux_repo_path,
+    ).stdout.strip()
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    output = run_workmux_list(env, workmux_exe_path, mux_repo_path)
+
+    restored_token = env.tmux(
+        ["display-message", "-p", "-t", restored_id, "#{@workmux_token}"]
+    ).stdout.strip()
+    assert restored_token == expected_token
+    row = next(row for row in parse_list_output(output) if row["BRANCH"] == branch_name)
+    assert row["MUX"] == "✓"
 
 
 def test_list_output_format(
@@ -166,7 +218,7 @@ def test_list_output_format(
     # Verify feature branch entry - shows as relative path
     feature_entry = next((r for r in parsed_output if r["BRANCH"] == branch_name), None)
     assert feature_entry is not None
-    assert feature_entry["AGE"] != ""  # age is populated (value depends on timing)
+    assert feature_entry["AGE"] != "-"
     assert feature_entry["AGENT"] == "-"
     assert feature_entry["MUX"] == "✓"
     assert feature_entry["UNMERGED"] == "-"
@@ -426,9 +478,11 @@ def test_list_json_output(
     env = mux_server
     branch_name = "feature-json"
     write_workmux_config(mux_repo_path)
+    creation_started_at = int(time.time())
     run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
 
     output = run_workmux_list(env, workmux_exe_path, mux_repo_path, "--json")
+    listed_at = int(time.time())
     data = json.loads(output)
 
     assert isinstance(data, list)
@@ -436,6 +490,8 @@ def test_list_json_output(
 
     # Verify all expected fields exist on each entry
     expected_fields = {
+        "project",
+        "project_path",
         "handle",
         "branch",
         "path",
@@ -443,6 +499,7 @@ def test_list_json_output(
         "mode",
         "has_uncommitted_changes",
         "is_open",
+        "agent_statuses",
         "created_at",
     }
     for entry in data:
@@ -450,8 +507,11 @@ def test_list_json_output(
 
     # Verify main worktree entry
     main_entry = next(e for e in data if e["branch"] == "main")
+    assert main_entry["project"] == mux_repo_path.name
+    assert main_entry["project_path"] == str(mux_repo_path)
     assert main_entry["is_main"] is True
     assert main_entry["mode"] == "window"
+    assert main_entry["agent_statuses"] == []
     # has_uncommitted_changes may be True due to config file written by write_workmux_config
     assert isinstance(main_entry["has_uncommitted_changes"], bool)
     assert main_entry["is_open"] is False
@@ -462,7 +522,11 @@ def test_list_json_output(
     assert feature_entry["mode"] == "window"
     assert feature_entry["has_uncommitted_changes"] is False
     assert feature_entry["is_open"] is True
+    assert feature_entry["agent_statuses"] == []
     assert feature_entry["path"] == str(get_worktree_path(mux_repo_path, branch_name))
+    assert isinstance(feature_entry["created_at"], int)
+    assert feature_entry["created_at"] > 0
+    assert creation_started_at - 1 <= feature_entry["created_at"] <= listed_at + 1
 
 
 def test_list_json_empty(
@@ -516,3 +580,101 @@ def test_list_json_with_filter(
     data = json.loads(output)
     assert len(data) == 1
     assert data[0]["branch"] == "feature-json-a"
+
+
+@pytest.mark.tmux_only
+def test_list_all_json_aggregates_repositories_and_agent_statuses(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """List --all discovers projects through tracked agents."""
+    assert isinstance(mux_server, TmuxEnvironment)
+    runner_window = mux_server.tmux(
+        ["display-message", "-p", "#{window_id}"]
+    ).stdout.strip()
+    first = start_active_agent(
+        mux_server,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-list-all-first",
+        status="waiting",
+    )
+    stabilize_tmux_agent(mux_server, first)
+    mux_server.select_window(runner_window)
+    second_repo = mux_server.tmp_path.parent / "list-all-second-repo"
+    second_repo.mkdir()
+    setup_git_repo(second_repo, mux_server.env)
+    second = start_active_agent(
+        mux_server,
+        workmux_exe_path,
+        second_repo,
+        "feature-list-all-second",
+        status="done",
+    )
+    stabilize_tmux_agent(mux_server, second)
+    mux_server.select_window(runner_window)
+
+    output = run_workmux_list(
+        mux_server, workmux_exe_path, mux_repo_path, "--all --json"
+    )
+    data = json.loads(output)
+
+    by_path = {entry["path"]: entry for entry in data}
+    assert set(by_path) == {
+        str(mux_repo_path),
+        str(first.worktree),
+        str(second_repo),
+        str(second.worktree),
+    }
+    assert by_path[str(first.worktree)]["agent_statuses"] == ["waiting"]
+    assert by_path[str(second.worktree)]["agent_statuses"] == ["done"]
+    assert by_path[str(first.worktree)]["project"] == mux_repo_path.name
+    assert by_path[str(second.worktree)]["project"] == second_repo.name
+
+
+@pytest.mark.parametrize("git_dir", [".git", ".bare"])
+def test_list_json_bare_repository_has_no_main_checkout(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, git_dir: str
+):
+    env = mux_server
+    project = env.tmp_path / "bare-project"
+    project.mkdir()
+    bare = project / git_dir
+    env.run_command(["git", "init", "--bare", str(bare)])
+    env.run_command(["git", "config", "user.name", "Test User"], cwd=bare)
+    env.run_command(["git", "config", "user.email", "test@example.com"], cwd=bare)
+    dev = project / "worktrees" / "dev"
+    env.run_command(["git", "worktree", "add", "-b", "dev", str(dev)], cwd=bare)
+    env.run_command(["git", "commit", "--allow-empty", "-m", "Initial commit"], cwd=dev)
+    write_workmux_config(dev, env=env)
+    for branch in ["branch-1", "branch-2"]:
+        env.run_command(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(project / "worktrees" / branch),
+                "dev",
+            ],
+            cwd=bare,
+        )
+
+    def check_listing(expected_branches: set[str], args: str = "--json"):
+        output = run_workmux_list(env, workmux_exe_path, dev, args)
+        rows = json.loads(output)
+        assert {row["branch"] for row in rows} == expected_branches
+        assert all(row["is_main"] is False for row in rows)
+        # Git treats a bare .git directory as the parent project's anchor.
+        anchor = project if git_dir == ".git" else bare
+        assert all(
+            Path(row["project_path"]).resolve() == anchor.resolve() for row in rows
+        )
+
+    check_listing({"branch-1", "branch-2", "dev"})
+    check_listing({"branch-2"}, "--json branch-2")
+    env.run_command(
+        ["git", "worktree", "remove", str(project / "worktrees" / "branch-1")],
+        cwd=bare,
+    )
+    check_listing({"branch-2", "dev"})
