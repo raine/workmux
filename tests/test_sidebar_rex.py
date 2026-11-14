@@ -28,12 +28,18 @@ class RexSidebar:
         self.exe = exe
 
     def workmux(
-        self, *args: str, session: Optional[str] = None, check: bool = True
+        self,
+        *args: str,
+        session: Optional[str] = None,
+        block: Optional[str] = None,
+        check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(self.env.env)
         env["WORKMUX_BACKEND"] = "rex"
         if session is not None:
             env["REX_SESSION"] = session
+        if block is not None:
+            env["REX_BLOCK"] = block
         result = subprocess.run(
             [str(self.exe), *args],
             cwd=self.env.tmp_path,
@@ -215,6 +221,9 @@ def rex_sidebar(tmp_path: Path, workmux_exe_path: Path) -> Iterator[RexSidebar]:
     # limit for Unix socket paths
     short_tmp = tempfile.mkdtemp(prefix="wmx_")
     env.env["TMPDIR"] = short_tmp
+    # Nothing a Rex sidebar does may call tmux. Sidebar processes inherit
+    # PATH from the server, so the tripwire goes in before it starts.
+    tmux_calls = install_tmux_tripwire(env.env, tmp_path)
     env.start_server()
     harness = RexSidebar(env, workmux_exe_path)
     try:
@@ -225,6 +234,21 @@ def rex_sidebar(tmp_path: Path, workmux_exe_path: Path) -> Iterator[RexSidebar]:
         finally:
             env.stop_server()
             shutil.rmtree(short_tmp, ignore_errors=True)
+    assert not tmux_calls.exists(), (
+        f"Rex sidebar called tmux:\n{tmux_calls.read_text()}"
+    )
+
+
+def install_tmux_tripwire(env: dict[str, str], tmp_path: Path) -> Path:
+    """Put a failing `tmux` first on PATH that logs its arguments."""
+    bin_dir = tmp_path / "tripwire"
+    bin_dir.mkdir()
+    log = tmp_path / "tmux-calls.log"
+    shim = bin_dir / "tmux"
+    shim.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit 1\n')
+    shim.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    return log
 
 
 def test_on_wraps_every_window_and_keeps_focus(rex_sidebar: RexSidebar):
@@ -543,3 +567,51 @@ def test_views_toggle_from_the_cli_and_the_sidebar(rex_sidebar: RexSidebar):
     s.rex("send", "-s", window["session_id"], "-b", sidebar, "V")
     s.wait_for(lambda: footer_shows("Mine"), message="V did not turn views back on")
     assert s.state()["views_enabled"] is True
+
+
+def test_sidebar_never_calls_tmux(rex_sidebar: RexSidebar, tmp_path: Path):
+    s = rex_sidebar
+    session = s.session
+    tmux_calls = tmp_path / "tmux-calls.log"
+    # The tripwire reaches processes the server starts.
+    probe = s.new_window(session, "/bin/sh", "-c", "tmux probe")
+    s.wait_for(tmux_calls.exists, message="tripwire not on the server's PATH")
+    s.wait_for(lambda: s.window(probe) is None, message="probe window stayed")
+    tmux_calls.unlink()
+
+    window = s.windows()[0]
+    agent = window["blocks"][0]["block_id"]
+    s.workmux("set-window-status", "working", session=session, block=agent)
+    s.sidebar("on")
+    window = s.open_window(window["window_id"])
+    sidebar = s.sidebar_block(window)
+
+    def shows_agent() -> bool:
+        out = s.env.mux_command(
+            ["capture", "-s", session, "-b", sidebar], check=False
+        ).stdout
+        return bool(out.strip()) and "No agents" not in out
+
+    s.wait_for(shows_agent, message="sidebar does not show the agent")
+    s.api(
+        "session.resize_pane",
+        {
+            "session_id": session,
+            "direction": "horizontal",
+            "before_block_id": sidebar,
+            "after_block_id": window["layout"]["split"]["after"]["block_id"],
+            "ratio": 0.3,
+        },
+    )
+    for key in ["V", "v", "f", "t", "z", "z", "f", "t", "v", "V", "o"]:
+        s.rex("send", "-s", session, "-b", sidebar, key)
+        time.sleep(0.2)
+    s.workmux("sidebar", "next", session=session, check=False)
+    s.workmux("sidebar", "jump", "1", session=session, check=False)
+    s.workmux("sidebar", "prev", session=session, check=False)
+    s.workmux("_sidebar-sync", session=session, check=False)
+    s.workmux("_sidebar-reflow", session=session, check=False)
+    s.workmux("_sidebar-reflow-all", session=session, check=False)
+    time.sleep(1)
+    s.sidebar("off")
+    assert not tmux_calls.exists(), tmux_calls.read_text()

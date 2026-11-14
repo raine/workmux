@@ -24,26 +24,23 @@ class SidebarHarness:
     state_path: Path
 
     def run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(self.executable), "sidebar", *args],
-            cwd=self.root,
-            env=self.env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
+        return self.run_raw("sidebar", *args)
 
     def run_raw(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        result = subprocess.run(
             [str(self.executable), *args],
             cwd=self.root,
             env=self.env,
             capture_output=True,
             text=True,
             timeout=10,
-            check=True,
+            check=False,
         )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, result.stdout, result.stderr
+            )
+        return result
 
     def model(self) -> dict[str, Any]:
         return json.loads((self.root / "mux.json").read_text())
@@ -76,15 +73,10 @@ def sidebar(tmp_path: Path, workmux_exe_path: Path) -> Iterator[SidebarHarness]:
         "SIDEBAR_TEST_ROOT": str(tmp_path),
     }
     subprocess.run(["git", "init", "-q", str(tmp_path)], env=env, check=True)
+    # Nothing a Zellij sidebar does may call tmux.
     install_script(
         bin_dir / "tmux",
-        "#!/bin/sh\n"
-        'printf "%s\\n" "$*" >> "$SIDEBAR_TEST_ROOT/tmux-calls"\n'
-        'case "$*" in\n'
-        "  *group_by*) echo none ;;\n"
-        "  *filter*) echo session ;;\n"
-        "  *position*) echo top ;;\n"
-        "esac\n",
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SIDEBAR_TEST_ROOT/tmux-calls"\nexit 1\n',
     )
     install_script(
         bin_dir / "zellij",
@@ -154,7 +146,12 @@ elif action == "go-to-tab-by-id":
     tab_id = int(args[1])
     for tab in model.get("tabs", []):
         tab["active"] = tab["tab_id"] == tab_id
-elif action in ("focus-pane-id", "change-floating-pane-coordinates", "next-swap-layout"):
+elif action in (
+    "focus-pane-id",
+    "change-floating-pane-coordinates",
+    "next-swap-layout",
+    "stack-panes",
+):
     pass
 else:
     raise AssertionError(args)
@@ -199,19 +196,41 @@ path.write_text(json.dumps(model))
         listener.bind(str(Path(runtime_dir) / f"workmux-sidebar-{key:016x}.sock"))
         listener.listen()
         yield harness
+    tmux_calls = tmp_path / "tmux-calls"
+    assert not tmux_calls.exists(), (
+        f"Zellij sidebar called tmux:\n{tmux_calls.read_text()}"
+    )
 
 
-def test_group_toggle_ignores_tmux_override(sidebar: SidebarHarness):
+def test_group_toggle_uses_the_state_file(sidebar: SidebarHarness):
     sidebar.run("group", "--clear")
     sidebar.run("group")
     assert sidebar.state()["group_by"] == "none"
-    assert not (sidebar.root / "tmux-calls").exists()
 
 
-def test_filter_toggle_ignores_tmux_override(sidebar: SidebarHarness):
+def test_filter_toggle_uses_the_state_file(sidebar: SidebarHarness):
     sidebar.run("filter")
     assert sidebar.state()["filter"] == "session"
-    assert not (sidebar.root / "tmux-calls").exists()
+
+
+def test_sidebar_commands_never_call_tmux(sidebar: SidebarHarness):
+    sidebar.run("on")
+    sidebar.run("view", "off")
+    sidebar.run("view")
+    sidebar.run("filter", "session")
+    sidebar.run("filter", "none")
+    sidebar.run("group")
+    sidebar.run("group", "--clear")
+    state = sidebar.state()
+    state["ordered_agents"] = ["terminal_1"]
+    sidebar.state_path.write_text(json.dumps(state))
+    sidebar.run("jump", "1")
+    sidebar.run("next")
+    sidebar.run("prev")
+    sidebar.run_raw("_sidebar-sync")
+    sidebar.run_raw("_sidebar-reflow")
+    sidebar.run_raw("_sidebar-reflow-all")
+    sidebar.run("off")
 
 
 @pytest.mark.parametrize("action", [("jump", "1"), ("next",), ("prev",)])
