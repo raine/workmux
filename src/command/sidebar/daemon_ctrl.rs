@@ -5,15 +5,12 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::multiplexer::{Multiplexer, TmuxBackend, create_backend, detect_backend};
-
 use super::daemon;
-use super::store::SidebarStore;
+use super::host::SidebarHost;
 
 /// Ensure the daemon is running, spawning it if needed. Returns the socket path.
-pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
-    let mux = create_backend(detect_backend());
-    let instance_id = mux.instance_id();
+pub(super) fn ensure_daemon_running(host: &SidebarHost) -> Result<PathBuf> {
+    let instance_id = host.instance_id();
     let sock_path = daemon::socket_path(&instance_id);
 
     if UnixStream::connect(&sock_path).is_ok() {
@@ -28,7 +25,7 @@ pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
 
     // Stale socket from a crashed daemon
     let _ = std::fs::remove_file(&sock_path);
-    spawn_daemon(mux.as_ref())?;
+    spawn_daemon(host)?;
     if !wait_for_daemon(&sock_path, Duration::from_secs(4)) {
         return Err(anyhow!("Sidebar daemon failed to start"));
     }
@@ -36,7 +33,7 @@ pub(super) fn ensure_daemon_running() -> Result<PathBuf> {
 }
 
 /// Spawn the sidebar daemon as a detached background process.
-fn spawn_daemon(mux: &dyn Multiplexer) -> Result<()> {
+fn spawn_daemon(host: &SidebarHost) -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut command = std::process::Command::new(exe);
     command
@@ -44,24 +41,7 @@ fn spawn_daemon(mux: &dyn Multiplexer) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if mux.name() == "rex" {
-        use std::os::unix::process::CommandExt;
-        // The daemon serves the whole server, not the block that started it:
-        // it must outlive that block's terminal and act on no session of its
-        // own.
-        command
-            .env("WORKMUX_BACKEND", "rex")
-            .env_remove("REX_SESSION")
-            .env_remove("REX_BLOCK");
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    host.daemon_command(&mut command);
     command.spawn()?;
     Ok(())
 }
@@ -79,9 +59,8 @@ fn wait_for_daemon(path: &Path, timeout: Duration) -> bool {
 }
 
 /// Kill the sidebar daemon (sends SIGTERM, clears its recorded PID).
-pub(super) fn kill_daemon() {
-    let mux = create_backend(detect_backend());
-    let store = SidebarStore::for_mux(mux.as_ref());
+pub(super) fn kill_daemon(host: &SidebarHost) {
+    let store = host.store();
     if let Some(pid) = store.daemon_pid() {
         let _ = std::process::Command::new("kill")
             .args(["-TERM", &pid])
@@ -98,19 +77,9 @@ fn signal_pid(pid: &str) {
         .status();
 }
 
-pub(super) fn signal_daemon_for(mux: &dyn Multiplexer) {
-    if mux.name() == "tmux" {
-        let tmux = TmuxBackend::for_socket(&mux.instance_id());
-        if let Ok(Some(pid)) = tmux.global_option("@workmux_sidebar_daemon_pid") {
-            signal_pid(&pid);
-        }
-    } else if let Some(pid) = SidebarStore::for_mux(mux).daemon_pid() {
+/// Signal the daemon to do an immediate refresh, bypassing tmux hook latency.
+pub(super) fn signal_daemon(host: &SidebarHost) {
+    if let Some(pid) = host.store().daemon_pid() {
         signal_pid(&pid);
     }
-}
-
-/// Signal the daemon to do an immediate refresh, bypassing tmux hook latency.
-pub(super) fn signal_daemon() {
-    let mux = create_backend(detect_backend());
-    signal_daemon_for(mux.as_ref());
 }

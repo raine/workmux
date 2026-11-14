@@ -1395,7 +1395,7 @@ pub fn run() -> Result<()> {
                 command::sidebar::navigate(command::sidebar::NavAction::Jump(index as usize))
             }
             Some(SidebarAction::View { mode }) => {
-                command::sidebar::view::set_enabled(mode.as_deref())
+                command::sidebar::set_views_enabled(mode.as_deref())
             }
             Some(SidebarAction::Filter { mode }) => {
                 command::sidebar::set_filter_mode(mode.as_deref())

@@ -3,14 +3,15 @@
 use anyhow::{Result, anyhow};
 use tracing::debug;
 
-use crate::cmd::Cmd;
 use crate::config::SidebarPosition;
 
-use super::super::SIDEBAR_ROLE_VALUE;
 use super::super::app::HostIdentity;
 use super::super::daemon_ctrl::kill_daemon;
+use super::super::host::TmuxHost;
+use super::super::read_sidebar_position;
 use super::hooks::remove_hooks;
 use super::layout_tree::{layout_after_sidebar_remove, reflow_after_sidebar_add};
+use super::{SIDEBAR_ROLE_VALUE, SidebarScope};
 
 const PENDING_SELECTION_OPTION: &str = "@workmux_sidebar_pending_selection";
 
@@ -30,8 +31,8 @@ fn parse_window_panes(output: &str) -> (Option<&str>, Option<&str>) {
     (sidebar_pane_id, first_pane_id)
 }
 
-fn query_window_panes(window_id: &str) -> Result<String> {
-    Cmd::new("tmux")
+fn query_window_panes(tmux: &TmuxHost, window_id: &str) -> Result<String> {
+    tmux.cmd()
         .args(&[
             "list-panes",
             "-t",
@@ -43,19 +44,26 @@ fn query_window_panes(window_id: &str) -> Result<String> {
 }
 
 /// Find the sidebar pane in a window, if one exists.
-pub(crate) fn find_sidebar_pane_in_window(window_id: &str) -> Result<Option<String>> {
-    let output = query_window_panes(window_id)?;
+pub(crate) fn find_sidebar_pane_in_window(
+    tmux: &TmuxHost,
+    window_id: &str,
+) -> Result<Option<String>> {
+    let output = query_window_panes(tmux, window_id)?;
     Ok(parse_window_panes(&output).0.map(str::to_string))
 }
 
 /// Check if a window already has a sidebar pane.
-pub(crate) fn find_sidebar_in_window(window_id: &str) -> Result<bool> {
-    Ok(find_sidebar_pane_in_window(window_id)?.is_some())
+pub(crate) fn find_sidebar_in_window(tmux: &TmuxHost, window_id: &str) -> Result<bool> {
+    Ok(find_sidebar_pane_in_window(tmux, window_id)?.is_some())
 }
 
 /// Leave an agent selection for a sidebar process before switching to it.
-pub(crate) fn set_pending_selection(sidebar_pane_id: &str, agent_pane_id: &str) -> Result<()> {
-    Cmd::new("tmux")
+pub(crate) fn set_pending_selection(
+    tmux: &TmuxHost,
+    sidebar_pane_id: &str,
+    agent_pane_id: &str,
+) -> Result<()> {
+    tmux.cmd()
         .args(&[
             "set-option",
             "-p",
@@ -68,8 +76,9 @@ pub(crate) fn set_pending_selection(sidebar_pane_id: &str, agent_pane_id: &str) 
         .map(|_| ())
 }
 
-pub(crate) fn clear_pending_selection(sidebar_pane_id: &str) {
-    let _ = Cmd::new("tmux")
+pub(crate) fn clear_pending_selection(tmux: &TmuxHost, sidebar_pane_id: &str) {
+    let _ = tmux
+        .cmd()
         .args(&[
             "set-option",
             "-pu",
@@ -81,8 +90,9 @@ pub(crate) fn clear_pending_selection(sidebar_pane_id: &str) {
 }
 
 /// Take the selection handed off by another sidebar process.
-pub(crate) fn take_pending_selection(sidebar_pane_id: &str) -> Option<String> {
-    let selection = Cmd::new("tmux")
+pub(crate) fn take_pending_selection(tmux: &TmuxHost, sidebar_pane_id: &str) -> Option<String> {
+    let selection = tmux
+        .cmd()
         .args(&[
             "show-option",
             "-pqv",
@@ -94,17 +104,19 @@ pub(crate) fn take_pending_selection(sidebar_pane_id: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    clear_pending_selection(sidebar_pane_id);
+    clear_pending_selection(tmux, sidebar_pane_id);
     selection
 }
 
 /// Create a sidebar pane in a specific window (idempotent).
 pub(crate) fn create_sidebar_in_window(
+    tmux: &TmuxHost,
     window_id: &str,
     position: SidebarPosition,
     size: u16,
 ) -> Result<()> {
-    let panes = query_window_panes(window_id).or_else(|_| query_window_panes(window_id))?;
+    let panes =
+        query_window_panes(tmux, window_id).or_else(|_| query_window_panes(tmux, window_id))?;
     let target_pane = match parse_window_panes(&panes) {
         (Some(_), _) => {
             debug!(
@@ -131,7 +143,8 @@ pub(crate) fn create_sidebar_in_window(
         SidebarPosition::Top => "-vbf",
     };
 
-    let new_pane_id = Cmd::new("tmux")
+    let new_pane_id = tmux
+        .cmd()
         .args(&[
             "split-window",
             split_flag,
@@ -150,7 +163,8 @@ pub(crate) fn create_sidebar_in_window(
         .trim()
         .to_string();
 
-    if let Err(error) = Cmd::new("tmux")
+    if let Err(error) = tmux
+        .cmd()
         .args(&[
             "set-option",
             "-p",
@@ -161,15 +175,13 @@ pub(crate) fn create_sidebar_in_window(
         ])
         .run()
     {
-        let _ = Cmd::new("tmux")
-            .args(&["kill-pane", "-t", &new_pane_id])
-            .run();
+        let _ = tmux.cmd().args(&["kill-pane", "-t", &new_pane_id]).run();
         return Err(anyhow!(
             "failed to mark sidebar pane {new_pane_id} in window {window_id}: {error}"
         ));
     }
 
-    reflow_after_sidebar_add(window_id, &new_pane_id, position, size);
+    reflow_after_sidebar_add(tmux, window_id, &new_pane_id, position, size);
 
     debug!(
         window_id,
@@ -194,15 +206,18 @@ fn sidebar_window_extent_format(position: SidebarPosition) -> &'static str {
 }
 
 fn list_windows_for_sidebars(
+    tmux: &TmuxHost,
     scope: SidebarWindowScope<'_>,
     position: SidebarPosition,
 ) -> Result<String> {
     let format = sidebar_window_extent_format(position);
     match scope {
-        SidebarWindowScope::All => Cmd::new("tmux")
+        SidebarWindowScope::All => tmux
+            .cmd()
             .args(&["list-windows", "-a", "-F", format])
             .run_and_capture_stdout(),
-        SidebarWindowScope::Session(session_id) => Cmd::new("tmux")
+        SidebarWindowScope::Session(session_id) => tmux
+            .cmd()
             .args(&["list-windows", "-t", session_id, "-F", format])
             .run_and_capture_stdout(),
     }
@@ -213,27 +228,33 @@ fn list_windows_for_sidebars(
 /// Computes width per-window from `#{window_width}` so each window gets a
 /// sidebar proportional to its own dimensions. Unattached sessions may have
 /// stale geometry, but `reflow()` corrects them on reattach.
-pub(crate) fn create_sidebars_in_all_windows(config: &crate::config::Config) -> Result<()> {
-    let position = super::super::read_sidebar_position(config);
-    let output = list_windows_for_sidebars(SidebarWindowScope::All, position)?;
+pub(crate) fn create_sidebars_in_all_windows(
+    tmux: &TmuxHost,
+    config: &crate::config::Config,
+) -> Result<()> {
+    let position = read_sidebar_position(&tmux.host(), config);
+    let output = list_windows_for_sidebars(tmux, SidebarWindowScope::All, position)?;
 
     debug!(position = ?position, "create_sidebars_in_all_windows: creating sidebars");
-    create_sidebars_from_window_output(&output, config, position)
+    create_sidebars_from_window_output(tmux, &output, config, position)
 }
 
 /// Create sidebars in all windows of a specific session (by session_id).
 pub(crate) fn create_sidebars_in_session(
+    tmux: &TmuxHost,
     session_id: &str,
     config: &crate::config::Config,
 ) -> Result<()> {
-    let position = super::super::read_sidebar_position(config);
-    let output = list_windows_for_sidebars(SidebarWindowScope::Session(session_id), position)?;
+    let position = read_sidebar_position(&tmux.host(), config);
+    let output =
+        list_windows_for_sidebars(tmux, SidebarWindowScope::Session(session_id), position)?;
 
     debug!(session_id, position = ?position, "create_sidebars_in_session: creating sidebars");
-    create_sidebars_from_window_output(&output, config, position)
+    create_sidebars_from_window_output(tmux, &output, config, position)
 }
 
 fn create_sidebars_from_window_output(
+    tmux: &TmuxHost,
     output: &str,
     config: &crate::config::Config,
     position: SidebarPosition,
@@ -246,8 +267,8 @@ fn create_sidebars_from_window_output(
         }
         let (window_id, extent_str) = line.split_once(' ').unwrap_or((line, "0"));
         let window_extent: u16 = extent_str.parse().unwrap_or(0);
-        let size = super::super::effective_size_for(config, position, window_extent);
-        if let Err(error) = create_sidebar_in_window(window_id, position, size) {
+        let size = super::effective_size_for(tmux, config, position, window_extent);
+        if let Err(error) = create_sidebar_in_window(tmux, window_id, position, size) {
             errors.push(format!("{window_id}: {error}"));
         }
     }
@@ -263,22 +284,28 @@ fn create_sidebars_from_window_output(
 }
 
 fn compute_sidebar_layouts(
+    tmux: &TmuxHost,
     sidebars: &[(String, String)],
     position: SidebarPosition,
 ) -> Vec<Option<String>> {
     sidebars
         .iter()
-        .map(|(window_id, pane_id)| layout_after_sidebar_remove(window_id, pane_id, position))
+        .map(|(window_id, pane_id)| layout_after_sidebar_remove(tmux, window_id, pane_id, position))
         .collect()
 }
 
-fn kill_panes_and_apply_layouts(sidebars: &[(String, String)], layouts: &[Option<String>]) {
+fn kill_panes_and_apply_layouts(
+    tmux: &TmuxHost,
+    sidebars: &[(String, String)],
+    layouts: &[Option<String>],
+) {
     for (_, pane_id) in sidebars {
-        let _ = Cmd::new("tmux").args(&["kill-pane", "-t", pane_id]).run();
+        let _ = tmux.cmd().args(&["kill-pane", "-t", pane_id]).run();
     }
     for (i, (window_id, _)) in sidebars.iter().enumerate() {
         if let Some(layout) = &layouts[i] {
-            let _ = Cmd::new("tmux")
+            let _ = tmux
+                .cmd()
                 .args(&["select-layout", "-t", window_id, layout])
                 .run();
         }
@@ -287,10 +314,11 @@ fn kill_panes_and_apply_layouts(sidebars: &[(String, String)], layouts: &[Option
 
 /// Kill sidebar panes only in a specific session (by session_id).
 /// Handles layout restoration for killed panes.
-pub(crate) fn kill_sidebars_in_session(session_id: &str) {
+pub(crate) fn kill_sidebars_in_session(tmux: &TmuxHost, session_id: &str) {
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::super::read_sidebar_position(&config);
-    let output = Cmd::new("tmux")
+    let position = read_sidebar_position(&tmux.host(), &config);
+    let output = tmux
+        .cmd()
         .args(&[
             "list-panes",
             "-a",
@@ -313,13 +341,14 @@ pub(crate) fn kill_sidebars_in_session(session_id: &str) {
         })
         .collect();
 
-    let layouts = compute_sidebar_layouts(&session_sidebars, position);
-    kill_panes_and_apply_layouts(&session_sidebars, &layouts);
+    let layouts = compute_sidebar_layouts(tmux, &session_sidebars, position);
+    kill_panes_and_apply_layouts(tmux, &session_sidebars, &layouts);
 }
 
 /// Find all sidebar panes across all windows. Returns (window_id, pane_id) pairs.
-pub(crate) fn list_sidebar_panes() -> Vec<(String, String)> {
-    let output = Cmd::new("tmux")
+pub(crate) fn list_sidebar_panes(tmux: &TmuxHost) -> Vec<(String, String)> {
+    let output = tmux
+        .cmd()
         .args(&[
             "list-panes",
             "-a",
@@ -345,13 +374,13 @@ pub(crate) fn list_sidebar_panes() -> Vec<(String, String)> {
 /// Computes the target layout from the live tree BEFORE killing panes,
 /// then applies it after. This preserves pane arrangements the user
 /// created while the sidebar was open.
-pub(crate) fn kill_all_sidebars_and_restore_layouts() {
+pub(crate) fn kill_all_sidebars_and_restore_layouts(tmux: &TmuxHost) {
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::super::read_sidebar_position(&config);
-    let sidebars = list_sidebar_panes();
+    let position = read_sidebar_position(&tmux.host(), &config);
+    let sidebars = list_sidebar_panes(tmux);
 
-    let layouts = compute_sidebar_layouts(&sidebars, position);
-    kill_panes_and_apply_layouts(&sidebars, &layouts);
+    let layouts = compute_sidebar_layouts(tmux, &sidebars, position);
+    kill_panes_and_apply_layouts(tmux, &sidebars, &layouts);
 }
 
 fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
@@ -365,55 +394,20 @@ fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
 /// In session-scoped mode, only kills sidebars in our session and removes
 /// our session from the scope set. Full cleanup (daemon, hooks) only happens
 /// when no scoped sessions remain.
-pub(crate) fn shutdown_all_sidebars(identity: &HostIdentity) {
-    let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
-    if matches!(mux.name(), "zellij" | "rex") {
-        use std::os::unix::process::CommandExt;
-        // Under a session scope, quitting leaves the other sessions' sidebars.
-        let session_scoped = mux.name() == "rex"
-            && super::super::session_state::read(&mux.instance_id())
-                .is_ok_and(|state| !state.enabled && state.sessions.contains(&identity.session_id));
-        // The helper must survive closing this pane so it can restore this tab too.
-        let result = std::env::current_exe().and_then(|exe| {
-            let mut command = std::process::Command::new(exe);
-            if session_scoped {
-                command.args(["sidebar", "--session", "off"]);
-            } else {
-                command.args(["sidebar", "off"]);
-            }
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            command.output()
-        });
-        match result {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => tracing::warn!(
-                stderr = %String::from_utf8_lossy(&output.stderr),
-                "failed to stop sidebars"
-            ),
-            Err(error) => tracing::warn!(%error, "failed to stop sidebars"),
-        }
-        return;
-    }
-
+pub(crate) fn shutdown_all_sidebars(tmux: &TmuxHost, identity: &HostIdentity) {
     let config = crate::config::Config::load(None).unwrap_or_default();
-    let position = super::super::read_sidebar_position(&config);
+    let position = read_sidebar_position(&tmux.host(), &config);
     let our_pane = identity.pane_id.as_str();
     let our_window = identity.window_id.as_str();
     let our_session_id = identity.session_id.as_str();
 
-    let scope = super::super::current_scope();
+    let scope = super::current_scope(tmux);
 
     let sidebars = match &scope {
-        super::super::SidebarScope::Sessions(ids) => {
+        SidebarScope::Sessions(ids) => {
             let our_sid = our_session_id;
-            let output = Cmd::new("tmux")
+            let output = tmux
+                .cmd()
                 .args(&[
                     "list-panes",
                     "-a",
@@ -439,17 +433,17 @@ pub(crate) fn shutdown_all_sidebars(identity: &HostIdentity) {
             let mut remaining = ids.clone();
             remaining.remove(our_sid);
             if remaining.is_empty() {
-                super::super::set_scope(&super::super::SidebarScope::Off);
+                super::set_scope(tmux, &SidebarScope::Off);
             } else {
-                super::super::set_scope(&super::super::SidebarScope::Sessions(remaining));
+                super::set_scope(tmux, &SidebarScope::Sessions(remaining));
             }
 
             sidebars
         }
-        _ => list_sidebar_panes(),
+        _ => list_sidebar_panes(tmux),
     };
 
-    let layouts = compute_sidebar_layouts(&sidebars, position);
+    let layouts = compute_sidebar_layouts(tmux, &sidebars, position);
 
     let other_sidebars: Vec<(String, String)> = sidebars
         .iter()
@@ -468,28 +462,130 @@ pub(crate) fn shutdown_all_sidebars(identity: &HostIdentity) {
         .find(|(_, (_, pane_id))| is_own_sidebar(pane_id, our_pane))
         .and_then(|(i, _)| layouts[i].clone());
 
-    kill_panes_and_apply_layouts(&other_sidebars, &other_layouts);
+    kill_panes_and_apply_layouts(tmux, &other_sidebars, &other_layouts);
 
     // Full cleanup only if no scoped sessions remain (or global mode)
-    let remaining_scope = super::super::current_scope();
-    let full_cleanup = !matches!(remaining_scope, super::super::SidebarScope::Sessions(_));
+    let remaining_scope = super::current_scope(tmux);
+    let full_cleanup = !matches!(remaining_scope, SidebarScope::Sessions(_));
 
     if full_cleanup {
-        kill_daemon();
-        remove_hooks();
-        super::super::clear_sidebar_globals();
+        kill_daemon(&tmux.host());
+        remove_hooks(tmux);
+        super::clear_sidebar_globals(tmux);
     }
 
     // Defer our own window's layout reflow until after our pane closes
     if let Some(layout) = our_layout {
         let cmd = format!("sleep 0.1; tmux select-layout -t {our_window} '{layout}' 2>/dev/null");
-        let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
+        let _ = tmux.cmd().args(&["run-shell", "-b", &cmd]).run();
     }
+}
+
+/// The sidebar's stable identity, from its `TMUX_PANE`.
+pub(crate) fn host_identity(tmux: &TmuxHost) -> Option<HostIdentity> {
+    let pane_id = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane_id| !pane_id.is_empty())?;
+    let output = tmux
+        .cmd()
+        .args(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane_id,
+            "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}",
+        ])
+        .run_and_capture_stdout()
+        .ok()?;
+
+    let identity = parse_host_identity(&output)?;
+    (identity.pane_id == pane_id).then_some(identity)
+}
+
+fn parse_host_identity(output: &str) -> Option<HostIdentity> {
+    let mut parts = output.trim().split('\t');
+    let identity = HostIdentity {
+        session_name: parts.next()?.to_string(),
+        session_id: parts.next()?.to_string(),
+        window_id: parts.next()?.to_string(),
+        pane_id: parts.next()?.to_string(),
+    };
+    if parts.next().is_some()
+        || identity.session_name.is_empty()
+        || identity.session_id.is_empty()
+        || identity.window_id.is_empty()
+        || identity.pane_id.is_empty()
+    {
+        return None;
+    }
+
+    Some(identity)
+}
+
+fn pane_kill_command(pane_id: &str) -> String {
+    format!(
+        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null || true",
+        crate::shell::shell_quote(pane_id)
+    )
+}
+
+/// Close a sidebar pane shortly after its client exits.
+pub(crate) fn close_pane_after_exit(tmux: &TmuxHost, pane_id: &str) {
+    let cmd = pane_kill_command(pane_id);
+    let _ = tmux.cmd().args(&["run-shell", "-b", &cmd]).run();
+}
+
+fn sole_pane_is_sidebar(output: &str, pane_id: &str) -> bool {
+    let mut panes = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    panes.next() == Some(pane_id) && panes.next().is_none()
+}
+
+/// Whether the sidebar pane is the only pane left in its window.
+pub(crate) fn sidebar_is_only_pane(tmux: &TmuxHost, window_id: &str, pane_id: &str) -> bool {
+    tmux.cmd()
+        .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
+        .run_and_capture_stdout()
+        .is_ok_and(|output| sole_pane_is_sidebar(&output, pane_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_complete_host_identity() {
+        let identity = parse_host_identity("main\t$1\t@42\t%94").unwrap();
+
+        assert_eq!(identity.session_name, "main");
+        assert_eq!(identity.session_id, "$1");
+        assert_eq!(identity.window_id, "@42");
+        assert_eq!(identity.pane_id, "%94");
+    }
+
+    #[test]
+    fn rejects_incomplete_host_identity() {
+        assert!(parse_host_identity("main\t$1\t@42").is_none());
+        assert!(parse_host_identity("main\t\t@42\t%94").is_none());
+    }
+
+    #[test]
+    fn pane_kill_command_targets_captured_sidebar_pane() {
+        assert_eq!(
+            pane_kill_command("%12"),
+            "sleep 0.05; tmux kill-pane -t '%12' 2>/dev/null || true"
+        );
+    }
+
+    #[test]
+    fn sole_pane_confirmation_requires_sidebar_identity() {
+        assert!(sole_pane_is_sidebar("%12\n", "%12"));
+        assert!(!sole_pane_is_sidebar("%12\n%13\n", "%12"));
+        assert!(!sole_pane_is_sidebar("%13\n", "%12"));
+        assert!(!sole_pane_is_sidebar("", "%12"));
+    }
 
     #[test]
     fn own_sidebar_matches_captured_pane_id() {

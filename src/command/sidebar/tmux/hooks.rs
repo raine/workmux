@@ -2,8 +2,9 @@
 
 use anyhow::{Result, anyhow};
 
-use crate::cmd::Cmd;
 use crate::shell::shell_quote;
+
+use super::super::host::TmuxHost;
 
 /// All hook names installed by the sidebar.
 const HOOK_NAMES: &[&str] = &[
@@ -17,7 +18,7 @@ const HOOK_NAMES: &[&str] = &[
 ];
 
 /// Install tmux hooks so new windows automatically get a sidebar.
-pub(crate) fn install_hooks() -> Result<()> {
+pub(crate) fn install_hooks(tmux: &TmuxHost) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_str = exe.to_str().ok_or_else(|| anyhow!("exe path not UTF-8"))?;
     let exe_arg = shell_quote(exe_str);
@@ -48,7 +49,7 @@ pub(crate) fn install_hooks() -> Result<()> {
     ];
 
     let args = hook_install_args(hooks);
-    Cmd::new("tmux").args(&args).run()?;
+    tmux.cmd().args(&args).run()?;
 
     Ok(())
 }
@@ -79,9 +80,9 @@ fn tmux_double_quote(value: &str) -> String {
 }
 
 /// Remove tmux hooks.
-pub(crate) fn remove_hooks() {
+pub(crate) fn remove_hooks(tmux: &TmuxHost) {
     for hook in HOOK_NAMES {
-        let _ = Cmd::new("tmux").args(&["set-hook", "-gu", hook]).run();
+        let _ = tmux.cmd().args(&["set-hook", "-gu", hook]).run();
     }
 }
 

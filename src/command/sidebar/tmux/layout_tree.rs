@@ -21,7 +21,7 @@
 use serde::Deserialize;
 use tracing::debug;
 
-use crate::cmd::Cmd;
+use super::super::host::TmuxHost;
 use crate::config::SidebarPosition;
 
 /// A rectangle in the tmux layout coordinate system.
@@ -488,12 +488,14 @@ fn sidebar_layout_size_for_status(
 /// the remaining space proportionally, then applies the fixed layout
 /// atomically via `select-layout`.
 pub(crate) fn reflow_after_sidebar_add(
+    tmux: &TmuxHost,
     window_id: &str,
     sidebar_pane_id: &str,
     position: SidebarPosition,
     content_size: u16,
 ) {
-    let output = match Cmd::new("tmux")
+    let output = match tmux
+        .cmd()
         .args(&[
             "display-message",
             "-t",
@@ -619,7 +621,7 @@ pub(crate) fn reflow_after_sidebar_add(
         "-p",
         "-t",
         sidebar_pane_id,
-        super::super::SIDEBAR_APPLIED_SIZE_OPTION,
+        super::SIDEBAR_APPLIED_SIZE_OPTION,
         &content_size,
     ];
 
@@ -627,7 +629,7 @@ pub(crate) fn reflow_after_sidebar_add(
     // different format from the one serialized here.
     if root == original_root {
         debug!(window_id, "reflow: layout already matches");
-        let _ = Cmd::new("tmux").args(&record_size).run();
+        let _ = tmux.cmd().args(&record_size).run();
         return;
     }
     let new_layout = serialize_layout(&root);
@@ -641,7 +643,7 @@ pub(crate) fn reflow_after_sidebar_add(
 
     let mut args = record_size.to_vec();
     args.extend_from_slice(&[";", "select-layout", "-t", window_id, &new_layout]);
-    let _ = Cmd::new("tmux").args(&args).run();
+    let _ = tmux.cmd().args(&args).run();
 }
 
 // ── Sidebar removal ────────────────────────────────────────────
@@ -689,11 +691,13 @@ fn prune_pane(node: LayoutNode, target: u32) -> Option<LayoutNode> {
 /// preserves whatever pane arrangement the user created while the sidebar
 /// was open, unlike the old save/restore approach which used a stale snapshot.
 pub(crate) fn layout_after_sidebar_remove(
+    tmux: &TmuxHost,
     window_id: &str,
     sidebar_pane_id: &str,
     position: SidebarPosition,
 ) -> Option<String> {
-    let layout_str = Cmd::new("tmux")
+    let layout_str = tmux
+        .cmd()
         .args(&["display-message", "-t", window_id, "-p", "#{window_layout}"])
         .run_and_capture_stdout()
         .ok()?;

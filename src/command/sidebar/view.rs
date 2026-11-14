@@ -6,42 +6,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use crate::cmd::Cmd;
 use crate::config::SidebarView;
-use crate::multiplexer::{AgentPane, LivePaneInfo, create_backend, detect_backend};
+use crate::multiplexer::{AgentPane, LivePaneInfo};
 use serde::{Deserialize, Serialize};
 
-use super::store::SidebarStore;
+use super::host::SidebarHost;
 
 pub const OPTION: &str = "@workmux_sidebar_views_enabled";
-pub const SCOPE_OPTION: &str = "@workmux_sidebar_scope";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowView {
     pub name: String,
     pub pane_ids: HashSet<String>,
-}
-
-pub fn current_window() -> Result<String> {
-    let pane = std::env::var("TMUX_PANE").ok();
-    let mut args = vec!["display-message", "-p"];
-    if let Some(pane) = pane.as_deref() {
-        args.extend(["-t", pane]);
-    }
-    args.push("#{window_id}");
-    Ok(Cmd::new("tmux")
-        .args(&args)
-        .run_and_capture_stdout()?
-        .trim()
-        .to_string())
-}
-
-pub fn read_scope(window: &str) -> Option<WindowView> {
-    let value = Cmd::new("tmux")
-        .args(&["show-option", "-wqv", "-t", window, SCOPE_OPTION])
-        .run_and_capture_stdout()
-        .ok()?;
-    serde_json::from_str(&value).ok()
 }
 
 /// Configured views are enabled unless the server has explicitly disabled them.
@@ -49,17 +24,16 @@ pub fn is_enabled(value: Option<&str>) -> bool {
     value.map(str::trim) != Some("off")
 }
 
-pub fn set_enabled(mode: Option<&str>) -> Result<()> {
+pub(super) fn set_enabled(host: &SidebarHost, mode: Option<&str>) -> Result<()> {
     let requested = match mode {
         Some("on") => Some(true),
         Some("off") => Some(false),
         Some(mode) => bail!("invalid sidebar view mode {mode:?}; expected on or off"),
         None => None,
     };
-    let mux = create_backend(detect_backend());
-    let store = SidebarStore::for_mux(mux.as_ref());
+    let store = host.store();
     store.set_views_enabled(requested.unwrap_or_else(|| !store.views_enabled()))?;
-    super::signal_daemon_for(mux.as_ref());
+    super::daemon_ctrl::signal_daemon(host);
     Ok(())
 }
 
@@ -241,6 +215,7 @@ fn project_root(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::Cmd;
 
     fn views() -> Vec<SidebarView> {
         serde_yaml::from_str("- name: Named\n  sessions: [foo, bar, xyz]\n- name: Code\n  project_dirs: [/home/me/code]\n- name: Work\n  project_dirs: [/home/me/work]\n- name: Other\n  other: true\n").unwrap()
@@ -277,7 +252,7 @@ mod tests {
         assert!(is_enabled(Some("on")));
         assert!(!is_enabled(Some("off")));
         assert!(!is_enabled(Some("off\n")));
-        assert!(set_enabled(Some("Named")).is_err());
+        assert!(set_enabled(&SidebarHost::test_tmux(), Some("Named")).is_err());
     }
 
     #[test]

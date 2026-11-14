@@ -15,14 +15,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::cmd::Cmd;
 use crate::multiplexer::{create_backend, detect_backend};
-use crate::shell::shell_quote;
 
 use super::app::{HostIdentity, SidebarApp};
 use super::client;
 use super::daemon_ctrl::ensure_daemon_running;
-use super::panes::shutdown_all_sidebars;
+use super::host::SidebarHost;
 use super::ui::render_sidebar;
 
 /// Drop guard that restores terminal state on panic or early return.
@@ -63,20 +61,21 @@ pub fn run_sidebar() -> Result<()> {
         tracing::info!("sidebar-run exiting: mux not running");
         return Ok(());
     }
-    if mux.name() == "zellij" {
-        drop(super::session_state::lock_layout(&mux.instance_id())?);
+    let host = SidebarHost::resolve(mux.as_ref())?;
+    if let SidebarHost::Zellij { instance_id } = &host {
+        drop(super::session_state::lock_layout(instance_id)?);
     }
 
     // Create app BEFORE entering raw mode: terminal_light::luma() queries
     // the terminal via stdin, which would race with the input reader thread.
-    let mut app = SidebarApp::new_client(mux)?;
+    let mut app = SidebarApp::new_client(mux, host)?;
     let Some(host_identity) = app.host_identity().cloned() else {
         tracing::error!("sidebar-run exiting: host pane identity unavailable");
         return Ok(());
     };
 
     // Ensure daemon is running (may have auto-exited or crashed)
-    let sock_path = ensure_daemon_running()?;
+    let sock_path = ensure_daemon_running(app.host())?;
 
     // Setup terminal (raw mode required before spawning input thread)
     enable_raw_mode()?;
@@ -132,7 +131,7 @@ pub fn run_sidebar() -> Result<()> {
             .then(|| app.refresh_interval())
             .flatten();
         let resize_timeout = app
-            .resize_deadline
+            .resize_deadline()
             .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
         let timeout = match (resize_timeout, refresh_interval) {
             (Some(resize), Some(refresh)) => {
@@ -183,7 +182,7 @@ pub fn run_sidebar() -> Result<()> {
 
         if last_pane_check.grace_expired(Instant::now())
             && last_pane_check.should_exit(app.host_identity(), |window_id, pane_id| {
-                sidebar_is_only_pane(app.mux.as_ref(), window_id, pane_id)
+                app.host().is_last_pane(window_id, pane_id)
             })
         {
             quit_for_last_pane(&mut app);
@@ -204,11 +203,8 @@ pub fn run_sidebar() -> Result<()> {
                 quit_reason = app.quit_reason.as_deref().unwrap_or("unknown"),
                 "sidebar-run quitting"
             );
-            if app.quit_silent {
-                schedule_pane_kill(app.mux.as_ref(), &host_identity.pane_id);
-            } else {
-                shutdown_all_sidebars(&host_identity);
-            }
+            app.host()
+                .finish_sidebar_exit(&host_identity, app.quit_silent);
             break;
         }
     }
@@ -244,52 +240,6 @@ fn handle_resize_event(
     app.on_resize_event(cols, rows);
     *needs_render = true;
     *needs_clear = true;
-}
-
-fn pane_kill_command(pane_id: &str) -> String {
-    format!(
-        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null || true",
-        shell_quote(pane_id)
-    )
-}
-
-fn schedule_pane_kill(mux: &dyn crate::multiplexer::Multiplexer, pane_id: &str) {
-    // Zellij and Rex close the pane when its process exits.
-    if matches!(mux.name(), "zellij" | "rex") {
-        return;
-    }
-    let cmd = pane_kill_command(pane_id);
-    let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
-}
-
-fn sole_pane_is_sidebar(output: &str, pane_id: &str) -> bool {
-    let mut panes = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    panes.next() == Some(pane_id) && panes.next().is_none()
-}
-
-fn sidebar_is_only_pane(
-    mux: &dyn crate::multiplexer::Multiplexer,
-    window_id: &str,
-    pane_id: &str,
-) -> bool {
-    match mux.name() {
-        "zellij" => {
-            return super::zellij_panes::sidebar_is_only_pane(
-                &mux.instance_id(),
-                window_id,
-                pane_id,
-            );
-        }
-        "rex" => return super::rex_panes::sidebar_is_only_pane(window_id, pane_id),
-        _ => {}
-    }
-    Cmd::new("tmux")
-        .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
-        .run_and_capture_stdout()
-        .is_ok_and(|output| sole_pane_is_sidebar(&output, pane_id))
 }
 
 struct LastPaneCheck {
@@ -361,7 +311,7 @@ fn process_event(
                     .and_then(|window_id| snapshot.window_pane_counts.get(window_id))
                     .copied();
                 if last_pane_check.should_exit(app.host_identity(), |window_id, pane_id| {
-                    sidebar_is_only_pane(app.mux.as_ref(), window_id, pane_id)
+                    app.host().is_last_pane(window_id, pane_id)
                 }) {
                     quit_for_last_pane(app);
                 }
@@ -445,7 +395,7 @@ fn handle_key_press(
         (KeyCode::Char('g'), _) => app.select_first(),
         (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
         (KeyCode::Char('V'), _) => {
-            if let Err(error) = super::view::set_enabled(None) {
+            if let Err(error) = super::view::set_enabled(app.host(), None) {
                 tracing::warn!(%error, "failed to toggle sidebar views");
             }
         }
@@ -566,22 +516,6 @@ mod tests {
         assert!(check.should_exit(Some(&identity), |window, pane| {
             window == "@42" && pane == "%12"
         }));
-    }
-
-    #[test]
-    fn pane_kill_command_targets_captured_sidebar_pane() {
-        assert_eq!(
-            pane_kill_command("%12"),
-            "sleep 0.05; tmux kill-pane -t '%12' 2>/dev/null || true"
-        );
-    }
-
-    #[test]
-    fn sole_pane_confirmation_requires_sidebar_identity() {
-        assert!(sole_pane_is_sidebar("%12\n", "%12"));
-        assert!(!sole_pane_is_sidebar("%12\n%13\n", "%12"));
-        assert!(!sole_pane_is_sidebar("%13\n", "%12"));
-        assert!(!sole_pane_is_sidebar("", "%12"));
     }
 
     #[test]

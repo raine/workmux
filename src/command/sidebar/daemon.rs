@@ -2687,10 +2687,10 @@ pub fn run() -> Result<()> {
                         let result = match &scope {
                             Some(scope) => tmux.set_window_option(
                                 window,
-                                super::view::SCOPE_OPTION,
+                                super::tmux::VIEW_OPTION,
                                 &serde_json::to_string(scope)?,
                             ),
-                            None => tmux.unset_window_option(window, super::view::SCOPE_OPTION),
+                            None => tmux.unset_window_option(window, super::tmux::VIEW_OPTION),
                         };
                         match result {
                             Ok(()) => {

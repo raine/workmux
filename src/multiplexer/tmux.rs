@@ -20,7 +20,7 @@ use super::{Multiplexer, PaneHandshake, util};
 ///
 /// This struct wraps all tmux-specific operations and implements the Multiplexer
 /// trait to provide a unified interface with other backends.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TmuxBackend {
     socket_path: Option<String>,
 }
@@ -433,7 +433,8 @@ impl TmuxBackend {
         }
     }
 
-    fn tmux_command(&self) -> Cmd<'_> {
+    /// A tmux command addressed to this server.
+    pub(crate) fn tmux_command(&self) -> Cmd<'_> {
         match self.socket_path.as_deref() {
             Some(socket_path) => Cmd::new("tmux").args(&["-S", socket_path]),
             None => Cmd::new("tmux"),
