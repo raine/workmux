@@ -35,6 +35,7 @@ pub(super) struct SidebarSessionState {
 
 /// A sidebar the daemon placed and the size it last gave it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "PlacementRecord", into = "PlacementRecord")]
 pub(super) struct Placement {
     pub block_id: String,
     /// The root split ratio the daemon last set or accepted.
@@ -44,20 +45,68 @@ pub(super) struct Placement {
     pub applied_window_cells: Option<u16>,
     /// Fingerprint of the window's block membership when the ratio was
     /// applied.
-    #[serde(alias = "topology")]
     pub membership: u64,
     /// What the daemon makes of ratio changes it did not ask for.
-    #[serde(default)]
     pub tracking: Tracking,
     /// Each block's size stamp when the daemon last changed the window's
     /// layout. A size still carrying its stamp predates that change.
-    #[serde(default)]
     pub stale_sizes: BTreeMap<String, String>,
 }
 
+/// A placement as the state file stores it. A daemon from another workmux
+/// version can keep running on the same server and reads every placement,
+/// so this shape must stay readable by the daemons already released.
+#[derive(Serialize, Deserialize)]
+struct PlacementRecord {
+    block_id: String,
+    applied_ratio: f64,
+    applied_window_cells: Option<u16>,
+    topology: u64,
+    #[serde(default)]
+    settling: bool,
+    #[serde(default)]
+    drag_candidate: Option<f64>,
+    #[serde(default)]
+    stale_sizes: BTreeMap<String, String>,
+}
+
+impl From<PlacementRecord> for Placement {
+    fn from(record: PlacementRecord) -> Self {
+        let tracking = match (record.settling, record.drag_candidate) {
+            (true, _) => Tracking::Settling,
+            (false, Some(ratio)) => Tracking::Candidate(ratio),
+            (false, None) => Tracking::Stable,
+        };
+        Self {
+            block_id: record.block_id,
+            applied_ratio: record.applied_ratio,
+            applied_window_cells: record.applied_window_cells,
+            membership: record.topology,
+            tracking,
+            stale_sizes: record.stale_sizes,
+        }
+    }
+}
+
+impl From<Placement> for PlacementRecord {
+    fn from(placement: Placement) -> Self {
+        Self {
+            block_id: placement.block_id,
+            applied_ratio: placement.applied_ratio,
+            applied_window_cells: placement.applied_window_cells,
+            topology: placement.membership,
+            settling: placement.tracking == Tracking::Settling,
+            drag_candidate: match placement.tracking {
+                Tracking::Candidate(ratio) => Some(ratio),
+                _ => None,
+            },
+            stale_sizes: placement.stale_sizes,
+        }
+    }
+}
+
 /// What the daemon makes of a root ratio it did not set.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) enum Tracking {
     /// The applied ratio holds: a new ratio may be a drag.
     #[default]
@@ -362,18 +411,51 @@ mod tests {
     }
 
     #[test]
-    fn placements_written_with_the_old_tracking_fields_still_read() {
+    fn placements_keep_their_file_shape() {
+        for (tracking, settling, drag_candidate) in [
+            (Tracking::Stable, false, serde_json::Value::Null),
+            (Tracking::Settling, true, serde_json::Value::Null),
+            (Tracking::Candidate(0.25), false, serde_json::json!(0.25)),
+        ] {
+            let placement = Placement {
+                block_id: "b".to_string(),
+                applied_ratio: 0.2,
+                applied_window_cells: Some(200),
+                membership: 7,
+                tracking,
+                stale_sizes: BTreeMap::from([("b".to_string(), "t1".to_string())]),
+            };
+            let json = serde_json::to_value(&placement).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "block_id": "b",
+                    "applied_ratio": 0.2,
+                    "applied_window_cells": 200,
+                    "topology": 7,
+                    "settling": settling,
+                    "drag_candidate": drag_candidate,
+                    "stale_sizes": {"b": "t1"},
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<Placement>(json).unwrap(),
+                placement
+            );
+        }
+    }
+
+    #[test]
+    fn placements_without_optional_fields_read_as_stable() {
         let placement: Placement = serde_json::from_value(serde_json::json!({
             "block_id": "b",
             "applied_ratio": 0.2,
-            "applied_window_cells": 200,
+            "applied_window_cells": null,
             "topology": 7,
-            "settling": true,
-            "drag_candidate": null,
         }))
         .unwrap();
-        assert_eq!(placement.membership, 7);
         assert_eq!(placement.tracking, Tracking::Stable);
+        assert!(placement.stale_sizes.is_empty());
     }
 
     #[test]
