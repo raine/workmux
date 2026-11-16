@@ -2,6 +2,10 @@
 Tests for PR checkout functionality (`workmux add --pr <number-or-url>`).
 """
 
+import json
+import subprocess
+from pathlib import Path
+
 from .conftest import (
     get_window_name,
     get_worktree_path,
@@ -28,9 +32,9 @@ def test_add_pr_from_same_repo(mux_server, workmux_exe_path, remote_repo_path):
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
 
-    assert "PR #123" in result.stdout
-    assert "Add new feature" in result.stdout
-    assert "contributor" in result.stdout
+    assert "PR #123" in result.stderr
+    assert "Add new feature" in result.stderr
+    assert "contributor" in result.stderr
 
     worktree_path = get_worktree_path(repo_path, "feature-branch")
     assert worktree_path.exists()
@@ -56,7 +60,7 @@ def test_add_pr_from_github_url(mux_server, workmux_exe_path, remote_repo_path):
         "add --pr https://github.com/raine/workmux/pull/190 url-review",
     )
 
-    assert "PR #190" in result.stdout
+    assert "PR #190" in result.stderr
     assert get_worktree_path(repo_path, "url-review").exists()
     assert get_window_name("url-review") in env.list_windows()
 
@@ -92,7 +96,7 @@ def test_add_pr_with_custom_branch_name(mux_server, workmux_exe_path, remote_rep
         env, workmux_exe_path, repo_path, "add my-review --pr 123"
     )
 
-    assert "PR #123" in result.stdout
+    assert "PR #123" in result.stderr
 
     worktree_path = get_worktree_path(repo_path, "my-review")
     assert worktree_path.exists()
@@ -124,7 +128,7 @@ def test_add_pr_reuses_existing_local_branch(
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
 
-    assert "PR #123" in result.stdout
+    assert "PR #123" in result.stderr
 
     worktree_path = get_worktree_path(repo_path, "feature-branch")
     assert worktree_path.exists()
@@ -160,7 +164,7 @@ def test_add_pr_merged_state_warning(mux_server, workmux_exe_path, remote_repo_p
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 456")
 
     assert "Warning" in result.stderr or "MERGED" in result.stderr
-    assert "456" in result.stdout
+    assert "456" in result.stderr
 
     worktree_path = get_worktree_path(repo_path, "merged-branch")
     assert worktree_path.exists()
@@ -312,8 +316,8 @@ def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_
 
     result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 16")
 
-    assert "PR #16" in result.stdout
-    assert "Use ANSI palette colors" in result.stdout
+    assert "PR #16" in result.stderr
+    assert "Use ANSI palette colors" in result.stderr
 
     worktree_path = get_worktree_path(repo_path, "forkowner-main")
     assert worktree_path.exists(), (
@@ -487,3 +491,80 @@ def test_add_pr_fetches_missing_target_ref(
         cwd=repo_path,
     ).stdout.strip()
     assert base == "origin/main"
+
+
+def run_headless_pr(env, workmux_exe_path, repo_path, *args):
+    process_env = env.env.copy()
+    process_env.pop("TMUX", None)
+    process_env.pop("TMUX_PANE", None)
+    return subprocess.run(
+        [str(workmux_exe_path), "add", *args, "--headless"],
+        cwd=repo_path,
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_headless_add_pr_creates_worktree_on_pr_branch(
+    mux_server, workmux_exe_path, remote_repo_path
+):
+    """Headless PR checkout provisions the PR head and emits only JSON on stdout."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    feature_commit = setup_pr_remote_and_branch(
+        env, repo_path, remote_repo_path, "feature-branch"
+    )
+    install_fake_pr_view(env, branch="feature-branch", base="main")
+    windows_before = env.list_windows()
+
+    result = run_headless_pr(env, workmux_exe_path, repo_path, "--pr", "123", "--json")
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["branch"] == "feature-branch"
+    assert receipt["base_branch"] == "origin/main"
+    assert "PR #123" in result.stderr
+    worktree_path = Path(receipt["worktree_path"])
+    assert worktree_path == get_worktree_path(repo_path, "feature-branch")
+    assert (worktree_path / "pr-content.txt").read_text() == "PR change\n"
+    head = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert head == feature_commit
+    base = env.run_command(
+        ["git", "config", "--get", "branch.feature-branch.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/main"
+    assert env.list_windows() == windows_before
+
+
+def test_headless_add_pr_with_custom_branch_name(
+    mux_server, workmux_exe_path, remote_repo_path
+):
+    """A branch name given with --pr names the local branch in headless mode."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    feature_commit = setup_pr_remote_and_branch(
+        env, repo_path, remote_repo_path, "feature-branch"
+    )
+    install_fake_pr_view(env, branch="feature-branch", base="main")
+
+    result = run_headless_pr(
+        env, workmux_exe_path, repo_path, "my-review", "--pr", "123"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "PR #123" in result.stderr
+    assert "Successfully provisioned headless worktree for 'my-review'" in result.stdout
+    worktree_path = get_worktree_path(repo_path, "my-review")
+    head = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert head == feature_commit

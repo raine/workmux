@@ -785,8 +785,12 @@ sessions, windows, panes, layouts, or pane commands. The JSON receipt includes
 Headless worktrees persist until removed with `workmux remove <handle>`. A later
 `workmux open <handle>` attaches a workmux-managed multiplexer target. Headless
 branch arguments are local branch names; remote branch syntax is rejected.
-Prompt, rescue, multi-worktree, sandbox, wait, dry-run, and mux-specific options
-are not accepted with `--headless`.
+`--pr <number|url>` checks out a pull or merge request the same way as without
+`--headless`: the PR's head branch becomes the local branch unless a branch
+name is given, and the PR's target branch is the base. PR details print to
+stderr, so `--json` stdout contains only the receipt. Prompt, rescue,
+multi-worktree, sandbox, wait, dry-run, and mux-specific options are not
+accepted with `--headless`.
 
 #### Examples
 

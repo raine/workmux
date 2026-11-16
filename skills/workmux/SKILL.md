@@ -122,9 +122,10 @@ starting an agent. No running multiplexer is required. `--json` requires
 `--headless` and returns one JSON receipt with the handle, worktree path,
 and effective working directory; hook output goes to stderr.
 
-Use an explicit local branch name. Supports `--base`, `--name`, `--no-hooks`,
-and `--no-file-ops`, but not PR checkout, prompts, `--background`, or other
-mux/agent options. Worktrees persist until removed: clean up with
+Use an explicit local branch name, or `--pr <number|url>` to check out a PR
+(the branch name is then optional). Supports `--base`, `--name`, `--no-hooks`,
+and `--no-file-ops`, but not prompts, `--background`, or other mux/agent
+options. Worktrees persist until removed: clean up with
 `workmux remove <handle>` or attach a window later with `workmux open <handle>`.
 
 ### List worktrees

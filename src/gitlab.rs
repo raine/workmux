@@ -233,9 +233,9 @@ pub fn resolve(
         "origin".to_string()
     };
 
-    println!("MR !{number}: {}", mr.title);
-    println!("Author: {}", mr.author.username);
-    println!("Branch: {}", mr.source_branch);
+    eprintln!("MR !{number}: {}", mr.title);
+    eprintln!("Author: {}", mr.author.username);
+    eprintln!("Branch: {}", mr.source_branch);
     if mr.state != "opened" {
         eprintln!(
             "Warning: MR !{number} is {}. Proceeding with checkout...",

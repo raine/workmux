@@ -230,6 +230,7 @@ struct HeadlessReceipt<'a> {
 fn run_headless(
     branch_name: Option<&str>,
     pr: Option<PrReference>,
+    forge: Option<Forge>,
     auto_name: bool,
     base: Option<&str>,
     name: Option<&str>,
@@ -249,9 +250,6 @@ fn run_headless(
 ) -> Result<()> {
     if crate::sandbox::guest::is_sandbox_guest() {
         bail!("--headless is not supported from inside a sandbox");
-    }
-    if pr.is_some() {
-        bail!("--pr cannot be used with --headless");
     }
     if auto_name {
         bail!("--auto-name cannot be used with --headless");
@@ -282,11 +280,18 @@ fn run_headless(
     }
 
     check_preconditions(true)?;
-    let branch_name = branch_name.context("A branch name is required with --headless")?;
+    let pr_checkout = pr
+        .map(|pr_reference| pr_reference.resolve(forge, branch_name, false))
+        .transpose()?;
+    let branch_name = match &pr_checkout {
+        Some(checkout) => checkout.local_branch.as_str(),
+        None => branch_name.context("A branch name is required with --headless")?,
+    };
     let (config, config_location) = config::Config::load_with_location(None, config_override)?;
     let mux = create_backend(detect_backend());
     let context = workflow::WorkflowContext::new(config, mux, config_location)?;
-    if let Some((candidate_remote, _)) = branch_name.split_once('/')
+    if pr_checkout.is_none()
+        && let Some((candidate_remote, _)) = branch_name.split_once('/')
         && git::remote_exists_in(candidate_remote, Some(&context.execution_dir))?
     {
         bail!(
@@ -295,12 +300,17 @@ fn run_headless(
         );
     }
     let handle = crate::naming::derive_handle(branch_name, name, &context.config)?;
-    let configured_base = if base.is_none() {
+    // A PR checkout targets the PR's base branch, so the configured base
+    // branch does not apply.
+    let configured_base = if base.is_none() && pr_checkout.is_none() {
         workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
     } else {
         None
     };
-    let resolved_base = base.or(configured_base.as_deref());
+    let resolved_base = match &pr_checkout {
+        Some(checkout) => checkout.base_branch.as_deref(),
+        None => base.or(configured_base.as_deref()),
+    };
     let options = SetupOptions::new(!setup.no_hooks, !setup.no_file_ops, false);
 
     if !json {
@@ -317,8 +327,10 @@ fn run_headless(
             branch_name,
             handle: &handle,
             base_branch: resolved_base,
-            remote_branch: None,
-            checkout_ref: None,
+            remote_branch: pr_checkout
+                .as_ref()
+                .map(|checkout| checkout.remote_branch.as_str()),
+            checkout_ref: pr_checkout.as_ref().map(|checkout| checkout.checkout_ref),
             prompt: None,
             options,
             mode_override: None,
@@ -440,6 +452,7 @@ pub fn run(
         return run_headless(
             branch_name,
             pr,
+            forge,
             auto_name,
             base,
             name.as_deref(),

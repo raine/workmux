@@ -204,9 +204,9 @@ pub fn resolve_pr_ref(
     .with_context(|| format!("Failed to fetch details for PR #{}", pr_number))?;
 
     // Display PR information
-    println!("PR #{}: {}", pr_number, pr_details.title);
-    println!("Author: {}", pr_details.author.login);
-    println!("Branch: {}", pr_details.head_ref_name);
+    eprintln!("PR #{}: {}", pr_number, pr_details.title);
+    eprintln!("Author: {}", pr_details.author.login);
+    eprintln!("Branch: {}", pr_details.head_ref_name);
 
     // Warn about PR state
     if pr_details.state != "OPEN" {
@@ -267,9 +267,9 @@ pub fn resolve_pr_ref_dry_run(
         github::get_pr_details(pr_number)
     })
     .with_context(|| format!("Failed to fetch details for PR #{}", pr_number))?;
-    println!("PR #{}: {}", pr_number, pr_details.title);
-    println!("Author: {}", pr_details.author.login);
-    println!("Branch: {}", pr_details.head_ref_name);
+    eprintln!("PR #{}: {}", pr_number, pr_details.title);
+    eprintln!("Author: {}", pr_details.author.login);
+    eprintln!("Branch: {}", pr_details.head_ref_name);
 
     let current_repo_owner =
         git::get_repo_owner().context("Failed to determine repository owner from origin remote")?;
@@ -317,7 +317,7 @@ pub fn resolve_fork_branch(fork_spec: &git::ForkBranchSpec) -> Result<ForkBranch
             "CLOSED" => " (closed)",
             _ => "",
         };
-        println!("PR #{}: {}{}", pr.number, pr.title, state_suffix);
+        eprintln!("PR #{}: {}{}", pr.number, pr.title, state_suffix);
     }
 
     // Ensure the fork remote exists
