@@ -341,6 +341,16 @@ pub struct WorktreeListing {
     pub worktrees: Vec<(PathBuf, String)>,
 }
 
+impl WorktreeListing {
+    /// Canonical roots for assigning agents to their deepest containing worktree.
+    pub fn canonical_paths(&self) -> Vec<PathBuf> {
+        self.worktrees
+            .iter()
+            .map(|(path, _)| crate::util::canon_or_self(path))
+            .collect()
+    }
+}
+
 fn parse_worktree_listing(output: &str) -> Result<WorktreeListing> {
     let main_path = output
         .lines()

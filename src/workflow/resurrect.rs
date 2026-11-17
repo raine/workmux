@@ -127,10 +127,8 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
 
         // Find matching worktree using descendant path matching
         // (agent workdir may be a subdirectory of the worktree root)
-        let owner = owning_worktree(&canon_agent, wt_map.iter().map(|(path, _)| path.as_path()));
-        let matched = wt_map
-            .iter()
-            .find(|(path, _)| Some(path.as_path()) == owner);
+        let owner = owning_worktree(&canon_agent, wt_map.iter().map(|(path, _)| path));
+        let matched = owner.and_then(|owner| wt_map.iter().find(|(path, _)| path == owner));
 
         match matched {
             Some((_canon_wt, handle)) if !git::get_worktree_attachment(handle).manages_mux() => {

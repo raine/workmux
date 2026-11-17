@@ -73,6 +73,7 @@ pub fn list_in(
     }
 
     let listing = git::list_worktrees_with_main_in(repo)?;
+    let worktree_paths = listing.canonical_paths();
     let main_worktree_path = listing.main_path;
     let worktrees_data = listing.worktrees;
 
@@ -81,12 +82,6 @@ pub fn list_in(
     }
 
     let repo_key = git::get_repository_key_in(repo)?;
-
-    // Ownership must include worktrees hidden by the display filter.
-    let canonical_worktrees: Vec<_> = worktrees_data
-        .iter()
-        .map(|(path, _)| canon_or_self(path))
-        .collect();
 
     // Apply filter early before expensive operations
     let worktrees_data = filter_worktrees(worktrees_data, filter);
@@ -229,10 +224,7 @@ pub fn list_in(
             let matching_statuses: Vec<_> = agent_panes_canon
                 .iter()
                 .filter(|(canon_agent_path, _)| {
-                    owning_worktree(
-                        canon_agent_path,
-                        canonical_worktrees.iter().map(|path| path.as_path()),
-                    ) == Some(canon_wt_path.as_path())
+                    owning_worktree(canon_agent_path, &worktree_paths) == Some(&canon_wt_path)
                 })
                 .filter_map(|(_, status)| *status)
                 .collect();

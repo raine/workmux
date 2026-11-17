@@ -6,6 +6,18 @@ use std::time::{Duration, SystemTime};
 
 const STALE_ATOMIC_TEMP_AGE: Duration = Duration::from_secs(60);
 
+/// Find the deepest worktree containing a path. Both the path and all worktree
+/// roots must be canonicalized, and roots must include unselected worktrees.
+pub fn owning_worktree<'a>(
+    path: &Path,
+    worktrees: impl IntoIterator<Item = &'a PathBuf>,
+) -> Option<&'a PathBuf> {
+    worktrees
+        .into_iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
 /// Write content through a same-directory temporary file and atomically replace the target.
 pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     write_atomic_with_durability(path, content, false)
@@ -95,17 +107,6 @@ fn atomic_temp_prefix(path: &Path) -> String {
 /// Canonicalize a path, falling back to the original if canonicalization fails.
 pub fn canon_or_self(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// Return the most specific canonical worktree path containing `path`.
-pub fn owning_worktree<'a>(
-    path: &Path,
-    worktrees: impl IntoIterator<Item = &'a Path>,
-) -> Option<&'a Path> {
-    worktrees
-        .into_iter()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
 }
 
 /// Lexically normalize a path by resolving `.` and `..` components without
@@ -317,42 +318,40 @@ pub fn format_elapsed_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn owning_worktree_uses_the_deepest_component_match() {
-        use std::path::Path;
-        let roots = [
-            Path::new("/repo/worktrees/feature/nested"),
-            Path::new("/repo"),
-            Path::new("/repo/worktrees/feature"),
-            Path::new("/sibling"),
-        ];
-        for (path, expected) in [
-            ("/repo", Some("/repo")),
-            ("/repo/src", Some("/repo")),
-            (
-                "/repo/worktrees/feature/src",
-                Some("/repo/worktrees/feature"),
-            ),
-            (
-                "/repo/worktrees/feature/nested/src",
-                Some("/repo/worktrees/feature/nested"),
-            ),
-            ("/repo/worktrees/feature-other", Some("/repo")),
-            ("/sibling/src", Some("/sibling")),
-            ("/repo-other", None),
-        ] {
-            assert_eq!(
-                super::owning_worktree(Path::new(path), roots),
-                expected.map(Path::new)
-            );
-            assert_eq!(
-                super::owning_worktree(Path::new(path), roots.into_iter().rev()),
-                expected.map(Path::new)
-            );
-        }
-    }
-
     use super::*;
+
+    #[test]
+    fn worktree_ownership_uses_components_and_ignores_order() {
+        let mut roots = vec![
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo/worktrees/feature"),
+            PathBuf::from("/repo/worktrees/feature/nested"),
+        ];
+        for _ in 0..2 {
+            for (path, owner) in [
+                ("/repo", Some("/repo")),
+                ("/repo/src", Some("/repo")),
+                (
+                    "/repo/worktrees/feature/src",
+                    Some("/repo/worktrees/feature"),
+                ),
+                (
+                    "/repo/worktrees/feature/nested/src",
+                    Some("/repo/worktrees/feature/nested"),
+                ),
+                ("/repo/worktrees/feature-other", Some("/repo")),
+                ("/repo-other", None),
+            ] {
+                assert_eq!(
+                    owning_worktree(Path::new(path), &roots).map(PathBuf::as_path),
+                    owner.map(Path::new),
+                    "{path}"
+                );
+            }
+            roots.reverse();
+        }
+        assert_eq!(owning_worktree(Path::new("/repo"), &[]), None);
+    }
 
     #[test]
     fn write_atomic_replaces_target_and_removes_temp() {

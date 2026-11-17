@@ -81,14 +81,11 @@ pub fn resolve_worktree_agents_from_snapshot(
             let local_result = if in_git_repo {
                 match git::find_worktree(&local_name) {
                     Ok((worktree_path, _branch)) => {
-                        let worktrees: Vec<_> = git::list_worktrees()?
-                            .iter()
-                            .map(|(path, _)| canon_or_self(path))
-                            .collect();
+                        let paths = git::list_worktrees_with_main_in(None)?.canonical_paths();
                         Some(Ok(resolve_local_agents(
                             agent_panes,
                             &worktree_path,
-                            &worktrees,
+                            &paths,
                         )))
                     }
                     Err(e) if e.downcast_ref::<git::WorktreeNotFound>().is_some() => None,
@@ -111,9 +108,9 @@ pub fn resolve_worktree_agents_from_snapshot(
 fn resolve_local_agents(
     agent_panes: &[AgentPane],
     worktree_path: &Path,
-    canonical_worktrees: &[PathBuf],
+    worktree_paths: &[PathBuf],
 ) -> (PathBuf, Vec<AgentPane>) {
-    let matching = match_agents_to_worktree(agent_panes, worktree_path, canonical_worktrees)
+    let matching = match_agents_to_worktree(agent_panes, worktree_path, worktree_paths)
         .into_iter()
         .cloned()
         .collect();
@@ -326,20 +323,19 @@ pub fn resolve_agent_target(name: &str, mux: &dyn Multiplexer) -> Result<AgentTa
 ///
 /// Used by `status` and `wait` commands that load agents once and match
 /// multiple worktrees, avoiding repeated calls to `load_reconciled_agents`.
+/// `worktree_paths` must contain all canonical roots in the target repository,
+/// including worktrees not selected by the command.
 pub fn match_agents_to_worktree<'a>(
     agents: &'a [AgentPane],
     worktree_path: &Path,
-    canonical_worktrees: &[PathBuf],
+    worktree_paths: &[PathBuf],
 ) -> Vec<&'a AgentPane> {
     let canon_wt = canon_or_self(worktree_path);
     agents
         .iter()
         .filter(|a| {
             let canon_agent = canon_or_self(&a.path);
-            owning_worktree(
-                &canon_agent,
-                canonical_worktrees.iter().map(|path| path.as_path()),
-            ) == Some(canon_wt.as_path())
+            owning_worktree(&canon_agent, worktree_paths) == Some(&canon_wt)
         })
         .collect()
 }
@@ -372,33 +368,44 @@ mod tests {
     }
 
     #[test]
-    fn local_agents_exclude_nested_worktrees() {
+    fn nested_agents_belong_only_to_the_deepest_worktree() {
         let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("quiver");
+        let repo = temp.path().join("repo");
         let nested = repo.join("worktrees/feature");
         let child = linked_worktree(&repo, &nested);
-        let main = agent_at(&repo.join("src"), "%0");
-        std::fs::create_dir(repo.join("src")).unwrap();
-        let panes = [main.clone(), child.clone()];
-        let roots = [canon_or_self(&repo), canon_or_self(&nested)];
-        assert_eq!(resolve_local_agents(&panes, &repo, &roots).1, vec![main]);
-        assert_eq!(resolve_local_agents(&panes, &nested, &roots).1, vec![child]);
-    }
-
-    #[test]
-    fn matched_agents_exclude_nested_worktrees() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("quiver");
-        let nested = repo.join("worktrees/feature");
-        let child = linked_worktree(&repo, &nested);
-        let main = agent_at(&repo, "%0");
-        let panes = [main.clone(), child.clone()];
-        let roots = [canon_or_self(&repo), canon_or_self(&nested)];
-        assert_eq!(match_agents_to_worktree(&panes, &repo, &roots), vec![&main]);
-        assert_eq!(
-            match_agents_to_worktree(&panes, &nested, &roots),
-            vec![&child]
+        let deeper = nested.join("worktrees/deeper");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "deeper", deeper.to_str().unwrap()],
         );
+        let paths = git::list_worktrees_with_main_in(Some(&repo))
+            .unwrap()
+            .canonical_paths();
+        let agents = [
+            agent_at(&repo, "%0"),
+            child.clone(),
+            agent_at(&deeper, "%2"),
+        ];
+        for (root, expected) in [(&repo, 0), (&nested, 1), (&deeper, 2)] {
+            assert_eq!(
+                match_agents_to_worktree(&agents, root, &paths),
+                vec![&agents[expected]]
+            );
+            assert_eq!(
+                resolve_local_agents(&agents, root, &paths).1,
+                vec![agents[expected].clone()]
+            );
+        }
+        assert!(match_agents_to_worktree(&[child], &repo, &paths).is_empty());
+
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&nested, &alias).unwrap();
+        let aliased_agent = agent_at(&alias.join("src"), "%3");
+        assert_eq!(
+            match_agents_to_worktree(std::slice::from_ref(&aliased_agent), &nested, &paths),
+            vec![&aliased_agent]
+        );
+        assert!(match_agents_to_worktree(&[aliased_agent], &repo, &paths).is_empty());
     }
 
     #[test]
