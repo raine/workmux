@@ -22,6 +22,20 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.283 (2026-11-18)
+
+<!-- highlight: Rex support -->
+
+- **New!** Use [Rex](https://www.superlogical.com/rex) as a multiplexer backend, with session mode, the dashboard, agent resurrection, and the sidebar. Experimental: see the [Rex guide](https://workmux.dev/guide/rex/) for setup and limitations. Thanks to [Amr Gawish](https://github.com/agawish) for contributing the backend. ([#344](https://github.com/raine/workmux/pull/344), [#345](https://github.com/raine/workmux/pull/345))
+- Check out pull requests without opening a terminal window with `workmux add --pr <number> --headless`, including fork PRs. Add `--json` for a machine-readable receipt. PR details now go to stderr rather than stdout in all modes.
+- Show inactive agents as **Quiet** in the sidebar, without a working spinner or elapsed timer. Quiet means no recent activity was observed, not that the agent has finished.
+- Fix canceled Pi turns continuing to show as working after the agent becomes idle.
+- Fix agents in nested worktrees being attributed to the main worktree, causing missing resurrection entries, duplicate status counts, and commands targeting the wrong agent. ([#357](https://github.com/raine/workmux/issues/357))
+- Fix toggling named sidebar views on Zellij, and make sidebar navigation follow the agents shown in the current view.
+- Fix Zellij sidebars sending commands to unrelated tmux sessions.
+- Fix concurrent sidebar starts launching duplicate daemons.
+- Fix intermittent pane handshake timeouts when opening worktrees on WezTerm, kitty, Zellij, and Rex.
+
 ## v0.1.282 (2026-11-10)
 
 - Fix `workmux remove` failing on detached worktrees. ([#354](https://github.com/raine/workmux/issues/354))
