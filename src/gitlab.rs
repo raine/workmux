@@ -123,16 +123,10 @@ impl GlabContext {
     fn json<T: serde::de::DeserializeOwned>(&self, args: &[&str]) -> Result<T> {
         let mut command = Command::new("glab");
         git::clear_ambient_git_env(&mut command);
+        configure_glab_env(&mut command);
         let output = command
             .current_dir(self.directory.path())
             .args(args)
-            .env_remove("GITLAB_REPO")
-            .env_remove("GITLAB_HOST")
-            .env_remove("GITLAB_URI")
-            .env_remove("GL_HOST")
-            .env("GLAB_ENABLE_CI_AUTOLOGIN", "false")
-            .env("NO_PROMPT", "1")
-            .env("GLAB_NO_PROMPT", "1")
             .output()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -150,6 +144,24 @@ impl GlabContext {
         }
         serde_json::from_slice(&output.stdout).context("Failed to parse glab JSON output")
     }
+}
+
+/// Isolate glab from the user's GitLab host selection and disable prompts.
+///
+/// `NO_PROMPT` is removed rather than set: newer glab versions print a
+/// deprecation warning for it on stdout, which corrupts the JSON output.
+/// `GLAB_NO_PROMPT` covers newer glab, and `PROMPT_DISABLED` covers versions
+/// that predate it, without triggering the warning.
+fn configure_glab_env(command: &mut Command) {
+    command
+        .env_remove("GITLAB_REPO")
+        .env_remove("GITLAB_HOST")
+        .env_remove("GITLAB_URI")
+        .env_remove("GL_HOST")
+        .env_remove("NO_PROMPT")
+        .env("GLAB_ENABLE_CI_AUTOLOGIN", "false")
+        .env("GLAB_NO_PROMPT", "1")
+        .env("PROMPT_DISABLED", "1");
 }
 
 pub fn resolve(
@@ -274,6 +286,19 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glab_env_disables_prompts_without_deprecated_no_prompt() {
+        let mut command = Command::new("glab");
+        configure_glab_env(&mut command);
+        let envs: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.and_then(|v| v.to_str())))
+            .collect();
+        assert_eq!(envs.get("NO_PROMPT"), Some(&None));
+        assert_eq!(envs.get("GLAB_NO_PROMPT"), Some(&Some("1")));
+        assert_eq!(envs.get("PROMPT_DISABLED"), Some(&Some("1")));
+    }
 
     #[test]
     fn repository_urls_preserve_nested_groups() {
