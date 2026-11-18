@@ -6,6 +6,11 @@ Requires [rust-release-tools](https://github.com/raine/rust-release-tools):
 pipx install git+https://github.com/raine/rust-release-tools.git
 ```
 
+Before releasing, prepare the changelog and show it to the user for explicit
+approval. A request to release does not count as changelog approval. Do not
+commit the release, tag, or push until the user confirms the changelog. Use the
+approved text without rewriting it.
+
 To release:
 
 ```bash
