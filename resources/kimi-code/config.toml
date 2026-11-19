@@ -1,0 +1,32 @@
+[[hooks]]
+event = "SessionStart"
+matcher = "startup|resume"
+command = "workmux register-agent"
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "PermissionRequest"
+command = "workmux set-window-status waiting"
+
+[[hooks]]
+event = "PermissionResult"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "PostToolUse"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "SubagentStart"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "SubagentStop"
+command = "workmux set-window-status working"
+
+[[hooks]]
+event = "Stop"
+command = "workmux set-window-status done"

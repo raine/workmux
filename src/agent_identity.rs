@@ -2,7 +2,8 @@
 //!
 //! Classifies an agent pane by combining tmux's `pane_current_command` with
 //! the pane title. Some agents report a version string (Claude Code: "2.1.118"),
-//! a truncated binary name (Codex: "codex-aarch64-a"), or run as a generic
+//! a truncated binary name (Codex: "codex-aarch64-a"), a self-assigned
+//! process title (Kimi Code: "kimi-code"), or run as a generic
 //! interpreter (Gemini, Pi, Vibe). Stem-based profile resolution alone misses
 //! these, so the result of `classify_agent_kind` is cached on `AgentState`
 //! once it becomes non-None and reused by the sidebar render path.
@@ -29,6 +30,7 @@ pub enum AgentKind {
     Antigravity,
     Pi,
     Omp,
+    Kimi,
     KiroCli,
     Vibe,
     Copilot,
@@ -47,6 +49,7 @@ impl AgentKind {
             AgentKind::Antigravity => "agy",
             AgentKind::Pi => "pi",
             AgentKind::Omp => "omp",
+            AgentKind::Kimi => "kimi",
             AgentKind::KiroCli => "kiro-cli",
             AgentKind::Vibe => "vibe",
             AgentKind::Copilot => "copilot",
@@ -64,6 +67,7 @@ impl AgentKind {
             "agy" => Some(AgentKind::Antigravity),
             "pi" => Some(AgentKind::Pi),
             "omp" => Some(AgentKind::Omp),
+            "kimi" => Some(AgentKind::Kimi),
             "kiro-cli" => Some(AgentKind::KiroCli),
             "vibe" => Some(AgentKind::Vibe),
             "copilot" => Some(AgentKind::Copilot),
@@ -83,6 +87,7 @@ impl AgentKind {
             AgentKind::Antigravity => "⋂",
             AgentKind::Pi => "π",
             AgentKind::Omp => "⌥",
+            AgentKind::Kimi => "KC",
             AgentKind::KiroCli => "K",
             AgentKind::Vibe => "V",
             AgentKind::Copilot => "CP",
@@ -101,6 +106,7 @@ impl AgentKind {
             AgentKind::Antigravity => "Antigravity",
             AgentKind::Pi => "Pi",
             AgentKind::Omp => "Oh My Pi",
+            AgentKind::Kimi => "Kimi",
             AgentKind::KiroCli => "Kiro",
             AgentKind::Vibe => "Vibe",
             AgentKind::Copilot => "Copilot",
@@ -125,6 +131,7 @@ impl AgentKind {
             AgentKind::Pi => Color::Rgb(0x96, 0xbb, 0xb5),
             AgentKind::Omp => Color::Rgb(0xe0, 0x57, 0x35),
             AgentKind::OpenCode => Color::Blue,
+            AgentKind::Kimi => Color::Rgb(0x4f, 0xa8, 0xff),
             AgentKind::KiroCli => return None,
             AgentKind::Grok => Color::Rgb(0x1d, 0x9b, 0xf0),
         })
@@ -168,6 +175,10 @@ fn classify_by_command(raw: &str, stem: &str) -> Option<AgentKind> {
 
     if stem == "codex" || stem.starts_with("codex-") {
         return Some(AgentKind::Codex);
+    }
+
+    if stem == "kimi-code" {
+        return Some(AgentKind::Kimi);
     }
 
     AgentKind::from_str(stem)
@@ -267,6 +278,16 @@ mod tests {
     fn kiro_and_copilot_match() {
         assert_eq!(classify("kiro-cli", ""), Some("kiro-cli".into()));
         assert_eq!(classify("copilot", ""), Some("copilot".into()));
+    }
+
+    #[test]
+    fn kimi_command_matches() {
+        assert_eq!(classify("kimi", ""), Some("kimi".into()));
+        assert_eq!(classify("kimi-code", ""), Some("kimi".into()));
+        assert_eq!(
+            classify("/usr/local/bin/kimi-code", ""),
+            Some("kimi".into())
+        );
     }
 
     #[test]
@@ -398,6 +419,7 @@ mod tests {
             AgentKind::Pi,
             AgentKind::Omp,
             AgentKind::KiroCli,
+            AgentKind::Kimi,
             AgentKind::Vibe,
             AgentKind::Copilot,
             AgentKind::Grok,
