@@ -920,10 +920,16 @@ fn handle_rescue_flow(
     )
     .context("Failed to move uncommitted changes")?;
 
+    let source_note = if rescue.patch {
+        "Unselected changes were left in the original worktree"
+    } else {
+        "Original worktree is now clean"
+    };
     println!(
-        "✓ Moved uncommitted changes to new worktree for branch '{}'\n  Worktree: {}\n  Original worktree is now clean",
+        "✓ Moved uncommitted changes to new worktree for branch '{}'\n  Worktree: {}\n  {}",
         result.branch_name,
-        result.worktree_path.display()
+        result.worktree_path.display(),
+        source_note
     );
 
     if wait {

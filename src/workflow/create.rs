@@ -794,10 +794,8 @@ pub fn create_with_changes(
     // 3. Apply stash in new worktree
     match git::stash_pop(new_worktree_path) {
         Ok(_) => {
-            // 4. Success: Clean up original worktree
-            info!("create_with_changes: stash applied successfully, cleaning original worktree");
-            git::reset_hard(&original_worktree_path)?;
-
+            // `git stash push` already removed the moved changes from the original
+            // worktree. A reset here would also discard hunks left out by --patch.
             info!(
                 branch = branch_name,
                 "create_with_changes: completed successfully"

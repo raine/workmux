@@ -1,6 +1,11 @@
 """Tests for `workmux add --with-changes` (rescue) functionality."""
 
+import os
+import pty
+import select
 import stat
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -8,6 +13,7 @@ import pytest
 from ..conftest import (
     MuxEnvironment,
     RepoBuilder,
+    TmuxEnvironment,
     get_window_name,
     get_worktree_path,
     run_workmux_command,
@@ -676,3 +682,85 @@ class TestRescueErrors:
         )
 
         assert "No uncommitted changes to move" in result.stderr
+
+
+class TestRescuePatch:
+    """Tests for --with-changes --patch, which needs a terminal for hunk selection."""
+
+    @pytest.mark.tmux_only
+    def test_rescue_patch_keeps_unselected_hunks_in_source(
+        self,
+        mux_server: TmuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """Hunks left out of the --patch selection stay in the original worktree."""
+        env = mux_server
+        branch_name = "feature-rescue-patch"
+        write_workmux_config(mux_repo_path)
+
+        for name in ("a.txt", "b.txt"):
+            (mux_repo_path / name).write_text(f"{name} original\n")
+        env.run_command(["git", "add", "a.txt", "b.txt"], cwd=mux_repo_path)
+        env.run_command(["git", "commit", "-m", "Add a and b"], cwd=mux_repo_path)
+        (mux_repo_path / "a.txt").write_text("a.txt changed\n")
+        (mux_repo_path / "b.txt").write_text("b.txt changed\n")
+
+        server_pid = env.tmux(["display-message", "-p", "#{pid}"]).stdout.strip()
+        proc_env = {
+            **env.env,
+            "TMUX": f"{env.socket_path},{server_pid},0",
+            "TMUX_PANE": str(env.runner_pane_id),
+        }
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [str(workmux_exe_path), "add", branch_name, "--with-changes", "--patch"],
+            cwd=mux_repo_path,
+            env=proc_env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+        )
+        os.close(slave)
+
+        # git asks once per file, in path order: skip a.txt, take b.txt.
+        answers = [b"n\n", b"y\n"]
+        output = b""
+        deadline = time.monotonic() + 30
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.5)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output += chunk
+                    asked = output.count(b"Stash this hunk")
+                    sent = 2 - len(answers)
+                    if answers and asked > sent:
+                        os.write(master, answers.pop(0))
+                elif proc.poll() is not None:
+                    break
+            returncode = proc.wait(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            os.close(master)
+
+        text = output.decode(errors="replace")
+        assert returncode == 0, text
+        assert not answers, f"git did not ask for every hunk:\n{text}"
+
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+        assert (worktree_path / "b.txt").read_text() == "b.txt changed\n"
+        assert (worktree_path / "a.txt").read_text() == "a.txt original\n"
+
+        assert (mux_repo_path / "a.txt").read_text() == "a.txt changed\n"
+        assert (mux_repo_path / "b.txt").read_text() == "b.txt original\n"
+        assert "now clean" not in text
+
+        stash_list = env.run_command(["git", "stash", "list"], cwd=mux_repo_path)
+        assert stash_list.stdout.strip() == ""
