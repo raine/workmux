@@ -3,6 +3,7 @@
 import os
 import pty
 import select
+import shlex
 import stat
 import subprocess
 import time
@@ -11,12 +12,20 @@ from pathlib import Path
 import pytest
 
 from ..conftest import (
+    FakeAgentInstaller,
     MuxEnvironment,
     RepoBuilder,
+    ShellCommands,
     TmuxEnvironment,
+    assert_prompt_file_contents,
+    assert_window_exists,
+    create_commit,
+    file_for_commit,
     get_window_name,
     get_worktree_path,
     run_workmux_command,
+    wait_for_file,
+    write_global_workmux_config,
     write_workmux_config,
 )
 
@@ -764,3 +773,388 @@ class TestRescuePatch:
 
         stash_list = env.run_command(["git", "stash", "list"], cwd=mux_repo_path)
         assert stash_list.stdout.strip() == ""
+
+
+def _git(env: MuxEnvironment, repo: Path, *args: str) -> str:
+    return env.run_command(["git", *args], cwd=repo).stdout
+
+
+def _repo_state(env: MuxEnvironment, repo: Path) -> dict[str, str]:
+    """Everything a rejected --with-changes must leave untouched."""
+    return {
+        "branches": _git(env, repo, "branch", "--list"),
+        "worktrees": _git(env, repo, "worktree", "list", "--porcelain"),
+        "status": _git(env, repo, "status", "--porcelain"),
+        "stash": _git(env, repo, "stash", "list"),
+        "remote_refs": _git(env, repo, "for-each-ref", "refs/remotes"),
+    }
+
+
+def _commit_config(env: MuxEnvironment, repo: Path, **config) -> None:
+    """Write and commit the config, so -u does not move it along with the changes."""
+    write_workmux_config(repo, **config)
+    env.run_command(["git", "add", ".workmux.yaml"], cwd=repo)
+    env.run_command(["git", "commit", "-qm", "Add config"], cwd=repo)
+
+
+def _make_changes(repo: Path) -> None:
+    """A tracked modification plus an untracked file."""
+    (repo / "tracked.txt").write_text("modified\n")
+    (repo / "moved.txt").write_text("moved content\n")
+
+
+def _prepare_repo(env: MuxEnvironment, repo: Path, **config) -> None:
+    # The fake agents live in the repository directory; -u must not move them away.
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("fake-bin/\n")
+    (repo / "tracked.txt").write_text("original\n")
+    env.run_command(["git", "add", "tracked.txt"], cwd=repo)
+    env.run_command(["git", "commit", "-qm", "Add tracked file"], cwd=repo)
+    _commit_config(env, repo, **config)
+    _make_changes(repo)
+
+
+class TestRescueRejectedCombinations:
+    """--with-changes combinations that create more than one worktree or ignore HEAD."""
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            ("add foo --with-changes --base main", "cannot be used with --base"),
+            ("add --pr 123 --with-changes", "cannot be used with --pr"),
+        ],
+        ids=["base", "pr"],
+    )
+    def test_rejected_before_anything_changes(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        args: str,
+        message: str,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+        before = _repo_state(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, args, expect_fail=True
+        )
+
+        assert message in result.stderr
+        assert "relative to the current HEAD" in result.stderr
+        # No fetch ran for --pr either: the remote refs are unchanged.
+        assert _repo_state(env, mux_repo_path) == before
+
+    def test_patch_with_untracked_is_rejected(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """git stash --patch cannot move untracked files, so -u is refused."""
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+        before = _repo_state(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            "add foo -w --patch -u",
+            expect_fail=True,
+        )
+
+        assert "--patch" in result.stderr
+        assert "--include-untracked" in result.stderr
+        assert _repo_state(env, mux_repo_path) == before
+
+    def test_stdin_branch_input_is_rejected(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+        before = _repo_state(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            "add foo --with-changes",
+            stdin_input="one\ntwo\n",
+            expect_fail=True,
+        )
+
+        assert "creates a single worktree" in result.stderr
+        assert "stdin" in result.stderr
+        assert _repo_state(env, mux_repo_path) == before
+
+    def test_frontmatter_foreach_is_rejected(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path, panes=[{"command": "<agent>"}])
+        prompt_file = mux_repo_path.parent / "prompt_with_matrix.md"
+        prompt_file.write_text("---\nforeach:\n  env: [dev, prod]\n---\nTask\n")
+        before = _repo_state(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add foo -w -P {shlex.quote(str(prompt_file))}",
+            expect_fail=True,
+        )
+
+        assert "creates a single worktree" in result.stderr
+        assert "foreach" in result.stderr
+        assert _repo_state(env, mux_repo_path) == before
+
+
+def _install_recording_agent(installer: FakeAgentInstaller, name: str) -> None:
+    """An agent that records its prompt argument and what it saw of the moved file."""
+    installer.install(
+        name,
+        """#!/bin/sh
+cat moved.txt > agent_saw.txt 2>/dev/null || echo missing > agent_saw.txt
+printf '%s' "$*" > agent_args.txt
+""",
+    )
+
+
+class TestRescueWithAddOptions:
+    """Options of a plain `workmux add` keep working together with --with-changes."""
+
+    def test_inline_prompt_reaches_agent_with_moved_files(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+        shell_cmd: ShellCommands,
+    ):
+        env = mux_server
+        env.configure_default_shell(shell_cmd.path)
+        _install_recording_agent(fake_agent_installer, "claude")
+        _prepare_repo(
+            env, mux_repo_path, agent="claude", panes=[{"command": "<agent>"}]
+        )
+
+        run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, 'add foo -w -u -p "do"'
+        )
+
+        worktree = get_worktree_path(mux_repo_path, "foo")
+        assert_prompt_file_contents(env, "foo", "do", worktree)
+        wait_for_file(
+            env,
+            worktree / "agent_args.txt",
+            window_name=get_window_name("foo"),
+            worktree_path=worktree,
+        )
+        assert (worktree / "agent_args.txt").read_text().endswith("do")
+        assert (worktree / "agent_saw.txt").read_text() == "moved content\n"
+        assert (worktree / "tracked.txt").read_text() == "modified\n"
+        assert _git(env, mux_repo_path, "status", "--porcelain") == ""
+        assert _git(env, mux_repo_path, "stash", "list") == ""
+
+    def test_configured_base_branch_is_ignored(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        env.run_command(["git", "checkout", "-qb", "feature-x"], cwd=mux_repo_path)
+        create_commit(env, mux_repo_path, "Commit on feature-x")
+        _prepare_repo(env, mux_repo_path, base_branch="auto")
+
+        run_workmux_command(env, workmux_exe_path, mux_repo_path, "add foo -w")
+
+        worktree = get_worktree_path(mux_repo_path, "foo")
+        assert file_for_commit(worktree, "Commit on feature-x").exists()
+        assert (worktree / "tracked.txt").read_text() == "modified\n"
+        assert (
+            _git(env, mux_repo_path, "rev-parse", "foo").strip()
+            == _git(env, mux_repo_path, "rev-parse", "feature-x").strip()
+        )
+        base = _git(env, mux_repo_path, "config", "--local", "branch.foo.workmux-base")
+        assert base.strip() == "feature-x"
+
+    def test_single_agent_runs(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+        shell_cmd: ShellCommands,
+    ):
+        env = mux_server
+        env.configure_default_shell(shell_cmd.path)
+        _install_recording_agent(fake_agent_installer, "codex")
+        _prepare_repo(env, mux_repo_path, panes=[{"command": "<agent>"}])
+
+        run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, 'add foo -w -u -a codex -p "do"'
+        )
+
+        worktree = get_worktree_path(mux_repo_path, "foo")
+        wait_for_file(
+            env,
+            worktree / "agent_args.txt",
+            window_name=get_window_name("foo"),
+            worktree_path=worktree,
+        )
+        assert "do" in (worktree / "agent_args.txt").read_text()
+        assert (worktree / "agent_saw.txt").read_text() == "moved content\n"
+
+    def test_explicit_name(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+
+        run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, "add foo -w --name bar"
+        )
+
+        worktree = get_worktree_path(mux_repo_path, "bar")
+        assert (worktree / "tracked.txt").read_text() == "modified\n"
+        assert not get_worktree_path(mux_repo_path, "foo").exists()
+        assert_window_exists(env, get_window_name("bar"))
+        assert _git(env, worktree, "branch", "--show-current").strip() == "foo"
+
+    def test_prompt_file_only(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+        shell_cmd: ShellCommands,
+    ):
+        env = mux_server
+        env.configure_default_shell(shell_cmd.path)
+        _install_recording_agent(fake_agent_installer, "claude")
+        _prepare_repo(
+            env, mux_repo_path, agent="claude", panes=[{"command": "<agent>"}]
+        )
+
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add foo -w -u -p "do" --prompt-file-only',
+        )
+
+        worktree = get_worktree_path(mux_repo_path, "foo")
+        assert_prompt_file_contents(env, "foo", "do", worktree)
+        wait_for_file(
+            env,
+            worktree / "agent_args.txt",
+            window_name=get_window_name("foo"),
+            worktree_path=worktree,
+        )
+        assert (worktree / "agent_args.txt").read_text() == ""
+        assert (worktree / "agent_saw.txt").read_text() == "moved content\n"
+
+    def test_auto_name(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+        shell_cmd: ShellCommands,
+    ):
+        env = mux_server
+        env.configure_default_shell(shell_cmd.path)
+        _install_recording_agent(fake_agent_installer, "claude")
+        write_global_workmux_config(
+            env, auto_name={"command": "sh -c 'printf \"gen-branch\\n\"'"}
+        )
+        _prepare_repo(
+            env, mux_repo_path, agent="claude", panes=[{"command": "<agent>"}]
+        )
+
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add -A -w -u -p "fix login redirect"',
+        )
+
+        worktree = get_worktree_path(mux_repo_path, "gen-branch")
+        assert (worktree / "tracked.txt").read_text() == "modified\n"
+        assert_prompt_file_contents(env, "gen-branch", "fix login redirect", worktree)
+        wait_for_file(
+            env,
+            worktree / "agent_args.txt",
+            window_name=get_window_name("gen-branch"),
+            worktree_path=worktree,
+        )
+        assert (worktree / "agent_args.txt").read_text().endswith("fix login redirect")
+        assert (worktree / "agent_saw.txt").read_text() == "moved content\n"
+        assert _git(env, mux_repo_path, "status", "--porcelain") == ""
+
+
+class TestRescueOutput:
+    """Dry-run plan and the success message."""
+
+    def test_dry_run_describes_transfer_and_changes_nothing(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+        before = _repo_state(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, "add foo -w -u --dry-run"
+        )
+
+        assert (
+            f"Changes:  move tracked changes and untracked files from {mux_repo_path}"
+            in result.stdout
+        )
+        assert _repo_state(env, mux_repo_path) == before
+        assert not get_worktree_path(mux_repo_path, "foo").exists()
+
+    def test_success_message_reports_untracked_left_behind(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+
+        result = run_workmux_command(env, workmux_exe_path, mux_repo_path, "add foo -w")
+
+        assert "Changes that were not moved remain" in result.stdout
+        assert "now clean" not in result.stdout
+        assert (mux_repo_path / "moved.txt").exists()
+
+    def test_success_message_reports_clean_source(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        env = mux_server
+        _prepare_repo(env, mux_repo_path)
+
+        result = run_workmux_command(
+            env, workmux_exe_path, mux_repo_path, "add foo -w -u"
+        )
+
+        assert "Original worktree is now clean" in result.stdout

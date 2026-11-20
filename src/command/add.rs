@@ -338,6 +338,7 @@ fn run_headless(
             is_explicit_name: name.is_some(),
             prompt_file_only: false,
             fork_source: None,
+            rescue: None,
         },
         json,
     )
@@ -431,6 +432,20 @@ pub fn run(
     config_override: Option<&std::path::Path>,
     remote: Option<RemoteSpec>,
 ) -> Result<()> {
+    if rescue.with_changes {
+        if base.is_some() {
+            bail!(
+                "--with-changes cannot be used with --base: the moved changes are relative to \
+                 the current HEAD, so the new branch always starts from it"
+            );
+        }
+        if pr.is_some() {
+            bail!(
+                "--with-changes cannot be used with --pr: the moved changes are relative to \
+                 the current HEAD, not to the pull request"
+            );
+        }
+    }
     if let Some(spec) = &remote {
         check_remote_options(
             spec,
@@ -605,6 +620,16 @@ pub fn run(
     // Detect stdin input early
     let stdin_lines = read_stdin_lines()?;
     let has_stdin = !stdin_lines.is_empty();
+    if rescue.with_changes {
+        if has_stdin {
+            bail!(
+                "--with-changes creates a single worktree and cannot be used with branch names \
+                 piped from stdin"
+            );
+        }
+        // Fail before the prompt editor or branch-name generation runs.
+        preflight_change_transfer(&rescue, if auto_name { None } else { branch_name })?;
+    }
 
     // Determine if we're in explicit multi-worktree mode (before loading prompt)
     let is_explicit_multi =
@@ -735,38 +760,6 @@ pub fn run(
         }
     }
 
-    // Handle rescue flow early if requested
-    if rescue.with_changes && !dry_run {
-        let (mut rescue_config, rescue_location) = config::Config::load_with_location(
-            multi.agent.first().map(|s| s.as_str()),
-            config_override,
-        )?;
-        if sandbox_override {
-            rescue_config.sandbox.enabled = Some(true);
-        }
-        if rescue_config.sandbox.is_enabled() {
-            crate::sandbox::notice::show_once();
-        }
-        if let Some(layout_name) = &layout {
-            resolve_layout(&mut rescue_config, layout_name)?;
-        }
-        let mux = create_backend(detect_backend());
-        let rescue_context = workflow::WorkflowContext::new(rescue_config, mux, rescue_location)?;
-        // Derive handle for rescue flow (uses config for naming strategy/prefix)
-        let handle =
-            crate::naming::derive_handle(branch_name, name.as_deref(), &rescue_context.config)?;
-        if handle_rescue_flow(
-            branch_name,
-            &handle,
-            &rescue,
-            &rescue_context,
-            options.clone(),
-            wait,
-        )? {
-            return Ok(());
-        }
-    }
-
     // Use preloaded prompt (from auto-name) OR load it now (standard flow)
     let prompt_template = if let Some(p) = preloaded_prompt {
         Some(p)
@@ -799,6 +792,13 @@ pub fn run(
         .and_then(|d| d.meta.foreach.as_ref())
         .is_some();
 
+    if has_foreach_in_prompt && rescue.with_changes {
+        bail!(
+            "--with-changes creates a single worktree and cannot be used with a prompt that \
+             declares 'foreach' in its frontmatter"
+        );
+    }
+
     if has_foreach_in_prompt && !multi.agent.is_empty() {
         return Err(anyhow!(
             "Cannot use --agent when 'foreach' is defined in the prompt frontmatter. \
@@ -815,7 +815,8 @@ pub fn run(
     // interfere with remote/fork branch detection.
     let (remote_branch, template_base_name) = if let Some(ref pr_remote) = remote_branch_for_pr {
         (Some(pr_remote.clone()), branch_name.to_string())
-    } else if auto_name {
+    } else if auto_name || rescue.with_changes {
+        // Moved changes always start from the current HEAD, never from a remote branch.
         (None, branch_name.to_string())
     } else if dry_run {
         detect_remote_branch_dry_run(branch_name, cli_base)?
@@ -892,59 +893,59 @@ pub fn run(
         fork_source,
         config_override,
         remote: remote.as_ref(),
+        rescue: rescue.with_changes.then_some(&rescue),
     };
     plan.execute()
 }
 
-/// Handle the rescue flow (--with-changes).
-/// Returns Ok(true) if rescue flow was handled, Ok(false) if normal flow should continue.
-fn handle_rescue_flow(
-    branch_name: &str,
-    handle: &str,
-    rescue: &RescueArgs,
-    context: &workflow::WorkflowContext,
-    options: SetupOptions,
-    wait: bool,
+/// Check that `--with-changes` has something to move and, when the branch name is already
+/// known, that the branch is new. `create` repeats the branch check authoritatively.
+fn preflight_change_transfer(rescue: &RescueArgs, branch_name: Option<&str>) -> Result<()> {
+    let source = std::env::current_dir().context("Failed to get current directory")?;
+    let has_tracked = git::has_tracked_changes(&source)?;
+    let has_untracked = rescue.include_untracked && git::has_untracked_files(&source)?;
+    if !has_tracked && !has_untracked {
+        return Err(match branch_name {
+            Some(branch) => anyhow!(
+                "No uncommitted changes to move. Use 'workmux add {}' to create a clean worktree.",
+                branch
+            ),
+            None => anyhow!("No uncommitted changes to move."),
+        });
+    }
+    if let Some(branch) = branch_name
+        && git::branch_exists(branch)?
+    {
+        bail!("Branch '{}' already exists.", branch);
+    }
+    Ok(())
+}
+
+/// Whether the source worktree still has changes after a transfer. Worktrees that workmux
+/// keeps inside the repository directory (e.g. `.worktrees/`) are not changes.
+fn source_has_unmoved_changes(
+    source: &std::path::Path,
+    worktree_base: &std::path::Path,
 ) -> Result<bool> {
-    if !rescue.with_changes {
-        return Ok(false);
+    if git::has_tracked_changes(source)? {
+        return Ok(true);
     }
+    let worktree_base = worktree_base
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_base.to_path_buf());
+    Ok(git::untracked_paths(source)?
+        .iter()
+        .any(|path| !path.starts_with(&worktree_base)))
+}
 
-    let result = workflow::create_with_changes(
-        branch_name,
-        handle,
-        rescue.include_untracked,
-        rescue.patch,
-        context,
-        options,
-    )
-    .context("Failed to move uncommitted changes")?;
-
-    let source_note = if rescue.patch {
-        "Unselected changes were left in the original worktree"
-    } else {
-        "Original worktree is now clean"
-    };
-    println!(
-        "✓ Moved uncommitted changes to new worktree for branch '{}'\n  Worktree: {}\n  {}",
-        result.branch_name,
-        result.worktree_path.display(),
-        source_note
-    );
-
-    if wait {
-        if result.mode == MuxMode::Session {
-            context
-                .mux
-                .wait_until_session_closed(&result.mux_target_full_name)?;
-        } else {
-            context
-                .mux
-                .wait_until_windows_closed(std::slice::from_ref(&result.mux_target_full_name))?;
-        }
+/// Describe what `--with-changes` moves, for the dry-run plan.
+fn describe_transfer(rescue: &RescueArgs) -> &'static str {
+    // --patch conflicts with --include-untracked at the CLI.
+    match (rescue.patch, rescue.include_untracked) {
+        (true, _) => "selected hunks",
+        (false, true) => "tracked changes and untracked files",
+        (false, false) => "tracked changes",
     }
-
-    Ok(true)
 }
 
 /// Determine the effective foreach matrix from CLI, stdin, or frontmatter.
@@ -1040,6 +1041,8 @@ struct CreationPlan<'a> {
     fork_source: Option<crate::workflow::types::ForkSource>,
     config_override: Option<&'a std::path::Path>,
     remote: Option<&'a RemoteSpec>,
+    /// `--with-changes`: move uncommitted changes from the current worktree
+    rescue: Option<&'a RescueArgs>,
 }
 
 impl<'a> CreationPlan<'a> {
@@ -1172,7 +1175,11 @@ impl<'a> CreationPlan<'a> {
             // Create a WorkflowContext for this spec's config (reuse shared mux)
             let location = config_location.clone();
             let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
-            let configured_base = if self.resolved_base.is_none() && self.remote_branch.is_none() {
+            // Moved changes are relative to the current HEAD, so a configured base is ignored.
+            let configured_base = if self.resolved_base.is_none()
+                && self.remote_branch.is_none()
+                && self.rescue.is_none()
+            {
                 workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
             } else {
                 None
@@ -1188,6 +1195,7 @@ impl<'a> CreationPlan<'a> {
                     self.remote_branch,
                     &self.options,
                     self.explicit_name.is_some(),
+                    self.rescue,
                 )?;
                 continue;
             }
@@ -1278,6 +1286,11 @@ impl<'a> CreationPlan<'a> {
                     is_explicit_name: self.explicit_name.is_some(),
                     prompt_file_only: self.prompt_file_only,
                     fork_source: fork_for_spec,
+                    rescue: self.rescue.map(|rescue| workflow::ChangeTransfer {
+                        source: context.execution_dir.clone(),
+                        include_untracked: rescue.include_untracked,
+                        patch: rescue.patch,
+                    }),
                 },
             )
             .with_context(|| {
@@ -1311,6 +1324,17 @@ impl<'a> CreationPlan<'a> {
                 println!("  Base: {}", base);
             }
             println!("  Worktree: {}", result.worktree_path.display());
+            if self.rescue.is_some() {
+                let source = &context.execution_dir;
+                println!("✓ Moved uncommitted changes from {}", source.display());
+                // Report what is actually left: --patch and a missing -u leave changes behind.
+                let worktree_base = context.worktree_base_dir()?;
+                if source_has_unmoved_changes(source, &worktree_base)? {
+                    println!("  Changes that were not moved remain in the original worktree");
+                } else {
+                    println!("  Original worktree is now clean");
+                }
+            }
         }
 
         for target in remote_wait_targets {
@@ -1335,6 +1359,7 @@ impl<'a> CreationPlan<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_dry_run(
     context: &workflow::WorkflowContext,
     branch_name: &str,
@@ -1343,6 +1368,7 @@ fn print_dry_run(
     remote_branch: Option<&str>,
     options: &SetupOptions,
     is_explicit_name: bool,
+    rescue: Option<&RescueArgs>,
 ) -> Result<()> {
     if context.config.panes.is_some() && context.config.windows.is_some() {
         bail!("Cannot specify both 'panes' and 'windows' in configuration.");
@@ -1391,6 +1417,13 @@ fn print_dry_run(
     );
     if is_explicit_name {
         println!("Handle:   {}", handle);
+    }
+    if let Some(rescue) = rescue {
+        println!(
+            "Changes:  move {} from {}",
+            describe_transfer(rescue),
+            context.execution_dir.display()
+        );
     }
 
     println!("\nFiles to copy or symlink:");
@@ -1603,5 +1636,51 @@ mod agent_validation_tests {
         let mut config = config("workmux-nonexistent-agent-938472");
         config.sandbox.enabled = Some(true);
         assert!(validate_agent_executable(&config).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod change_transfer_tests {
+    use super::*;
+    use crate::test_support::{init_repo, run_git};
+
+    #[test]
+    fn worktrees_inside_the_repository_are_not_unmoved_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let repo = repo.canonicalize().unwrap();
+        let base = repo.join(".worktrees");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "foo",
+                base.join("foo").to_str().unwrap(),
+            ],
+        );
+
+        assert!(!source_has_unmoved_changes(&repo, &base).unwrap());
+
+        std::fs::write(repo.join("left.txt"), "left\n").unwrap();
+        assert!(source_has_unmoved_changes(&repo, &base).unwrap());
+        std::fs::remove_file(repo.join("left.txt")).unwrap();
+
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        assert!(source_has_unmoved_changes(&repo, &base).unwrap());
+        run_git(&repo, &["checkout", "--", "README.md"]);
+
+        // Run from a subdirectory: untracked files at the root still count.
+        let sub = repo.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("kept.txt"), "kept\n").unwrap();
+        run_git(&repo, &["add", "sub/kept.txt"]);
+        run_git(&repo, &["commit", "-qm", "sub"]);
+        std::fs::write(repo.join("left.txt"), "left\n").unwrap();
+        assert!(source_has_unmoved_changes(&sub, &base).unwrap());
     }
 }

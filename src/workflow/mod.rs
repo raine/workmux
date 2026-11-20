@@ -25,7 +25,7 @@ pub use agent_resolve::{
     resolve_worktree_agents_from_snapshot,
 };
 pub use cleanup::run_deferred_cleanup_worker;
-pub use create::{create, create_headless, create_with_changes, project_suffixed_handle};
+pub use create::{create, create_headless, project_suffixed_handle};
 pub use list::{list, list_in};
 pub use merge::{MergeConflict, merge};
 pub use open::open;
@@ -38,4 +38,4 @@ pub use setup::{
 
 // Re-export commonly used types for convenience
 pub use context::{WorkflowContext, resolve_configured_base_branch};
-pub use types::{CreateArgs, SetupOptions};
+pub use types::{ChangeTransfer, CreateArgs, SetupOptions};

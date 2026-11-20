@@ -115,6 +115,7 @@ fn run_add_worktree_job(
                     is_explicit_name: false,
                     prompt_file_only: false,
                     fork_source: None,
+                    rescue: None,
                 },
             )?;
             Ok(result.branch_name)
@@ -177,6 +178,7 @@ fn run_add_worktree_job(
                     is_explicit_name: false,
                     prompt_file_only: false,
                     fork_source: None,
+                    rescue: None,
                 },
             )?;
             Ok(result.branch_name)

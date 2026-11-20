@@ -25,6 +25,32 @@ pub struct ProvisionedEnvironment {
     pub post_create_hooks_run: usize,
 }
 
+/// Copies and symlinks the configured files into a new worktree, plus CLAUDE.local.md.
+///
+/// Does nothing when `options.run_file_ops` is false.
+pub fn apply_file_operations(
+    options: &super::types::SetupOptions,
+    worktree_path: &Path,
+    project_root: &Path,
+    config: &config::Config,
+) -> Result<()> {
+    if !options.run_file_ops {
+        return Ok(());
+    }
+    let effective_working_dir = options.working_dir.as_deref().unwrap_or(worktree_path);
+    let file_ops_source = options.config_root.as_deref().unwrap_or(project_root);
+
+    handle_file_operations(file_ops_source, effective_working_dir, &config.files)
+        .context("Failed to perform file operations")?;
+    symlink_claude_local_md(file_ops_source, effective_working_dir)
+        .context("Failed to auto-symlink CLAUDE.local.md")?;
+    debug!(
+        worktree = %effective_working_dir.display(),
+        "apply_file_operations:file operations applied"
+    );
+    Ok(())
+}
+
 pub fn provision_environment(
     branch_name: &str,
     handle: &str,
@@ -35,18 +61,8 @@ pub fn provision_environment(
     hook_output: cmd::ShellOutput,
 ) -> Result<ProvisionedEnvironment> {
     let effective_working_dir = options.working_dir.as_deref().unwrap_or(worktree_path);
-    let file_ops_source = options.config_root.as_deref().unwrap_or(project_root);
 
-    if options.run_file_ops {
-        handle_file_operations(file_ops_source, effective_working_dir, &config.files)
-            .context("Failed to perform file operations")?;
-        symlink_claude_local_md(file_ops_source, effective_working_dir)
-            .context("Failed to auto-symlink CLAUDE.local.md")?;
-        debug!(
-            branch = branch_name,
-            "provision_environment:file operations applied"
-        );
-    }
+    apply_file_operations(options, worktree_path, project_root, config)?;
 
     let mut hooks_run = 0;
     if options.run_hooks

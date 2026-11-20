@@ -73,6 +73,27 @@ pub fn has_untracked_files(worktree_path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Untracked, non-ignored paths of the whole worktree as absolute paths, even when
+/// `worktree_path` is a subdirectory. A nested repository or worktree is listed once, as
+/// its directory.
+pub fn untracked_paths(worktree_path: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let top_level = bg_git()
+        .workdir(worktree_path)
+        .args(&["rev-parse", "--show-toplevel"])
+        .run_and_capture_stdout()?;
+    // Porcelain paths are relative to the top level, whatever the cwd.
+    let output = bg_git()
+        .workdir(worktree_path)
+        .args(&["status", "--porcelain=v1", "-z", "--untracked-files=normal"])
+        .run()?;
+    let top_level = Path::new(&top_level);
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter_map(|entry| entry.strip_prefix("?? "))
+        .map(|path| top_level.join(path.trim_end_matches('/')))
+        .collect())
+}
+
 fn git_diff_has_changes(worktree_path: &Path, args: &[&str]) -> Result<bool> {
     let mut command = super::pinned_git(worktree_path)?;
     command.arg("--no-optional-locks");

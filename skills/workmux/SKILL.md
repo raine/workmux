@@ -99,7 +99,10 @@ Key flags:
 - `-e, --prompt-editor`: write prompt in $EDITOR
 - `-A, --auto-name`: generate branch name from prompt via LLM
 - `-a <agent>`: override the agent (can specify multiple for multi-worktree)
-- `-w, --with-changes`: move uncommitted changes to the new worktree
+- `-w, --with-changes`: move uncommitted changes to the new worktree, which
+  starts from the current HEAD; `-u` adds untracked files, `--patch` picks hunks (not with `-u`).
+  Works with `-p`/`-P`/`-e`/`-A` and a single `-a`; rejects `--base`, `--pr` and
+  stdin input
 - `--base <branch>`: branch from a specific base
 - `--name <name>`: override the worktree handle
 - `--target-name <name>`: override the workmux-managed tmux window or session name
