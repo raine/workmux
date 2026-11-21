@@ -1433,7 +1433,14 @@ mod tests {
             let repo = temp.path().join("repo");
             std::fs::create_dir_all(&repo).unwrap();
             test_support::init_repo(&repo);
-            test_support::run_isolated_test(test_name, &repo, &[("WM_TEST_TEMP", temp.path())]);
+            test_support::run_isolated_test(
+                test_name,
+                &repo,
+                &[
+                    ("WM_TEST_TEMP", temp.path()),
+                    ("XDG_STATE_HOME", &temp.path().join("state")),
+                ],
+            );
             return None;
         }
         println!("{}", test_support::ISOLATED_TEST_CANARY);
