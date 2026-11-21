@@ -110,7 +110,8 @@ import os
 import subprocess
 
 assert os.environ.get("GLAB_NO_PROMPT") == "1"
-assert os.environ.get("NO_PROMPT") == "1"
+assert "NO_PROMPT" not in os.environ
+assert os.environ.get("PROMPT_DISABLED") == "1"
 assert os.environ.get("GLAB_ENABLE_CI_AUTOLOGIN") == "false"
 assert not any(key in os.environ for key in ("GITLAB_REPO", "GITLAB_HOST", "GITLAB_URI", "GL_HOST"))
 assert subprocess.check_output(["git", "remote"], text=True).strip() == "origin"
@@ -202,6 +203,7 @@ def test_add_gitlab_numeric_uses_origin_and_merge_request_ref(
         repo_path,
         "add --pr 123",
         pre_run_env={
+            "NO_PROMPT": "1",
             "GITLAB_REPO": "other/project",
             "GITLAB_HOST": "other.example.com",
             "GITLAB_URI": "other.example.com",
