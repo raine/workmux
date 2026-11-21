@@ -120,7 +120,10 @@ pub(super) struct SocketServer {
 }
 
 impl SocketServer {
-    pub(super) fn bind(path: &Path) -> std::io::Result<Self> {
+    pub(super) fn bind(
+        path: &Path,
+        on_connect: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Self> {
         let listener = UnixListener::bind(path)?;
         // Restrict socket to owner only (prevent other local users from reading snapshots)
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -144,6 +147,7 @@ impl SocketServer {
                         break;
                     }
                 };
+                on_connect();
                 let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
                 loop {
                     let (generation, payload) = {
@@ -609,7 +613,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("sidebar.sock");
-        let server = SocketServer::bind(&socket).unwrap();
+        let server = SocketServer::bind(&socket, || {}).unwrap();
         let mut first = UnixStream::connect(&socket).unwrap();
         first
             .set_read_timeout(Some(Duration::from_millis(250)))
@@ -668,7 +672,7 @@ mod tests {
     fn concurrent_accept_observes_latest_published_generation() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("sidebar.sock");
-        let server = Arc::new(SocketServer::bind(&socket).unwrap());
+        let server = Arc::new(SocketServer::bind(&socket, || {}).unwrap());
         assert!(server.broadcast(&empty_snapshot()));
 
         let publisher = Arc::clone(&server);

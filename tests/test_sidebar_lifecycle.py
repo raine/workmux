@@ -12,6 +12,39 @@ from .test_popup_navigation import attached_client
 pytestmark = pytest.mark.tmux_only
 
 
+def test_quick_server_restart_registers_surviving_daemon(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path
+):
+    env = mux_server
+    env.env["TMPDIR"] = "/tmp"
+
+    def enable():
+        env.tmux(["set-environment", "-g", "TMPDIR", "/tmp"])
+        env.env["TMUX"] = f"{env.socket_path},0,0"
+        assert env.runner_pane_id is not None
+        env.env["TMUX_PANE"] = env.runner_pane_id
+        env.run_command([str(workmux_exe_path), "sidebar", "on"])
+
+    def daemon_pid():
+        return env.tmux(
+            ["show-option", "-gqv", "@workmux_sidebar_daemon_pid"]
+        ).stdout.strip()
+
+    enable()
+    pid = daemon_pid()
+    assert pid.isdecimal()
+    env.stop_server()
+    env.env.pop("TMUX")
+    env.env.pop("TMUX_PANE")
+    env.start_server()
+    assert not daemon_pid()
+    try:
+        enable()
+        assert poll_until(lambda: daemon_pid() == pid, timeout=4)
+    finally:
+        env.run_command([str(workmux_exe_path), "sidebar", "off"])
+
+
 @pytest.mark.parametrize("remaining_content", [False, True], ids=["last", "split"])
 def test_natural_pane_exit_wakes_sidebar_daemon(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, remaining_content: bool

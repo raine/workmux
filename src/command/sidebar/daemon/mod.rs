@@ -110,7 +110,15 @@ pub fn run() -> Result<()> {
 
     let sock_path = socket_path(&instance_id);
     let _ = std::fs::remove_file(&sock_path);
-    let server = SocketServer::bind(&sock_path)?;
+    // A restarted tmux server can reuse this socket but loses its PID option.
+    let tmux_store = matches!(host, SidebarHost::Tmux(_)).then(|| host.store());
+    let server = SocketServer::bind(&sock_path, move || {
+        if let Some(store) = &tmux_store
+            && let Err(error) = store.record_daemon_pid()
+        {
+            tracing::warn!(%error, "failed to register sidebar daemon on connection");
+        }
+    })?;
 
     // The daemon exits once its server is gone, so it must not start one
     if matches!(host, SidebarHost::Rex(_)) {
