@@ -1013,6 +1013,7 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
         let proxy = if network_deny {
             let allowed = config.sandbox.network.allowed_domain_rules();
             let max_connections = config.sandbox.network.max_connections();
+            NetworkProxy::raise_open_file_limit();
             let proxy = NetworkProxy::bind(&allowed, max_connections)?;
             let proxy_port = proxy.port();
             let proxy_token = proxy.token().to_string();

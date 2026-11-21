@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::multiplexer::{AgentStatus, Multiplexer};
+use crate::sandbox::accept::AcceptErrors;
 use crate::sandbox::constant_time::constant_time_eq;
 
 // ── Protocol types ──────────────────────────────────────────────────────
@@ -297,6 +298,7 @@ impl RpcServer {
 
         let active = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
+            let mut accept_errors = AcceptErrors::new("RPC");
             for stream in self.listener.incoming() {
                 match stream {
                     Ok(stream) => {
@@ -317,8 +319,9 @@ impl RpcServer {
                         });
                     }
                     Err(e) => {
-                        debug!(error = %e, "RPC accept error, shutting down");
-                        break;
+                        if !accept_errors.backoff(&e) {
+                            break;
+                        }
                     }
                 }
             }
@@ -1462,6 +1465,40 @@ mod tests {
             RpcResponse::Ok => {}
             other => panic!("Expected Ok, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn rpc_keeps_accepting_after_running_out_of_file_descriptors() {
+        const TEST: &str =
+            "sandbox::rpc::tests::rpc_keeps_accepting_after_running_out_of_file_descriptors";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let temp = tempfile::tempdir().unwrap();
+            crate::test_support::run_isolated_test_with_timeout(
+                TEST,
+                temp.path(),
+                &[],
+                std::time::Duration::from_secs(15),
+            );
+            return;
+        }
+
+        crate::test_support::set_soft_open_file_limit(128);
+        let (mut existing, port, token) = setup_test_server();
+        assert!(matches!(
+            existing.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        crate::test_support::exercise_accept_at_fd_limit(port);
+        assert!(matches!(
+            existing.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        let mut fresh = RpcClient::connect("127.0.0.1", port, &token).unwrap();
+        assert!(matches!(
+            fresh.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
     }
 
     #[test]
