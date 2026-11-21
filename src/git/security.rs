@@ -15,7 +15,9 @@ const CONFIG_OVERRIDES: &[(&str, &str)] = &[
     ("tag.gpgSign", "false"),
     ("gpg.program", "false"),
     ("diff.external", ""),
-    ("interactive.diffFilter", ""),
+    // An empty value is not "no filter": with colored output (a terminal), `add -p` and
+    // `stash -p` try to run it and fail. `cat` replaces any configured filter with a no-op.
+    ("interactive.diffFilter", "cat"),
     ("status.showUntrackedFiles", "all"),
     ("protocol.allow", "never"),
     ("protocol.file.allow", "always"),
@@ -570,7 +572,7 @@ mod tests {
             "core.fsmonitor=false",
             "core.hooksPath=/dev/null",
             "gpg.program=false",
-            "interactive.diffFilter=",
+            "interactive.diffFilter=cat",
             "protocol.allow=never",
             "status.showUntrackedFiles=all",
         ] {

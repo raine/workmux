@@ -648,6 +648,7 @@ fn hydrate(
             is_explicit_name: true,
             prompt_file_only: false,
             fork_source: None,
+            rescue: None,
         },
         false,
     )
