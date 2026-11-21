@@ -16,7 +16,43 @@ pub fn run_isolated_test(test_name: &str, cwd: &Path, envs: &[(&str, &Path)]) {
     run_isolated_test_inner(test_name, cwd, envs, None);
 }
 
-#[cfg(target_os = "macos")]
+pub(crate) fn open_file_limit() -> libc::rlimit {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0
+    );
+    limit
+}
+
+pub(crate) fn set_soft_open_file_limit(soft: libc::rlim_t) {
+    let mut limit = open_file_limit();
+    limit.rlim_cur = soft.min(limit.rlim_max);
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+}
+
+/// Exercise a listener while the isolated test process has no free descriptors.
+pub(crate) fn exercise_accept_at_fd_limit(port: u16) {
+    let mut files = Vec::new();
+    loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(file) => files.push(file),
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                break;
+            }
+        }
+    }
+    files.pop().unwrap();
+    let pending = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    drop(files);
+    drop(pending);
+}
+
 pub fn run_isolated_test_with_timeout(
     test_name: &str,
     cwd: &Path,

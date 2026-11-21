@@ -1468,6 +1468,40 @@ mod tests {
     }
 
     #[test]
+    fn rpc_keeps_accepting_after_running_out_of_file_descriptors() {
+        const TEST: &str =
+            "sandbox::rpc::tests::rpc_keeps_accepting_after_running_out_of_file_descriptors";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let temp = tempfile::tempdir().unwrap();
+            crate::test_support::run_isolated_test_with_timeout(
+                TEST,
+                temp.path(),
+                &[],
+                std::time::Duration::from_secs(15),
+            );
+            return;
+        }
+
+        crate::test_support::set_soft_open_file_limit(128);
+        let (mut existing, port, token) = setup_test_server();
+        assert!(matches!(
+            existing.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        crate::test_support::exercise_accept_at_fd_limit(port);
+        assert!(matches!(
+            existing.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        let mut fresh = RpcClient::connect("127.0.0.1", port, &token).unwrap();
+        assert!(matches!(
+            fresh.call(&RpcRequest::Heartbeat).unwrap(),
+            RpcResponse::Ok
+        ));
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
+    }
+
+    #[test]
     fn test_request_serialization_exec() {
         let req = RpcRequest::Exec {
             command: "just".to_string(),

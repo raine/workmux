@@ -926,24 +926,6 @@ mod tests {
         assert!(proxy.port() > 0);
     }
 
-    fn open_file_limit() -> libc::rlimit {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-            0
-        );
-        limit
-    }
-
-    fn set_soft_open_file_limit(soft: libc::rlim_t) {
-        let mut limit = open_file_limit();
-        limit.rlim_cur = soft.min(limit.rlim_max);
-        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-    }
-
     #[test]
     fn raise_open_file_limit_reaches_target_or_hard_limit() {
         const TEST: &str =
@@ -953,9 +935,9 @@ mod tests {
             crate::test_support::run_isolated_test(TEST, temp.path(), &[]);
             return;
         }
-        set_soft_open_file_limit(256);
+        crate::test_support::set_soft_open_file_limit(256);
         NetworkProxy::raise_open_file_limit();
-        let limit = open_file_limit();
+        let limit = crate::test_support::open_file_limit();
         assert_eq!(limit.rlim_cur, OPEN_FILES_TARGET.min(limit.rlim_max));
         println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
     }
@@ -968,17 +950,9 @@ mod tests {
             crate::test_support::run_isolated_test(TEST, temp.path(), &[]);
             return;
         }
-        set_soft_open_file_limit(128);
+        crate::test_support::set_soft_open_file_limit(128);
         let proxy = spawn_test_proxy(&[]);
-        let mut files = Vec::new();
-        while let Ok(file) = std::fs::File::open("/dev/null") {
-            files.push(file);
-        }
-        files.pop();
-        let pending = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
-        thread::sleep(Duration::from_millis(200));
-        drop(files);
-        drop(pending);
+        crate::test_support::exercise_accept_at_fd_limit(proxy.port);
 
         let response =
             proxy_request_status_line(proxy.port, "CONNECT example.com:443 HTTP/1.1\r\n\r\n");

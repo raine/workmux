@@ -63,7 +63,7 @@ impl AcceptErrors {
 fn is_fatal(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
-        Some(libc::EBADF | libc::EFAULT | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP)
+        Some(libc::EBADF | libc::EFAULT | libc::EINVAL | libc::ENOTSOCK)
     )
 }
 
@@ -82,6 +82,7 @@ mod tests {
             libc::EINTR,
             libc::EAGAIN,
             libc::EPROTO,
+            libc::EOPNOTSUPP,
             libc::EPERM,
         ] {
             assert!(!is_fatal(&io::Error::from_raw_os_error(errno)), "{errno}");
