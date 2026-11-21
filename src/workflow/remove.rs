@@ -127,7 +127,13 @@ fn remove_with_hook_output(
         ));
     }
 
-    if worktree_path.exists()
+    if context.jj
+        && git::get_worktree_meta_in(actual_handle, crate::jj::BOOKMARK_META_KEY, workdir).is_some()
+    {
+        if !force {
+            crate::jj::check_removal(&worktree_path, &branch_name, keep_branch)?;
+        }
+    } else if worktree_path.exists()
         && !git::has_missing_admin_dir(&worktree_path)
         && git::has_uncommitted_changes(&worktree_path)?
         && !force
@@ -174,7 +180,9 @@ fn remove_with_hook_output(
 
     let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
     if cleanup_scheduled && show_hook_output {
-        if keep_branch {
+        if context.jj {
+            println!("✓ Scheduled removal of workspace '{}'", actual_handle);
+        } else if keep_branch {
             println!(
                 "✓ Scheduled removal of worktree '{}' (branch '{}' will be kept)",
                 actual_handle, branch_name

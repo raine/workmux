@@ -358,6 +358,96 @@ pub fn advance_workspace_bookmark(workspace_root: &Path, bookmark: &str) -> Resu
     Ok(())
 }
 
+/// Check the workspace itself: Git status compares to @-, and a bookmark may
+/// be missing or point somewhere other than the user's working copy.
+pub fn check_removal(path: &Path, bookmark: &str, keep: bool) -> Result<()> {
+    let git = || Cmd::new("git").workdir(path);
+    if !git()
+        .args(&["diff", "--cached", "--quiet", "HEAD", "--"])
+        .run_as_check()?
+    {
+        bail!("Workspace has staged changes");
+    }
+    let tip = workspace_tip(path)?;
+    let wc = commit_id(path, "@")?;
+    if tip.uncommitted
+        || !git().args(&["diff", "--quiet", &wc, "--"]).run_as_check()?
+        || !git()
+            .args(&["ls-files", "--others", "--exclude-standard", "-z"])
+            .run_and_capture_stdout()?
+            .is_empty()
+    {
+        bail!("Workspace has uncommitted changes");
+    }
+    let base = git::get_branch_base_in(bookmark, Some(path))
+        .or_else(|_| git::get_default_branch_in(Some(path)))?;
+    ensure_not_conflicted(path, &base)?;
+    if base == bookmark {
+        bail!("Workspace cannot prove integration into its own bookmark");
+    }
+    let target = format!("bookmarks(exact:{})", quoted(&base));
+    let history = format!(
+        "({} | (@ ~ (empty() & description(exact:\"\") ~ merges())))",
+        tip.commit
+    );
+    if non_empty(path, &format!("::{history} & divergent()"))? {
+        bail!("Workspace has divergent changes");
+    }
+    if keep {
+        ensure_not_conflicted(path, bookmark)?;
+        advance_workspace_bookmark(path, bookmark)?;
+    }
+    let retained = if keep {
+        format!("::{target} | ::bookmarks(exact:{})", quoted(bookmark))
+    } else {
+        format!("::{target}")
+    };
+    if non_empty(path, &format!("{history} ~ ({retained})"))? {
+        bail!("Workspace has commits not merged into '{base}'. Use --force to discard them");
+    }
+    Ok(())
+}
+
+pub fn verify_workspace_path(main: &Path, handle: &str, expected: &Path) -> Result<()> {
+    let recorded = jj(main)
+        .args(&[
+            "--ignore-working-copy",
+            "workspace",
+            "root",
+            "--name",
+            handle,
+        ])
+        .run_and_capture_stdout()?;
+    if Path::new(&recorded) != expected {
+        bail!("Workspace path changed for '{handle}'");
+    }
+    Ok(())
+}
+
+/// Pin a related bookmark before quarantine. A missing, conflicted, moved,
+/// or separately checked-out bookmark belongs to no cleanup operation.
+pub fn removal_ref(main: &Path, workspace: &str, bookmark: &str) -> Result<Option<String>> {
+    let wc = working_copy(workspace);
+    let name = format!("bookmarks(exact:{})", quoted(bookmark));
+    let revs = log(main, &name, r#"commit_id ++ "\n""#)?;
+    let [id] = revs.as_slice() else {
+        return Ok(None);
+    };
+    let merged_source = git::get_worktree_meta_in(workspace, "merged-source", Some(main));
+    if merged_source.as_ref() != Some(id) && !non_empty(main, &format!("{id} & ::{wc}"))? {
+        return Ok(None);
+    }
+    let checked_out = Cmd::new("git")
+        .workdir(main)
+        .args(&[
+            "for-each-ref",
+            "--format=%(worktreepath)",
+            &format!("refs/heads/{bookmark}"),
+        ])
+        .run_and_capture_stdout()?;
+    Ok(checked_out.is_empty().then(|| id.clone()))
+}
+
 fn set_bookmark(dir: &Path, name: &str, revision: &str, allow_backwards: bool) -> Result<()> {
     let mut cmd = jj(dir).args(&["bookmark", "set", name, "-r", revision]);
     if allow_backwards {
@@ -488,8 +578,17 @@ pub fn merge(request: &MergeRequest<'_>) -> Result<()> {
     let source = quoted(bookmark);
     let target_rev = quoted(target);
     let old_target = commit_id(main_root, &target_rev)?;
+    // A merge may consume a stack above an edited working copy. Only that
+    // specific source, not an arbitrary later descendant, is ours to delete.
+    let source_id = commit_id(main_root, &source)?;
 
     if non_empty(main_root, &format!("{source} & ::{target_rev}"))? {
+        git::set_worktree_meta_in(
+            request.workspace,
+            "merged-source",
+            &source_id,
+            Some(main_root),
+        )?;
         println!("Bookmark '{bookmark}' is already merged into '{target}'.");
         return Ok(());
     }
@@ -565,6 +664,17 @@ pub fn merge(request: &MergeRequest<'_>) -> Result<()> {
     };
 
     set_bookmark(main_root, target, &new_target, false)?;
+    let integrated_source = if strategy == MergeStrategy::Rebase {
+        &new_target
+    } else {
+        &source_id
+    };
+    git::set_worktree_meta_in(
+        request.workspace,
+        "merged-source",
+        integrated_source,
+        Some(main_root),
+    )?;
     match bookmark_workspace(main_root, target) {
         Some(owner) => {
             follow_target(&owner, &old_target, target)?;

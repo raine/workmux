@@ -103,13 +103,20 @@ fn run_specified(
     // 4. Safety checks: categorize candidates
     let mut uncommitted: Vec<String> = Vec::new();
     let mut unmerged: Vec<(String, String, String)> = Vec::new(); // (handle, branch, base)
-    let mut safe: Vec<String> = Vec::new();
+    let mut safe = Vec::new();
 
     for (handle, path, branch) in candidates {
-        if context.jj && path.exists() && !branch.is_empty() {
-            // Unmerged checks below read the bookmark, which trails the
-            // workspace's commits until moved.
-            crate::jj::advance_workspace_bookmark(&path, &branch)?;
+        if context.jj
+            && git::get_worktree_meta_in(
+                &handle,
+                crate::jj::BOOKMARK_META_KEY,
+                Some(&context.execution_dir),
+            )
+            .is_some()
+        {
+            crate::jj::check_removal(&path, &branch, keep_branch)?;
+            safe.push((handle, false));
+            continue;
         }
         // Check uncommitted (blocking)
         if path.exists()
@@ -137,7 +144,7 @@ fn run_specified(
             continue;
         }
 
-        safe.push(handle);
+        safe.push((handle, true));
     }
 
     // 5. Handle blocking issues (uncommitted changes)
@@ -173,14 +180,13 @@ fn run_specified(
 
         // Add unmerged candidates to safe list for processing
         for (handle, _, _) in unmerged {
-            safe.push(handle);
+            safe.push((handle, true));
         }
     }
 
     // 7. Execute removal
-    for handle in safe {
-        // force=true because we already checked/prompted
-        remove_worktree(&handle, true, keep_branch)?;
+    for (handle, approved_git_deletion) in safe {
+        remove_worktree(&handle, approved_git_deletion, keep_branch)?;
     }
 
     Ok(())
@@ -317,6 +323,7 @@ struct BulkSkippedWorktree {
 struct BulkRemovableWorktree {
     branch: String,
     handle: String,
+    jj: bool,
 }
 
 struct BulkRemovalPlan {
@@ -397,6 +404,19 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
+        let handle = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&branch)
+            .to_string();
+        let jj = git::get_worktree_meta(&handle, crate::jj::BOOKMARK_META_KEY).is_some();
+        if jj {
+            // The execution path checks the workspace against its target. Git's
+            // porcelain and branch heuristics can reject a clean jj workspace.
+            plan.to_remove
+                .push(BulkRemovableWorktree { branch, handle, jj });
+            continue;
+        }
         if !force && path.exists() && git::has_uncommitted_changes(&path)? {
             plan.skipped.push(BulkSkippedWorktree {
                 branch,
@@ -422,14 +442,8 @@ fn collect_bulk_removal_plan(
             }
         }
 
-        let handle = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&branch)
-            .to_string();
-
         plan.to_remove
-            .push(BulkRemovableWorktree { branch, handle });
+            .push(BulkRemovableWorktree { branch, handle, jj });
     }
 
     Ok(plan)
@@ -446,11 +460,12 @@ fn split_skipped_worktrees(skipped: &[BulkSkippedWorktree], reason: BulkSkipReas
 fn execute_bulk_removals(
     to_remove: &[BulkRemovableWorktree],
     keep_branch: bool,
+    force: bool,
 ) -> BulkRemovalSummary {
     let mut summary = BulkRemovalSummary::default();
 
     for worktree in to_remove {
-        match remove_worktree(&worktree.handle, true, keep_branch) {
+        match remove_worktree(&worktree.handle, force || !worktree.jj, keep_branch) {
             Ok(result) if result.cleanup_scheduled => summary.scheduled += 1,
             Ok(_) => summary.removed += 1,
             Err(error) => summary
@@ -496,8 +511,11 @@ fn run_bulk_removal(
         return Ok(());
     }
 
-    let summary = execute_bulk_removals(&plan.to_remove, keep_branch);
+    let summary = execute_bulk_removals(&plan.to_remove, keep_branch, force);
     report_removal_results(&summary);
+    if !summary.failed.is_empty() {
+        anyhow::bail!("Some worktrees could not be removed");
+    }
     Ok(())
 }
 
@@ -535,7 +553,9 @@ fn remove_worktree(
         .context("Failed to remove worktree")?;
 
     if !result.cleanup_scheduled {
-        if keep_branch {
+        if context.jj {
+            println!("✓ Removed workspace '{}'", handle);
+        } else if keep_branch {
             println!(
                 "✓ Removed worktree '{}' (branch '{}' kept)",
                 handle, result.branch_removed
