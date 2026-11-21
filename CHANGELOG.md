@@ -22,9 +22,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.284 (2026-11-21)
 
-- Fix headless Pi and oh-my-pi runs registering as agents and changing the parent pane’s status.
+- Make `workmux add -w` honor the prompt and agent choice, and move edits before hooks or agents start. Use it for one branch from the current commit, without `--base` or `--pr`. ([#367](https://github.com/raine/workmux/issues/367), [#368](https://github.com/raine/workmux/pull/368))
+- Keep staged edits staged during `add -w` and save a stash backup. `--patch` now leaves skipped hunks in place; unstage first and omit `-u`. ([#358](https://github.com/raine/workmux/issues/358), [#368](https://github.com/raine/workmux/pull/368))
+- Fix GitLab MR checkout with newer `glab` versions. ([#363](https://github.com/raine/workmux/pull/363))
+- Restore sandbox connectivity after temporary file descriptor exhaustion. ([#369](https://github.com/raine/workmux/pull/369))
+- Make the tmux sidebar highlight follow pane focus immediately. ([#364](https://github.com/raine/workmux/issues/364))
+- Restore sidebar updates after a quick tmux server restart. ([#366](https://github.com/raine/workmux/issues/366))
+- Stop headless Pi and oh-my-pi runs from changing the parent pane’s agent status.
 
 ## v0.1.283 (2026-11-18)
 
