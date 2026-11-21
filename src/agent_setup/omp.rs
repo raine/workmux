@@ -154,11 +154,10 @@ mod tests {
     fn test_extension_without_registration_needs_update() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("workmux-status.ts");
-        let previous_source = EXTENSION_SOURCE
-            .replace(
-                "  pi.on(\"session_start\", async () => {\n    pendingPrompt = undefined;\n    await pi.exec(\"workmux\", [\"register-agent\"]).catch(() => {});\n  });\n\n",
-                "",
-            );
+        let previous_source = EXTENSION_SOURCE.replace(
+            "    await pi.exec(\"workmux\", [\"register-agent\"]).catch(() => {});\n",
+            "",
+        );
         std::fs::write(&path, previous_source).unwrap();
 
         assert!(matches!(

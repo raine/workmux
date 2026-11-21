@@ -31,6 +31,7 @@ function execWithPrompt(args: string[], prompt: PendingPrompt): Promise<number> 
 }
 
 export default function (pi: ExtensionAPI) {
+  let sessionActive = false;
   let lastStatus: string | undefined;
   let pendingPrompt: PendingPrompt | undefined;
   let statusQueue = Promise.resolve();
@@ -43,6 +44,7 @@ export default function (pi: ExtensionAPI) {
 
   function setStatus(status: string) {
     // A pending prompt rides the next `working` report, even a repeated one.
+    if (!sessionActive) return statusQueue;
     const prompt = status === "working" ? pendingPrompt : undefined;
     if (status === lastStatus && !prompt) {
       return statusQueue;
@@ -56,12 +58,16 @@ export default function (pi: ExtensionAPI) {
     return statusQueue;
   }
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
+    // RPC exposes UI callbacks but does not own an interactive pane.
+    sessionActive = ctx.hasUI && ctx.mode !== "rpc";
+    if (!sessionActive) return;
     pendingPrompt = undefined;
     await pi.exec("workmux", ["register-agent"]).catch(() => {});
   });
 
   pi.on("input", async (event, ctx) => {
+    if (!sessionActive) return;
     const text = event.text.trimStart();
     // Input handlers run before oh-my-pi handles `!` shell and `$` Python
     // input, which never reach the agent.

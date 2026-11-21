@@ -93,6 +93,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     unsubscribe?.();
     sessionActive = false;
+    // RPC exposes UI callbacks but does not own an interactive pane.
+    if (!ctx.hasUI || ctx.mode === "rpc") return;
     await writes;
     activeCount = undefined;
     lastStatus = undefined;

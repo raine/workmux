@@ -22,6 +22,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix headless Pi and oh-my-pi runs registering as agents and changing the parent pane’s status.
+
 ## v0.1.283 (2026-11-18)
 
 <!-- highlight: Rex support -->

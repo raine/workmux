@@ -48,6 +48,8 @@ const abortedMessages: AssistantMessage[] = [
 async function createHarness(
   initialMessage = stoppedMessage(),
   options: {
+    hasUI?: boolean;
+    mode?: string;
     snapshot?: number;
     idle?: boolean;
     exec?: (args: string[]) => Promise<number>;
@@ -122,6 +124,8 @@ async function createHarness(
       if (name === 'agent_settled') idle = true;
       if (isIdle !== undefined) idle = isIdle;
       await handlers.get(name)?.({ aborted }, {
+        hasUI: options.hasUI ?? true,
+        mode: options.mode ?? 'tui',
         isIdle: () => idle,
         sessionManager: { getBranch: () => branch },
       });
@@ -138,6 +142,19 @@ function deferred() {
 }
 
 describe('pi workmux status extension', () => {
+  test.each([['print', false], ['json', false], ['rpc', true]] as const)(
+    'ignores %s sessions', async (mode, hasUI) => {
+      const harness = await createHarness(stoppedMessage(), { mode, hasUI });
+      expect(harness.listeners.has('suba:activity')).toBe(false);
+      await harness.input('rewrite');
+      await harness.emit('agent_start');
+      await harness.emit('agent_settled');
+      await harness.emit('session_shutdown');
+      expect(harness.calls).toEqual([]);
+      expect(spawned).toEqual([]);
+    },
+  );
+
   test('registers without changing status when no publisher is present', async () => {
     const harness = await createHarness();
     expect(harness.calls).toEqual([['register-agent']]);

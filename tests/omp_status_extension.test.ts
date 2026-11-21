@@ -22,7 +22,7 @@ const { default: workmuxStatusExtension } = await import('../resources/omp/exten
 
 type Handler = (event: unknown, context: unknown) => Promise<void> | void;
 
-function createHarness() {
+function createHarness(mode = 'tui', hasUI = true) {
   const handlers = new Map<string, Handler>();
   const calls: string[][] = [];
   const statuses: string[] = [];
@@ -42,7 +42,7 @@ function createHarness() {
     calls,
     statuses,
     async emit(name: string, event: unknown = {}) {
-      await handlers.get(name)?.(event, {});
+      await handlers.get(name)?.(event, { mode, hasUI });
     },
     async input(text: string, source = 'interactive') {
       await handlers.get('input')?.({ type: 'input', text, source }, { cwd: '/repo/feature' });
@@ -51,6 +51,20 @@ function createHarness() {
 }
 
 describe('omp workmux status extension', () => {
+  test.each([['json', false], ['rpc', true]] as const)(
+    'ignores %s sessions', async (mode, hasUI) => {
+      const harness = createHarness(mode, hasUI);
+      await harness.emit('session_start');
+      await harness.input('rewrite');
+      await harness.emit('agent_start');
+      await harness.emit('tool_call', { toolName: 'ask' });
+      await harness.emit('tool_execution_start');
+      await harness.emit('agent_end');
+      expect(harness.calls).toEqual([]);
+      expect(spawned).toEqual([]);
+    },
+  );
+
   test('does not report waiting between an assistant tool call and execution', async () => {
     const harness = createHarness();
 
