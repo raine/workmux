@@ -23,7 +23,7 @@ workmux add feature-auth --base main
 
 This creates a colocated workspace with its working-copy commit on top of `main`. The new `feature-auth` bookmark starts on the **base commit**, not the working-copy commit. Using an existing bookmark creates a workspace on top of that bookmark.
 
-Before merging or non-forced removal, workmux moves the workspace's bookmark to the workspace's latest commit. That is the top of the commits stacked above `@`, for example after `jj edit` of an earlier commit. Without such commits, it is `@` when `@` has both changes and a description; otherwise, `@-`. If several stacks branch off above `@`, workmux asks you to abandon or rebase all but one. Removal only advances a bookmark along its existing history. Merge rejects a bookmark on unrelated history and tells you how to reposition it.
+Before merging or removing a workspace with `--keep-branch` and without `--force`, workmux moves the workspace's bookmark to the workspace's latest commit. That is the top of the commits stacked above `@`, for example after `jj edit` of an earlier commit. Without such commits, it is `@` when `@` has both changes and a description; otherwise, `@-`. If several stacks branch off above `@`, workmux asks you to abandon or rebase all but one. Removal only advances a bookmark along its existing history. Merge rejects a bookmark on unrelated history and tells you how to reposition it.
 
 ## Choosing a base
 
@@ -83,7 +83,9 @@ Replace `main` with your merge target. To rebase without merging or cleanup, use
 
 A successful merge removes the workspace directory, forgets the jj workspace, deletes its bookmark, and closes its managed terminal window unless you use `--keep`.
 
-`workmux remove [name]` cleans up without merging. Its uncommitted-change check uses Git status, so describe and finish your working-copy commit with `jj new` before removal if needed. Use `--keep-branch` to preserve the bookmark while removing the workspace and window. `--force` bypasses confirmation, uncommitted-change protection, and bookmark advancement; use it only when you intend to discard the workspace.
+`workmux remove [name]` checks that your workspace's commits are reachable from its base bookmark, even if the working copy is immutable. It refuses unsaved changes and does not require the workspace bookmark to still exist. `--keep-branch` can retain unmerged commits by advancing the workspace bookmark. If you moved the bookmark to unrelated history, workmux leaves it there.
+
+A successful `merge --squash` cleans up immediately. After `merge --squash --keep`, the original commits are not ancestors of the squashed result, so a later `remove` can refuse. Check the target's contents before using `remove --force`. Force discards the workspace without checking integration or advancing its bookmark.
 
 ## Unsupported features
 

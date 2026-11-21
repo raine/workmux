@@ -245,6 +245,132 @@ def test_remove_cleans_all_state(mux_server, jj_repo, wm):
     assert_cleaned(mux_server, jj_repo, "feature")
 
 
+@pytest.mark.parametrize("missing", [True, False])
+def test_remove_merged_workspace(mux_server, jj_repo, wm, missing):
+    wm("add feature --headless")
+    workspace = get_worktree_path(jj_repo, "feature")
+    (workspace / "data").write_text("keep me")
+    jj(mux_server, workspace, "describe", "-m", "change")
+    jj(mux_server, jj_repo, "bookmark", "set", "main", "-r", "feature@")
+    jj(mux_server, jj_repo, "bookmark", "set", "feature", "-r", "feature@")
+    jj(
+        mux_server,
+        jj_repo,
+        "config",
+        "set",
+        "--repo",
+        'revset-aliases."immutable_heads()"',
+        "main",
+    )
+    if missing:
+        jj(mux_server, jj_repo, "bookmark", "delete", "feature")
+    assert (
+        jj(
+            mux_server,
+            jj_repo,
+            "log",
+            "-r",
+            "feature@",
+            "--no-graph",
+            "-T",
+            "immutable",
+        )
+        == "true"
+    )
+    wm("remove feature")
+    assert_cleaned(mux_server, jj_repo, "feature")
+    assert jj(mux_server, jj_repo, "file", "show", "-r", "main", "data") == "keep me"
+
+
+def test_remove_protects_dirty_and_immutable_unmerged(mux_server, jj_repo, wm):
+    wm("add feature --headless")
+    path = get_worktree_path(jj_repo, "feature")
+    (path / "data").write_text("unique")
+    wm("remove feature", expect_fail=True)
+    jj(mux_server, path, "describe", "-m", "important")
+    jj(mux_server, jj_repo, "bookmark", "create", "published", "-r", "feature@")
+    jj(
+        mux_server,
+        jj_repo,
+        "config",
+        "set",
+        "--repo",
+        'revset-aliases."immutable_heads()"',
+        "published",
+    )
+    assert (
+        jj(
+            mux_server,
+            jj_repo,
+            "log",
+            "-r",
+            "feature@",
+            "--no-graph",
+            "-T",
+            "immutable",
+        )
+        == "true"
+    )
+    wm("remove feature", expect_fail=True)
+    assert (path / "data").read_text() == "unique"
+    wm("remove feature --keep-branch")
+    assert revision(mux_server, jj_repo, "feature") == revision(
+        mux_server, jj_repo, "published"
+    )
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_remove_preserves_moved_bookmark(mux_server, jj_repo, wm, force):
+    wm("add feature --headless")
+    commit(mux_server, jj_repo, "unrelated")
+    jj(mux_server, jj_repo, "bookmark", "set", "feature", "-r", "@-")
+    unrelated = revision(mux_server, jj_repo, "feature")
+    wm("remove feature" + (" --force" if force else ""))
+    assert revision(mux_server, jj_repo, "feature") == unrelated
+    assert not get_worktree_path(jj_repo, "feature").exists()
+
+
+@pytest.mark.parametrize("strategy", ["", "--rebase", "--squash"])
+def test_remove_after_kept_merge(mux_server, jj_repo, wm, strategy):
+    wm("add feature --headless")
+    path = get_worktree_path(jj_repo, "feature")
+    commit(mux_server, path, "source")
+    commit(mux_server, jj_repo, "target")
+    jj(mux_server, jj_repo, "bookmark", "set", "main", "-r", "@-")
+    wm(f"merge feature {strategy} --keep")
+    assert jj(mux_server, jj_repo, "file", "show", "-r", "main", "source") == "source"
+    if strategy == "--squash":
+        wm("remove feature", expect_fail=True)
+        assert (path / "source").exists()
+        wm("remove feature --force")
+    else:
+        wm("remove feature")
+    assert_cleaned(mux_server, jj_repo, "feature")
+
+
+def test_standalone_rebase_keeps_workspace_for_merge(mux_server, jj_repo, wm):
+    wm("add feature --headless")
+    path = get_worktree_path(jj_repo, "feature")
+    commit(mux_server, path, "source")
+    commit(mux_server, jj_repo, "base-change")
+    jj(mux_server, jj_repo, "bookmark", "set", "main", "-r", "@-")
+    wm("rebase feature")
+    assert (path / "base-change").is_file()
+    wm("remove feature", expect_fail=True)
+    wm("merge feature")
+    assert_cleaned(mux_server, jj_repo, "feature")
+
+
+def test_pre_remove_hook_cannot_discard_new_edits(mux_server, jj_repo, wm):
+    write_workmux_config(jj_repo, pre_remove=["echo keep > new-file"], env=mux_server)
+    wm("add feature --headless --base main")
+    wm("remove feature", expect_fail=True)
+    path = get_worktree_path(jj_repo, "feature")
+    assert (path / "new-file").read_text() == "keep\n"
+    assert "feature" in jj(mux_server, jj_repo, "workspace", "list")
+
+
 def test_rename_is_rejected(jj_repo, wm):
     wm("add feature --background")
     result = wm("rename feature renamed", expect_fail=True)

@@ -384,6 +384,32 @@ fn perform_destructive_cleanup(
         Some(expected) => expected.admin_dir.map(Path::to_path_buf),
         None => git::linked_worktree_registration_in(worktree_path, git_common_dir)?,
     };
+    let workspace =
+        git::get_worktree_meta_in(handle, crate::jj::BOOKMARK_META_KEY, Some(git_common_dir));
+    let jj_root = crate::jj::repo_root_for_common_dir(git_common_dir);
+    let jj = match (workspace.as_deref(), jj_root.as_deref()) {
+        (Some(bookmark), Some(main)) => {
+            anyhow::ensure!(
+                bookmark == branch_name,
+                "Workspace bookmark identity changed"
+            );
+            crate::jj::verify_workspace_path(main, handle, worktree_path)?;
+            if !force {
+                crate::jj::check_removal(worktree_path, bookmark, keep_branch)?;
+            }
+            let deletion = if keep_branch {
+                None
+            } else {
+                crate::jj::removal_ref(main, handle, bookmark)?
+            };
+            Some((main, deletion))
+        }
+        (Some(_), None) => anyhow::bail!("Missing jj repository"),
+        (None, _) if worktree_path.join(".jj").try_exists()? => {
+            anyhow::bail!("Missing workmux registration for jj workspace")
+        }
+        _ => None,
+    };
     if let Some(admin_dir) = linked_admin_dir {
         // A linked-worktree lock prevents pruning. Removing it before quarantine
         // leaves the original worktree path available if the operation fails.
@@ -417,14 +443,28 @@ fn perform_destructive_cleanup(
             worktree_path.display()
         );
     }
-    if !keep_branch {
+    if let Some((main, deletion)) = jj {
+        anyhow::ensure!(
+            !worktree_path.try_exists()?,
+            "Workspace path reused during cleanup"
+        );
+        crate::jj::verify_workspace_path(main, handle, worktree_path)?;
+        if let Some(id) = deletion {
+            crate::cmd::Cmd::new("git")
+                .workdir(main)
+                .args(&[
+                    "update-ref",
+                    "-d",
+                    &format!("refs/heads/{branch_name}"),
+                    &id,
+                ])
+                .run()
+                .context("Bookmark changed during cleanup; quarantine retained")?;
+        }
+        crate::jj::forget_workspace(main, handle)?;
+    } else if !keep_branch {
         git::delete_branch_in(branch_name, force, git_common_dir)
             .context("Failed to delete local branch")?;
-    }
-    // Forgetting the workspace also imports the branch deletion as a deleted
-    // bookmark.
-    if let Some(jj_root) = crate::jj::repo_root_for_common_dir(git_common_dir) {
-        crate::jj::forget_workspace(&jj_root, handle)?;
     }
     git::remove_worktree_meta_at(handle, git_common_dir)
         .context("Failed to remove Workmux metadata after Git cleanup")?;
