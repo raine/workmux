@@ -686,12 +686,13 @@ immediately. If the branch doesn't exist, it will be created automatically.
   optional when `placement` names a remote or only one is configured. Put the
   branch name first: `workmux add my-branch --remote`.
 - `--local`: Create the workspace locally even when `placement` names a remote.
-- `-w, --with-changes`: Move uncommitted changes from the current worktree to
-  the new worktree, then reset the original worktree to a clean state. Useful
-  when you've started working on main and want to move your branches to a new
-  worktree.
-- `--patch`: Interactively select which changes to move (requires
-  `--with-changes`). Opens an interactive prompt for selecting hunks to stash.
+- `-w, --with-changes`: Move uncommitted changes from the current worktree into
+  the new worktree. The new branch starts from the current HEAD, and prompt and
+  agent options apply as usual. If the changes cannot be applied, the new
+  worktree is removed and the changes are restored.
+- `--patch`: Interactively select which hunks to move (requires
+  `--with-changes`, can't be combined with `-u`). Hunks you leave out stay in
+  the current worktree.
 - `-u, --include-untracked`: Also move untracked files (requires
   `--with-changes`). By default, only staged and modified tracked files are
   moved.
@@ -850,7 +851,20 @@ workmux add fix/bug --with-changes
 
 # Interactively select which changes to move
 workmux add feature/partial --with-changes --patch
+
+# Move the changes and hand them to an agent with a prompt
+workmux add feature/new-thing -w -u -p "Finish the login form and add tests"
 ```
+
+`--with-changes` creates a single worktree from the current HEAD, so it can't be
+combined with `--base`, `--pr`, `--count`, `--foreach`, several `--agent` flags,
+branch names piped from stdin, or a prompt whose frontmatter declares `foreach`.
+The changes are applied after file copies and symlinks and before `post_create`
+hooks and the agent start, so both see them. If they can't be applied, the new
+worktree and branch are removed and workmux tries to restore the changes in the
+current worktree. Staged changes stay staged. Use `--patch` only when nothing
+is staged. Each transfer keeps a backup in `git stash list`; if restoration
+conflicts, use the reported commit ID to recover in a clean worktree.
 
 ##### AI agent prompts
 

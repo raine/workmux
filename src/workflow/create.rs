@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::MuxMode;
 use crate::multiplexer::MuxHandle;
@@ -124,7 +124,14 @@ fn create_impl(
         is_explicit_name,
         prompt_file_only,
         fork_source,
+        rescue,
     } = args;
+
+    if rescue.is_some() && headless {
+        return Err(anyhow!(
+            "Moving uncommitted changes is not supported for headless worktrees"
+        ));
+    }
 
     info!(
         branch = branch_name,
@@ -249,6 +256,9 @@ fn create_impl(
 
     // Auto-detect: create branch if it doesn't exist
     let branch_exists = git::branch_exists_in(branch_name, Some(&context.execution_dir))?;
+    if rescue.is_some() && branch_exists {
+        return Err(anyhow!("Branch '{}' already exists.", branch_name));
+    }
     if branch_exists && remote_branch.is_some() && checkout_ref.is_none() {
         return Err(anyhow!(
             "Branch '{}' already exists. Remove '--remote' or pick a different branch name.",
@@ -374,6 +384,12 @@ fn create_impl(
             let current_branch = current_branch.trim().to_string();
 
             if current_branch.is_empty() {
+                if rescue.is_some() {
+                    return Err(anyhow!(
+                        "Cannot move uncommitted changes from a detached HEAD. \
+                         Check out a branch first; the new branch starts from it."
+                    ));
+                }
                 return Err(anyhow!(
                     "Cannot determine current branch (detached HEAD). \
                      Use --base to explicitly specify the starting point."
@@ -456,190 +472,264 @@ fn create_impl(
         "create:creating worktree"
     );
 
-    // Acquire an exclusive lock to serialize .git/config writes across parallel
-    // workmux processes. Without this, concurrent `workmux add` commands race on
-    // git's config.lock file and fail with "could not lock config file".
-    let _config_lock = git::GitConfigLock::acquire(&context.git_common_dir)
-        .context("Failed to acquire git config lock")?;
-
-    // Store the review base before checkout so observers that see the worktree
-    // appear on disk also see complete branch metadata.
-    if let Some(ref base) = comparison_base {
-        git::set_branch_base_in(branch_name, base, Some(&context.execution_dir)).with_context(
-            || {
-                format!(
-                    "Failed to store base branch '{}' for branch '{}'",
-                    base, branch_name
-                )
-            },
-        )?;
-        debug!(
-            branch = branch_name,
-            base = base,
-            "create:stored review base in git config"
-        );
-    }
-
-    git::create_worktree_in(
-        &worktree_path,
-        branch_name,
-        create_new,
-        base_branch_for_creation.as_deref(),
-        track_upstream,
-        Some(&context.execution_dir),
-    )
-    .context("Failed to create git worktree")?;
-
-    if headless {
-        if let Err(error) = git::set_worktree_attachment_in(
-            &current_handle,
-            git::WorktreeAttachment::Headless,
-            Some(&context.execution_dir),
-        ) {
-            drop(_config_lock);
-            let rollback = cleanup::cleanup_headless(
-                context,
+    // Stash the changes to move only now: every cheap check above has passed, and
+    // nothing is visible yet, so an interrupted --patch selection leaves no trace.
+    let moved = match &rescue {
+        Some(transfer) => {
+            let message = format!(
+                "workmux: moving changes to {} [{}]",
                 branch_name,
-                &current_handle,
-                &worktree_path,
-                cleanup::CleanupOptions {
-                    force: true,
-                    keep_branch: !create_new,
-                    no_hooks: true,
-                    show_hook_output: false,
-                },
+                stash_nonce()
             );
-            return match rollback {
-                Ok(_) => Err(error),
-                Err(rollback_error) => Err(error.context(format!(
-                    "Metadata rollback also failed for '{}': {rollback_error:#}",
-                    worktree_path.display()
-                ))),
-            };
+            let sha = git::stash_push(
+                &transfer.source,
+                &message,
+                transfer.include_untracked,
+                transfer.patch,
+            )
+            .context("Failed to stash current changes")?
+            .ok_or_else(|| {
+                anyhow!(
+                    "No uncommitted changes to move. Use 'workmux add {}' to create a clean worktree.",
+                    branch_name
+                )
+            })?;
+            info!(branch = branch_name, stash = %sha, "create:stashed changes to move");
+            Some(StashedChanges {
+                source: transfer.source.clone(),
+                sha,
+            })
         }
-    } else {
-        let mode_str = match options.mode {
-            MuxMode::Session => "session",
-            MuxMode::Window => "window",
-        };
-        git::set_worktree_meta_in(
-            &current_handle,
-            "mode",
-            mode_str,
+        None => None,
+    };
+
+    // Everything from here until the moved changes are applied is rolled back as a
+    // unit when changes are being moved, so they are never left only in the stash.
+    let mut worktree_created = false;
+    let staged = (|| -> Result<SetupOptions> {
+        // Acquire an exclusive lock to serialize .git/config writes across parallel
+        // workmux processes. Without this, concurrent `workmux add` commands race on
+        // git's config.lock file and fail with "could not lock config file".
+        let _config_lock = git::GitConfigLock::acquire(&context.git_common_dir)
+            .context("Failed to acquire git config lock")?;
+
+        // Store the review base before checkout so observers that see the worktree
+        // appear on disk also see complete branch metadata.
+        if let Some(ref base) = comparison_base {
+            git::set_branch_base_in(branch_name, base, Some(&context.execution_dir)).with_context(
+                || {
+                    format!(
+                        "Failed to store base branch '{}' for branch '{}'",
+                        base, branch_name
+                    )
+                },
+            )?;
+            debug!(
+                branch = branch_name,
+                base = base,
+                "create:stored review base in git config"
+            );
+        }
+
+        git::create_worktree_in(
+            &worktree_path,
+            branch_name,
+            create_new,
+            base_branch_for_creation.as_deref(),
+            track_upstream,
             Some(&context.execution_dir),
         )
-        .with_context(|| {
-            format!(
-                "Failed to store tmux mode for worktree '{}'",
-                current_handle
-            )
-        })?;
-        git::set_worktree_attachment_in(
-            &current_handle,
-            git::WorktreeAttachment::Multiplexer,
-            Some(&context.execution_dir),
-        )?;
-        if let Some(target_window_name) = &options.target_window_name {
-            git::set_worktree_meta_in(
+        .context("Failed to create git worktree")?;
+        worktree_created = true;
+
+        if headless {
+            if let Err(error) = git::set_worktree_attachment_in(
                 &current_handle,
-                "target-window",
-                target_window_name,
+                git::WorktreeAttachment::Headless,
                 Some(&context.execution_dir),
-            )?;
-        }
-        if let Some(target_session_name) = &options.target_session_name {
-            git::set_worktree_meta_in(
-                &current_handle,
-                "target-session",
-                target_session_name,
-                Some(&context.execution_dir),
-            )?;
-        }
-        if let Some(window_session_name) = &options.window_session_name {
-            git::set_worktree_meta_in(
-                &current_handle,
-                "window-session",
-                window_session_name,
-                Some(&context.execution_dir),
-            )?;
-        }
-        if options.mode == MuxMode::Window && context.mux.supports_window_ownership() {
-            options.window_token = Some(git::ensure_worktree_window_token_in(
-                &current_handle,
-                Some(&context.execution_dir),
-            )?);
-            options.primary_window = true;
-        }
-        debug!(handle = %current_handle, mode = mode_str, "create:stored mux metadata");
-    }
-
-    // Release the config lock before proceeding to non-git operations
-    // (prompt files, tmux setup, hooks, etc.)
-    drop(_config_lock);
-
-    // Fork conversation into the new worktree if requested.
-    // Must happen after git::create_worktree() (path is finalized) and before
-    // setup_environment() (which launches the agent with resume args).
-    if let Some(fork) = fork_source {
-        let session_id = fork
-            .forker
-            .prepare_fork(&fork.session, &worktree_path)
-            .context("Failed to fork conversation into new worktree")?;
-        options.resume_mode =
-            crate::multiplexer::types::ResumeMode::ForkSession(session_id.clone());
-        info!(
-            session_id = %session_id,
-            target = %worktree_path.display(),
-            "create:forked conversation into new worktree"
-        );
-    }
-
-    // Write prompt file to worktree if provided
-    let prompt_file_path = if let Some(p) = prompt {
-        Some(setup::write_prompt_file(
-            Some(&worktree_path),
-            branch_name,
-            p,
-        )?)
-    } else {
-        None
-    };
-
-    // In file-only mode, the prompt file is written but not passed to setup.
-    // This skips agent validation and prompt injection into pane commands.
-    let setup_prompt_file_path = if prompt_file_only {
-        None
-    } else {
-        prompt_file_path
-    };
-
-    // Compute working directory from config location
-    let working_dir = if !context.config_rel_dir.as_os_str().is_empty() {
-        let subdir_in_worktree = worktree_path.join(&context.config_rel_dir);
-        // Only use subdir if it exists (may not exist if base branch lacks it)
-        if subdir_in_worktree.exists() {
-            Some(subdir_in_worktree)
+            ) {
+                drop(_config_lock);
+                let rollback = cleanup::cleanup_headless(
+                    context,
+                    branch_name,
+                    &current_handle,
+                    &worktree_path,
+                    cleanup::CleanupOptions {
+                        force: true,
+                        keep_branch: !create_new,
+                        no_hooks: true,
+                        show_hook_output: false,
+                    },
+                );
+                return match rollback {
+                    Ok(_) => Err(error),
+                    Err(rollback_error) => Err(error.context(format!(
+                        "Metadata rollback also failed for '{}': {rollback_error:#}",
+                        worktree_path.display()
+                    ))),
+                };
+            }
         } else {
-            debug!(
-                subdir = %context.config_rel_dir.display(),
-                "create:config subdir does not exist in worktree, falling back to root"
-            );
-            None
+            let mode_str = match options.mode {
+                MuxMode::Session => "session",
+                MuxMode::Window => "window",
+            };
+            git::set_worktree_meta_in(
+                &current_handle,
+                "mode",
+                mode_str,
+                Some(&context.execution_dir),
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to store tmux mode for worktree '{}'",
+                    current_handle
+                )
+            })?;
+            git::set_worktree_attachment_in(
+                &current_handle,
+                git::WorktreeAttachment::Multiplexer,
+                Some(&context.execution_dir),
+            )?;
+            if let Some(target_window_name) = &options.target_window_name {
+                git::set_worktree_meta_in(
+                    &current_handle,
+                    "target-window",
+                    target_window_name,
+                    Some(&context.execution_dir),
+                )?;
+            }
+            if let Some(target_session_name) = &options.target_session_name {
+                git::set_worktree_meta_in(
+                    &current_handle,
+                    "target-session",
+                    target_session_name,
+                    Some(&context.execution_dir),
+                )?;
+            }
+            if let Some(window_session_name) = &options.window_session_name {
+                git::set_worktree_meta_in(
+                    &current_handle,
+                    "window-session",
+                    window_session_name,
+                    Some(&context.execution_dir),
+                )?;
+            }
+            if options.mode == MuxMode::Window && context.mux.supports_window_ownership() {
+                options.window_token = Some(git::ensure_worktree_window_token_in(
+                    &current_handle,
+                    Some(&context.execution_dir),
+                )?);
+                options.primary_window = true;
+            }
+            debug!(handle = %current_handle, mode = mode_str, "create:stored mux metadata");
         }
-    } else {
-        None
-    };
 
-    // Use config_source_dir for file operations (the directory where config was found)
-    let config_root = Some(context.config_source_dir.clone());
+        // Release the config lock before proceeding to non-git operations
+        // (prompt files, tmux setup, hooks, etc.)
+        drop(_config_lock);
 
-    // Merge options
-    let options_with_prompt = SetupOptions {
-        prompt_file_path: setup_prompt_file_path,
-        working_dir,
-        config_root,
-        ..options
+        // Fork conversation into the new worktree if requested.
+        // Must happen after git::create_worktree() (path is finalized) and before
+        // setup_environment() (which launches the agent with resume args).
+        if let Some(fork) = fork_source {
+            let session_id = fork
+                .forker
+                .prepare_fork(&fork.session, &worktree_path)
+                .context("Failed to fork conversation into new worktree")?;
+            options.resume_mode =
+                crate::multiplexer::types::ResumeMode::ForkSession(session_id.clone());
+            info!(
+                session_id = %session_id,
+                target = %worktree_path.display(),
+                "create:forked conversation into new worktree"
+            );
+        }
+
+        // Write prompt file to worktree if provided
+        let prompt_file_path = if let Some(p) = prompt {
+            Some(setup::write_prompt_file(
+                Some(&worktree_path),
+                branch_name,
+                p,
+            )?)
+        } else {
+            None
+        };
+
+        // In file-only mode, the prompt file is written but not passed to setup.
+        // This skips agent validation and prompt injection into pane commands.
+        let setup_prompt_file_path = if prompt_file_only {
+            None
+        } else {
+            prompt_file_path
+        };
+
+        // Compute working directory from config location
+        let working_dir = if !context.config_rel_dir.as_os_str().is_empty() {
+            let subdir_in_worktree = worktree_path.join(&context.config_rel_dir);
+            // Only use subdir if it exists (may not exist if base branch lacks it)
+            if subdir_in_worktree.exists() {
+                Some(subdir_in_worktree)
+            } else {
+                debug!(
+                    subdir = %context.config_rel_dir.display(),
+                    "create:config subdir does not exist in worktree, falling back to root"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
+        // Use config_source_dir for file operations (the directory where config was found)
+        let config_root = Some(context.config_source_dir.clone());
+
+        // Merge options
+        let mut options_with_prompt = SetupOptions {
+            prompt_file_path: setup_prompt_file_path,
+            working_dir,
+            config_root,
+            ..options
+        };
+
+        if let Some(moved) = &moved {
+            // File ops run before the apply, so a collision with a moved file fails
+            // the apply instead of overwriting the moved file.
+            setup::apply_file_operations(
+                &options_with_prompt,
+                &worktree_path,
+                &context.main_worktree_root,
+                &context.config,
+            )?;
+            options_with_prompt.run_file_ops = false;
+            git::stash_apply(&worktree_path, &moved.sha)
+                .context("Failed to apply the moved changes in the new worktree")?;
+            info!(path = %worktree_path.display(), "create:applied moved changes");
+        }
+        Ok(options_with_prompt)
+    })();
+
+    let options_with_prompt = match staged {
+        Ok(options) => options,
+        Err(error) => {
+            return Err(match &moved {
+                Some(moved) => rollback_transfer(
+                    context,
+                    branch_name,
+                    &current_handle,
+                    &worktree_path,
+                    worktree_created,
+                    moved,
+                    error,
+                ),
+                None => error,
+            });
+        }
     };
+    if let Some(moved) = &moved {
+        eprintln!("Transfer backup kept in git stash: {}", moved.sha);
+    }
     if headless {
         let hook_output = if json_output {
             crate::cmd::ShellOutput::RedirectToStderr
@@ -699,7 +789,15 @@ fn create_impl(
         &options_with_prompt,
         agent,
         placement_window_id,
-    )?;
+    )
+    .map_err(|error| match &moved {
+        // The new worktree is now the only place the moved changes exist: keep it.
+        Some(_) => error.context(format!(
+            "Your uncommitted changes were moved to '{}', which has been kept",
+            worktree_path.display()
+        )),
+        None => error,
+    })?;
     result.base_branch = comparison_base;
     info!(
         branch = branch_name,
@@ -710,138 +808,64 @@ fn create_impl(
     Ok(CreateOutcome::Attached(result))
 }
 
-/// Create a new worktree and move uncommitted changes from the current worktree into it.
-pub fn create_with_changes(
+/// A stash entry holding the changes that one `create` call is moving.
+struct StashedChanges {
+    source: PathBuf,
+    sha: String,
+}
+
+/// A stash message suffix unique to this invocation.
+fn stash_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("{}-{}", std::process::id(), nanos)
+}
+
+/// Undo a change transfer that failed before the changes were applied: remove the new
+/// worktree and branch, and put the changes back into the source worktree.
+fn rollback_transfer(
+    context: &WorkflowContext,
     branch_name: &str,
     handle: &str,
-    include_untracked: bool,
-    patch: bool,
-    context: &WorkflowContext,
-    options: SetupOptions,
-) -> Result<CreateResult> {
-    info!(
-        branch = branch_name,
-        handle = handle,
-        include_untracked,
-        patch,
-        "create_with_changes:start"
-    );
-
-    // Capture the current working directory, which is the worktree with the changes.
-    let original_worktree_path = std::env::current_dir()
-        .context("Failed to get current working directory to rescue changes from")?;
-
-    // Check for changes based on the include_untracked flag
-    let has_tracked_changes = git::has_tracked_changes(&original_worktree_path)?;
-    let has_movable_untracked =
-        include_untracked && git::has_untracked_files(&original_worktree_path)?;
-
-    if !has_tracked_changes && !has_movable_untracked {
-        return Err(anyhow!(
-            "No uncommitted changes to move. Use 'workmux add {}' to create a clean worktree.",
-            branch_name
+    worktree_path: &Path,
+    worktree_created: bool,
+    moved: &StashedChanges,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    warn!(error = %error, "create:change transfer failed, rolling back");
+    let mut error = error;
+    if worktree_created
+        && let Err(cleanup_error) = cleanup::cleanup_headless(
+            context,
+            branch_name,
+            handle,
+            worktree_path,
+            cleanup::CleanupOptions {
+                force: true,
+                keep_branch: false,
+                no_hooks: true,
+                show_hook_output: false,
+            },
+        )
+    {
+        error = error.context(format!(
+            "Could not remove the new worktree '{}': {cleanup_error:#}",
+            worktree_path.display()
         ));
     }
 
-    if git::branch_exists(branch_name)? {
-        return Err(anyhow!("Branch '{}' already exists.", branch_name));
-    }
-
-    // 1. Stash changes
-    let stash_message = format!("workmux: moving changes to {}", branch_name);
-    git::stash_push(&stash_message, include_untracked, patch)
-        .context("Failed to stash current changes")?;
-    info!(branch = branch_name, "create_with_changes: changes stashed");
-
-    // Capture mode before moving options (needed for rollback cleanup)
-    let mode = options.mode;
-
-    // 2. Create new worktree
-    let create_result = match create(
-        context,
-        CreateArgs {
-            branch_name,
-            handle,
-            base_branch: None,
-            remote_branch: None,
-            checkout_ref: None,
-            prompt: None,
-            options,
-            mode_override: None,
-            agent: None,
-            is_explicit_name: false,
-            prompt_file_only: false,
-            fork_source: None,
-        },
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            warn!(error = %e, "create_with_changes: worktree creation failed, popping stash");
-            // Best effort to restore the stash - if this fails, user still has stash@{0}
-            let _ = git::stash_pop(&original_worktree_path);
-            return Err(e).context(
-                "Failed to create new worktree. Stashed changes have been restored if possible.",
-            );
-        }
-    };
-
-    let new_worktree_path = &create_result.worktree_path;
-    info!(
-        path = %new_worktree_path.display(),
-        "create_with_changes: worktree created"
-    );
-
-    // 3. Apply stash in new worktree
-    match git::stash_pop(new_worktree_path) {
-        Ok(_) => {
-            // 4. Success: Clean up original worktree
-            info!("create_with_changes: stash applied successfully, cleaning original worktree");
-            git::reset_hard(&original_worktree_path)?;
-
-            info!(
-                branch = branch_name,
-                "create_with_changes: completed successfully"
-            );
-            Ok(create_result)
-        }
-        Err(e) => {
-            // 5. Failure: Rollback
-            warn!(error = %e, "create_with_changes: failed to apply stash, rolling back");
-
-            let cleanup_result = cleanup::cleanup(
-                context,
-                branch_name,
-                &create_result.resolved_handle,
-                &create_result.worktree_path,
-                cleanup::CleanupOptions {
-                    force: true,
-                    keep_branch: false,
-                    no_hooks: false,
-                    show_hook_output: true,
-                },
-            )
-            .context(
-                "Rollback failed: could not clean up the new worktree. Please do so manually.",
-            )?;
-
-            // Handle window navigation/closing based on whether we're inside the source window
-            cleanup::navigate_to_target_and_close(
-                context.mux.as_ref(),
-                &context.prefix,
-                &context.main_branch,
-                &create_result.resolved_handle,
-                &cleanup_result,
-                mode,
-                context.config.default_session(),
-            )?;
-
-            Err(anyhow!(
-                "Could not apply changes to '{}', likely due to conflicts.\n\n\
-                The new worktree has been removed.\n\
-                Your changes are safe in the latest stash. Run 'git stash pop' manually to resolve.",
-                branch_name
-            ))
-        }
+    match git::stash_apply(&moved.source, &moved.sha) {
+        Ok(()) => error.context(format!(
+            "Your uncommitted changes were restored to '{}'. Stash backup: {}",
+            moved.source.display(), moved.sha
+        )),
+        Err(apply_error) => error.context(format!(
+            "Could not restore your uncommitted changes to '{}': {apply_error:#}\n\
+             Inspect the source for partial changes. To recover in a clean worktree at {}^1, run: git stash apply --index {}",
+            moved.source.display(), moved.sha, moved.sha
+        )),
     }
 }
 
@@ -855,6 +879,7 @@ mod tests {
     };
     use crate::multiplexer::{Multiplexer, PaneHandshake};
     use crate::test_support;
+    use crate::workflow::ChangeTransfer;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1125,6 +1150,7 @@ mod tests {
                 is_explicit_name: false,
                 prompt_file_only: false,
                 fork_source: None,
+                rescue: None,
             },
         )
         .unwrap();
@@ -1184,6 +1210,7 @@ mod tests {
                 is_explicit_name: false,
                 prompt_file_only: false,
                 fork_source: None,
+                rescue: None,
             },
         ) {
             Ok(_) => panic!("stale source ref should not be accepted"),
@@ -1249,6 +1276,7 @@ mod tests {
                 is_explicit_name: false,
                 prompt_file_only: false,
                 fork_source: None,
+                rescue: None,
             },
         )
         .unwrap();
@@ -1322,6 +1350,7 @@ mod tests {
                 is_explicit_name: false,
                 prompt_file_only: false,
                 fork_source: None,
+                rescue: None,
             },
         ) {
             Ok(_) => panic!("missing target branch should not be accepted"),
@@ -1384,6 +1413,7 @@ mod tests {
                 is_explicit_name: false,
                 prompt_file_only: false,
                 fork_source: None,
+                rescue: None,
             },
         )
         .unwrap();
@@ -1394,5 +1424,256 @@ mod tests {
             Some("window")
         );
         assert!(!git::branch_exists_in("feature", Some(&repo_a)).unwrap());
+    }
+    /// Runs the calling test in an isolated child with a fresh repository as cwd.
+    /// Returns the repository path in the child and `None` in the parent.
+    fn isolated_repo(test_name: &str) -> Option<PathBuf> {
+        if !test_support::is_isolated_child(test_name) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            test_support::init_repo(&repo);
+            test_support::run_isolated_test(test_name, &repo, &[("WM_TEST_TEMP", temp.path())]);
+            return None;
+        }
+        println!("{}", test_support::ISOLATED_TEST_CANARY);
+        let temp = std::env::var_os("WM_TEST_TEMP").map(PathBuf::from).unwrap();
+        Some(temp.join("repo").canonicalize().unwrap())
+    }
+
+    fn create_moving_changes(
+        ctx: &WorkflowContext,
+        branch: &str,
+        options: SetupOptions,
+        include_untracked: bool,
+    ) -> Result<CreateResult> {
+        create(
+            ctx,
+            CreateArgs {
+                branch_name: branch,
+                handle: branch,
+                base_branch: None,
+                remote_branch: None,
+                checkout_ref: None,
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+                rescue: Some(ChangeTransfer {
+                    source: ctx.execution_dir.clone(),
+                    include_untracked,
+                    patch: false,
+                }),
+            },
+        )
+    }
+
+    fn quiet_options(run_hooks: bool, run_file_ops: bool) -> SetupOptions {
+        let mut options = SetupOptions::new(run_hooks, run_file_ops, false);
+        options.focus_window = false;
+        options
+    }
+
+    fn stash_list(repo: &Path) -> String {
+        test_support::run_git_output(repo, &["stash", "list"])
+    }
+
+    #[test]
+    fn moving_changes_to_existing_branch_leaves_source_untouched() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::moving_changes_to_existing_branch_leaves_source_untouched",
+        ) else {
+            return;
+        };
+        test_support::run_git(&repo, &["branch", "foo"]);
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+
+        let error = create_moving_changes(&ctx, "foo", quiet_options(false, false), false)
+            .err()
+            .expect("an existing branch must be rejected");
+
+        assert!(format!("{error:#}").contains("Branch 'foo' already exists"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(stash_list(&repo), "");
+    }
+
+    #[test]
+    fn moving_changes_from_clean_source_creates_nothing() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::moving_changes_from_clean_source_creates_nothing",
+        ) else {
+            return;
+        };
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+
+        let error = create_moving_changes(&ctx, "foo", quiet_options(false, false), true)
+            .err()
+            .expect("a clean source must be rejected");
+
+        assert!(format!("{error:#}").contains("No uncommitted changes to move"));
+        assert!(!ctx.worktree_base_dir().unwrap().join("foo").exists());
+        assert!(!git::branch_exists_in("foo", Some(&repo)).unwrap());
+    }
+
+    #[test]
+    fn moved_changes_are_in_place_before_post_create_hooks() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::moved_changes_are_in_place_before_post_create_hooks",
+        ) else {
+            return;
+        };
+        std::fs::write(repo.join("README.md"), "index\n").unwrap();
+        test_support::run_git(&repo, &["add", "README.md"]);
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        let config = Config {
+            post_create: Some(vec!["cp README.md hook_seen.txt".to_string()]),
+            ..Config::default()
+        };
+        let ctx = WorkflowContext::new_in(&repo, config, Arc::new(TestMux), None).unwrap();
+
+        let result = create_moving_changes(&ctx, "foo", quiet_options(true, true), true).unwrap();
+
+        let worktree = result.worktree_path;
+        assert_eq!(
+            test_support::run_git_output(&worktree, &["show", ":README.md"]).trim(),
+            "index"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("new.txt")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("hook_seen.txt")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "test\n"
+        );
+        assert!(!repo.join("new.txt").exists());
+        assert!(stash_list(&repo).contains("workmux: moving"));
+    }
+
+    #[test]
+    fn failed_apply_removes_worktree_and_restores_source() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::failed_apply_removes_worktree_and_restores_source",
+        ) else {
+            return;
+        };
+        // The file-ops source is the main worktree; the changes live in a linked one.
+        std::fs::write(repo.join("local.cfg"), "main cfg\n").unwrap();
+        let source = repo.parent().unwrap().join("source");
+        test_support::run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work",
+                source.to_str().unwrap(),
+            ],
+        );
+        let source = source.canonicalize().unwrap();
+        std::fs::write(source.join("README.md"), "index\n").unwrap();
+        test_support::run_git(&source, &["add", "README.md"]);
+        std::fs::write(source.join("README.md"), "changed\n").unwrap();
+        std::fs::write(source.join("local.cfg"), "source cfg\n").unwrap();
+        let mut config = Config::default();
+        config.files.copy = Some(vec!["local.cfg".to_string()]);
+        let ctx = WorkflowContext::new_in(&source, config, Arc::new(TestMux), None).unwrap();
+
+        let error = create_moving_changes(&ctx, "foo", quiet_options(false, true), true)
+            .err()
+            .expect("the colliding untracked file must fail the apply");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("already exists"), "{message}");
+        assert!(message.contains("restored"), "{message}");
+        assert!(!ctx.worktree_base_dir().unwrap().join("foo").exists());
+        assert!(!git::branch_exists_in("foo", Some(&repo)).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(source.join("README.md")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("local.cfg")).unwrap(),
+            "source cfg\n"
+        );
+        assert_eq!(
+            test_support::run_git_output(&source, &["show", ":README.md"]).trim(),
+            "index"
+        );
+        assert!(stash_list(&repo).contains("workmux: moving"));
+    }
+
+    #[test]
+    fn failed_hook_after_transfer_keeps_worktree_with_changes() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::failed_hook_after_transfer_keeps_worktree_with_changes",
+        ) else {
+            return;
+        };
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let config = Config {
+            post_create: Some(vec!["exit 1".to_string()]),
+            ..Config::default()
+        };
+        let ctx = WorkflowContext::new_in(&repo, config, Arc::new(TestMux), None).unwrap();
+
+        let error = create_moving_changes(&ctx, "foo", quiet_options(true, true), false)
+            .err()
+            .expect("the failing hook must fail the call");
+
+        let worktree = ctx.worktree_base_dir().unwrap().join("foo");
+        assert!(
+            format!("{error:#}").contains(&worktree.display().to_string()),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+            "changed\n"
+        );
+        assert!(stash_list(&repo).contains("workmux: moving"));
+    }
+    #[test]
+    fn moving_changes_from_detached_head_fails_before_stashing() {
+        let Some(repo) = isolated_repo(
+            "workflow::create::tests::moving_changes_from_detached_head_fails_before_stashing",
+        ) else {
+            return;
+        };
+        test_support::run_git(&repo, &["checkout", "-q", "--detach"]);
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+
+        let error = create_moving_changes(&ctx, "foo", quiet_options(false, false), false)
+            .err()
+            .expect("a detached HEAD must be rejected");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("detached HEAD"), "{message}");
+        assert!(!message.contains("--base"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(stash_list(&repo), "");
     }
 }
