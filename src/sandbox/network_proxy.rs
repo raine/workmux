@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::config::AllowedDomainRule;
+use crate::sandbox::accept::AcceptErrors;
 use crate::sandbox::constant_time::constant_time_eq;
 use crate::sandbox::rpc::generate_token;
 
@@ -37,6 +38,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The only destination port allowed via CONNECT.
 const ALLOWED_PORT: u16 = 443;
+
+/// Soft `RLIMIT_NOFILE` requested for the proxy process. Each tunnelled
+/// connection holds four descriptors.
+const OPEN_FILES_TARGET: libc::rlim_t = 10240;
 
 /// HTTP CONNECT proxy server with domain allowlist and private IP rejection.
 pub struct NetworkProxy {
@@ -134,6 +139,29 @@ impl NetworkProxy {
         })
     }
 
+    /// Raise the process soft open file limit to `OPEN_FILES_TARGET`, or to
+    /// the hard limit if that is lower.
+    pub fn raise_open_file_limit() {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+            return;
+        }
+        let previous = limit.rlim_cur;
+        let target = OPEN_FILES_TARGET.min(limit.rlim_max);
+        if previous >= target {
+            return;
+        }
+        limit.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+            debug!(previous, current = target, "raised open file limit");
+        } else {
+            debug!(error = %io::Error::last_os_error(), "failed to raise open file limit");
+        }
+    }
+
     /// Get the port the proxy is listening on.
     pub fn port(&self) -> u16 {
         self.port
@@ -154,6 +182,7 @@ impl NetworkProxy {
         let accept_limit = Arc::clone(&limit);
 
         let handle = thread::spawn(move || {
+            let mut accept_errors = AcceptErrors::new("network proxy");
             for stream in self.listener.incoming() {
                 match stream {
                     Ok(stream) => {
@@ -174,8 +203,9 @@ impl NetworkProxy {
                         });
                     }
                     Err(e) => {
-                        debug!(error = %e, "proxy accept error, shutting down");
-                        break;
+                        if !accept_errors.backoff(&e) {
+                            break;
+                        }
                     }
                 }
             }
@@ -894,6 +924,66 @@ mod tests {
     fn proxy_binds_to_random_port() {
         let proxy = NetworkProxy::bind(&[rule("example.com", false)], 128).unwrap();
         assert!(proxy.port() > 0);
+    }
+
+    fn open_file_limit() -> libc::rlimit {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit
+    }
+
+    fn set_soft_open_file_limit(soft: libc::rlim_t) {
+        let mut limit = open_file_limit();
+        limit.rlim_cur = soft.min(limit.rlim_max);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    }
+
+    #[test]
+    fn raise_open_file_limit_reaches_target_or_hard_limit() {
+        const TEST: &str =
+            "sandbox::network_proxy::tests::raise_open_file_limit_reaches_target_or_hard_limit";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let temp = tempfile::tempdir().unwrap();
+            crate::test_support::run_isolated_test(TEST, temp.path(), &[]);
+            return;
+        }
+        set_soft_open_file_limit(256);
+        NetworkProxy::raise_open_file_limit();
+        let limit = open_file_limit();
+        assert_eq!(limit.rlim_cur, OPEN_FILES_TARGET.min(limit.rlim_max));
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
+    }
+
+    #[test]
+    fn proxy_keeps_accepting_after_running_out_of_file_descriptors() {
+        const TEST: &str = "sandbox::network_proxy::tests::proxy_keeps_accepting_after_running_out_of_file_descriptors";
+        if !crate::test_support::is_isolated_child(TEST) {
+            let temp = tempfile::tempdir().unwrap();
+            crate::test_support::run_isolated_test(TEST, temp.path(), &[]);
+            return;
+        }
+        set_soft_open_file_limit(128);
+        let proxy = spawn_test_proxy(&[]);
+        let mut files = Vec::new();
+        while let Ok(file) = std::fs::File::open("/dev/null") {
+            files.push(file);
+        }
+        files.pop();
+        let pending = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        drop(files);
+        drop(pending);
+
+        let response =
+            proxy_request_status_line(proxy.port, "CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+        assert!(response.contains("407"));
+        println!("{}", crate::test_support::ISOLATED_TEST_CANARY);
     }
 
     #[test]

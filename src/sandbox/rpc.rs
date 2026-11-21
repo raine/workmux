@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::multiplexer::{AgentStatus, Multiplexer};
+use crate::sandbox::accept::AcceptErrors;
 use crate::sandbox::constant_time::constant_time_eq;
 
 // ── Protocol types ──────────────────────────────────────────────────────
@@ -297,6 +298,7 @@ impl RpcServer {
 
         let active = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
+            let mut accept_errors = AcceptErrors::new("RPC");
             for stream in self.listener.incoming() {
                 match stream {
                     Ok(stream) => {
@@ -317,8 +319,9 @@ impl RpcServer {
                         });
                     }
                     Err(e) => {
-                        debug!(error = %e, "RPC accept error, shutting down");
-                        break;
+                        if !accept_errors.backoff(&e) {
+                            break;
+                        }
                     }
                 }
             }

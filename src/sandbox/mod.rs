@@ -1,5 +1,6 @@
 //! Sandbox backends for running agents in isolated environments.
 
+mod accept;
 pub(crate) mod clipboard;
 mod constant_time;
 mod container;

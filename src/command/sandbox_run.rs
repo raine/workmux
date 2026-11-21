@@ -464,6 +464,7 @@ fn run_container(
     let proxy = if network_deny {
         let allowed = config.sandbox.network.allowed_domain_rules();
         let max_connections = config.sandbox.network.max_connections();
+        NetworkProxy::raise_open_file_limit();
         let proxy = match bind_ip {
             Some(ip) => NetworkProxy::bind_to(ip, &allowed, max_connections)?,
             None => NetworkProxy::bind(&allowed, max_connections)?,
