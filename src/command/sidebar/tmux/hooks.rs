@@ -12,6 +12,7 @@ const HOOK_NAMES: &[&str] = &[
     "after-new-session[99]",
     "window-resized[99]",
     "after-select-window[98]",
+    "window-pane-changed[98]",
     "client-session-changed[98]",
     "after-kill-pane[98]",
     "pane-exited[98]",
@@ -41,6 +42,7 @@ pub(crate) fn install_hooks(tmux: &TmuxHost) -> Result<()> {
         ("after-new-session[99]", &sync_cmd),
         ("window-resized[99]", &reflow_cmd),
         ("after-select-window[98]", dirty_cmd),
+        ("window-pane-changed[98]", dirty_cmd),
         ("client-session-changed[98]", dirty_cmd),
         ("after-kill-pane[98]", &after_kill_pane_cmd),
         // Shell exits do not fire after-kill-pane. Wake the daemon so a lone

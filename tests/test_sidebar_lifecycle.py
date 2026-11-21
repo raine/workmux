@@ -45,9 +45,9 @@ def test_quick_server_restart_registers_surviving_daemon(
         env.run_command([str(workmux_exe_path), "sidebar", "off"])
 
 
-@pytest.mark.parametrize("remaining_content", [False, True], ids=["last", "split"])
-def test_natural_pane_exit_wakes_sidebar_daemon(
-    mux_server: TmuxEnvironment, workmux_exe_path: Path, remaining_content: bool
+@pytest.mark.parametrize("event", ["last-pane-exit", "split-pane-exit", "pane-focus"])
+def test_pane_event_wakes_sidebar_daemon(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, event: str
 ):
     env = mux_server
     # Unix sidebar sockets must fit macOS sockaddr_un, unlike pytest paths.
@@ -70,7 +70,7 @@ def test_natural_pane_exit_wakes_sidebar_daemon(
         ]
     ).stdout.split()
     survivor = None
-    if remaining_content:
+    if event != "last-pane-exit":
         survivor = env.tmux(
             ["split-window", "-d", "-t", content, "-P", "-F", "#{pane_id}"]
         ).stdout.strip()
@@ -103,7 +103,7 @@ def test_natural_pane_exit_wakes_sidebar_daemon(
             )
 
             # Forward one actual hook signal to the daemon. Waiting for the signal,
-            # rather than timing the window closure, cannot pass via fallback polling.
+            # rather than timing a sidebar update, cannot pass via fallback polling.
             with subprocess.Popen(
                 [
                     sys.executable,
@@ -133,7 +133,11 @@ def test_natural_pane_exit_wakes_sidebar_daemon(
                     )
                     # The affected window is in the background: do not mistake the
                     # active pane/window for the one whose content is exiting.
-                    env.send_keys(content, "exit")
+                    if event == "pane-focus":
+                        assert survivor is not None
+                        env.tmux(["select-pane", "-t", survivor])
+                    else:
+                        env.send_keys(content, "exit")
                     assert relay.wait(timeout=5) == 0
                 finally:
                     env.tmux(
@@ -142,7 +146,10 @@ def test_natural_pane_exit_wakes_sidebar_daemon(
                     if relay.poll() is None:
                         relay.kill()
 
-            assert poll_until(lambda: content not in pane_ids())
+            if event == "pane-focus":
+                assert content in pane_ids()
+            else:
+                assert poll_until(lambda: content not in pane_ids())
             if survivor is None:
                 assert poll_until(lambda: window not in env.list_window_ids())
             else:
@@ -150,4 +157,6 @@ def test_natural_pane_exit_wakes_sidebar_daemon(
             assert env.runner_pane_id in pane_ids()
         finally:
             cli("off")
-        assert "pane-exited[98]" not in env.tmux(["show-hooks", "-g"]).stdout
+        hooks = env.tmux(["show-hooks", "-g"]).stdout
+        assert "pane-exited[98]" not in hooks
+        assert "window-pane-changed[98]" not in hooks
