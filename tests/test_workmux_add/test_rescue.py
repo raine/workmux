@@ -772,7 +772,7 @@ class TestRescuePatch:
         assert "now clean" not in text
 
         stash_list = env.run_command(["git", "stash", "list"], cwd=mux_repo_path)
-        assert stash_list.stdout.strip() == ""
+        assert branch_name in stash_list.stdout
 
 
 def _git(env: MuxEnvironment, repo: Path, *args: str) -> str:
@@ -962,7 +962,9 @@ class TestRescueWithAddOptions:
         assert (worktree / "agent_saw.txt").read_text() == "moved content\n"
         assert (worktree / "tracked.txt").read_text() == "modified\n"
         assert _git(env, mux_repo_path, "status", "--porcelain") == ""
-        assert _git(env, mux_repo_path, "stash", "list") == ""
+        assert "workmux: moving changes to foo" in _git(
+            env, mux_repo_path, "stash", "list"
+        )
 
     def test_configured_base_branch_is_ignored(
         self,

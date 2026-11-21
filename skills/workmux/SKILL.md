@@ -100,7 +100,7 @@ Key flags:
 - `-A, --auto-name`: generate branch name from prompt via LLM
 - `-a <agent>`: override the agent (can specify multiple for multi-worktree)
 - `-w, --with-changes`: move uncommitted changes to the new worktree, which
-  starts from the current HEAD; `-u` adds untracked files, `--patch` picks hunks (not with `-u`).
+  starts from the current HEAD; `-u` adds untracked files, `--patch` picks hunks (not with `-u` or staged changes). A stash backup remains after transfer.
   Works with `-p`/`-P`/`-e`/`-A` and a single `-a`; rejects `--base`, `--pr` and
   stdin input
 - `--base <branch>`: branch from a specific base

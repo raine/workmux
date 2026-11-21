@@ -212,7 +212,10 @@ branch names piped from stdin, or a prompt whose frontmatter declares `foreach`.
 The changes are applied after file copies and symlinks and before `post_create`
 hooks and the agent start, so both see them. If they can't be applied, for
 example because a copied file collides with a moved untracked file, the new
-worktree and branch are removed and the changes go back to the current worktree.
+worktree and branch are removed and workmux tries to restore the changes in the
+current worktree. Staged changes stay staged. Use `--patch` only when nothing
+is staged. Each transfer keeps a backup in `git stash list`; if restoration
+conflicts, use the reported commit ID to recover in a clean worktree.
 
   </TabItem>
   <TabItem label="AI agent prompts">

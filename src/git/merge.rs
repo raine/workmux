@@ -75,7 +75,11 @@ pub fn stash_push(
     patch: bool,
 ) -> Result<Option<String>> {
     if patch {
-        // For --patch mode, we need an interactive terminal
+        if super::has_staged_changes(workdir)? {
+            return Err(anyhow!(
+                "--patch cannot move staged changes; omit --patch to move staged and unstaged changes together"
+            ));
+        }
         let status = super::interactive_git(workdir)?
             .args(["stash", "push", "-m", message, "--patch"])
             .status()
@@ -104,34 +108,10 @@ pub fn stash_push(
 pub fn stash_apply(workdir: &Path, sha: &str) -> Result<()> {
     Cmd::new("git")
         .workdir(workdir)
-        .args(&["stash", "apply", sha])
+        .args(&["stash", "apply", "--index", sha])
         .run()
         .context("Failed to apply stashed changes. Conflicts may have occurred.")?;
     Ok(())
-}
-
-/// Drop the stash entry with commit id `sha`. Returns `Ok(false)` if it is already gone.
-///
-/// `git stash drop` only accepts `stash@{n}`, so the current index of the entry is looked
-/// up first; other entries may have been pushed or dropped since it was created.
-pub fn stash_drop(workdir: &Path, sha: &str) -> Result<bool> {
-    let Some(index) = stash_index(workdir, sha)? else {
-        return Ok(false);
-    };
-    let reference = format!("stash@{{{index}}}");
-    Cmd::new("git")
-        .workdir(workdir)
-        .args(&["stash", "drop", &reference])
-        .run()
-        .context("Failed to drop stash entry")?;
-    Ok(true)
-}
-
-/// The current `stash@{n}` index of the entry with commit id `sha`, if it is still listed.
-pub fn stash_index(workdir: &Path, sha: &str) -> Result<Option<usize>> {
-    Ok(stash_entries(workdir)?
-        .iter()
-        .position(|(entry, _)| entry == sha))
 }
 
 /// Find the commit id of the stash entry whose message is `message`.
@@ -151,7 +131,7 @@ fn stash_entries(workdir: &Path) -> Result<Vec<(String, String)>> {
         .args(&["stash", "list", "--format=%H%x00%gs"])
         .run()
         .context("Failed to list stash entries")?;
-    let stdout = String::from_utf8(output.stdout).context("Stash list is not valid UTF-8")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout
         .lines()
         .filter_map(|line| {
@@ -274,24 +254,6 @@ mod tests {
         );
     }
     #[test]
-    fn stash_drop_removes_entry_below_a_newer_one() {
-        let temp = repo();
-        let path = temp.path();
-        std::fs::write(path.join("tracked.txt"), "ours\n").unwrap();
-        let ours = stash_push(path, "workmux: test [5]", false, false)
-            .unwrap()
-            .unwrap();
-        std::fs::write(path.join("tracked.txt"), "foreign\n").unwrap();
-        git(path, &["stash", "push", "-m", "someone else"]);
-        let foreign = git(path, &["rev-parse", "stash@{0}"]);
-
-        assert!(stash_drop(path, &ours).unwrap());
-
-        assert_eq!(git(path, &["stash", "list", "--format=%H"]), foreign);
-        assert!(!stash_drop(path, &ours).unwrap());
-    }
-
-    #[test]
     fn stash_apply_fails_on_existing_untracked_path_and_keeps_entry() {
         let temp = repo();
         let path = temp.path();
@@ -303,10 +265,55 @@ mod tests {
 
         assert!(stash_apply(path, &sha).is_err());
 
-        assert_eq!(stash_index(path, &sha).unwrap(), Some(0));
+        assert_eq!(git(path, &["rev-parse", "refs/stash"]), sha);
         assert_eq!(
             std::fs::read_to_string(path.join("new.txt")).unwrap(),
             "in the way\n"
+        );
+    }
+
+    #[test]
+    fn patch_rejects_a_staged_version_before_modifying_anything() {
+        let temp = repo();
+        let path = temp.path();
+        let file = path.join("tracked.txt");
+        std::fs::write(&file, "staged\n").unwrap();
+        git(path, &["add", "tracked.txt"]);
+        std::fs::write(&file, "unstaged\n").unwrap();
+        assert!(stash_push(path, "test", false, true).is_err());
+        assert_eq!(git(path, &["show", ":tracked.txt"]), "staged");
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "unstaged\n");
+        assert_eq!(git(path, &["stash", "list"]), "");
+    }
+
+    #[test]
+    fn conflicted_restore_can_recover_both_versions_in_a_clean_worktree() {
+        let temp = repo();
+        let path = temp.path();
+        let file = path.join("tracked.txt");
+        std::fs::write(&file, "staged\n").unwrap();
+        git(path, &["add", "tracked.txt"]);
+        std::fs::write(&file, "unstaged\n").unwrap();
+        let sha = stash_push(path, "test", false, false).unwrap().unwrap();
+        std::fs::write(&file, "concurrent edit\n").unwrap();
+        assert!(stash_apply(path, &sha).is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "concurrent edit\n");
+        let recovery = tempfile::tempdir().unwrap();
+        git(
+            path,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                recovery.path().to_str().unwrap(),
+                &format!("{sha}^1"),
+            ],
+        );
+        stash_apply(recovery.path(), &sha).unwrap();
+        assert_eq!(git(recovery.path(), &["show", ":tracked.txt"]), "staged");
+        assert_eq!(
+            std::fs::read_to_string(recovery.path().join("tracked.txt")).unwrap(),
+            "unstaged\n"
         );
     }
 
@@ -332,6 +339,6 @@ mod tests {
             std::fs::read_to_string(path.join("new.txt")).unwrap(),
             "new\n"
         );
-        assert_eq!(stash_index(path, &ours).unwrap(), Some(1));
+        assert_eq!(git(path, &["rev-parse", "stash@{1}"]), ours);
     }
 }

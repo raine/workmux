@@ -498,7 +498,6 @@ fn create_impl(
             Some(StashedChanges {
                 source: transfer.source.clone(),
                 sha,
-                message,
             })
         }
         None => None,
@@ -696,7 +695,7 @@ fn create_impl(
 
         if let Some(moved) = &moved {
             // File ops run before the apply, so a collision with a moved file fails
-            // the apply instead of being overwritten after the stash entry is gone.
+            // the apply instead of overwriting the moved file.
             setup::apply_file_operations(
                 &options_with_prompt,
                 &worktree_path,
@@ -729,13 +728,7 @@ fn create_impl(
         }
     };
     if let Some(moved) = &moved {
-        match git::stash_drop(&moved.source, &moved.sha) {
-            Ok(true) => {}
-            Ok(false) => warn!(stash = %moved.sha, "create:moved changes stash entry already gone"),
-            Err(error) => {
-                warn!(error = %error, stash = %moved.sha, "create:failed to drop moved changes stash entry")
-            }
-        }
+        eprintln!("Transfer backup kept in git stash: {}", moved.sha);
     }
     if headless {
         let hook_output = if json_output {
@@ -819,7 +812,6 @@ fn create_impl(
 struct StashedChanges {
     source: PathBuf,
     sha: String,
-    message: String,
 }
 
 /// A stash message suffix unique to this invocation.
@@ -865,28 +857,15 @@ fn rollback_transfer(
     }
 
     match git::stash_apply(&moved.source, &moved.sha) {
-        Ok(()) => {
-            if let Err(drop_error) = git::stash_drop(&moved.source, &moved.sha) {
-                warn!(error = %drop_error, stash = %moved.sha, "create:failed to drop restored stash entry");
-            }
-            error.context(format!(
-                "Your uncommitted changes were restored to '{}'",
-                moved.source.display()
-            ))
-        }
-        Err(apply_error) => {
-            let reference = git::stash_index(&moved.source, &moved.sha)
-                .ok()
-                .flatten()
-                .map(|index| format!("stash@{{{index}}}"))
-                .unwrap_or_else(|| moved.sha.clone());
-            error.context(format!(
-                "Could not restore your uncommitted changes to '{}': {apply_error:#}\n\
-                 They are kept in {reference} (\"{}\"). Restore them with: git stash pop {reference}",
-                moved.source.display(),
-                moved.message
-            ))
-        }
+        Ok(()) => error.context(format!(
+            "Your uncommitted changes were restored to '{}'. Stash backup: {}",
+            moved.source.display(), moved.sha
+        )),
+        Err(apply_error) => error.context(format!(
+            "Could not restore your uncommitted changes to '{}': {apply_error:#}\n\
+             Inspect the source for partial changes. To recover in a clean worktree at {}^1, run: git stash apply --index {}",
+            moved.source.display(), moved.sha, moved.sha
+        )),
     }
 }
 
@@ -1552,6 +1531,8 @@ mod tests {
         ) else {
             return;
         };
+        std::fs::write(repo.join("README.md"), "index\n").unwrap();
+        test_support::run_git(&repo, &["add", "README.md"]);
         std::fs::write(repo.join("README.md"), "changed\n").unwrap();
         std::fs::write(repo.join("new.txt"), "new\n").unwrap();
         let config = Config {
@@ -1563,6 +1544,10 @@ mod tests {
         let result = create_moving_changes(&ctx, "foo", quiet_options(true, true), true).unwrap();
 
         let worktree = result.worktree_path;
+        assert_eq!(
+            test_support::run_git_output(&worktree, &["show", ":README.md"]).trim(),
+            "index"
+        );
         assert_eq!(
             std::fs::read_to_string(worktree.join("README.md")).unwrap(),
             "changed\n"
@@ -1580,7 +1565,7 @@ mod tests {
             "test\n"
         );
         assert!(!repo.join("new.txt").exists());
-        assert_eq!(stash_list(&repo), "");
+        assert!(stash_list(&repo).contains("workmux: moving"));
     }
 
     #[test]
@@ -1605,6 +1590,8 @@ mod tests {
             ],
         );
         let source = source.canonicalize().unwrap();
+        std::fs::write(source.join("README.md"), "index\n").unwrap();
+        test_support::run_git(&source, &["add", "README.md"]);
         std::fs::write(source.join("README.md"), "changed\n").unwrap();
         std::fs::write(source.join("local.cfg"), "source cfg\n").unwrap();
         let mut config = Config::default();
@@ -1628,7 +1615,11 @@ mod tests {
             std::fs::read_to_string(source.join("local.cfg")).unwrap(),
             "source cfg\n"
         );
-        assert_eq!(stash_list(&repo), "");
+        assert_eq!(
+            test_support::run_git_output(&source, &["show", ":README.md"]).trim(),
+            "index"
+        );
+        assert!(stash_list(&repo).contains("workmux: moving"));
     }
 
     #[test]
@@ -1658,7 +1649,7 @@ mod tests {
             std::fs::read_to_string(worktree.join("README.md")).unwrap(),
             "changed\n"
         );
-        assert_eq!(stash_list(&repo), "");
+        assert!(stash_list(&repo).contains("workmux: moving"));
     }
     #[test]
     fn moving_changes_from_detached_head_fails_before_stashing() {
