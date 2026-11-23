@@ -369,7 +369,15 @@ impl RexBackend {
         // --trim drops the blank rows under the last line of output
         let output = self
             .rex_cmd()
-            .args(&["capture", "-s", session_id, "-b", block_id, "--trim"])
+            .args(&[
+                "capture",
+                "-s",
+                session_id,
+                "-b",
+                block_id,
+                "--trim",
+                "--format=vt",
+            ])
             .run_and_capture_stdout()
             .ok()?;
         Some(util::tail_lines(&output, lines))
