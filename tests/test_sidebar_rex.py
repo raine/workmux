@@ -36,8 +36,8 @@ class RexSidebar:
     ) -> subprocess.CompletedProcess[str]:
         env = dict(self.env.env)
         env["WORKMUX_BACKEND"] = "rex"
-        if session is not None:
-            env["REX_SESSION"] = session
+        if session is not None and block is None:
+            block = self.block_in(session)
         if block is not None:
             env["REX_BLOCK"] = block
         result = subprocess.run(
@@ -134,6 +134,15 @@ class RexSidebar:
                     }
                 )
         return windows
+
+    def block_in(self, session: str) -> str:
+        """A block in `session`, for running workmux as if from its terminal."""
+        return next(
+            b["block_id"]
+            for w in self.windows()
+            if w["session_id"] == session
+            for b in w["blocks"]
+        )
 
     def window(self, window_id: str) -> Optional[dict[str, Any]]:
         return next((w for w in self.windows() if w["window_id"] == window_id), None)

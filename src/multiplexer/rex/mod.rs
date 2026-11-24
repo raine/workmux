@@ -4,8 +4,8 @@
 //! CLI. Rex sessions map to tmux sessions, Rex windows (tabs) to tmux windows,
 //! and Rex blocks to tmux panes. Pane IDs are Rex block IDs (`block:<uuid>`).
 //!
-//! Relies on the REX_SERVER, REX_SESSION and REX_BLOCK environment variables
-//! that Rex sets in every terminal it starts.
+//! Relies on the REX_SERVER and REX_BLOCK environment variables that Rex sets
+//! in every terminal it starts.
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -134,6 +134,21 @@ pub fn in_rex_terminal() -> bool {
 
 fn is_rex_block(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.trim().is_empty())
+}
+
+/// The session holding this process's Rex terminal, looked up from `$REX_BLOCK`.
+pub fn current_session_id() -> Option<String> {
+    let block = std::env::var("REX_BLOCK").ok()?;
+    let resolved = RexBackend
+        .call_api(
+            "target.resolve",
+            json!({ "kinds": ["session"], "queries": [block] }),
+        )
+        .ok()?;
+    resolved
+        .pointer("/results/0/target/session_id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// A session as reported by the snapshot script.
@@ -379,9 +394,7 @@ impl RexBackend {
     }
 
     fn env_session_id() -> Option<String> {
-        std::env::var("REX_SESSION")
-            .ok()
-            .filter(|id| !id.trim().is_empty())
+        current_session_id()
     }
 
     fn is_current_session(session_id: &str) -> bool {
@@ -723,7 +736,7 @@ impl Multiplexer for RexBackend {
     fn create_window(&self, params: CreateWindowParams) -> Result<String> {
         let full_name = util::prefixed(params.prefix, params.name);
         let session_id = Self::env_session_id()
-            .ok_or_else(|| anyhow!("REX_SESSION not set; run workmux inside a Rex terminal"))?;
+            .ok_or_else(|| anyhow!("No current Rex session; run workmux inside a Rex terminal"))?;
         // Rex appends new windows at the end; params.after_window is ignored
         let result = self
             .call_api(
