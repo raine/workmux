@@ -312,17 +312,22 @@ impl App {
         // Sort after filtering
         self.sort_worktrees();
 
-        // Restore selection by path
+        // Restore selection by path. When the selected worktree is gone (e.g.
+        // removed), keep the cursor at the same row so it lands on a neighbor.
         if let Some(ref path) = self.selected_worktree_path {
             if let Some(idx) = self.worktrees.iter().position(|w| &w.path == path) {
                 self.worktree_table_state.select(Some(idx));
-            } else {
+            } else if self.worktrees.is_empty() {
                 self.selected_worktree_path = None;
-                if self.worktrees.is_empty() {
-                    self.worktree_table_state.select(None);
-                } else {
-                    self.worktree_table_state.select(Some(0));
-                }
+                self.worktree_table_state.select(None);
+            } else {
+                let idx = self
+                    .worktree_table_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.worktrees.len() - 1);
+                self.worktree_table_state.select(Some(idx));
+                self.selected_worktree_path = Some(self.worktrees[idx].path.clone());
             }
         } else if !self.worktrees.is_empty() && self.worktree_table_state.selected().is_none() {
             self.worktree_table_state.select(Some(0));
