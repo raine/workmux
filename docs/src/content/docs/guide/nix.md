@@ -58,4 +58,4 @@ See [Configuration](/guide/configuration/) for all config options.
 
 ## Shell completions
 
-The flake automatically installs completions for Bash, Zsh, and Fish. Do not add the manual `eval "$(workmux completions ...)"` lines from the [Installation](/guide/installation/#shell-completions) guide.
+The flake automatically installs completions for Bash, Zsh, Fish, and Nushell. Do not add the manual `workmux completions ...` lines from the [Installation](/guide/installation/#shell-completions) guide.

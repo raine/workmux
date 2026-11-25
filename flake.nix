@@ -26,6 +26,7 @@
             installShellCompletion --cmd workmux \
               --bash <($out/bin/workmux completions bash) \
               --fish <($out/bin/workmux completions fish) \
+              --nushell <($out/bin/workmux completions nushell) \
               --zsh <($out/bin/workmux completions zsh)
           '';
         };

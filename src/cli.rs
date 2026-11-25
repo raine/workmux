@@ -249,6 +249,17 @@ enum CliMuxMode {
     Session,
 }
 
+/// `clap_complete::Shell` plus Nushell, whose generator lives in a separate crate.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    Powershell,
+    Zsh,
+    Nushell,
+}
+
 impl From<CliMuxMode> for MuxMode {
     fn from(value: CliMuxMode) -> Self {
         match value {
@@ -889,7 +900,7 @@ enum Commands {
     Completions {
         /// The shell to generate completions for
         #[arg(value_enum)]
-        shell: Shell,
+        shell: CompletionShell,
     },
 
     /// Output worktree branch names for shell completion (internal use)
@@ -1502,9 +1513,23 @@ fn prune_claude_config() -> Result<()> {
     Ok(())
 }
 
-fn generate_completions(shell: Shell) {
+fn generate_completions(shell: CompletionShell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
+
+    let shell = match shell {
+        CompletionShell::Bash => Shell::Bash,
+        CompletionShell::Elvish => Shell::Elvish,
+        CompletionShell::Fish => Shell::Fish,
+        CompletionShell::Powershell => Shell::PowerShell,
+        CompletionShell::Zsh => Shell::Zsh,
+        CompletionShell::Nushell => {
+            let mut buf = Vec::new();
+            generate(clap_complete_nushell::Nushell, &mut cmd, &name, &mut buf);
+            print!("{}", prepare_nushell(&String::from_utf8_lossy(&buf)));
+            return;
+        }
+    };
 
     // Generate base completions
     let mut buf = Vec::new();
@@ -1560,6 +1585,51 @@ fn prepare_zsh_base(script: &str, name: &str) -> String {
         Some(stripped) => stripped.to_string(),
         None => script,
     }
+}
+
+/// Attach the dynamic completers from `nushell_dynamic.nu` to the generated
+/// externs. Nushell binds completers per parameter (`name: string@"..."`), so
+/// unlike the other shells the generated script is rewritten, not wrapped.
+fn prepare_nushell(script: &str) -> String {
+    let mut out = String::new();
+    let mut cmd = String::new();
+    let mut positional_seen = false;
+    for line in script.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("export extern \"workmux ") {
+            cmd = rest.split('"').next().unwrap_or_default().to_string();
+            positional_seen = false;
+        }
+        let flag = trimmed
+            .starts_with("--")
+            .then(|| trimmed.split(':').next().unwrap_or_default());
+        let is_param = trimmed.contains(": string ") || trimmed.ends_with(": string");
+        // Only the first positional is a worktree/branch; later ones are free text.
+        let completer = match (cmd.as_str(), flag) {
+            _ if !is_param || (flag.is_none() && positional_seen) => None,
+            ("open" | "remove" | "rename" | "path" | "merge" | "rebase" | "close", None)
+            | ("merge", Some("--into")) => Some("handles"),
+            ("send" | "capture" | "status" | "wait" | "run", None) => Some("agent-targets"),
+            ("add", None | Some("--base")) => Some("git-branches"),
+            _ => None,
+        };
+        if is_param && flag.is_none() {
+            positional_seen = true;
+        }
+        match completer {
+            Some(c) => out.push_str(&line.replacen(
+                ": string",
+                &format!(": string@\"nu-complete workmux {c}\""),
+                1,
+            )),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+        if line == "module completions {" {
+            out.push_str(include_str!("scripts/completions/nushell_dynamic.nu"));
+        }
+    }
+    out
 }
 
 fn print_zsh_dynamic_completion() {
@@ -2062,5 +2132,52 @@ mod tests {
         // Dynamic completions registered
         assert!(output.contains("__workmux_handles"));
         assert!(output.contains("__workmux_git_branches"));
+    }
+
+    #[test]
+    fn nushell_output_attaches_dynamic_completers() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(
+            clap_complete_nushell::Nushell,
+            &mut cmd,
+            "workmux",
+            &mut buf,
+        );
+        let output = prepare_nushell(&String::from_utf8_lossy(&buf));
+
+        // Completers are defined inside the module so the externs can see them.
+        let module_start = output.find("module completions {").unwrap();
+        let def = output.find(r#"def "nu-complete workmux handles""#).unwrap();
+        assert!(module_start < def);
+
+        let extern_body = |name: &str| {
+            let start = output
+                .find(&format!("export extern \"workmux {name}\" ["))
+                .unwrap_or_else(|| panic!("extern for {name} not found"));
+            let end = start + output[start..].find("\n  ]").unwrap();
+            &output[start..end]
+        };
+        for (name, completer) in [
+            ("open", "handles"),
+            ("merge", "handles"),
+            ("send", "agent-targets"),
+            ("run", "agent-targets"),
+            ("add", "git-branches"),
+        ] {
+            let tag = format!(r#"@"nu-complete workmux {completer}""#);
+            assert!(
+                extern_body(name).contains(&tag),
+                "{name} should use {completer}"
+            );
+        }
+        assert!(extern_body("merge").contains(r#"--into: string@"nu-complete workmux handles""#));
+        assert!(
+            extern_body("add").contains(r#"--base: string@"nu-complete workmux git-branches""#)
+        );
+
+        // Only the first positional gets a completer; free text stays plain.
+        assert!(extern_body("send").contains("text?: string "));
+        assert!(extern_body("run").contains("...command: string "));
     }
 }

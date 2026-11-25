@@ -2106,7 +2106,7 @@ workmux claude prune
 Generates shell completion script for the specified shell. Completions provide
 tab-completion for commands and dynamic branch name suggestions.
 
-- `<shell>`: Shell type: `bash`, `zsh`, or `fish`.
+- `<shell>`: Shell type: `bash`, `zsh`, `fish`, or `nushell`.
 
 #### Examples
 
@@ -2911,6 +2911,13 @@ For **fish**, add to your `config.fish`:
 
 ```bash
 workmux completions fish | source
+```
+
+For **nushell**, add to your `config.nu`:
+
+```nu
+mkdir ($nu.data-dir | path join "vendor/autoload")
+workmux completions nushell | save -f ($nu.data-dir | path join "vendor/autoload/workmux.nu")
 ```
 
 ## Requirements
