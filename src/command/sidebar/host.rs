@@ -324,7 +324,7 @@ impl SidebarHost {
                 Some(session.trim().to_string())
             }
             Self::Zellij { instance_id } => Some(instance_id.clone()),
-            Self::Rex(_) => std::env::var("REX_SESSION").ok(),
+            Self::Rex(_) => crate::multiplexer::rex::RexBackend::block_session_id(),
         }
     }
 }

@@ -80,9 +80,7 @@ pub(super) fn sync_zellij(instance_id: &str) -> Result<()> {
 }
 
 fn current_rex_session() -> Result<String> {
-    std::env::var("REX_SESSION")
-        .ok()
-        .filter(|session| !session.trim().is_empty())
+    crate::multiplexer::rex::RexBackend::block_session_id()
         .ok_or_else(|| anyhow!("run this inside a Rex terminal to target its session"))
 }
 
