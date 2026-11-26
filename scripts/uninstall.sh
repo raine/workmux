@@ -82,7 +82,7 @@ echo ""
 # 4. Manual cleanup guidance
 log_info "Manual cleanup (check your shell config):"
 echo "  - Remove 'eval \"\$(workmux completions bash)\"' or similar from"
-echo "    ~/.bashrc, ~/.zshrc, ~/.config/fish/config.fish"
+echo "    ~/.bashrc, ~/.zshrc, ~/.config/fish/config.fish, or nushell's config.nu"
 echo "  - Remove 'alias wm=workmux' from your shell config"
 echo ""
 

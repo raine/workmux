@@ -92,6 +92,15 @@ workmux completions fish | source
 ```
 
   </TabItem>
+  <TabItem label="Nushell">
+
+```nu
+# Add to config.nu
+mkdir ($nu.data-dir | path join "vendor/autoload")
+workmux completions nushell | save -f ($nu.data-dir | path join "vendor/autoload/workmux.nu")
+```
+
+  </TabItem>
 </Tabs>
 
 ## Uninstalling

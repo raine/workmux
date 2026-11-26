@@ -1,6 +1,6 @@
 ---
 title: "completions"
-description: Generate shell completion scripts for bash, zsh, or fish
+description: Generate shell completion scripts for bash, zsh, fish, or nushell
 ---
 
 Generates shell completion script for the specified shell. Completions provide tab-completion for commands and dynamic branch name suggestions.
@@ -11,7 +11,7 @@ workmux completions <shell>
 
 ## Arguments
 
-- `<shell>`: Shell type: `bash`, `zsh`, or `fish`.
+- `<shell>`: Shell type: `bash`, `zsh`, `fish`, or `nushell`.
 
 ## Examples
 
