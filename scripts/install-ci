@@ -51,6 +51,22 @@ find_run_id() {
     return 1
 }
 
+# A dispatched run can return 404 from the API for a few seconds after
+# `gh workflow run` reports it.
+wait_for_run() {
+    local repo=$1
+    local run_id=$2
+
+    for _ in {1..30}; do
+        if gh run view "$run_id" --repo "$repo" --json status >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+
+    return 1
+}
+
 verify_checksum() {
     local directory=$1
     local checksum_name="${archive_name%.tar.gz}.sha256"
@@ -125,6 +141,7 @@ main() {
     fi
 
     printf '%s\n' "$run_url"
+    wait_for_run "$repo" "$run_id" || fail "workflow run $run_id did not become available"
     gh run watch "$run_id" --repo "$repo" --exit-status --compact --interval 10
 
     tmp_dir=$(mktemp -d)
