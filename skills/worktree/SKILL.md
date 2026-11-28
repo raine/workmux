@@ -74,15 +74,18 @@ For example, `/skill:worktree -a gemini implement feature X` runs:
 workmux add feature-x -b -P <prompt-file> --agent gemini
 ```
 
-**`--merge`**: When passed, add instruction to use `/merge` skill at the end to
-commit, rebase, and merge the branch.
+**`--merge`**: When passed, add an instruction to merge at the end with the
+merge skill. Write it as a command to run, not a `/merge` skill invocation: the
+worktree agent may not be Claude Code, and invocation syntax differs between
+agents.
 
 ```
 ...
-Then use the /merge skill to commit, rebase, and merge the branch.
+Then run `workmux skill show merge` and follow the instructions it prints to
+commit, rebase, and merge the branch.
 ```
 
-Only instruct worktree agent to `/merge` if explicitly requested by user in
+Only instruct the worktree agent to merge if explicitly requested by user in
 task.
 
 **`--fork`**: When passed, add `--fork` to the `workmux add` command. This copies

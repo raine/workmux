@@ -45,6 +45,57 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     },
 ];
 
+/// The instructions of bundled skill `name`, as an agent invoking it with
+/// `args` would read them: without frontmatter, `$ARGUMENTS` replaced.
+///
+/// A customized installed copy takes precedence over the bundled version:
+/// the first copy in an agent's skills directory whose content differs.
+pub fn instructions(name: &str, args: &str) -> Result<String> {
+    let installed: Vec<PathBuf> = [
+        Agent::Claude,
+        Agent::Pi,
+        Agent::Omp,
+        Agent::OpenCode,
+        Agent::Grok,
+    ]
+    .into_iter()
+    .filter_map(skills_dir)
+    .map(|dir| dir.join(name).join("SKILL.md"))
+    .collect();
+    instructions_from(name, args, &installed)
+}
+
+fn instructions_from(name: &str, args: &str, installed: &[PathBuf]) -> Result<String> {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == name)
+        .ok_or_else(|| {
+            let names: Vec<_> = BUNDLED_SKILLS.iter().map(|skill| skill.name).collect();
+            anyhow::anyhow!(
+                "no bundled skill named '{name}'; bundled skills: {}",
+                names.join(", ")
+            )
+        })?;
+    let customized = installed
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .find(|content| content != skill.content);
+    let content = customized.as_deref().unwrap_or(skill.content);
+    let body = strip_frontmatter(content).trim_start();
+    Ok(body.replace("$ARGUMENTS", args.trim()))
+}
+
+/// `content` after its leading YAML frontmatter block, if it has one.
+fn strip_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+    match rest.find("\n---\n") {
+        Some(end) => &rest[end + "\n---\n".len()..],
+        None => content,
+    }
+}
+
 /// Return the skills base directory for a given agent.
 /// Returns None if the agent doesn't support skills.
 pub fn skills_dir(agent: Agent) -> Option<PathBuf> {
@@ -600,6 +651,54 @@ mod tests {
         let result = remove_at(Layout::CommandFile, base.clone(), "OpenCode").unwrap();
         assert!(result.contains("6 removed"), "{result}");
         assert!(!base.exists());
+    }
+
+    #[test]
+    fn test_instructions_drop_frontmatter_and_fill_arguments() {
+        let merge = instructions_from("merge", "--keep", &[]).unwrap();
+        assert!(!merge.starts_with("---"), "{merge}");
+        assert!(!merge.contains("disable-model-invocation"));
+        assert!(!merge.contains("$ARGUMENTS"));
+        assert!(merge.contains("`--keep`"));
+
+        for skill in BUNDLED_SKILLS {
+            let body = instructions_from(skill.name, "", &[]).unwrap();
+            assert!(!body.starts_with("---"), "{}", skill.name);
+            assert!(!body.is_empty(), "{}", skill.name);
+        }
+    }
+
+    #[test]
+    fn test_instructions_prefer_a_customized_installed_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unmodified = tmp.path().join("a/merge/SKILL.md");
+        let customized = tmp.path().join("b/merge/SKILL.md");
+        let missing = tmp.path().join("c/merge/SKILL.md");
+        let bundled = BUNDLED_SKILLS.iter().find(|s| s.name == "merge").unwrap();
+        fs::create_dir_all(unmodified.parent().unwrap()).unwrap();
+        fs::create_dir_all(customized.parent().unwrap()).unwrap();
+        fs::write(&unmodified, bundled.content).unwrap();
+        fs::write(
+            &customized,
+            "---\nname: merge\n---\nSquash first. $ARGUMENTS\n",
+        )
+        .unwrap();
+
+        let paths = [missing.clone(), unmodified.clone(), customized];
+        assert_eq!(
+            instructions_from("merge", "-k", &paths).unwrap(),
+            "Squash first. -k\n"
+        );
+        assert_eq!(
+            instructions_from("merge", "", &[missing, unmodified]).unwrap(),
+            instructions_from("merge", "", &[]).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_instructions_of_unknown_skill_lists_bundled_ones() {
+        let err = instructions("nope", "").unwrap_err().to_string();
+        assert!(err.contains("merge, rebase"), "{err}");
     }
 
     /// OpenCode runs `` !`cmd` `` in a command template as a shell command.

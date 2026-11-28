@@ -223,6 +223,11 @@ differently (`/merge` in Claude Code, `/skill:merge` in Pi, `$merge` in Codex),
 and `send` types the target agent's syntax. Text after the target becomes the
 skill's arguments.
 
+`workmux skill show <name> [args]` prints a bundled skill's instructions
+(merge, rebase, open-pr, ...). To have an agent follow a bundled skill without
+invoking it, for example when `--skill` fails with `skill_unsupported`, tell it
+to run `workmux skill show <name>` and follow what it prints.
+
 Failures print a stable error name and exit with its code:
 
 | Error                  | Exit | Meaning                                                |

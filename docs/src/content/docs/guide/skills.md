@@ -44,6 +44,14 @@ workmux send feature-auth --skill rebase main   # text after the target is passe
 
 OpenCode has no prompt syntax for skills, so `workmux setup --skills` also installs each skill as an OpenCode command. For other agents, and for agents in [remote workspaces](/guide/remote/), `send --skill` sends nothing and fails with `skill_unsupported` (exit 9).
 
+`workmux skill show <name> [args]` prints a bundled skill's instructions, with the arguments filled in. An agent can run it and follow the output, whatever its skill syntax and whether or not the skill is installed. The `/worktree` skill uses it to tell worktree agents to merge when they finish:
+
+```bash
+workmux send feature-auth "Run \`workmux skill show merge\` and follow the instructions it prints."
+```
+
+If you have customized an installed copy of the skill, it prints that copy instead of the bundled one.
+
 ## Installation
 
 Run `workmux setup` to install all skills automatically:

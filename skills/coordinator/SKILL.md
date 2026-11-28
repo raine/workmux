@@ -184,7 +184,13 @@ pane IDs instead.
 Always invoke skills with `--skill`, never by typing `/name`: worktree agents
 may not be Claude Code, and other agents invoke skills differently. If `send`
 refuses with `skill_unsupported` (exit 9), workmux does not know that agent's
-skill syntax; tell the user rather than guessing one.
+skill syntax. For a skill bundled with workmux (merge, rebase, open-pr), send
+an instruction to run `workmux skill show <name>` and follow what it prints;
+for any other skill, tell the user rather than guessing a syntax.
+
+```bash
+workmux send agent-a "Run \`workmux skill show merge\` and follow the instructions it prints."
+```
 
 ### Run Commands
 

@@ -832,6 +832,12 @@ enum Commands {
         command: ClaudeCommands,
     },
 
+    /// Bundled skills
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+
     /// Manage sandbox settings
     Sandbox(command::sandbox::SandboxArgs),
 
@@ -984,6 +990,23 @@ pub enum SidebarAction {
 enum ClaudeCommands {
     /// Remove stale entries from ~/.claude.json for deleted worktrees
     Prune,
+}
+
+#[derive(Subcommand)]
+enum SkillCommands {
+    /// Print a bundled skill's instructions, for an agent to follow
+    ///
+    /// Works in any agent, whatever its skill syntax, and regardless of
+    /// whether the skill is installed or allows model invocation. A
+    /// customized installed copy takes precedence over the bundled one.
+    Show {
+        /// Skill name (merge, rebase, worktree, coordinator, open-pr, workmux)
+        name: String,
+
+        /// Arguments, substituted for $ARGUMENTS in the skill
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 /// A skill name as agents name skill directories: letters, digits, `-`,
@@ -1465,6 +1488,12 @@ pub fn run() -> Result<()> {
         Commands::Config(args) => command::config::run(args),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
+        },
+        Commands::Skill { command } => match command {
+            SkillCommands::Show { name, args } => {
+                print!("{}", crate::skills::instructions(&name, &args.join(" "))?);
+                Ok(())
+            }
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
         Commands::Remote(args) => command::remote::run(args),
