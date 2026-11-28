@@ -578,20 +578,27 @@ enum Commands {
     /// those by pane ID. Failures print a stable error name and exit with
     /// its code: agent_waiting (3), ambiguous_target (4), agent_not_found
     /// (5), send_stalled (6), agent_gone (7), agent_status_unknown (8),
-    /// timeout (124).
+    /// skill_unsupported (9), timeout (124).
     Send {
         /// Worktree name (supports cross-project with project:handle
         /// syntax), or an agent's pane ID
         #[arg(value_parser = AgentTargetParser::new())]
         name: String,
 
-        /// Text to send (reads from --file or stdin if omitted)
+        /// Text to send (reads from --file or stdin if omitted); with
+        /// --skill, the skill's arguments
         #[arg(conflicts_with = "file")]
         text: Option<String>,
 
         /// Read prompt from file
-        #[arg(short, long, conflicts_with = "text")]
+        #[arg(short, long, conflicts_with_all = ["text", "skill"])]
         file: Option<String>,
+
+        /// Invoke the skill NAME in the agent's own syntax: /NAME in Claude
+        /// Code, Gemini, and OpenCode, /skill:NAME in Pi and Oh My Pi, $NAME
+        /// in Codex. Other agents are refused (skill_unsupported)
+        #[arg(long, value_name = "NAME", value_parser = parse_skill_name)]
+        skill: Option<String>,
 
         /// Confirm the agent acted on the prompt, then wait for an --until
         /// status. An agent that was not working must show activity within
@@ -979,6 +986,20 @@ enum ClaudeCommands {
     Prune,
 }
 
+/// A skill name as agents name skill directories: letters, digits, `-`,
+/// `_`, and `:` for plugin namespaces.
+fn parse_skill_name(name: &str) -> std::result::Result<String, String> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    if valid {
+        Ok(name.to_string())
+    } else {
+        Err("a skill name has only letters, digits, '-', '_', and ':'".to_string())
+    }
+}
+
 fn is_headless_add(cmd: &Commands) -> bool {
     matches!(cmd, Commands::Add { headless: true, .. })
 }
@@ -1298,6 +1319,7 @@ pub fn run() -> Result<()> {
             name,
             text,
             file,
+            skill,
             wait,
             until,
             timeout,
@@ -1317,7 +1339,17 @@ pub fn run() -> Result<()> {
             } else {
                 None
             };
-            command::send::run(&name, text.as_deref(), file.as_deref(), wait)
+            let content = match &skill {
+                Some(skill) => command::send::Content::Skill {
+                    name: skill,
+                    args: text.as_deref().unwrap_or(""),
+                },
+                None => command::send::Content::Text {
+                    text: text.as_deref(),
+                    file: file.as_deref(),
+                },
+            };
+            command::send::run(&name, content, wait)
         }
         Commands::Shell { name, host } => command::shell::run(name.as_deref(), host),
         Commands::Capture { name, lines } => command::capture::run(&name, lines),

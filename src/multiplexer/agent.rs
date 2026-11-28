@@ -95,6 +95,30 @@ pub trait AgentProfile: Send + Sync {
     fn continue_flag(&self) -> Option<&'static str> {
         None
     }
+
+    /// The prompt that invokes skill `name` with `args` in this agent.
+    ///
+    /// Returns `None` for agents whose prompt syntax for skills workmux
+    /// does not know.
+    fn skill_invocation(&self, _name: &str, _args: &str) -> Option<String> {
+        None
+    }
+}
+
+/// `prefix` + `name`, then `args` after a space.
+///
+/// With `closes_picker`, a bare invocation keeps a trailing space: those
+/// composers open a completion picker on a bare skill name, and the Enter
+/// that should submit the prompt accepts the completion instead.
+fn skill_prompt(prefix: &str, name: &str, args: &str, closes_picker: bool) -> String {
+    let args = args.trim();
+    if !args.is_empty() {
+        format!("{prefix}{name} {args}")
+    } else if closes_picker {
+        format!("{prefix}{name} ")
+    } else {
+        format!("{prefix}{name}")
+    }
 }
 
 // === Built-in Profiles ===
@@ -125,6 +149,10 @@ impl AgentProfile for ClaudeProfile {
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--continue")
     }
+
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("/", name, args, false))
+    }
 }
 
 pub struct GeminiProfile;
@@ -148,6 +176,11 @@ impl AgentProfile for GeminiProfile {
 
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--resume")
+    }
+
+    /// Gemini CLI registers each skill as a slash command.
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("/", name, args, false))
     }
 }
 
@@ -221,6 +254,13 @@ impl AgentProfile for OpenCodeProfile {
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--continue")
     }
+
+    /// OpenCode has no prompt syntax for skills; `workmux setup --skills`
+    /// also installs each bundled skill as an OpenCode command of the same
+    /// name.
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("/", name, args, true))
+    }
 }
 
 pub struct CodexProfile;
@@ -268,6 +308,10 @@ impl AgentProfile for CodexProfile {
 
     fn continue_flag(&self) -> Option<&'static str> {
         Some("resume --last")
+    }
+
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("$", name, args, true))
     }
 }
 
@@ -361,6 +405,10 @@ impl AgentProfile for PiProfile {
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--continue")
     }
+
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("/skill:", name, args, false))
+    }
 }
 
 pub struct OmpProfile;
@@ -384,6 +432,10 @@ impl AgentProfile for OmpProfile {
 
     fn continue_flag(&self) -> Option<&'static str> {
         Some("--continue")
+    }
+
+    fn skill_invocation(&self, name: &str, args: &str) -> Option<String> {
+        Some(skill_prompt("/skill:", name, args, false))
     }
 }
 
@@ -749,6 +801,35 @@ mod tests {
     use super::*;
 
     // === Profile behavior tests ===
+
+    #[test]
+    fn skill_invocation_uses_each_agents_syntax() {
+        let invoke =
+            |agent: &str, args: &str| resolve_profile(Some(agent)).skill_invocation("merge", args);
+        assert_eq!(invoke("claude", "").as_deref(), Some("/merge"));
+        assert_eq!(invoke("gemini", "").as_deref(), Some("/merge"));
+        assert_eq!(invoke("pi", "").as_deref(), Some("/skill:merge"));
+        assert_eq!(invoke("omp", "").as_deref(), Some("/skill:merge"));
+        assert_eq!(invoke("codex", "").as_deref(), Some("$merge "));
+        assert_eq!(invoke("opencode", "").as_deref(), Some("/merge "));
+        assert_eq!(
+            invoke("claude", " --keep \n").as_deref(),
+            Some("/merge --keep")
+        );
+        assert_eq!(invoke("codex", "--keep").as_deref(), Some("$merge --keep"));
+    }
+
+    #[test]
+    fn skill_invocation_is_unknown_for_other_agents() {
+        for agent in ["copilot", "agy", "kiro-cli", "vibe", "grok", "my-wrapper"] {
+            assert_eq!(
+                resolve_profile(Some(agent)).skill_invocation("merge", ""),
+                None,
+                "{agent}"
+            );
+        }
+        assert_eq!(resolve_profile(None).skill_invocation("merge", ""), None);
+    }
 
     #[test]
     fn test_claude_profile() {

@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 
 use crate::agent_error::{AgentError, AgentErrorKind};
 use crate::config;
+use crate::multiplexer::agent::resolve_profile;
 use crate::multiplexer::{AgentPane, AgentStatus, Multiplexer, create_backend, detect_backend};
 use crate::remote::agents::SentAgent;
 use crate::remote::cache::{self, WorkspaceRecord};
@@ -26,16 +27,25 @@ pub struct WaitFor {
     pub timeout: Option<Duration>,
 }
 
-pub fn run(
-    name: &str,
-    text: Option<&str>,
-    file: Option<&str>,
-    wait: Option<WaitFor>,
-) -> Result<()> {
+/// What to type into the agent.
+pub enum Content<'a> {
+    /// `text`, else the contents of `file`, else stdin.
+    Text {
+        text: Option<&'a str>,
+        file: Option<&'a str>,
+    },
+    /// An invocation of skill `name` with `args`, in the agent's syntax.
+    Skill { name: &'a str, args: &'a str },
+}
+
+pub fn run(name: &str, content: Content<'_>, wait: Option<WaitFor>) -> Result<()> {
     let cfg = config::Config::load(None).unwrap_or_default();
     let mux = create_backend(detect_backend());
     let target = workflow::resolve_agent_target(name, mux.as_ref())?;
-    let content = read_content(text, file)?;
+    let content = match content {
+        Content::Text { text, file } => read_content(text, file)?,
+        Content::Skill { name: skill, args } => skill_content(&cfg, &target, skill, args)?,
+    };
     let start = Instant::now();
     let deadline = wait
         .as_ref()
@@ -98,12 +108,7 @@ fn send_local<'a>(
     }
     check_sendable(&agent, wait)?;
     let baseline = !same_second(agent.status, agent.status_ts, cache::now());
-    let agent_identity = agent
-        .agent_kind
-        .as_deref()
-        .or(cfg.agent.as_deref())
-        .or(agent.agent_command.as_deref());
-    mux.send_prompt_to_agent(&pane_id, content, agent_identity)?;
+    mux.send_prompt_to_agent(&pane_id, content, agent_identity(cfg, &agent))?;
     let fence = TurnFence {
         status: agent.status.filter(|_| baseline),
         status_ts: agent.status_ts.filter(|_| baseline),
@@ -134,6 +139,47 @@ fn send_local<'a>(
             })
         }),
     }))
+}
+
+/// What tells which agent runs in `agent`'s pane, for its profile.
+fn agent_identity<'a>(cfg: &'a config::Config, agent: &'a AgentPane) -> Option<&'a str> {
+    agent
+        .agent_kind
+        .as_deref()
+        .or(cfg.agent.as_deref())
+        .or(agent.agent_command.as_deref())
+}
+
+/// The prompt that invokes skill `name` with `args` in the agent `target`.
+fn skill_content(
+    cfg: &config::Config,
+    target: &AgentTarget,
+    name: &str,
+    args: &str,
+) -> Result<String> {
+    let AgentTarget::Local(agent) = target else {
+        return Err(AgentError::error(
+            AgentErrorKind::SkillUnsupported,
+            "--skill cannot tell which agent runs in a remote workspace; \
+             send the agent's own skill syntax as text",
+        ));
+    };
+    skill_invocation(agent_identity(cfg, agent), name, args)
+}
+
+fn skill_invocation(agent: Option<&str>, name: &str, args: &str) -> Result<String> {
+    resolve_profile(agent)
+        .skill_invocation(name, args)
+        .ok_or_else(|| {
+            AgentError::error(
+                AgentErrorKind::SkillUnsupported,
+                format!(
+                    "workmux does not know how {} invokes skills; send the skill \
+                     invocation as text",
+                    agent.unwrap_or("this agent")
+                ),
+            )
+        })
 }
 
 /// The live local agent in `pane_id`.
@@ -309,6 +355,29 @@ mod tests {
     }
 
     const SETTLED: &[AgentStatus] = &[AgentStatus::Done, AgentStatus::Waiting];
+
+    #[test]
+    fn a_skill_is_sent_in_the_agents_syntax() {
+        assert_eq!(
+            skill_invocation(Some("pi"), "merge", "").unwrap(),
+            "/skill:merge"
+        );
+        assert_eq!(
+            skill_invocation(Some("codex"), "rebase", "main").unwrap(),
+            "$rebase main"
+        );
+    }
+
+    #[test]
+    fn a_skill_for_an_agent_without_known_syntax_is_refused() {
+        let refused =
+            |agent| crate::agent_error::kind_of(&skill_invocation(agent, "merge", "").unwrap_err());
+        assert_eq!(
+            refused(Some("copilot")),
+            Some(AgentErrorKind::SkillUnsupported)
+        );
+        assert_eq!(refused(None), Some(AgentErrorKind::SkillUnsupported));
+    }
 
     #[test]
     fn the_wait_ends_at_the_first_until_status_of_the_turn() {

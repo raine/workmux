@@ -27,6 +27,23 @@ dashboard:
   merge: "/merge"
 ```
 
+The dashboard types this text as is, so use the syntax of the agent you run: `/skill:merge` in Pi, `$merge` in Codex.
+
+To invoke a skill in another agent, use `workmux send --skill`. It types the skill invocation in the target agent's syntax, so the same command works for every agent:
+
+```bash
+workmux send feature-auth --skill merge
+workmux send feature-auth --skill rebase main   # text after the target is passed to the skill
+```
+
+| Agent                             | Sent as        |
+| --------------------------------- | -------------- |
+| Claude Code, Gemini CLI, OpenCode | `/merge`       |
+| Pi, Oh My Pi                      | `/skill:merge` |
+| Codex                             | `$merge`       |
+
+OpenCode has no prompt syntax for skills, so `workmux setup --skills` also installs each skill as an OpenCode command. For other agents, and for agents in [remote workspaces](/guide/remote/), `send --skill` sends nothing and fails with `skill_unsupported` (exit 9).
+
 ## Installation
 
 Run `workmux setup` to install all skills automatically:
@@ -41,7 +58,7 @@ You can also copy skills manually from [`skills/`](https://github.com/raine/work
 
 **Claude Code**: `~/.claude/skills/` (or project `.claude/skills/`). If `CLAUDE_CONFIG_DIR` is set, `workmux setup --skills` installs to `$CLAUDE_CONFIG_DIR/skills/` instead.
 
-**OpenCode**: `~/.config/opencode/skills/`.
+**OpenCode**: `~/.config/opencode/skills/`, and as commands in `~/.config/opencode/command/` (`merge/SKILL.md` becomes `merge.md`).
 
 **Pi**: `~/.pi/agent/skills/`.
 
@@ -146,7 +163,7 @@ The typical coordinator workflow:
 3. Confirm agents started with `workmux wait --status working`
 4. Wait for completion with `workmux wait`
 5. Review results with `workmux capture`
-6. Merge one at a time by sending `/merge` to each agent sequentially
+6. Merge one at a time with `workmux send <agent> --skill merge`, one agent after another
 
 ### When to use `/coordinator` vs `/worktree`
 

@@ -159,8 +159,9 @@ New phases get separate assignments/worktrees, not additions to active agents.
 # Send a short instruction
 workmux send agent-a "fix the failing tests"
 
-# Send a skill command
-workmux send agent-a "/commit"
+# Invoke a skill, typed in the agent's own syntax (/rebase, /skill:rebase,
+# $rebase, ...); text after the target becomes the skill's arguments
+workmux send agent-a --skill rebase main
 
 # Send from file (for long prompts)
 workmux send agent-a -f followup.md
@@ -179,6 +180,11 @@ workmux send --wait --until working agent-a "fix the failing tests"
 it with `workmux capture` before answering it yourself. A worktree with several
 agents is refused too (`ambiguous_target`, exit 4); send to one of the listed
 pane IDs instead.
+
+Always invoke skills with `--skill`, never by typing `/name`: worktree agents
+may not be Claude Code, and other agents invoke skills differently. If `send`
+refuses with `skill_unsupported` (exit 9), workmux does not know that agent's
+skill syntax; tell the user rather than guessing one.
 
 ### Run Commands
 
@@ -203,12 +209,12 @@ The command runs in a new split pane. Exit code is propagated (exits 124 on time
 
 ### Merge & Cleanup
 
-Tell the agent to merge its own branch via `/merge`. This lets the agent handle
-rebasing and conflict resolution.
+Tell the agent to merge its own branch with the merge skill. This lets the
+agent handle rebasing and conflict resolution.
 
 ```bash
 # Tell agent to commit, rebase, and merge
-workmux send agent-a "/merge"
+workmux send agent-a --skill merge
 
 # Remove a worktree without merging
 workmux remove agent-a
@@ -267,19 +273,19 @@ workmux wait auth-module api-tests docs-update --any --timeout 7200
 # 5. Identify the finished agent, review its output, and merge it immediately
 workmux status auth-module api-tests docs-update
 workmux capture auth-module -n 50
-workmux send auth-module "/merge"
+workmux send auth-module --skill merge
 workmux wait auth-module --timeout 120
 
 # 6. Repeat with the remaining agents so completed work does not wait idle
 workmux wait api-tests docs-update --any --timeout 7200
 workmux status api-tests docs-update
 workmux capture docs-update -n 50
-workmux send docs-update "/merge"
+workmux send docs-update --skill merge
 workmux wait docs-update --timeout 120
 
 workmux wait api-tests --timeout 7200
 workmux capture api-tests -n 50
-workmux send api-tests "/merge"
+workmux send api-tests --skill merge
 workmux wait api-tests --timeout 120
 ```
 
@@ -304,8 +310,9 @@ remaining handles. Keep finished handles out of subsequent wait commands.
    finishes, identify it with `workmux status`, capture and review its output,
    and merge it before waiting again on the remaining handles.
 6. **Capture and review output** before merging. Do not blindly merge.
-7. **Merge one at a time** by sending `/merge` to each agent sequentially. Wait
-   for each merge to complete before starting the next to avoid conflicts.
+7. **Merge one at a time** by sending `--skill merge` to each agent
+   sequentially. Wait for each merge to complete before starting the next to
+   avoid conflicts.
 8. **Use `--timeout`** to avoid waiting forever. Handle timeout exits
    gracefully.
 9. **Prompt files should use relative paths** (each worktree has its own root).

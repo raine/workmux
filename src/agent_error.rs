@@ -19,6 +19,8 @@ pub enum AgentErrorKind {
     StatusUnknown,
     /// The caller's deadline passed.
     Timeout,
+    /// workmux does not know how the agent invokes a skill.
+    SkillUnsupported,
 }
 
 impl AgentErrorKind {
@@ -31,6 +33,7 @@ impl AgentErrorKind {
             Self::Gone => "agent_gone",
             Self::StatusUnknown => "agent_status_unknown",
             Self::Timeout => "timeout",
+            Self::SkillUnsupported => "skill_unsupported",
         }
     }
 
@@ -43,6 +46,7 @@ impl AgentErrorKind {
             Self::Gone => 7,
             Self::StatusUnknown => 8,
             Self::Timeout => 124,
+            Self::SkillUnsupported => 9,
         }
     }
 }

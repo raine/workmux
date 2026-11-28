@@ -200,7 +200,8 @@ workmux capture agent-a -n 50           # last 50 lines
 
 # Send instructions to an agent
 workmux send agent-a "fix the tests"    # short message
-workmux send agent-a "/merge"           # send a skill command
+workmux send agent-a --skill merge      # invoke a skill in the agent's syntax
+workmux send agent-a --skill rebase main  # skill with arguments
 workmux send agent-a -f followup.md     # from file
 workmux send myproject:docs "update the API section"  # cross-project
 workmux send %42 "fix the tests"        # by pane ID (worktrees with several agents)
@@ -215,8 +216,14 @@ workmux run agent-a -b -- npm run build # run in background
 
 `send` refuses an agent waiting on a dialog (Enter would answer it) and a
 worktree with several agents; target one of those by the pane ID that
-`workmux status --json` shows. Failures print a stable error name and exit with
-its code:
+`workmux status --json` shows.
+
+Use `--skill <name>` rather than typing a skill command: agents invoke skills
+differently (`/merge` in Claude Code, `/skill:merge` in Pi, `$merge` in Codex),
+and `send` types the target agent's syntax. Text after the target becomes the
+skill's arguments.
+
+Failures print a stable error name and exit with its code:
 
 | Error                  | Exit | Meaning                                                |
 | ---------------------- | ---- | ------------------------------------------------------ |
@@ -226,6 +233,7 @@ its code:
 | `send_stalled`         | 6    | `--wait`: idle agent showed no activity within 5s      |
 | `agent_gone`           | 7    | `--wait`: agent exited before its turn settled         |
 | `agent_status_unknown` | 8    | `--wait` on an agent with no reported status; not sent |
+| `skill_unsupported`    | 9    | `--skill`: agent's skill syntax unknown; nothing sent  |
 | `timeout`              | 124  | `--wait --timeout` expired                             |
 
 After a `send`, `workmux wait` counts only the agent sent to and only states of

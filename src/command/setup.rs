@@ -152,6 +152,14 @@ fn run_skills_setup(checks: &[agent_setup::AgentCheck]) -> Result<()> {
                 style(dir.display()).dim()
             );
         }
+        if let Some(dir) = skills::commands_dir(*agent) {
+            println!(
+                "  {} {} commands -> {}",
+                style("•").dim(),
+                agent.name(),
+                style(dir.display()).dim()
+            );
+        }
     }
     println!();
     println!(

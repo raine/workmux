@@ -84,15 +84,61 @@ fn skills_dir_with_env(
     }
 }
 
+/// Return the directory where bundled skills are also installed as commands,
+/// for agents that invoke a command by name but have no prompt syntax for
+/// skills.
+pub fn commands_dir(agent: Agent) -> Option<PathBuf> {
+    let home = home::home_dir()?;
+    commands_dir_in(agent, &home)
+}
+
+fn commands_dir_in(agent: Agent, home: &Path) -> Option<PathBuf> {
+    match agent {
+        Agent::OpenCode => Some(home.join(".config/opencode/command")),
+        _ => None,
+    }
+}
+
+/// How a bundled skill is laid out in an install directory.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// `<name>/SKILL.md`.
+    SkillDir,
+    /// `<name>.md`: a command whose template is the skill.
+    CommandFile,
+}
+
+impl Layout {
+    fn noun(self) -> &'static str {
+        match self {
+            Layout::SkillDir => "Skills",
+            Layout::CommandFile => "Commands",
+        }
+    }
+
+    /// The file of skill `name`, relative to the install directory.
+    fn file(self, name: &str) -> PathBuf {
+        match self {
+            Layout::SkillDir => Path::new(name).join("SKILL.md"),
+            Layout::CommandFile => PathBuf::from(format!("{name}.md")),
+        }
+    }
+}
+
+/// The directories the given agent's bundled skills install to.
+fn install_dirs(agent: Agent) -> Vec<(Layout, PathBuf)> {
+    let skills = skills_dir(agent).map(|dir| (Layout::SkillDir, dir));
+    let commands = commands_dir(agent).map(|dir| (Layout::CommandFile, dir));
+    skills.into_iter().chain(commands).collect()
+}
+
 /// Check if any bundled skills are missing for the given agent.
 pub fn needs_install(agent: Agent) -> bool {
-    let Some(base_dir) = skills_dir(agent) else {
-        return false;
-    };
-
-    BUNDLED_SKILLS
-        .iter()
-        .any(|skill| !base_dir.join(skill.name).join("SKILL.md").exists())
+    install_dirs(agent).iter().any(|(layout, base_dir)| {
+        BUNDLED_SKILLS
+            .iter()
+            .any(|skill| !base_dir.join(layout.file(skill.name)).exists())
+    })
 }
 
 enum InstallOutcome {
@@ -102,20 +148,30 @@ enum InstallOutcome {
     Skipped,
 }
 
-/// Install all bundled skills to the given agent's skills directory.
+/// Install all bundled skills to the given agent's skills directory, and
+/// as commands to its [`commands_dir`].
 pub fn install_skills(agent: Agent) -> Result<String> {
-    let Some(base_dir) = skills_dir(agent) else {
+    let dirs = install_dirs(agent);
+    if dirs.is_empty() {
         return Ok(format!("{} does not support skills", agent.name()));
-    };
+    }
+    let summaries = dirs
+        .iter()
+        .map(|(layout, base_dir)| install_at(*layout, base_dir, agent.name()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(summaries.join("\n  "))
+}
 
+fn install_at(layout: Layout, base_dir: &Path, agent_name: &str) -> Result<String> {
     let mut installed = 0u32;
     let mut up_to_date = 0u32;
     let mut updated = 0u32;
     let mut skipped = 0u32;
 
     for skill in BUNDLED_SKILLS {
-        let dir = base_dir.join(skill.name);
-        let path = dir.join("SKILL.md");
+        let file = layout.file(skill.name);
+        let label = file.display().to_string();
+        let path = base_dir.join(&file);
 
         let outcome = if path.exists() {
             let existing = fs::read_to_string(&path)
@@ -124,22 +180,23 @@ pub fn install_skills(agent: Agent) -> Result<String> {
             if existing == skill.content {
                 InstallOutcome::AlreadyUpToDate
             } else {
-                print_skill_diff(skill.name, &existing, skill.content);
-                if confirm_overwrite(skill.name)? {
+                print_skill_diff(&label, &existing, skill.content);
+                if confirm_overwrite(&label)? {
                     fs::write(&path, skill.content)
                         .with_context(|| format!("Failed to write {}", path.display()))?;
-                    println!("  {} updated {}/SKILL.md", style("✓").green(), skill.name);
+                    println!("  {} updated {}", style("✓").green(), label);
                     InstallOutcome::Updated
                 } else {
                     InstallOutcome::Skipped
                 }
             }
         } else {
-            fs::create_dir_all(&dir)
+            let dir = path.parent().unwrap_or(base_dir);
+            fs::create_dir_all(dir)
                 .with_context(|| format!("Failed to create {}", dir.display()))?;
             fs::write(&path, skill.content)
                 .with_context(|| format!("Failed to write {}", path.display()))?;
-            println!("  {} installed {}/SKILL.md", style("✓").green(), skill.name);
+            println!("  {} installed {}", style("✓").green(), label);
             InstallOutcome::Installed
         };
 
@@ -166,19 +223,20 @@ pub fn install_skills(agent: Agent) -> Result<String> {
     }
 
     Ok(format!(
-        "Skills for {} ({}): {}",
-        agent.name(),
+        "{} for {} ({}): {}",
+        layout.noun(),
+        agent_name,
         base_dir.display(),
         parts.join(", ")
     ))
 }
 
-fn print_skill_diff(name: &str, old: &str, new: &str) {
+fn print_skill_diff(label: &str, old: &str, new: &str) {
     println!();
     println!(
-        "  {} {}/SKILL.md differs from bundled version:",
+        "  {} {} differs from bundled version:",
         style("~").yellow(),
-        name
+        label
     );
     println!();
 
@@ -209,19 +267,25 @@ fn print_skill_diff(name: &str, old: &str, new: &str) {
 
 /// Remove bundled skills for the given agent.
 ///
-/// Only removes skill directories whose contents match the bundled
-/// version exactly. Modified skills are left in place.
+/// Only removes skills whose contents match the bundled version exactly.
+/// Modified skills are left in place.
 pub fn remove_skills(agent: Agent) -> Result<String> {
-    let Some(base_dir) = skills_dir(agent) else {
+    let dirs = install_dirs(agent);
+    if dirs.is_empty() {
         return Ok(format!("{} does not support skills", agent.name()));
-    };
-    remove_skills_at(base_dir, agent.name())
+    }
+    let summaries = dirs
+        .into_iter()
+        .map(|(layout, base_dir)| remove_at(layout, base_dir, agent.name()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(summaries.join("\n  "))
 }
 
-fn remove_skills_at(base_dir: PathBuf, agent_name: &str) -> Result<String> {
+fn remove_at(layout: Layout, base_dir: PathBuf, agent_name: &str) -> Result<String> {
     if !base_dir.exists() {
         return Ok(format!(
-            "No skills directory found at {}",
+            "No {} directory found at {}",
+            layout.noun().to_lowercase(),
             base_dir.display()
         ));
     }
@@ -230,14 +294,16 @@ fn remove_skills_at(base_dir: PathBuf, agent_name: &str) -> Result<String> {
     let mut skipped = 0u32;
 
     for skill in BUNDLED_SKILLS {
-        let path = base_dir.join(skill.name).join("SKILL.md");
+        let path = base_dir.join(layout.file(skill.name));
         if !path.exists() {
             continue;
         }
         match fs::read_to_string(&path) {
             Ok(content) if content == skill.content => {
-                let dir = path.parent().unwrap();
-                fs::remove_dir_all(dir)?;
+                match layout {
+                    Layout::SkillDir => fs::remove_dir_all(path.parent().unwrap())?,
+                    Layout::CommandFile => fs::remove_file(&path)?,
+                }
                 removed += 1;
             }
             Ok(_) => {
@@ -248,7 +314,7 @@ fn remove_skills_at(base_dir: PathBuf, agent_name: &str) -> Result<String> {
         }
     }
 
-    // Remove skills base dir if empty
+    // Remove the base dir if empty
     if base_dir.read_dir().is_ok_and(|mut it| it.next().is_none()) {
         let _ = fs::remove_dir(&base_dir);
     }
@@ -265,17 +331,18 @@ fn remove_skills_at(base_dir: PathBuf, agent_name: &str) -> Result<String> {
     }
 
     Ok(format!(
-        "Skills for {} ({}): {}",
+        "{} for {} ({}): {}",
+        layout.noun(),
         agent_name,
         base_dir.display(),
         parts.join(", ")
     ))
 }
 
-fn confirm_overwrite(name: &str) -> Result<bool> {
+fn confirm_overwrite(label: &str) -> Result<bool> {
     let prompt = format!(
-        "  Overwrite {}/SKILL.md with bundled version? {}{}{} ",
-        name,
+        "  Overwrite {} with bundled version? {}{}{} ",
+        label,
         style("[").bold().cyan(),
         style("y/N").bold(),
         style("]").bold().cyan(),
@@ -420,7 +487,7 @@ mod tests {
         let skills_base = tmp.path().join("skills");
         std::fs::create_dir_all(&skills_base).unwrap();
 
-        let result = remove_skills_at(skills_base, "Claude Code").unwrap();
+        let result = remove_at(Layout::SkillDir, skills_base, "Claude Code").unwrap();
         assert!(result.contains("none found"));
     }
 
@@ -436,7 +503,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), skill.content).unwrap();
 
-        let result = remove_skills_at(skills_base, "Claude Code").unwrap();
+        let result = remove_at(Layout::SkillDir, skills_base, "Claude Code").unwrap();
         assert!(result.contains("1 removed"));
         assert!(!skill_dir.exists());
     }
@@ -453,7 +520,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "modified content").unwrap();
 
-        let result = remove_skills_at(skills_base, "Claude Code").unwrap();
+        let result = remove_at(Layout::SkillDir, skills_base, "Claude Code").unwrap();
         assert!(result.contains("1 skipped (modified)"));
         assert!(skill_dir.exists());
     }
@@ -476,7 +543,7 @@ mod tests {
         std::fs::create_dir_all(&d2).unwrap();
         std::fs::write(d2.join("SKILL.md"), "modified content").unwrap();
 
-        let result = remove_skills_at(skills_base, "Claude Code").unwrap();
+        let result = remove_at(Layout::SkillDir, skills_base, "Claude Code").unwrap();
         assert!(result.contains("1 removed"));
         assert!(result.contains("1 skipped (modified)"));
         assert!(!d1.exists());
@@ -488,12 +555,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skills_base = tmp.path().join("skills");
         // Dir doesn't exist -- both calls return "No skills directory found"
-        let result1 = remove_skills_at(skills_base.clone(), "Claude Code").unwrap();
+        let result1 = remove_at(Layout::SkillDir, skills_base.clone(), "Claude Code").unwrap();
         assert!(
             result1.contains("No skills directory found"),
             "result1: {result1}"
         );
-        let result2 = remove_skills_at(skills_base, "Claude Code").unwrap();
+        let result2 = remove_at(Layout::SkillDir, skills_base, "Claude Code").unwrap();
         assert!(
             result2.contains("No skills directory found"),
             "result2: {result2}"
@@ -504,5 +571,42 @@ mod tests {
     fn test_remove_skills_unsupported_agent() {
         let result = remove_skills(Agent::Codex).unwrap();
         assert!(result.contains("does not support skills"));
+    }
+
+    #[test]
+    fn test_commands_dir_only_for_opencode() {
+        let home = Path::new("/home/test");
+        assert_eq!(
+            commands_dir_in(Agent::OpenCode, home),
+            Some(PathBuf::from("/home/test/.config/opencode/command"))
+        );
+        assert_eq!(commands_dir_in(Agent::Claude, home), None);
+        assert_eq!(commands_dir_in(Agent::Pi, home), None);
+    }
+
+    #[test]
+    fn test_commands_install_and_remove_as_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("command");
+
+        let result = install_at(Layout::CommandFile, &base, "OpenCode").unwrap();
+        assert!(result.contains("6 installed"), "{result}");
+        let merge = std::fs::read_to_string(base.join("merge.md")).unwrap();
+        assert_eq!(merge, BUNDLED_SKILLS[0].content);
+
+        let result = install_at(Layout::CommandFile, &base, "OpenCode").unwrap();
+        assert!(result.contains("6 up to date"), "{result}");
+
+        let result = remove_at(Layout::CommandFile, base.clone(), "OpenCode").unwrap();
+        assert!(result.contains("6 removed"), "{result}");
+        assert!(!base.exists());
+    }
+
+    /// OpenCode runs `` !`cmd` `` in a command template as a shell command.
+    #[test]
+    fn test_bundled_skills_have_no_command_shell_interpolation() {
+        for skill in BUNDLED_SKILLS {
+            assert!(!skill.content.contains("!`"), "{}", skill.name);
+        }
     }
 }
