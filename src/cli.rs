@@ -266,6 +266,21 @@ enum Commands {
         ws_id: String,
         id: String,
     },
+    #[command(name = "_notify-status", hide = true)]
+    NotifyStatus {
+        #[arg(long)]
+        backend: String,
+        #[arg(long, allow_hyphen_values = true)]
+        instance: String,
+        #[arg(long, allow_hyphen_values = true)]
+        pane: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long, value_enum)]
+        event: crate::notifications::DesktopEvent,
+        #[arg(long)]
+        delay_ms: u64,
+    },
     #[command(name = "_deferred-cleanup", hide = true)]
     DeferredCleanup {
         #[arg(long, allow_hyphen_values = true)]
@@ -1156,6 +1171,23 @@ pub fn run() -> Result<()> {
     let remotes_configured = !cfg.remotes.is_empty();
 
     let result = match cli.command {
+        Commands::NotifyStatus {
+            backend,
+            instance,
+            pane,
+            token,
+            event,
+            delay_ms,
+        } => crate::notifications::run_status_worker(
+            crate::state::PaneKey {
+                backend,
+                instance,
+                pane_id: pane,
+            },
+            &token,
+            event,
+            std::time::Duration::from_millis(delay_ms),
+        ),
         Commands::DeferredCleanup {
             worktree_path,
             branch_name,

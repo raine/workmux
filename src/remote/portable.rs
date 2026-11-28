@@ -303,6 +303,15 @@ mod tests {
     }
 
     #[test]
+    fn notifications_stay_on_the_laptop() {
+        // Node hooks report on the node; they must not alert its desktop.
+        let mut config = Config::default();
+        config.notifications.desktop = vec![crate::notifications::DesktopEvent::Waiting];
+        let portable = portable_config(&config, None, RemoteIsolation::None, Path::new("/n/wt"));
+        assert!(portable.config.notifications.desktop.is_empty());
+    }
+
+    #[test]
     fn local_files_note_only_when_remote_selection_is_unset() {
         let mut config = Config::default();
         for (local, remote, expected) in [

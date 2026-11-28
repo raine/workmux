@@ -150,6 +150,14 @@ pub struct AgentState {
     /// the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteRef>,
+
+    /// Random identity of the current status transition. A new token is
+    /// drawn whenever the status changes or a new agent incarnation reports
+    /// its first status; repeated identical reports keep it. A delayed
+    /// notification checks it to confirm the state it was scheduled for
+    /// still holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_token: Option<String>,
 }
 
 impl AgentState {

@@ -22,6 +22,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Add opt-in desktop notifications when an agent needs input or finishes, set with `notifications.desktop` in the global config. A short delay (`notifications.delay_seconds`, default 1s) skips states the agent leaves right away. ([#378](https://github.com/raine/workmux/issues/378))
+
 ## v0.1.284 (2026-11-21)
 
 - Make `workmux add -w` honor the prompt and agent choice, and move edits before hooks or agents start. Use it for one branch from the current commit, without `--base` or `--pr`. ([#367](https://github.com/raine/workmux/issues/367), [#368](https://github.com/raine/workmux/pull/368))

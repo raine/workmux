@@ -44,6 +44,21 @@ pub struct RemoteUpdate {
     pub agent_kind: Option<String>,
 }
 
+/// A status change committed to the state store by one write.
+///
+/// Produced only when an explicit status differs from the status stored for
+/// the same agent incarnation, or is the first status that incarnation
+/// reports. Concurrent identical reports therefore yield one transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusTransition {
+    pub pane_key: PaneKey,
+    /// Status stored for the same agent incarnation before the write.
+    pub previous: Option<AgentStatus>,
+    pub status: AgentStatus,
+    /// Token stored with the new status; see [`AgentState::status_token`].
+    pub token: String,
+}
+
 /// Persist an agent state update to the StateStore.
 ///
 /// For tmux, merges state from the same pane process and server lifecycle so
@@ -55,6 +70,7 @@ pub struct RemoteUpdate {
 /// - `prompt` keeps, replaces or removes the stored prompt.
 ///
 /// Logs warnings on failure without propagating errors (best-effort persistence).
+/// Returns the status transition the write committed, if any.
 pub fn persist_agent_update(
     mux: &dyn Multiplexer,
     pane_id: &str,
@@ -62,7 +78,7 @@ pub fn persist_agent_update(
     title_override: Option<String>,
     agent_session_id: Option<String>,
     prompt: PromptUpdate,
-) {
+) -> Option<StatusTransition> {
     if status == Some(AgentStatus::Working) && mux.name() == "tmux" {
         let tmux = crate::multiplexer::TmuxBackend::for_socket(&mux.instance_id());
         if let Err(error) = tmux.wake_agent(pane_id) {
@@ -78,7 +94,7 @@ pub fn persist_agent_update(
         prompt,
         true,
         None,
-    );
+    )
 }
 
 /// Persist the state of a local pane relaying a remote agent. `status`
@@ -165,16 +181,16 @@ fn persist_agent_snapshot(
     prompt: PromptUpdate,
     preserve_existing: bool,
     remote: Option<RemoteUpdate>,
-) {
+) -> Option<StatusTransition> {
     let Ok(store) = StateStore::new() else {
-        return;
+        return None;
     };
     let pane_key = PaneKey {
         backend: mux.name().to_string(),
         instance: mux.instance_id(),
         pane_id: pane_id.to_string(),
     };
-    let result = (|| -> anyhow::Result<()> {
+    let result = (|| -> anyhow::Result<Option<StatusTransition>> {
         // Persistence is best-effort: unrelated writers must not keep a hook
         // retrying forever, and rejected snapshots must never be applied.
         const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
@@ -184,39 +200,38 @@ fn persist_agent_snapshot(
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => {
                     warn!(%pane_id, "pane not found, skipping state persist");
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(error) => {
                     warn!(%error, "failed to get live pane snapshot, skipping state persist");
-                    return Ok(());
+                    return Ok(None);
                 }
             };
-            if store
-                .with_agent_generation(generation, |store| {
-                    persist_agent_snapshot_locked(
-                        store,
-                        pane_key.clone(),
-                        snapshot,
-                        status,
-                        title_override.clone(),
-                        agent_session_id.clone(),
-                        prompt.clone(),
-                        preserve_existing,
-                        remote.clone(),
-                    );
-                    Ok(())
-                })?
-                .is_some()
-            {
-                return Ok(());
+            // `None` from the store means another writer won the generation:
+            // retry. `Some(None)` is a committed write without a transition.
+            if let Some(transition) = store.with_agent_generation(generation, |store| {
+                Ok(persist_agent_snapshot_locked(
+                    store,
+                    pane_key.clone(),
+                    snapshot,
+                    status,
+                    title_override.clone(),
+                    agent_session_id.clone(),
+                    prompt.clone(),
+                    preserve_existing,
+                    remote.clone(),
+                ))
+            })? {
+                return Ok(transition);
             }
         }
         warn!(%pane_id, "agent state changed during every snapshot attempt, skipping state persist");
-        Ok(())
+        Ok(None)
     })();
-    if let Err(error) = result {
+    result.unwrap_or_else(|error| {
         warn!(%error, "failed to persist agent state");
-    }
+        None
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,7 +245,7 @@ fn persist_agent_snapshot_locked(
     prompt: PromptUpdate,
     preserve_existing: bool,
     remote: Option<RemoteUpdate>,
-) {
+) -> Option<StatusTransition> {
     let pane_id = &pane_key.pane_id;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -242,11 +257,11 @@ fn persist_agent_snapshot_locked(
     let live_pid = if pane_key.backend == "tmux" {
         let Some(live_pid) = live_info.pid else {
             warn!(%pane_id, "tmux pane PID unavailable, skipping state persist");
-            return;
+            return None;
         };
         if boot_id.is_none() {
             warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
-            return;
+            return None;
         }
         live_pid
     } else {
@@ -258,7 +273,7 @@ fn persist_agent_snapshot_locked(
             store.compact_context_locked(&pane_key.backend, &pane_key.instance, boot_id)
     {
         warn!(%error, "failed to compact historical agent state");
-        return;
+        return None;
     }
 
     // tmux pane PIDs and server lifecycles form a stable process identity.
@@ -299,6 +314,18 @@ fn persist_agent_snapshot_locked(
             Some(existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now))
         }
         Some(_) => Some(now),
+    };
+
+    // An explicit status opens a new transition when it changes the status
+    // of this incarnation or is the incarnation's first report.
+    let transition = status.filter(|status| previous_status != Some(*status));
+    let status_token = match transition {
+        Some(_) => Some(new_status_token()),
+        None if final_status.is_some() => existing
+            .as_ref()
+            .and_then(|state| state.status_token.clone())
+            .or_else(|| Some(new_status_token())),
+        None => None,
     };
 
     let previous_activity_ts = existing.as_ref().and_then(AgentState::activity_ts);
@@ -378,11 +405,33 @@ fn persist_agent_snapshot_locked(
         agent_session_id,
         prompt,
         remote,
+        status_token,
     };
 
     if let Err(error) = store.upsert_agent_locked(&state) {
         warn!(%error, "failed to persist agent state");
+        return None;
     }
+    Some(StatusTransition {
+        pane_key: state.pane_key,
+        previous: previous_status,
+        status: transition?,
+        token: state.status_token?,
+    })
+}
+
+fn new_status_token() -> String {
+    let mut bytes = [0u8; 16];
+    // A token only needs to differ from earlier ones for the same pane; the
+    // clock keeps it unique if the system RNG is unavailable.
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        bytes = (nanos ^ u128::from(std::process::id())).to_le_bytes();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// `existing` is already limited to the same agent process, so a kept prompt
@@ -426,6 +475,132 @@ fn merge_agent_kind(new: Option<String>, existing: Option<String>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multiplexer::LivePaneInfo;
+    use crate::state::test_support::{default_pane_key, temp_store};
+
+    fn snapshot(pid: u32) -> LivePaneSnapshot {
+        LivePaneSnapshot {
+            pane: LivePaneInfo {
+                pid: Some(pid),
+                current_command: Some("claude".into()),
+                working_dir: "/repo".into(),
+                title: None,
+                session: Some("main".into()),
+                window: Some("wm-parser".into()),
+                session_id: None,
+                window_id: None,
+                window_index: None,
+            },
+            boot_id: Some("100:1".into()),
+        }
+    }
+
+    fn report(store: &StateStore, pid: u32, status: AgentStatus) -> Option<StatusTransition> {
+        persist_agent_snapshot_locked(
+            store,
+            default_pane_key(),
+            snapshot(pid),
+            Some(status),
+            None,
+            None,
+            PromptUpdate::Keep,
+            true,
+            None,
+        )
+    }
+
+    fn stored_token(store: &StateStore) -> Option<String> {
+        store
+            .get_agent(&default_pane_key())
+            .unwrap()
+            .unwrap()
+            .status_token
+    }
+
+    #[test]
+    fn status_change_commits_one_transition_per_edge() {
+        let (store, _dir) = temp_store();
+        let working = report(&store, 7, AgentStatus::Working).unwrap();
+        assert_eq!(working.previous, None);
+
+        let waiting = report(&store, 7, AgentStatus::Waiting).unwrap();
+        assert_eq!(waiting.previous, Some(AgentStatus::Working));
+        assert_eq!(waiting.status, AgentStatus::Waiting);
+        assert_ne!(waiting.token, working.token);
+        assert_eq!(stored_token(&store), Some(waiting.token.clone()));
+
+        // A repeated report keeps the transition and its token.
+        assert_eq!(report(&store, 7, AgentStatus::Waiting), None);
+        assert_eq!(stored_token(&store), Some(waiting.token.clone()));
+
+        let done = report(&store, 7, AgentStatus::Done).unwrap();
+        assert_eq!(done.previous, Some(AgentStatus::Waiting));
+        assert_ne!(done.token, waiting.token);
+    }
+
+    #[test]
+    fn returning_to_a_status_draws_a_new_token() {
+        let (store, _dir) = temp_store();
+        let first = report(&store, 7, AgentStatus::Waiting).unwrap();
+        report(&store, 7, AgentStatus::Working).unwrap();
+        let second = report(&store, 7, AgentStatus::Waiting).unwrap();
+        assert_ne!(first.token, second.token);
+    }
+
+    #[test]
+    fn recycled_pane_starts_without_previous_status() {
+        let (store, _dir) = temp_store();
+        let old = report(&store, 7, AgentStatus::Waiting).unwrap();
+        let reused = report(&store, 8, AgentStatus::Waiting).unwrap();
+        assert_eq!(reused.previous, None);
+        assert_ne!(reused.token, old.token);
+    }
+
+    #[test]
+    fn metadata_and_registration_writes_commit_no_transition() {
+        let (store, _dir) = temp_store();
+        report(&store, 7, AgentStatus::Waiting).unwrap();
+        let token = stored_token(&store);
+        let title_only = persist_agent_snapshot_locked(
+            &store,
+            default_pane_key(),
+            snapshot(7),
+            None,
+            Some("title".into()),
+            None,
+            PromptUpdate::Keep,
+            true,
+            None,
+        );
+        assert_eq!(title_only, None);
+        assert_eq!(stored_token(&store), token);
+
+        let registration = persist_agent_snapshot_locked(
+            &store,
+            default_pane_key(),
+            snapshot(7),
+            None,
+            None,
+            None,
+            PromptUpdate::Clear,
+            false,
+            None,
+        );
+        assert_eq!(registration, None);
+        assert_eq!(stored_token(&store), None);
+    }
+
+    #[test]
+    fn clear_drops_the_transition_token() {
+        let (store, _dir) = temp_store();
+        report(&store, 7, AgentStatus::Waiting).unwrap();
+        store
+            .clear_agent_status(&default_pane_key(), false)
+            .unwrap();
+        assert_eq!(stored_token(&store), None);
+        let after = report(&store, 7, AgentStatus::Done);
+        assert_eq!(after.map(|t| t.previous), Some(None));
+    }
 
     #[test]
     fn registration_starts_activity_without_status() {

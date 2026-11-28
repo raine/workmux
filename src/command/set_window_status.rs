@@ -244,14 +244,20 @@ pub(crate) fn apply_status(
                 Some(update) => {
                     crate::state::persist_remote_update(mux, pane_id, Some(status), update, prompt)
                 }
-                None => crate::state::persist_agent_update(
-                    mux,
-                    pane_id,
-                    Some(status),
-                    None,
-                    agent_session_id.map(str::to_string),
-                    prompt,
-                ),
+                // A relayed remote status is an observation of the node,
+                // not a fresh transition, so it never notifies.
+                None => {
+                    if let Some(transition) = crate::state::persist_agent_update(
+                        mux,
+                        pane_id,
+                        Some(status),
+                        None,
+                        agent_session_id.map(str::to_string),
+                        prompt,
+                    ) {
+                        crate::notifications::schedule_status(&config.notifications, &transition);
+                    }
+                }
             }
         }
     }
@@ -752,6 +758,7 @@ mod tests {
             agent_session_id: Some(agent_session_id.to_string()),
             prompt: None,
             remote: None,
+            status_token: None,
         }
     }
 

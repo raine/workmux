@@ -416,6 +416,24 @@ Supported tmux style attributes: `fg=`, `bg=`, `default`. Colors can be hex (`#a
 
 Set `status_format: false` to disable automatic tmux format modification.
 
+### Desktop notifications
+
+Show a desktop notification when an agent needs input or finishes:
+
+```yaml
+# ~/.config/workmux/config.yaml
+notifications:
+  desktop: [waiting, done]
+  delay_seconds: 1
+```
+
+| Option                        | Description                                                                 | Default |
+| ----------------------------- | --------------------------------------------------------------------------- | ------- |
+| `notifications.desktop`       | Events that notify: `waiting`, `done`, or both. Empty sends none.           | `[]`    |
+| `notifications.delay_seconds` | Seconds an agent must stay in that state first. `0` is immediate. Max 3600. | `1`     |
+
+`notifications` is global-only: in a project's `.workmux.yaml` it is ignored with a warning. See [desktop notifications](/guide/status-tracking/#desktop-notifications) for when they fire.
+
 ### Auto-name configuration
 
 Configure LLM-based branch name generation for the `--auto-name` (`-A`) flag:

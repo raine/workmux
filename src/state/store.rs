@@ -678,6 +678,7 @@ impl StateStore {
         };
         state.status = None;
         state.status_ts = None;
+        state.status_token = None;
         if clear_prompt {
             state.prompt = None;
         }
@@ -1768,6 +1769,7 @@ mod tests {
             agent_session_id: None,
             prompt: None,
             remote: None,
+            status_token: None,
         }
     }
 

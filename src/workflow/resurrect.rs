@@ -305,6 +305,7 @@ mod tests {
             agent_session_id: None,
             prompt: None,
             remote: None,
+            status_token: None,
         }
     }
 

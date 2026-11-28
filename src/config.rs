@@ -1066,6 +1066,33 @@ pub struct Config {
     /// Where new agents run: `local` (default) or a remote name.
     #[serde(default)]
     pub placement: Option<String>,
+
+    /// Desktop notifications for agent status changes. Global-only.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+}
+
+/// Desktop notifications for agent status changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    /// Agent events that show a desktop notification. Empty or unset sends
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop: Vec<crate::notifications::DesktopEvent>,
+
+    /// Seconds an agent must stay in a notified state before the
+    /// notification is shown. 0 shows it immediately. Default: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_seconds: Option<u64>,
+}
+
+impl NotificationsConfig {
+    /// Longest accepted delay; larger values are clamped.
+    pub const MAX_DELAY_SECONDS: u64 = 3600;
+
+    pub fn delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.delay_seconds.unwrap_or(1).min(Self::MAX_DELAY_SECONDS))
+    }
 }
 
 /// A named agent environment value.
@@ -3539,6 +3566,16 @@ impl Config {
         }
         merged.remotes = self.remotes;
 
+        // Notifications are global-only: they describe the user's desktop,
+        // not a project.
+        if project.notifications != NotificationsConfig::default() {
+            tracing::warn!(
+                "notifications in project config (.workmux.yaml) is ignored -- \
+                move it to your global config (~/.config/workmux/config.yaml)"
+            );
+        }
+        merged.notifications = self.notifications;
+
         merged
     }
 
@@ -3763,6 +3800,12 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   working: "🤖"
 #   waiting: "💬"
 #   done: "✅"
+
+# Desktop notifications when an agent needs input or finishes (global only).
+# The agent must stay in the state for delay_seconds first. Default delay: 1
+# notifications:
+#   desktop: [waiting, done]
+#   delay_seconds: 1
 
 #-------------------------------------------------------------------------------
 # Agent & AI
@@ -5265,6 +5308,40 @@ sidebar:
         let global: Config = serde_yaml::from_str("stale_after: 5h\n").unwrap();
         let project: Config = serde_yaml::from_str("{}\n").unwrap();
         assert_eq!(global.merge(project).stale_after_secs(), 5 * 60 * 60);
+    }
+
+    #[test]
+    fn notifications_are_global_only() {
+        use crate::notifications::DesktopEvent;
+        let global: Config =
+            serde_yaml::from_str("notifications:\n  desktop: [waiting]\n  delay_seconds: 0\n")
+                .unwrap();
+        let project: Config = serde_yaml::from_str(
+            "notifications:\n  desktop: [waiting, done]\n  delay_seconds: 5\n",
+        )
+        .unwrap();
+        let merged = global.merge(project);
+        assert_eq!(merged.notifications.desktop, vec![DesktopEvent::Waiting]);
+        assert_eq!(merged.notifications.delay(), std::time::Duration::ZERO);
+
+        let project_only: Config =
+            serde_yaml::from_str("notifications:\n  desktop: [done]\n").unwrap();
+        let merged = Config::default().merge(project_only);
+        assert!(merged.notifications.desktop.is_empty());
+    }
+
+    #[test]
+    fn notification_delay_defaults_to_one_second_and_is_bounded() {
+        let config = super::NotificationsConfig::default();
+        assert!(config.desktop.is_empty());
+        assert_eq!(config.delay(), std::time::Duration::from_secs(1));
+        let config: Config =
+            serde_yaml::from_str("notifications:\n  delay_seconds: 99999\n").unwrap();
+        assert_eq!(
+            config.notifications.delay(),
+            std::time::Duration::from_secs(super::NotificationsConfig::MAX_DELAY_SECONDS)
+        );
+        assert!(serde_yaml::from_str::<Config>("notifications:\n  desktop: [working]\n").is_err());
     }
 
     #[test]

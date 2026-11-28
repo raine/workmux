@@ -280,6 +280,41 @@ set -g window-status-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?win
 set -g window-status-current-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
 ```
 
+## Desktop notifications
+
+workmux can show a native desktop notification when an agent needs input or
+finishes its turn. Notifications are off by default; enable them in your global
+config:
+
+```yaml
+# ~/.config/workmux/config.yaml
+notifications:
+  desktop: [waiting, done]
+```
+
+The notification names the agent's window, for example `wm-parser needs input`.
+It never includes the prompt or other pane content. The dashboard and sidebar
+don't need to be running.
+
+A notification fires when the agent's status changes to the listed state and
+stays there for `delay_seconds` (default `1`). Agents often pass through a state
+briefly: a permission prompt you answer right away, or a turn that ends and
+immediately resumes. Those don't notify. Repeated reports of the same status
+don't notify again or restart the delay. Set `delay_seconds: 0` to notify
+immediately.
+
+The first `done` workmux sees from an agent doesn't notify, since it can't tell
+whether the agent just finished. The first `waiting` does.
+
+Limits:
+
+- Notifications are shown on the machine running the agent's status hook. Agents
+  on a [remote](/guide/remote/) don't notify, and over plain SSH the
+  notification appears on the SSH server.
+- Notifications fire even when you are looking at the agent's window.
+- macOS shows them under Terminal, so Terminal needs notification permission
+  in System Settings. Linux needs a running notification server.
+
 ## Interrupted agent detection
 
 When an agent is in "working" status but its pane output hasn't changed for 10 seconds, workmux automatically detects it as interrupted. This typically happens when a user presses Ctrl+C to stop an agent.

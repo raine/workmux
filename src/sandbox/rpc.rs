@@ -688,15 +688,17 @@ fn handle_set_status(status: &str, prompt: Option<&str>, ctx: &RpcContext) -> Rp
     match ctx.mux.set_status(&ctx.pane_id, &icon, auto_clear) {
         Ok(()) => {
             // Persist agent state to StateStore so the dashboard sees this agent
-            if let Some(agent_status) = agent_status {
-                crate::state::persist_agent_update(
+            if let Some(agent_status) = agent_status
+                && let Some(transition) = crate::state::persist_agent_update(
                     &*ctx.mux,
                     &ctx.pane_id,
                     Some(agent_status),
                     None,
                     None,
                     crate::command::set_window_status::prompt_update(config, agent_status, prompt),
-                );
+                )
+            {
+                crate::notifications::schedule_status(&config.notifications, &transition);
             }
             crate::command::sidebar::request_refresh_for(&*ctx.mux);
             RpcResponse::Ok
@@ -711,7 +713,7 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
     match ctx.mux.rename_window_at_pane(&ctx.pane_id, title) {
         Ok(_) => {
             // Persist title to StateStore so the dashboard sees it
-            crate::state::persist_agent_update(
+            let _ = crate::state::persist_agent_update(
                 &*ctx.mux,
                 &ctx.pane_id,
                 None,

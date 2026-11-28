@@ -330,7 +330,7 @@ pub fn merge(
     // Show notification before cleanup or early return (--keep),
     // since cleanup may kill the window and terminate this process
     if notification {
-        show_notification(&format!(
+        crate::notifications::show_notification(&format!(
             "Merged '{}' into '{}'",
             branch_to_merge, target_branch
         ));
@@ -397,34 +397,4 @@ pub fn merge(
         cleanup_scheduled,
         cleanup_error,
     })
-}
-
-/// Shows a system notification on macOS or Linux
-fn show_notification(message: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        use mac_notification_sys::{Notification, set_application};
-        // Set application to Terminal to use its icon
-        if let Err(e) = set_application("com.apple.Terminal") {
-            tracing::debug!("Failed to set notification application: {:?}", e);
-        }
-        if let Err(e) = Notification::default()
-            .title("workmux")
-            .message(message)
-            .send()
-        {
-            tracing::debug!("Failed to send notification: {:?}", e);
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = notify_rust::Notification::new()
-            .summary("workmux")
-            .body(message)
-            .show()
-        {
-            tracing::debug!("Failed to send notification: {:?}", e);
-        }
-    }
 }
